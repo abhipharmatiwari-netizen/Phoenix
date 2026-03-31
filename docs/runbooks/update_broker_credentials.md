@@ -101,8 +101,8 @@ INSERT INTO broker_credentials (
     'YOUR_CLIENT_CODE',
     'YOUR_4_DIGIT_PIN',
     'YOUR_TOTP_SECRET_BASE32',
-    '172.20.96.1',
-    '100.14.130.20',
+    '223.181.60.56',
+    '223.181.60.56',
     '00-15-5D-1E-B5-C0',
     NOW()
 );
@@ -128,7 +128,7 @@ WHERE broker_account_id = 'A1';
 UPDATE broker_credentials
 SET
     api_key          = 'YOUR_NEW_API_KEY',
-    client_public_ip = '100.14.130.20',
+    client_public_ip = '223.181.60.56',
     updated_at       = NOW()
 WHERE broker_account_id = 'A1';
 ```
@@ -152,8 +152,8 @@ SET
     client_code      = 'YOUR_CLIENT_CODE',
     pin              = 'YOUR_4_DIGIT_PIN',
     totp_secret      = 'YOUR_TOTP_SECRET_BASE32',
-    client_local_ip  = '172.20.96.1',
-    client_public_ip = '100.14.130.20',
+    client_local_ip  = '223.181.60.56',
+    client_public_ip = '223.181.60.56',
     mac_address      = '00-15-5D-1E-B5-C0',
     updated_at       = NOW()
 WHERE broker_account_id = 'A1';
@@ -203,7 +203,7 @@ docker compose -f .\docker-compose.live.single.yml up -d --build --force-recreat
 | `UPDATE 0` | wrong `broker_account_id` | run the Step 2 `SELECT` again |
 | login still fails | wrong API key or client code | verify values against the SmartAPI portal |
 | `Invalid TOTP` | wrong TOTP secret or local clock drift | re-copy the Base32 secret and verify server time sync |
-| `IP not whitelisted` | `client_public_ip` does not match SmartAPI configuration | update the portal and the DB row so they match |
+| `IP not whitelisted` (AG7002) | `client_public_ip` does not match SmartAPI configuration | update the portal and the DB row so they match; note the ISP (Alphion PPPoE) applies CGNAT — the visible public IP (`223.181.60.56`) differs from the router WAN IP (`100.14.130.20`); always verify with `curl https://api.ipify.org` from inside the container |
 | Phoenix still uses old values | backend not restarted | restart the backend |
 
 ---
