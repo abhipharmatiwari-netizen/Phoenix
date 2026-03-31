@@ -1,0 +1,351 @@
+# Bundled Docker/Desktop LIVE manifest
+# Current recommended automated LIVE runtime:
+# - TRADE_MODE=LIVE
+# - ENABLE_MULTI_HUB=true
+# - USE_HUB_ROUTER=true
+# - DISABLE_STREAM_WORKER=false
+# Secrets must be injected at runtime. Do not store real secrets in repo files.
+
+name: phoenix-live
+
+x-db-env: &db-env
+  CONTROL_PLANE_PG_HOST: "${CONTROL_PLANE_PG_HOST:-host.docker.internal}"
+  CONTROL_PLANE_PG_PORT: "${CONTROL_PLANE_PG_PORT:-5432}"
+  CONTROL_PLANE_PG_DB: "${CONTROL_PLANE_PG_DB:?Set CONTROL_PLANE_PG_DB in the current PowerShell session}"
+  CONTROL_PLANE_PG_USER: "${CONTROL_PLANE_PG_USER:?Set CONTROL_PLANE_PG_USER in the current PowerShell session}"
+  CONTROL_PLANE_PG_PASSWORD: "${CONTROL_PLANE_PG_PASSWORD_HOST:?Set CONTROL_PLANE_PG_PASSWORD_HOST in the current PowerShell session}"
+  CONTROL_PLANE_PG_SSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-disable}"
+  POSTGRES_FORCE_IPV4: "true"
+  POSTGRES_CONNECT_TIMEOUT_SECONDS: "5"
+  POSTGRES_SESSION_TIMEZONE: "Asia/Kolkata"
+
+x-live-backend-env: &live-backend-env
+  <<: *db-env
+  APP_ENV: "production"
+  LOG_LEVEL: "INFO"
+  LOG_TICKS: "0"
+  UNIVERSE_LOG_FULL_LIST: "0"
+  CLIENT_LOCAL_IP: "${CLIENT_LOCAL_IP:?Set CLIENT_LOCAL_IP at deploy time}"
+  CLIENT_PUBLIC_IP: "${CLIENT_PUBLIC_IP:?Set CLIENT_PUBLIC_IP at deploy time}"
+  MAC_ADDRESS: "${MAC_ADDRESS:?Set MAC_ADDRESS at deploy time}"
+  TZ: "Asia/Kolkata"
+  DEFAULT_TIME_ZONE: "Asia/Kolkata"
+  LOG_FILE_PER_PROCESS: "true"
+  RUNNER_MODE: "uvicorn"
+  HOST: "0.0.0.0"
+  PORT: "8080"
+  BACKEND_URL: "http://127.0.0.1:8080"
+  CORS_ORIGINS: "http://localhost,http://127.0.0.1"
+
+  CONTROL_PLANE_BACKEND: "postgres"
+  SWEEP_STATE_BACKEND: "postgres"
+  BROKER_SECRET_BACKEND: "postgres"
+
+  APP_RUNTIME_STARTUP_VALIDATE: "true"
+  SCHEMA_CHECK_MODE: "strict"
+  RUNTIME_CONFIG_AUTO_ENABLE: "false"
+  RUNTIME_CONFIG_ENABLED: "false"
+
+  ADMIN_API_KEY: "${ADMIN_API_KEY_HOST:?Set ADMIN_API_KEY_HOST in the current PowerShell session}"
+  DEMO_AUTH_TOKEN_SECRET: "${DEMO_AUTH_TOKEN_SECRET_HOST:?Set DEMO_AUTH_TOKEN_SECRET_HOST in the current PowerShell session}"
+  ENABLE_DEMO_AUTH: "false"
+  DASHBOARD_AUTH_DISABLED: "false"
+  DISABLE_CONTROL_TOWER_ROUTES: "false"
+
+  ENABLE_MULTI_HUB: "true"
+  USE_HUB_ROUTER: "true"
+  DISABLE_STREAM_WORKER: "false"
+  USE_HUB_ROUTER_FOR_NIFTY_OPTIONS: "true"
+  USE_HUB_ROUTER_FOR_BANKNIFTY_OPTIONS: "true"
+  USE_HUB_ROUTER_FOR_FINNIFTY_OPTIONS: "true"
+  USE_HUB_ROUTER_FOR_SENSEX_OPTIONS: "true"
+  USE_HUB_ROUTER_FOR_MIDCPNIFTY_OPTIONS: "true"
+  USE_HUB_ROUTER_FOR_NG_OPTIONS: "true"
+  AUTO_STRATEGY_SELECT_ENABLED: "true"
+  AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING: "${AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING:-2}"
+  AUTO_STRATEGY_MIN_HOLD_SECONDS: "${AUTO_STRATEGY_MIN_HOLD_SECONDS:-180}"
+
+  TRADE_MODE: "LIVE"
+  DISABLE_TRADING_WINDOW_FILTER: "false"
+
+  ENABLE_CAPITAL_CHECKS: "true"
+  CAPITAL_LIMITS_JSON: "{}"
+  CAPITAL_FAIL_CLOSED_ON_MISSING_STATE: "true"
+  CAPITAL_FAIL_CLOSED_ON_MISSING_NOTIONAL_PRICE: "true"
+
+  ENABLE_RISK_CHECKS: "true"
+  RISK_ENABLE_DAILY_LOSS: "true"
+  RISK_MAX_DAILY_LOSS: "${RISK_MAX_DAILY_LOSS:-2000}"
+  RISK_FAIL_OPEN_ON_MISSING_PNL: "false"
+
+  ENABLE_PROFIT_CHECKS: "true"
+  PROFIT_ENABLE_DAILY_TARGET: "true"
+  PROFIT_DAILY_TARGET: "${PROFIT_DAILY_TARGET:-5000}"
+  PROFIT_DAILY_TARGET_PAPER: "${PROFIT_DAILY_TARGET_PAPER:-5000}"
+  PROFIT_BLOCK_NEW_ORDERS_ON_TARGET: "true"
+
+  ORDER_ROUTER_ENFORCE_IDEMPOTENCY: "true"
+  ORDER_SUBMISSION_OUTBOX_ENABLED: "true"
+  ORDER_SUBMISSION_OUTBOX_REQUIRED: "true"
+  ORDER_SUBMISSION_OUTBOX_BACKEND: "postgres"
+  POSITION_OWNERSHIP_ENABLED: "true"
+  POSITION_OWNERSHIP_UNKNOWN_MODE: "block_entries"
+  ORDER_LIFECYCLE_PERSIST_MARKERS: "true"
+  ORDER_LIFECYCLE_PERSIST_MARKERS_REQUIRED: "true"
+
+  ENABLE_EOD_EXIT: "true"
+  EOD_EXIT_TIME: "${EOD_EXIT_TIME:-15:20}"
+  EOD_EXIT_EXCLUDED_EXCHANGES: "MCX"
+  EOD_CANCEL_OPEN_ORDERS_ENABLED: "true"
+  CIRCUIT_BREAKER_PERSIST_STATE: "true"
+
+  PROFIT_SWEEP_ENABLED: "true"
+  PROFIT_SWEEP_STRATEGY: "SIMPLE"
+  PROFIT_SIMPLE_ENABLED: "true"
+  PROFIT_MULTIPLE_ENABLED: "false"
+  PROFIT_MULTIPLE_TARGET: "${PROFIT_MULTIPLE_TARGET:-500}"
+  PROFIT_SWEEP_COOLDOWN_MINUTES: "${PROFIT_SWEEP_COOLDOWN_MINUTES:-30}"
+  PROFIT_MAX_SWEEPS_PER_DAY: "${PROFIT_MAX_SWEEPS_PER_DAY:-5}"
+
+  INDICATOR_CSV_ENABLED: "true"
+  INDICATOR_CSV_PATH: "/app/logs/indicator_bars.csv"
+  INDICATOR_POSTGRES_ENABLED: "true"
+  INDICATOR_POSTGRES_TABLE: "indicator_bars"
+  INDICATOR_POSTGRES_RETENTION_MONTHS: "3"
+  INDICATOR_POSTGRES_RETENTION_PRUNE_INTERVAL_SECONDS: "900"
+  INDICATOR_SEED_BARS: "300"
+  ORDER_CSV_ENABLED: "true"
+  TRADE_CSV_ENABLED: "true"
+  TRADE_CSV_PATH: "/app/logs/trades.csv"
+
+  HUB_DEFAULT_TENANT_ID: "${HUB_DEFAULT_TENANT_ID:-tenant-1}"
+  HUB_DEFAULT_BROKER_ACCOUNT_ID: "${HUB_DEFAULT_BROKER_ACCOUNT_ID:-A1}"
+  HUB_ROUTES_JSON: '{"ema20_strategy":[{"tenant_id":"${HUB_DEFAULT_TENANT_ID:-tenant-1}","broker_account_id":"${HUB_DEFAULT_BROKER_ACCOUNT_ID:-A1}"}],"exclusive_nifty_ce_buy":[{"tenant_id":"${HUB_DEFAULT_TENANT_ID:-tenant-1}","broker_account_id":"${HUB_DEFAULT_BROKER_ACCOUNT_ID:-A1}"}],"put_momentum_scalper":[{"tenant_id":"${HUB_DEFAULT_TENANT_ID:-tenant-1}","broker_account_id":"${HUB_DEFAULT_BROKER_ACCOUNT_ID:-A1}"}]}'
+
+  NIFTY_EMA20_LOTS: "${NIFTY_EMA20_LOTS:-1}"
+  BANKNIFTY_EMA20_LOTS: "${BANKNIFTY_EMA20_LOTS:-1}"
+  FINNIFTY_EMA20_LOTS: "${FINNIFTY_EMA20_LOTS:-1}"
+  MIDCPNIFTY_EMA20_LOTS: "${MIDCPNIFTY_EMA20_LOTS:-1}"
+  SENSEX_EMA20_LOTS: "${SENSEX_EMA20_LOTS:-1}"
+  NG_EMA20_LOTS: "${NG_EMA20_LOTS:-1}"
+
+  EXCLUSIVE_NIFTY_CE_BUY_TIMEFRAME_SECONDS: "30"
+  EXCLUSIVE_NIFTY_CE_BUY_PRESEED_HISTORY: "true"
+  EXCLUSIVE_NIFTY_CE_BUY_PRESEED_HISTORY_ROWS: "400"
+
+  NG_SL_PCT: "0.25"
+  NG_TP_PCT: "0.35"
+  NG_TRAIL_BUFFER_PCT: "0.04"
+
+  ANGEL_FETCH_COOLDOWN_BASE_SECONDS: "5"
+  ANGEL_FETCH_COOLDOWN_MAX_SECONDS: "120"
+  ANGEL_FETCH_RATE_LIMIT_FLOOR_SECONDS: "90"
+  ANGEL_FETCH_BLOCKED_FLOOR_SECONDS: "30"
+  ANGEL_FETCH_TIMEOUT_CAP_SECONDS: "60"
+  ANGEL_HTTP_TIMEOUT_SECONDS: "25"
+  ANGEL_ORDER_PLACE_MAX_ATTEMPTS: "2"
+  ANGEL_ORDER_PLACE_RETRY_BASE_SECONDS: "0.5"
+  ANGEL_ORDER_CONFIRM_TIMEOUT_SECONDS: "8"
+  ANGEL_ORDER_CONFIRM_POLL_SECONDS: "0.8"
+
+  DEFAULT_PROFIT_TARGET_PCT: "0.50"
+  DEFAULT_STOPLOSS_PCT: "1.0"
+
+  POSITION_SYNC_INTERVAL_SECONDS: "90"
+  POSITION_SYNC_BLOCKED_MIN_INTERVAL_SECONDS: "90"
+  ORDERS_SYNC_INTERVAL_SECONDS: "90"
+
+  STREAM_SELF_HEAL_TOKEN_LABELS: "false"
+  STREAM_SYNC_EXECUTED_TOKEN_LABELS: "false"
+  STREAM_DROP_UNMAPPED_TICKS: "false"
+  STREAM_UNMAPPED_TICK_LOG_INTERVAL_SECONDS: "60"
+
+  ML_ENABLED: "true"
+  ML_MODE: "GATE"
+
+x-db-client-env: &db-client-env
+  PGHOST: "${CONTROL_PLANE_PG_HOST:-host.docker.internal}"
+  PGPORT: "${CONTROL_PLANE_PG_PORT:-5432}"
+  PGDATABASE: "${CONTROL_PLANE_PG_DB:?Set CONTROL_PLANE_PG_DB in the current PowerShell session}"
+  PGUSER: "${CONTROL_PLANE_PG_USER:?Set CONTROL_PLANE_PG_USER in the current PowerShell session}"
+  PGPASSWORD: "${CONTROL_PLANE_PG_PASSWORD_HOST:?Set CONTROL_PLANE_PG_PASSWORD_HOST in the current PowerShell session}"
+  PGSSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-disable}"
+  PGCONNECT_TIMEOUT: "5"
+  PHX_MIGRATION_APP_NAME: "phoenix-live-compose"
+
+x-migration-volumes: &migration-volumes
+  - ./migrations:/migrations:ro
+  - ./scripts/run_migrations.sh:/scripts/run_migrations.sh:ro
+
+services:
+  migrator:
+    image: postgres:16-alpine
+    container_name: phoenix-v9-migrator
+    restart: "no"
+    environment:
+      <<: *db-client-env
+    volumes: *migration-volumes
+    command:
+      - sh
+      - -ec
+      - |
+          sed 's/\r$//' /scripts/run_migrations.sh | sh -s -- apply
+
+  db-preflight:
+    image: postgres:16-alpine
+    container_name: phoenix-v9-db-preflight
+    restart: "no"
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+    environment:
+      <<: *db-client-env
+      PHX_BROKER_ACCOUNT_ID: "${HUB_DEFAULT_BROKER_ACCOUNT_ID:-A1}"
+    volumes: *migration-volumes
+    command:
+      - sh
+      - -ec
+      - |
+          until pg_isready -h "$$PGHOST" -p "$$PGPORT" -U "$$PGUSER" -d "$$PGDATABASE"; do
+            echo "Waiting for Postgres $$PGHOST:$$PGPORT/$$PGDATABASE ..."
+            sleep 2
+          done
+
+          sed 's/\r$//' /scripts/run_migrations.sh | sh -s -- verify
+
+          psql -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE TABLE IF NOT EXISTS public.users (
+              id TEXT PRIMARY KEY,
+              email TEXT NOT NULL,
+              name TEXT NOT NULL,
+              password_hash TEXT NOT NULL,
+              role TEXT NOT NULL,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON public.users (lower(email));
+
+          DO $$do$$
+          BEGIN
+              IF EXISTS (
+                  SELECT 1
+                  FROM information_schema.columns
+                  WHERE table_schema = 'public' AND table_name = 'broker_accounts' AND column_name = 'client_code'
+              ) THEN
+                  CREATE INDEX IF NOT EXISTS idx_broker_accounts_client_code ON public.broker_accounts (client_code);
+              END IF;
+
+              IF EXISTS (
+                  SELECT 1
+                  FROM information_schema.columns
+                  WHERE table_schema = 'public' AND table_name = 'subscriptions' AND column_name IN ('tenant_id', 'broker_account_id', 'mode')
+                  GROUP BY table_name
+                  HAVING COUNT(*) = 3
+              ) THEN
+                  CREATE INDEX IF NOT EXISTS idx_subscriptions_tenant_account_mode
+                      ON public.subscriptions (tenant_id, broker_account_id, mode);
+              END IF;
+          END
+          $$do$$;
+          SQL
+
+          psql -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$do$$
+          DECLARE
+              missing text;
+          BEGIN
+              SELECT string_agg(name, ', ' ORDER BY name) INTO missing
+              FROM (
+                  SELECT required_table AS name
+                  FROM (VALUES
+                      ('tenants'),
+                      ('broker_accounts'),
+                      ('subscriptions'),
+                      ('strategy_configs'),
+                      ('broker_credentials')
+                  ) AS req(required_table)
+                  WHERE NOT EXISTS (
+                      SELECT 1
+                      FROM information_schema.tables t
+                      WHERE t.table_schema = 'public'
+                        AND t.table_name = req.required_table
+                  )
+
+                  UNION ALL
+
+                  SELECT required_index AS name
+                  FROM (VALUES
+                      ('idx_broker_accounts_client_code'),
+                      ('idx_subscriptions_tenant_account_mode'),
+                      ('idx_users_email')
+                  ) AS req(required_index)
+                  WHERE NOT EXISTS (
+                      SELECT 1
+                      FROM pg_indexes i
+                      WHERE i.schemaname = 'public'
+                        AND i.indexname = req.required_index
+                  )
+              ) x;
+
+              IF missing IS NOT NULL THEN
+                  RAISE EXCEPTION 'Missing required schema objects: %', missing;
+              END IF;
+          END
+          $$do$$;
+          SQL
+
+          psql -v ON_ERROR_STOP=1 -tAc "SELECT 1 FROM public.broker_credentials WHERE broker_account_id = '$$PHX_BROKER_ACCOUNT_ID' LIMIT 1" | grep -q 1 || {
+            echo "Missing broker_credentials row for broker_account_id=$$PHX_BROKER_ACCOUNT_ID"
+            exit 1
+          }
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: phoenix-v9-backend:live
+    container_name: phoenix-v9-backend
+    init: true
+    restart: unless-stopped
+    depends_on:
+      db-preflight:
+        condition: service_completed_successfully
+    expose:
+      - "8080"
+    environment:
+      <<: *live-backend-env
+    volumes:
+      - ./logs:/app/logs
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  nginx:
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+    image: phoenix-v9-web:live
+    container_name: phoenix-v9-web
+    init: true
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:80:80"
+    environment:
+      ADMIN_API_KEY: "${ADMIN_API_KEY_HOST:?Set ADMIN_API_KEY_HOST in the current PowerShell session}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

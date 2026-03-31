@@ -1,0 +1,1352 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multi-token Live Dashboard</title>
+  <style>
+    @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap");
+
+    :root {
+      --bg: #0a0f1f;
+      --panel: #0f172a;
+      --card: #111827;
+      --muted: #8b97b1;
+      --accent: #7c3aed;
+      --accent-2: #22d3ee;
+      --good: #22c55e;
+      --warn: #f97316;
+      --bad: #ef4444;
+      --border: #1f2937;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Space Grotesk", "Segoe UI", sans-serif;
+      background: radial-gradient(circle at 20% 20%, rgba(124, 58, 237, 0.12), transparent 25%), radial-gradient(circle at 80% 0%, rgba(34, 211, 238, 0.14), transparent 30%), var(--bg);
+      color: #e5e7eb;
+      min-height: 100vh;
+      padding: 20px 20px 40px;
+    }
+
+    .page {
+      max-width: 1400px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    header.top {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .brand {
+      font-size: 26px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .brand .badge {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #0b1224;
+      padding: 6px 10px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 700;
+      box-shadow: 0 8px 20px rgba(124, 58, 237, 0.35);
+    }
+
+    .tags {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+
+    .pill {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      font-size: 13px;
+      color: #d1d5db;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .pill .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--good);
+      box-shadow: 0 0 12px rgba(34, 197, 94, 0.8);
+      display: inline-block;
+    }
+
+    .timestamp {
+      text-align: right;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 14px;
+    }
+
+    @media (max-width: 1100px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+      header.top {
+        grid-template-columns: 1fr;
+        justify-items: flex-start;
+      }
+      .timestamp {
+        text-align: left;
+      }
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+    }
+
+    .control-tower-panel {
+      margin-top: 12px;
+    }
+
+    .control-table-wrapper {
+      overflow-x: auto;
+    }
+
+    .control-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      min-width: 520px;
+    }
+
+    .control-table th,
+    .control-table td {
+      padding: 8px 6px;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+    }
+
+    .control-table th:first-child,
+    .control-table td:first-child {
+      position: sticky;
+      left: 0;
+      background: var(--panel);
+      z-index: 2;
+    }
+
+    .control-table th {
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .toggle-switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 22px;
+    }
+
+    .toggle-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .toggle-slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: #1f2937;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      transition: all 0.2s ease;
+    }
+
+    .toggle-slider:before {
+      position: absolute;
+      content: "";
+      height: 16px;
+      width: 16px;
+      left: 3px;
+      top: 2px;
+      background: #9ca3af;
+      border-radius: 50%;
+      transition: all 0.2s ease;
+    }
+
+    .toggle-switch input:checked + .toggle-slider {
+      background: rgba(34, 197, 94, 0.15);
+      border-color: rgba(34, 197, 94, 0.45);
+    }
+
+    .toggle-switch input:checked + .toggle-slider:before {
+      transform: translateX(20px);
+      background: #22c55e;
+    }
+
+    .panel-title {
+      font-weight: 700;
+      margin-bottom: 10px;
+      letter-spacing: -0.01em;
+    }
+
+    .instrument-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+    }
+
+    .card {
+      background: linear-gradient(155deg, rgba(17, 24, 39, 0.96), rgba(9, 12, 26, 0.9));
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px 12px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .card::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(120deg, rgba(124, 58, 237, 0.06), rgba(34, 211, 238, 0.06));
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      pointer-events: none;
+    }
+
+    .card:hover::after {
+      opacity: 1;
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+    }
+
+    .label {
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: 0.01em;
+    }
+
+    .price {
+      font-size: 18px;
+      font-weight: 700;
+      color: #f8fafc;
+    }
+
+    .meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .change {
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+    }
+
+    .change.positive {
+      color: var(--good);
+      border-color: rgba(34, 197, 94, 0.45);
+      background: rgba(34, 197, 94, 0.08);
+    }
+
+    .change.negative {
+      color: var(--bad);
+      border-color: rgba(239, 68, 68, 0.45);
+      background: rgba(239, 68, 68, 0.08);
+    }
+
+    .sparks {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+    }
+
+    .spark {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 8px 6px;
+      position: relative;
+    }
+
+    .spark-label {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .spark-value {
+      font-weight: 700;
+      font-size: 13px;
+      color: #e5e7eb;
+      text-align: right;
+    }
+
+    .spark canvas {
+      width: 100%;
+      height: 56px;
+      display: block;
+    }
+
+    .side-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th, td {
+      padding: 8px 4px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .pill-sm {
+      padding: 4px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      font-size: 12px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .pnl-value {
+      font-weight: 800;
+      font-size: 20px;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .empty {
+      color: var(--muted);
+      font-size: 13px;
+      padding: 6px 0;
+    }
+
+    .compact-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    .compact-table th,
+    .compact-table td {
+      padding: 6px 4px;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+    }
+
+    .compact-table th {
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .form-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+
+    .text-input {
+      background: #0b1224;
+      border: 1px solid var(--border);
+      color: #e5e7eb;
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 13px;
+      flex: 1 1 160px;
+    }
+
+    .btn {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #0b1224;
+      border: none;
+      border-radius: 10px;
+      padding: 8px 12px;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="top">
+      <div class="brand">
+        Phoenix Dashboard
+        <span class="badge">Live View</span>
+      </div>
+      <div class="tags">
+        <span class="pill" id="mode-pill">Mode: --</span>
+        <span class="pill" id="trade-pill">Trade: --</span>
+        <span class="pill" id="live-pill"><span class="dot"></span><span id="live-text">Connecting</span></span>
+      </div>
+      <div class="timestamp" id="timestamp">Waiting for data...</div>
+    </header>
+
+    <div class="layout">
+      <section class="panel">
+        <div class="panel-title">Instruments</div>
+        <div class="instrument-grid" id="instrument-grid"></div>
+      </section>
+
+      <section class="side-panel">
+        <div class="panel">
+          <div class="panel-title">P&L</div>
+          <div class="pnl-value" id="total-pnl">--</div>
+          <div class="muted" style="margin-bottom: 8px;">Overall</div>
+          <div id="pnl-breakdown"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title" id="positions-title">Open Positions</div>
+          <div id="positions-table"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">Tenant Positions (API)</div>
+          <div class="muted" style="margin-bottom: 8px; font-size: 12px;">
+            Reads /tenant positions (requires X-Tenant-Id header).
+          </div>
+          <div class="form-row">
+            <input id="tenant-id-input" class="text-input" placeholder="Tenant ID" />
+            <button id="tenant-load-btn" class="btn">Load</button>
+          </div>
+          <div id="tenant-positions-status" class="muted" style="margin-bottom: 6px;"></div>
+          <div id="tenant-positions-table"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">Recent Trades</div>
+          <div id="trades-list"></div>
+        </div>
+      </section>
+    </div>
+
+    <section class="panel control-tower-panel">
+      <div class="panel-title">Control Tower</div>
+      <div class="muted" style="margin-bottom: 8px; font-size: 13px;">
+        Enable or disable strategies per tenant. Turning ON will enable strategy configs across active broker accounts for that tenant.
+      </div>
+      <div id="control-tower-status" class="muted" style="margin-bottom: 6px;"></div>
+      <div class="control-table-wrapper">
+        <div id="control-tower-table" class="control-table-shell"></div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const gridEl = document.getElementById("instrument-grid");
+    const modeEl = document.getElementById("mode-pill");
+    const tradeModeEl = document.getElementById("trade-pill");
+    const liveEl = document.getElementById("live-pill");
+    const liveTextEl = document.getElementById("live-text");
+    const timestampEl = document.getElementById("timestamp");
+    const totalPnlEl = document.getElementById("total-pnl");
+    const pnlBreakdownEl = document.getElementById("pnl-breakdown");
+    const positionsTitleEl = document.getElementById("positions-title");
+    const positionsTableEl = document.getElementById("positions-table");
+    const tradesListEl = document.getElementById("trades-list");
+    const controlTableEl = document.getElementById("control-tower-table");
+    const controlStatusEl = document.getElementById("control-tower-status");
+    const tenantIdInput = document.getElementById("tenant-id-input");
+    const tenantLoadBtn = document.getElementById("tenant-load-btn");
+    const tenantPositionsTableEl = document.getElementById("tenant-positions-table");
+    const tenantPositionsStatusEl = document.getElementById("tenant-positions-status");
+
+    const cards = new Map();
+    let ctTenants = [];
+    let ctStrategies = [];
+    let ctMatrix = {};
+    const DASHBOARD_FIX_RECENT_TRADES = "__DASHBOARD_FIX_RECENT_TRADES__" === "true";
+
+    function formatTime(iso) {
+      const d = new Date(iso);
+      return `${d.toLocaleTimeString([], { hour12: false })} | ${d.toLocaleDateString()}`;
+    }
+
+    // Format an ISO timestamp as IST for display in the positions tables.
+    function formatIst(iso) {
+      if (!iso) return "--";
+      try {
+        const d = new Date(iso);
+        return d.toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+          hour12: false,
+        });
+      } catch (err) {
+        return "--";
+      }
+    }
+
+    function ensureCard(label) {
+      if (cards.has(label)) return cards.get(label);
+      const card = document.createElement("article");
+      card.className = "card";
+      card.innerHTML = `
+        <div class="card-header">
+          <div class="label" data-role="label">${label}</div>
+          <div class="price" data-role="price">--</div>
+        </div>
+        <div class="meta">
+          <span data-role="time">--</span>
+          <span class="change" data-role="change">--</span>
+        </div>
+        <div class="sparks">
+          <div class="spark">
+            <div class="spark-label">ATR <span class="spark-value" data-role="atr-val">--</span></div>
+            <canvas data-role="atr-canvas" width="160" height="56"></canvas>
+          </div>
+          <div class="spark">
+            <div class="spark-label">RSI <span class="spark-value" data-role="rsi-val">--</span></div>
+            <canvas data-role="rsi-canvas" width="160" height="56"></canvas>
+          </div>
+          <div class="spark">
+            <div class="spark-label">MACD <span class="spark-value" data-role="macd-val">--</span></div>
+            <canvas data-role="macd-canvas" width="160" height="56"></canvas>
+          </div>
+        </div>
+      `;
+      gridEl.appendChild(card);
+      cards.set(label, card);
+      return card;
+    }
+
+    function drawSpark(canvas, values, color, bounds = null) {
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      if (!values || values.length < 2) return;
+      const min = bounds?.min ?? Math.min(...values);
+      const max = bounds?.max ?? Math.max(...values);
+      const span = max - min || 1;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      values.forEach((v, i) => {
+        const x = (i / (values.length - 1)) * (w - 4) + 2;
+        const y = h - ((v - min) / span) * (h - 6) - 3;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      ctx.fillStyle = color + "55";
+      ctx.beginPath();
+      values.forEach((v, i) => {
+        const x = (i / (values.length - 1)) * (w - 4) + 2;
+        const y = h - ((v - min) / span) * (h - 6) - 3;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.lineTo(w, h);
+      ctx.lineTo(0, h);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function renderInstrument(inst) {
+      const card = ensureCard(inst.label);
+      const labelEl = card.querySelector("[data-role='label']");
+      const priceEl = card.querySelector("[data-role='price']");
+      const changeEl = card.querySelector("[data-role='change']");
+      const timeEl = card.querySelector("[data-role='time']");
+      const atrValEl = card.querySelector("[data-role='atr-val']");
+      const rsiValEl = card.querySelector("[data-role='rsi-val']");
+      const macdValEl = card.querySelector("[data-role='macd-val']");
+      const atrCanvas = card.querySelector("[data-role='atr-canvas']");
+      const rsiCanvas = card.querySelector("[data-role='rsi-canvas']");
+      const macdCanvas = card.querySelector("[data-role='macd-canvas']");
+
+      if (labelEl) {
+        labelEl.textContent = inst.display_name || inst.label;
+      }
+      priceEl.textContent = inst.price?.toFixed?.(2) ?? "--";
+      const pct = inst.change_pct || 0;
+      changeEl.textContent = `${pct > 0 ? "+" : ""}${pct.toFixed(2)}%`;
+      changeEl.className = `change ${pct >= 0 ? "positive" : "negative"}`;
+      timeEl.textContent = inst.tick_time ? formatTime(inst.tick_time) : "--";
+      const lastAtr = inst.atr_series?.at?.(-1);
+      const lastRsi = inst.rsi_series?.at?.(-1);
+      const lastMacd = inst.macd_series?.at?.(-1);
+      atrValEl.textContent = lastAtr !== undefined ? lastAtr.toFixed(2) : "--";
+      rsiValEl.textContent = lastRsi !== undefined ? lastRsi.toFixed(1) : "--";
+      macdValEl.textContent = lastMacd !== undefined ? lastMacd.toFixed(2) : "--";
+
+      drawSpark(atrCanvas, inst.atr_series, "#22d3ee");
+      drawSpark(rsiCanvas, inst.rsi_series, "#a855f7", { min: 0, max: 100 });
+      drawSpark(macdCanvas, inst.macd_series, "#f472b6");
+    }
+
+    function renderPnl(pnl) {
+      if (!pnl) return;
+      const total = pnl.total ?? 0;
+      totalPnlEl.textContent = `${total >= 0 ? "+" : ""}${total.toFixed(2)}`;
+      totalPnlEl.style.color = total >= 0 ? "var(--good)" : "var(--bad)";
+
+      pnlBreakdownEl.innerHTML = "";
+      const open = pnl.open ?? 0;
+      const realized = pnl.realized ?? 0;
+      const summary = document.createElement("div");
+      summary.className = "meta";
+      summary.innerHTML = `
+        <span class="muted">Open</span>
+        <span style="color:${open >= 0 ? "var(--good)" : "var(--bad)"};">${open >= 0 ? "+" : ""}${open.toFixed(2)}</span>
+      `;
+      pnlBreakdownEl.appendChild(summary);
+      const summary2 = document.createElement("div");
+      summary2.className = "meta";
+      summary2.innerHTML = `
+        <span class="muted">Realized</span>
+        <span style="color:${realized >= 0 ? "var(--good)" : "var(--bad)"};">${realized >= 0 ? "+" : ""}${realized.toFixed(2)}</span>
+      `;
+      pnlBreakdownEl.appendChild(summary2);
+
+      const byInst = pnl.by_instrument || {};
+      const entries = Object.entries(byInst);
+      if (!entries.length) {
+        pnlBreakdownEl.innerHTML += '<div class="empty">No instrument P&L yet.</div>';
+        return;
+      }
+      entries.forEach(([label, val]) => {
+        const row = document.createElement("div");
+        row.className = "meta";
+        const spanLabel = document.createElement("span");
+        spanLabel.textContent = label;
+        const spanVal = document.createElement("span");
+        spanVal.textContent = `${val >= 0 ? "+" : ""}${val.toFixed(2)}`;
+        spanVal.style.color = val >= 0 ? "var(--good)" : "var(--bad)";
+        row.appendChild(spanLabel);
+        row.appendChild(spanVal);
+        pnlBreakdownEl.appendChild(row);
+      });
+    }
+
+    function renderLegacyPositions(positions) {
+      positionsTableEl.innerHTML = "";
+      if (!positions || !positions.length) {
+        positionsTableEl.innerHTML = '<div class="empty">No open positions.</div>';
+        return;
+      }
+      const table = document.createElement("table");
+      table.className = "compact-table";
+      table.innerHTML = `
+        <thead>
+          <tr>
+            <th>Instrument</th>
+            <th>Side</th>
+            <th>Qty</th>
+            <th>Entry</th>
+            <th>Last</th>
+            <th>P&L</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      `;
+      const tbody = table.querySelector("tbody");
+      positions.forEach((pos) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${pos.instrument}</td>
+          <td><span class="pill-sm" style="border-color:${pos.side === "BUY" ? "rgba(34,197,94,0.35)" : "rgba(239,68,68,0.35)"}; color:${pos.side === "BUY" ? "var(--good)" : "var(--bad)"};">${pos.side}</span></td>
+          <td>${pos.qty_lots ?? pos.qty}</td>
+          <td>${pos.entry.toFixed(2)}</td>
+          <td>${pos.last.toFixed(2)}</td>
+          <td style="color:${pos.pnl >= 0 ? "var(--good)" : "var(--bad)"};">${pos.pnl >= 0 ? "+" : ""}${pos.pnl.toFixed(2)}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+      positionsTableEl.appendChild(table);
+    }
+
+    function renderHubPositions(rows) {
+      positionsTableEl.innerHTML = "";
+      if (!rows || !rows.length) {
+        positionsTableEl.innerHTML = '<div class="empty">No hub positions.</div>';
+        return;
+      }
+      const table = document.createElement("table");
+      table.className = "compact-table";
+      table.innerHTML = `
+        <thead>
+          <tr>
+            <th>Tenant</th>
+            <th>Account</th>
+            <th>Symbol</th>
+            <th>Side</th>
+            <th>Qty</th>
+            <th>Entry</th>
+            <th>LTP (used)</th>
+            <th>Entry time (IST)</th>
+            <th>Product</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      `;
+      const tbody = table.querySelector("tbody");
+      rows.forEach((row) => {
+        const side =
+          (row.side || "").toUpperCase() ||
+          ((row.net_qty ?? 0) < 0 ? "SELL" : "BUY");
+        const qtyRaw =
+          row.qty_lots !== undefined
+            ? row.qty_lots
+            : row.qty !== undefined
+            ? row.qty
+            : row.net_qty ?? 0;
+        const qty = Math.abs(qtyRaw);
+        const entryPrice = Number(row.entry_price ?? row.avg_price);
+        const ltp =
+          row.ltp === null || row.ltp === undefined || row.ltp === ""
+            ? Number.NaN
+            : Number(row.ltp);
+        const entryTs = row.entry_ts || row.entryTs || null;
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${row.tenant_id || "--"}</td>
+          <td>${row.broker_account_id || "--"}</td>
+          <td>${row.symbol || "--"}</td>
+          <td><span class="pill-sm" style="border-color:${side === "BUY" ? "rgba(34,197,94,0.35)" : "rgba(239,68,68,0.35)"}; color:${side === "BUY" ? "var(--good)" : "var(--bad)"};">${side}</span></td>
+          <td>${qty ?? "--"}</td>
+          <td>${Number.isFinite(entryPrice) ? entryPrice.toFixed(2) : "--"}</td>
+          <td>${Number.isFinite(ltp) ? ltp.toFixed(2) : "--"}</td>
+          <td class="muted">${formatIst(entryTs)}</td>
+          <td>${row.product_type || "--"}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+      positionsTableEl.appendChild(table);
+    }
+
+    function renderTenantPositions(rows) {
+      if (!tenantPositionsTableEl) return;
+      tenantPositionsTableEl.innerHTML = "";
+      if (!rows || !rows.length) {
+        tenantPositionsTableEl.innerHTML = '<div class="empty">No positions loaded.</div>';
+        return;
+      }
+      const table = document.createElement("table");
+      table.className = "compact-table";
+      table.innerHTML = `
+        <thead>
+          <tr>
+            <th>Account</th>
+            <th>Symbol</th>
+            <th>Side</th>
+            <th>Qty</th>
+            <th>Entry</th>
+            <th>Entry time (IST)</th>
+            <th>Product</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      `;
+      const tbody = table.querySelector("tbody");
+      rows.forEach((row) => {
+        const side =
+          (row.side || "").toUpperCase() ||
+          ((row.net_qty ?? 0) < 0 ? "SELL" : "BUY");
+        const qty =
+          row.qty !== undefined ? row.qty : Math.abs(row.net_qty ?? 0);
+        const entryPrice = Number(row.entry_price ?? row.avg_price);
+        const entryTs = row.entry_ts || row.entryTs || null;
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${row.account_label || row.account_id || "--"}</td>
+          <td>${row.symbol || "--"}</td>
+          <td><span class="pill-sm" style="border-color:${side === "BUY" ? "rgba(34,197,94,0.35)" : "rgba(239,68,68,0.35)"}; color:${side === "BUY" ? "var(--good)" : "var(--bad)"};">${side}</span></td>
+          <td>${qty ?? "--"}</td>
+          <td>${Number.isFinite(entryPrice) ? entryPrice.toFixed(2) : "--"}</td>
+          <td class="muted">${formatIst(entryTs)}</td>
+          <td>${row.product_type || "--"}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+      tenantPositionsTableEl.appendChild(table);
+    }
+
+    function renderTradesLegacy(trades) {
+      tradesListEl.innerHTML = "";
+      if (!trades || !trades.length) {
+        tradesListEl.innerHTML = '<div class="empty">No trades yet.</div>';
+        return;
+      }
+
+      // Create header row
+      const headerRow = document.createElement("div");
+      headerRow.style.cssText = "display:grid; grid-template-columns:100px 150px 120px 100px 120px 80px 80px; gap:8px; padding:8px 0; border-bottom:1px solid var(--border); margin-bottom:8px; font-weight:600; font-size:12px; color:var(--muted);";
+      headerRow.innerHTML = `
+        <span>Tenant</span>
+        <span>Instrument</span>
+        <span>Entry Time</span>
+        <span>Order Type</span>
+        <span>Price/Qty</span>
+        <span>Exit Price</span>
+        <span>PNL</span>
+      `;
+      tradesListEl.appendChild(headerRow);
+
+      // Render trades
+      trades.slice(-8).reverse().forEach((t) => {
+        const symbol = t.instrument || t.label || t.underlying || "--";
+        const tenant = t.tenant_id || t.tenant || "--";
+        const entryPrice = t.entry_price ?? 0;
+        const exitPrice = t.exit_price ?? t.price ?? 0;
+        const entryTs = t.entry_ts || t.ts;
+        const exitTs = t.exit_ts;
+        const entryTime = entryTs ? new Date(entryTs).toLocaleTimeString([], { hour12: false }) : "--:--";
+        const side = t.side || "--";
+        const qty = t.qty ?? "--";
+        const pnl = t.pnl;
+
+        const row = document.createElement("div");
+        row.style.cssText = "display:grid; grid-template-columns:100px 150px 120px 100px 120px 80px 80px; gap:8px; padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.05); align-items:center;";
+        
+        const pnlColor = (pnl ?? 0) >= 0 ? "var(--good)" : "var(--bad)";
+        const sideColor = side === "BUY" ? "var(--good)" : side === "SELL" ? "var(--bad)" : "var(--muted)";
+        
+        tr.innerHTML = `
+          <td>${row.tenant_id ?? "--"}</td>
+          <td>${row.broker_account_id ?? "--"}</td>
+          <td>${row.symbol ?? "--"}</td>
+          <td><span class="pill-sm" style="border-color:${row.side === "BUY" ? "rgba(34,197,94,0.35)" : "rgba(239,68,68,0.35)"}; color:${row.side === "BUY" ? "var(--good)" : "var(--bad)"};">${row.side ?? "--"}</span></td>
+          <td>${row.qty ?? "--"}</td>
+          <td>${row.entry_price?.toFixed?.(2) ?? "--"}</td>
+          <td>${row.ltp?.toFixed?.(2) ?? "--"}</td>
+          <td>${row.entry_time_ist ?? row.entry_ts ?? "--"}</td>
+          <td>${row.product_type ?? "--"}</td>
+        `;
+      });
+    }
+
+    function renderTrades(trades) {
+      if (!DASHBOARD_FIX_RECENT_TRADES) {
+        renderTradesLegacy(trades);
+        return;
+      }
+      if (!tradesListEl) return;
+      tradesListEl.innerHTML = "";
+      const items = Array.isArray(trades) ? trades : [];
+      if (!items.length) {
+        tradesListEl.innerHTML = '<div class="empty">No trades yet.</div>';
+        return;
+      }
+
+      const headerRow = document.createElement("div");
+      headerRow.style.cssText = "display:grid; grid-template-columns:100px 150px 120px 100px 120px 80px 80px; gap:8px; padding:8px 0; border-bottom:1px solid var(--border); margin-bottom:8px; font-weight:600; font-size:12px; color:var(--muted);";
+      headerRow.innerHTML = `
+        <span>Tenant</span>
+        <span>Instrument</span>
+        <span>Entry Time</span>
+        <span>Order Type</span>
+        <span>Price/Qty</span>
+        <span>Exit Price</span>
+        <span>PNL</span>
+      `;
+      tradesListEl.appendChild(headerRow);
+
+      items.slice(-8).reverse().forEach((trade) => {
+        const tenant = trade.tenant_id || trade.tenant || "--";
+        const instrument = trade.instrument || trade.symbol || trade.label || trade.underlying || "--";
+        const entryTime = formatIst(trade.entry_ts || trade.ts || trade.trade_time);
+        const orderType = trade.order_type || trade.side || "--";
+        const entryPrice = Number(trade.entry_price ?? trade.price);
+        const exitPrice = Number(trade.exit_price);
+        const qty = trade.qty ?? trade.quantity ?? "--";
+        const pnl = Number(trade.pnl ?? trade.realized_pnl);
+        const row = document.createElement("div");
+        row.style.cssText = "display:grid; grid-template-columns:100px 150px 120px 100px 120px 80px 80px; gap:8px; padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.05); align-items:center;";
+        row.innerHTML = `
+          <span>${tenant}</span>
+          <span>${instrument}</span>
+          <span>${entryTime || "--"}</span>
+          <span style="color:${orderType === "BUY" ? "var(--good)" : orderType === "SELL" ? "var(--bad)" : "var(--muted)"};">${orderType}</span>
+          <span>${Number.isFinite(entryPrice) ? `${entryPrice.toFixed(2)} / ${qty}` : `-- / ${qty}`}</span>
+          <span>${Number.isFinite(exitPrice) ? exitPrice.toFixed(2) : "--"}</span>
+          <span style="color:${Number.isFinite(pnl) && pnl < 0 ? "var(--bad)" : "var(--good)"};">${Number.isFinite(pnl) ? pnl.toFixed(2) : "--"}</span>
+        `;
+        tradesListEl.appendChild(row);
+      });
+    }
+
+    function updateHeader(payload) {
+      modeEl.textContent = `Mode: ${payload.mode || "--"}`;
+      tradeModeEl.textContent = `Trade: ${payload.trade_mode || "--"}`;
+      const isLiveTrade = (payload.trade_mode || "").toUpperCase() === "LIVE";
+      tradeModeEl.style.borderColor = isLiveTrade ? "rgba(34,197,94,0.35)" : "var(--border)";
+      tradeModeEl.style.color = isLiveTrade ? "var(--good)" : "#d1d5db";
+      liveTextEl.textContent = payload.live ? "Live" : "Standby";
+      liveEl.querySelector(".dot").style.background = payload.live ? "var(--good)" : "var(--warn)";
+      timestampEl.textContent = payload.timestamp ? `Updated ${formatTime(payload.timestamp)}` : "Waiting for data...";
+    }
+
+    function mergeDashboardPayload(previous, incoming) {
+      if (
+        incoming &&
+        typeof incoming === "object" &&
+        incoming._mode === "delta" &&
+        previous &&
+        typeof previous === "object"
+      ) {
+        return { ...previous, ...incoming };
+      }
+      return incoming;
+    }
+
+    function handlePayload(payload) {
+      updateHeader(payload);
+      renderUnderlyingsOnly(payload);
+      renderPnl(payload.pnl);
+      const useHubPositions =
+        payload.multi_hub_enabled && Array.isArray(payload.hub_positions);
+      if (positionsTitleEl) {
+        positionsTitleEl.textContent = useHubPositions
+          ? "Hub Positions"
+          : "Open Positions";
+      }
+      if (useHubPositions) {
+        renderHubPositions(payload.hub_positions || []);
+      } else {
+        renderLegacyPositions(payload.trades?.open_positions || []);
+      }
+      renderTrades(payload.trades?.recent || []);
+    }
+
+    const UNDERLYING_ORDER = [
+      { label: "NIFTY_IDX", name: "Nifty" },
+      { label: "BANKNIFTY_IDX", name: "BankNifty" },
+      { label: "FINNIFTY_IDX", name: "Finnifty" },
+      { label: "MIDCPNIFTY_IDX", name: "Midcap Nifty" },
+      { label: "SENSEX_IDX", name: "Sensex" },
+      { label: "NG_FUT", name: "Natural Gas Futures" },
+    ];
+
+    function renderUnderlyingsOnly(payload) {
+      const desired = new Set(UNDERLYING_ORDER.map((x) => x.label));
+      // Remove any non-underlying cards
+      for (const [label, card] of Array.from(cards.entries())) {
+        if (!desired.has(label)) {
+          card.remove();
+          cards.delete(label);
+        }
+      }
+
+      const lookup = new Map(
+        (payload.instruments || []).map((inst) => [inst.label, inst])
+      );
+
+      UNDERLYING_ORDER.forEach((entry) => {
+        const inst =
+          lookup.get(entry.label) || { label: entry.label, price: null };
+        inst.display_name = entry.name;
+        const card = ensureCard(entry.label);
+        renderInstrument(inst);
+        // Re-append to enforce the desired order in the grid
+        gridEl.appendChild(card);
+      });
+    }
+
+    let adminKey = "";
+
+    function promptForAdminKey() {
+      return (prompt("Enter Admin Key") || "").trim();
+    }
+
+    async function fetchWithAdminAuth(url, opts = {}) {
+      let prompted = false;
+      while (true) {
+        const headers = Object.assign({}, opts.headers || {});
+        if (adminKey) {
+          headers["X-Admin-Key"] = adminKey;
+        }
+        const response = await fetch(url, { ...opts, headers });
+        if (response.status !== 401) {
+          return response;
+        }
+        if (prompted) {
+          adminKey = "";
+          return response;
+        }
+        const promptedKey = promptForAdminKey();
+        if (!promptedKey) {
+          adminKey = "";
+          return response;
+        }
+        adminKey = promptedKey;
+        prompted = true;
+      }
+    }
+
+    async function apiFetch(url, opts = {}) {
+      return fetchWithAdminAuth(url, opts);
+    }
+
+    async function fetchDashboardTicket(mode) {
+      const response = await fetchWithAdminAuth(
+        `/admin/dashboard/ws-ticket?mode=${encodeURIComponent(mode)}`,
+        { method: "POST" }
+      );
+      if (!response.ok) {
+        if (response.status === 401) {
+          adminKey = "";
+        }
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const payload = await response.json();
+      return payload.ticket;
+    }
+
+    async function loadControlTower() {
+      if (!controlTableEl || !controlStatusEl) return;
+      controlStatusEl.textContent = "Loading Control Tower...";
+      try {
+        const res = await apiFetch("/api/control_tower/matrix");
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        ctTenants = data.tenants || [];
+        ctStrategies = data.strategies || [];
+        ctMatrix = data.matrix || {};
+        renderControlTower();
+        controlStatusEl.textContent = "";
+      } catch (err) {
+        controlStatusEl.textContent = "Failed to load Control Tower.";
+      }
+    }
+
+    function renderControlTower() {
+      if (!controlTableEl) return;
+      controlTableEl.innerHTML = "";
+      if (!ctTenants.length) {
+        controlTableEl.innerHTML = '<div class="empty">No tenants found.</div>';
+        return;
+      }
+      if (!ctStrategies.length) {
+        controlTableEl.innerHTML = '<div class="empty">No strategies found.</div>';
+        return;
+      }
+      const table = document.createElement("table");
+      table.className = "control-table";
+      const thead = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      headRow.innerHTML = "<th>Tenant</th>";
+      ctStrategies.forEach((s) => {
+        const th = document.createElement("th");
+        th.textContent = s.display_name || s.strategy_id;
+        headRow.appendChild(th);
+      });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+
+      const tbody = document.createElement("tbody");
+      ctTenants.forEach((tenant) => {
+        const tr = document.createElement("tr");
+        const tdTenant = document.createElement("td");
+        tdTenant.innerHTML = `<div style="display:flex; flex-direction:column; gap:2px;">
+          <span>${tenant.name || tenant.tenant_id}</span>
+          <span class="muted" style="font-size:11px;">${tenant.tenant_id}</span>
+        </div>`;
+        tr.appendChild(tdTenant);
+        ctStrategies.forEach((s) => {
+          const td = document.createElement("td");
+          const enabled =
+            (ctMatrix[tenant.tenant_id] || {})[s.strategy_id] || false;
+          const label = document.createElement("label");
+          label.className = "toggle-switch";
+          const input = document.createElement("input");
+          input.type = "checkbox";
+          input.checked = enabled;
+          input.addEventListener("change", () =>
+            handleControlToggle(tenant.tenant_id, s.strategy_id, input.checked)
+          );
+          const slider = document.createElement("span");
+          slider.className = "toggle-slider";
+          label.appendChild(input);
+          label.appendChild(slider);
+          td.appendChild(label);
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      controlTableEl.appendChild(table);
+    }
+
+    function setTenantStatus(message) {
+      if (!tenantPositionsStatusEl) return;
+      tenantPositionsStatusEl.textContent = message || "";
+    }
+
+    async function loadTenantPositions() {
+      if (!tenantIdInput || !tenantPositionsTableEl) return;
+      const tenantId = (tenantIdInput.value || "").trim();
+      if (!tenantId) {
+        setTenantStatus("Enter a tenant id first.");
+        tenantPositionsTableEl.innerHTML = "";
+        return;
+      }
+      setTenantStatus("Loading...");
+      if (tenantLoadBtn) tenantLoadBtn.disabled = true;
+      try {
+        const accountsRes = await fetch("/tenant/me/accounts", {
+          headers: { "X-Tenant-Id": tenantId },
+        });
+        if (!accountsRes.ok) {
+          if (accountsRes.status === 429) {
+            setTenantStatus("Rate limited. Retrying in 2 seconds...");
+            renderTenantPositions([]);
+            if (tenantLoadBtn) tenantLoadBtn.disabled = false;
+            setTimeout(() => loadTenantPositions(), 2000);
+            return;
+          }
+          if (accountsRes.status === 404 || accountsRes.status === 401) {
+            setTenantStatus("Tenant or account not found.");
+            renderTenantPositions([]);
+            return;
+          }
+          throw new Error(`HTTP ${accountsRes.status}`);
+        }
+        const accountsData = await accountsRes.json();
+        const accounts = accountsData.accounts || [];
+        if (!accounts.length) {
+          renderTenantPositions([]);
+          setTenantStatus("No accounts found.");
+          return;
+        }
+        const results = await Promise.all(
+          accounts.map(async (account, index) => {
+            const accountId =
+              account.broker_account_id || account.brokerAccountId || account.id;
+            if (!accountId) {
+              return { account, positions: [] };
+            }
+            // Add small delay between requests to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, index * 100));
+            try {
+              const res = await fetch(
+                `/tenant/me/accounts/${encodeURIComponent(accountId)}/positions`,
+                { headers: { "X-Tenant-Id": tenantId } }
+              );
+              if (!res.ok) {
+                if (res.status === 429) {
+                  throw new Error("Rate limited");
+                }
+                throw new Error(`HTTP ${res.status}`);
+              }
+              const data = await res.json();
+              return { account, positions: data.positions || [] };
+            } catch (err) {
+              return { account, positions: [], error: err };
+            }
+          })
+        );
+
+        const rows = [];
+        results.forEach((result) => {
+          const account = result.account || {};
+          const accountId =
+            account.broker_account_id || account.brokerAccountId || account.id;
+          const accountLabel = account.display_name || accountId || "--";
+          (result.positions || []).forEach((pos) => {
+            const netQty = Number(pos.net_qty ?? pos.quantity ?? pos.qty ?? 0);
+            if (!netQty) return;
+            const side = netQty < 0 ? "SELL" : "BUY";
+            const qty =
+              pos.qty_lots !== undefined
+                ? Math.abs(Number(pos.qty_lots))
+                : Math.abs(netQty);
+            rows.push({
+              account_id: accountId,
+              account_label: accountLabel,
+              symbol: pos.symbol || pos.tradingsymbol || "--",
+              side: side,
+              qty: Math.abs(qty),
+              net_qty: netQty,
+              avg_price:
+                pos.avg_price ?? pos.avgPrice ?? pos.average_price ?? pos.avgprice,
+              entry_price:
+                pos.entry_price ?? pos.avg_price ?? pos.avgPrice ?? pos.average_price ?? pos.avgprice,
+              entry_ts: pos.entry_ts || pos.entryTs || pos.entry_ts_utc || null,
+              product_type:
+                pos.product_type ?? pos.productType ?? pos.producttype ?? "--",
+            });
+          });
+        });
+
+        renderTenantPositions(rows);
+        setTenantStatus(rows.length ? "" : "No open positions for tenant.");
+        try {
+          localStorage.setItem("dashboard_tenant_id", tenantId);
+        } catch (err) {
+          // ignore localStorage failures
+        }
+      } catch (err) {
+        const message = err?.message || String(err);
+        // Check if error is due to rate limiting
+        if (message.includes("Rate limited")) {
+          setTenantStatus("Rate limited. Retrying in 2 seconds...");
+          if (tenantLoadBtn) tenantLoadBtn.disabled = false;
+          setTimeout(() => loadTenantPositions(), 2000);
+        } else if (message.includes("HTTP") || message.includes("404") || message.includes("401")) {
+          setTenantStatus("Failed to load positions: " + message);
+          renderTenantPositions([]);
+        } else {
+          setTenantStatus("Failed to load positions: " + message);
+          renderTenantPositions([]);
+        }
+      } finally {
+        if (tenantLoadBtn) tenantLoadBtn.disabled = false;
+      }
+    }
+
+    async function handleControlToggle(tenantId, strategyId, enabled) {
+      if (!controlTableEl) return;
+      if (!ctMatrix[tenantId]) ctMatrix[tenantId] = {};
+      const prev = ctMatrix[tenantId][strategyId] || false;
+      ctMatrix[tenantId][strategyId] = enabled;
+      renderControlTower();
+      try {
+        const res = await apiFetch("/api/control_tower/toggle", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tenant_id: tenantId,
+            strategy_id: strategyId,
+            enabled: enabled,
+          }),
+        });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        ctMatrix[tenantId][strategyId] = !!data.enabled;
+        renderControlTower();
+        controlStatusEl.textContent = "";
+      } catch (err) {
+        ctMatrix[tenantId][strategyId] = prev;
+        renderControlTower();
+        controlStatusEl.textContent = "Toggle failed, please retry.";
+      }
+    }
+
+    async function connect() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      let ticket = "";
+      try {
+        ticket = await fetchDashboardTicket("delta");
+      } catch (err) {
+        liveTextEl.textContent = "Auth required";
+        setTimeout(connect, 1500);
+        return;
+      }
+      let dashboardState = null;
+      const ws = new WebSocket(
+        `${proto}://${location.host}/ws/dashboard?ticket=${encodeURIComponent(ticket)}&mode=delta`
+      );
+      liveTextEl.textContent = "Connecting";
+      ws.onmessage = (ev) => {
+        const payload = JSON.parse(ev.data);
+        dashboardState = mergeDashboardPayload(dashboardState, payload);
+        handlePayload(dashboardState);
+      };
+      ws.onopen = () => {
+        liveTextEl.textContent = "Live";
+      };
+      ws.onclose = () => {
+        liveTextEl.textContent = "Reconnecting...";
+        setTimeout(connect, 1500);
+      };
+      ws.onerror = () => {
+        liveTextEl.textContent = "Error";
+      };
+    }
+
+    connect();
+    loadControlTower();
+    if (tenantIdInput) {
+      try {
+        const savedTenant = localStorage.getItem("dashboard_tenant_id");
+        if (savedTenant) tenantIdInput.value = savedTenant;
+      } catch (err) {
+        // ignore localStorage failures
+      }
+      tenantIdInput.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          loadTenantPositions();
+        }
+      });
+    }
+    if (tenantLoadBtn) {
+      tenantLoadBtn.addEventListener("click", () => loadTenantPositions());
+    }
+  </script>
+</body>
+</html>

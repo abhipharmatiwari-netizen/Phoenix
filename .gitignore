@@ -1,0 +1,28 @@
+# Runtime secrets — never commit
+.backend-live.env.runtime
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment overrides with real secrets
+*.env.local
+*.env.secrets
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude memory (local session state)
+.claude/

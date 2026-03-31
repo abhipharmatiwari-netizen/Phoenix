@@ -1,0 +1,101 @@
+underlyings:
+  - name: NG
+    type: FUT
+    exchange: MCX
+    segment: MCX_FO
+    symbol_pattern: NATURALGAS
+    lot_size: 1250
+    options:
+      use_atm: true
+      use_strangle_otm: true
+      otm_steps: [1,2,3,4,5,6,7,8,9,10]   # e.g. 2*strike_step away
+    enabled: true
+
+  - name: NIFTY
+    type: INDEX
+    index_token: 99926000
+    index_exchange: NSE
+    index_symbol: "NIFTY 50"
+    segment: NFO
+    symbol_pattern: NIFTY
+    lot_size: 65
+    options:
+      weekly: true
+      use_atm: true
+      use_strangle_otm: true
+      otm_steps: [1,2,3,4,5,6,7,8,9,10]
+      option_segments: ["NSE", "NFO"]
+    enabled: true
+
+  - name: BANKNIFTY
+    type: INDEX
+    index_exchange: NSE
+    index_token: 99926009
+    index_symbol: "NIFTY BANK"
+    segment: NFO
+    symbol_pattern: BANKNIFTY
+    lot_size: 30
+    options:
+      weekly: true
+      use_atm: true
+      use_strangle_otm: true
+      otm_steps: [1,2,3,4,5,6,7,8,9,10]
+      option_segments: ["NSE", "NFO"]
+    enabled: true
+
+  - name: FINNIFTY
+    type: INDEX
+    index_exchange: NSE
+    index_token: 99926037
+    index_symbol: "Nifty Fin Services"
+    segment: NFO
+    symbol_pattern: FINNIFTY
+    lot_size: 60
+    options:
+      weekly: true
+      use_atm: true
+      use_strangle_otm: true
+      option_segments: ["NSE", "NFO"]
+    enabled: true
+
+  - name: SENSEX
+    type: INDEX
+    index_exchange: BSE
+    index_token: 99919000
+    index_symbol: "SENSEX"
+    segment: BFO
+    symbol_pattern: SENSEX
+    lot_size: 20
+    options:
+      weekly: true
+      use_atm: true
+      use_strangle_otm: true
+      otm_steps: [1,2,3,4,5,6,7,8,9,10]
+      option_segments: ["BFO", "BSEFO"]
+    enabled: true
+
+  - name: MIDCPNIFTY
+    type: INDEX
+    index_token: 99926074
+    index_exchange: NSE
+    index_symbol: "NIFTY MID SELECT"
+    segment: NFO
+    symbol_pattern: MIDCPNIFTY
+    lot_size: 120
+    options:
+      weekly: true
+      use_atm: true
+      use_strangle_otm: true
+      option_segments: ["NSE", "NFO"]
+    enabled: true
+
+  # Data-only feed for volatility circuit breaker (RISK-5.4).
+  # Not tradeable — subscribes to India VIX tick for real-time volatility monitoring.
+  - name: INDIAVIX
+    type: DATA
+    index_token: 99926017
+    index_exchange: NSE
+    index_symbol: "India VIX"
+    segment: NSE
+    lot_size: 1
+    enabled: true

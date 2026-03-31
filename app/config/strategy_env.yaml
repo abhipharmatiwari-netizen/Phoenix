@@ -1,0 +1,861 @@
+# strategy_env.yaml
+
+ng:
+  enabled: true
+  signal_timeframe: 300
+  min_atr: 2.0
+  rsi_upper: 75.0
+  rsi_lower: 30.0
+  use_rsi_filter: true
+  ema_period: 8
+  ema20_require_rsi_falling: false
+
+  sl_pct: 0.20
+  tp_pct: 0.30
+  trail_buffer_pct: 0.08
+  trail_trigger_pct: 0.25
+
+  max_open_spreads: 1
+
+  vol_low_atr_norm: 0.0011      # LOW / MED threshold
+  vol_high_atr_norm: 0.0020    # MED / HIGH threshold
+
+  neutral_template: "SHORT_STRADDLE"         # or "SHORT_STRANGLE"
+  directional_template_ce: "SHORT_CE"
+  directional_template_pe: "SHORT_PE"
+
+  lot_size: 1
+  qty_per_trade: 1
+
+  role_labels:
+    strangle_ce_label: "NG_OTM_CE_???"
+    strangle_pe_label: "NG_OTM_PE_???"
+
+nifty:
+  options_enabled: false   
+  delta_enabled: false
+  signal_timeframe: 300
+  min_atr: 1.8
+  rsi_upper: 60.0
+  rsi_lower: 40.0
+  use_rsi_filter: true
+  ema_period: 20
+
+  sl_pct: 0.20
+  tp_pct: 0.30
+  trail_buffer_pct: 0.03
+
+  max_open_spreads: 1
+
+  vol_low_atr_norm: 0.0005      # tune via vol_calibration.py
+  vol_high_atr_norm: 0.0014
+
+  neutral_template: "SHORT_STRANGLE"         # e.g. strangle in low vol
+  directional_template_ce: "SHORT_CE"
+  directional_template_pe: "SHORT_PE"
+
+  lot_size: 65
+  qty_per_trade: 1
+
+  role_labels:
+    # e.g. if you want NIFTY short strangle, set these to real labels:
+    # strangle_ce_label: "NIFTY_OTM_CE_24000"
+    # strangle_pe_label: "NIFTY_OTM_PE_22000"
+    strangle_ce_label: null
+    strangle_pe_label: null
+
+banknifty:
+  options_enabled: false
+  delta_enabled: false
+  signal_timeframe: 300
+  min_atr: 2.0        # tuned for wider participation
+  rsi_upper: 65.0
+  rsi_lower: 40.0
+  use_rsi_filter: true
+  ema_period: 20
+
+  sl_pct: 0.20
+  tp_pct: 0.30
+  trail_buffer_pct: 0.05
+
+  max_open_spreads: 1
+
+  vol_low_atr_norm: 0.0006
+  vol_high_atr_norm: 0.0013
+
+  neutral_template: "SHORT_STRANGLE"
+  directional_template_ce: "SHORT_CE"
+  directional_template_pe: "SHORT_PE"
+
+  lot_size: 30
+  qty_per_trade: 1
+
+  role_labels:
+    strangle_ce_label: null
+    strangle_pe_label: null
+
+finnifty:
+  options_enabled: false
+  signal_timeframe: 300
+  min_atr: 1.0
+  rsi_upper: 65.0
+  rsi_lower: 35.0
+  use_rsi_filter: true
+  ema_period: 20
+
+  sl_pct: 0.10
+  tp_pct: 0.30
+  trail_buffer_pct: 0.05
+
+  max_open_spreads: 2
+
+  vol_low_atr_norm: 0.0007
+  vol_high_atr_norm: 0.0015
+
+  neutral_template: "SHORT_STRANGLE"
+  directional_template_ce: "SHORT_CE"
+  directional_template_pe: "SHORT_PE"
+
+  lot_size: 60
+  qty_per_trade: 1
+
+  role_labels:
+    strangle_ce_label: null
+    strangle_pe_label: null
+
+sensex:
+  options_enabled: false
+  signal_timeframe: 300
+  min_atr: 1.0
+  rsi_upper: 65.0
+  rsi_lower: 35.0
+  use_rsi_filter: true
+  ema_period: 20
+
+  sl_pct: 0.20
+  tp_pct: 0.30
+  trail_buffer_pct: 0.05
+
+  max_open_spreads: 1
+
+  vol_low_atr_norm: 0.0006
+  vol_high_atr_norm: 0.0014
+
+  neutral_template: "SHORT_STRANGLE"
+  directional_template_ce: "SHORT_CE"
+  directional_template_pe: "SHORT_PE"
+
+  lot_size: 20
+  qty_per_trade: 1
+
+  role_labels:
+    strangle_ce_label: null
+    strangle_pe_label: null
+
+midcpnifty:
+  options_enabled: false
+  signal_timeframe: 300
+  min_atr: 1.0
+  rsi_upper: 65.0
+  rsi_lower: 35.0
+  use_rsi_filter: true
+  ema_period: 20
+
+  sl_pct: 0.10
+  tp_pct: 0.30
+  trail_buffer_pct: 0.05
+
+  max_open_spreads: 1
+
+  vol_low_atr_norm: 0.0008
+  vol_high_atr_norm: 0.0016
+
+  neutral_template: "SHORT_STRANGLE"
+  directional_template_ce: "SHORT_CE"
+  directional_template_pe: "SHORT_PE"
+
+  lot_size: 120
+  qty_per_trade: 1
+
+  role_labels:
+    strangle_ce_label: null
+    strangle_pe_label: null
+
+delta:
+  delta_qty_per_leg: 1
+  delta_qty_per_leg_by_underlying:
+    NIFTY: 1
+    BANKNIFTY: 1
+    FINNIFTY: 1
+    MIDCPNIFTY: 1
+    SENSEX: 1
+
+risk:
+  capital_auto_resize_enabled: true
+  max_open_spreads_per_underlying: 1
+  max_daily_loss: 1500
+  max_intraday_drawdown: 2000
+  kill_switch_square_off_open_positions: true
+  risk_limits:
+    default:
+      max_lots_per_trade: 1
+      max_open_lots: 1
+      max_notional_per_underlying: null
+    per_underlying:
+      NIFTY:
+        max_lots_per_trade: 1
+        max_open_lots: 1
+      BANKNIFTY:
+        max_lots_per_trade: 1
+        max_open_lots: 1
+      FINNIFTY:
+        max_lots_per_trade: 1
+        max_open_lots: 1
+      MIDCPNIFTY:
+        max_lots_per_trade: 1
+        max_open_lots: 1
+      SENSEX:
+        max_lots_per_trade: 1
+        max_open_lots: 1
+      NG:
+        max_lots_per_trade: 1
+        max_open_lots: 1
+  per_underlying:
+    NG: 1
+    NIFTY: 1
+    BANKNIFTY: 1
+    FINNIFTY: 1
+    SENSEX: 1
+    MIDCPNIFTY: 1
+
+vol_thresholds:
+  NIFTY_IDX:
+    low_max: 0.0006
+    med_max: 0.0016
+  BANKNIFTY_IDX:
+    low_max: 0.0007
+    med_max: 0.0015
+  FINNIFTY_IDX:
+    low_max: 0.0007
+    med_max: 0.0015
+  SENSEX_IDX:
+    low_max: 0.0006
+    med_max: 0.0014
+  MIDCPNIFTY_IDX:
+    low_max: 0.0008
+    med_max: 0.0016
+  NG_FUT:
+    low_max: 0.0012
+    med_max: 0.0022
+
+strategies:
+  - name: delta_strangle
+    enabled: true
+    instruments: ["NIFTY_IDX", "BANKNIFTY_IDX"]
+    params:
+      sl_pct: 0.30
+      tp_pct: 0.30
+  - name: option_strategy
+    enabled: true
+    instruments:
+      - "NIFTY_IDX"
+      - "BANKNIFTY_IDX"
+      - "FINNIFTY_IDX"
+      - "SENSEX_IDX"
+      - "MIDCPNIFTY_IDX"
+      - "NG_FUT"
+  - name: ema20_strategy
+    enabled: true
+    instruments:
+      - "NIFTY_IDX"
+    params:
+      ema_period: 20
+      timeframe_seconds: 300
+      min_atr: 25.0                  # optimized: was 45.0 — too restrictive (6/19 days)
+      require_rsi_falling: true
+      use_adx_filter: false
+      adx_period: 14
+      min_adx: 18.0
+      require_bearish_di: true
+      min_di_spread: 0.0
+      first_entry_time: "9:30"
+      square_off_time: "15:00"
+      sl_pct: 0.20
+      tp_pct: 0.30
+      trail_buffer_pct: 0.05
+      trail_trigger_pct: 0.10
+      dynamic_policy:
+        enabled: true
+        policy_id: "ema20_nifty_v1"
+        freeze_on_entry: true
+        hold_bars: 3
+        min_regime_hold_minutes: 0
+        thresholds:
+          adx_trend: 24
+          di_spread_trend: 4
+          ema_slope_trend_min: 0.0005
+          atr_norm_high: 1.45
+          atr_norm_secondary: 1.2
+          gap_ratio_spike: 0.8
+          atr_norm_low: 0.7
+          adx_normal_low: 16
+          adx_normal_high: 24
+          chop_adx_max: 15
+          chop_di_spread_max: 2.5
+        profiles:
+          TRENDING:
+            ema_period: 20
+            use_adx_filter: false
+            min_adx: 18.0
+            tp_pct: 0.30
+            trail_trigger_pct: 0.15
+            trail_buffer_pct: 0.05
+            qty_mult: 1.0
+            min_atr: 24.0
+          NORMAL:
+            ema_period: 20
+            use_adx_filter: true
+            min_adx: 20.0
+            sl_pct: 0.20
+            tp_pct: 0.30
+            trail_trigger_pct: 0.12
+            trail_buffer_pct: 0.05
+            qty_mult: 1.0
+            min_atr: 21.0
+          CHOPPY:
+            ema_period: 30
+            use_adx_filter: true
+            min_adx: 24.0
+            min_di_spread: 8.0
+            require_rsi_falling: true
+            sl_pct: 0.20
+            tp_pct: 0.30
+            trail_trigger_pct: 0.0
+            trail_buffer_pct: 0.0
+            qty_mult: 0.6
+            min_atr: 18.0
+          HIGH_VOL:
+            ema_period: 20
+            use_adx_filter: true
+            min_adx: 24.0
+            sl_pct: 0.20
+            tp_pct: 0.30
+            trail_trigger_pct: 0.16
+            trail_buffer_pct: 0.07
+            qty_mult: 0.6
+            first_entry_delay_minutes: 10
+            min_atr: 24.0
+          NO_TRADE:
+            disable_entries: false
+            use_adx_filter: true
+            min_adx: 22.0
+            min_di_spread: 5.0
+            require_rsi_falling: true
+            min_atr: 24.0
+            qty_mult: 0.4
+            first_entry_delay_minutes: 15
+  - name: ema20_strategy
+    enabled: true
+    instruments:
+      - "BANKNIFTY_IDX"
+    params:
+      ema_period: 20
+      timeframe_seconds: 300
+      require_rsi_falling: false    # optimized: was true — improves PF 1.05->1.08
+      use_adx_filter: false
+      adx_period: 14
+      min_adx: 18.0
+      require_bearish_di: true
+      min_di_spread: 0.0
+      square_off_time: "15:00"
+      sl_pct: 0.20
+      tp_pct: 0.30
+      trail_buffer_pct: 0.10
+      trail_trigger_pct: 0.15
+      dynamic_policy:
+        enabled: true
+        policy_id: "ema20_banknifty_v1"
+        freeze_on_entry: true
+        hold_bars: 3
+        min_regime_hold_minutes: 0
+        thresholds:
+          adx_trend: 25
+          di_spread_trend: 5
+          ema_slope_trend_min: 0.0005
+          atr_norm_high: 1.6
+          atr_norm_secondary: 1.3
+          gap_ratio_spike: 1.0
+          atr_norm_low: 0.8
+          adx_normal_low: 18
+          adx_normal_high: 25
+          chop_adx_max: 17
+          chop_di_spread_max: 3
+        profiles:
+          TRENDING:
+            ema_period: 20
+            use_adx_filter: false
+            min_adx: 18.0
+            tp_pct: 0.30
+            trail_trigger_pct: 0.18
+            trail_buffer_pct: 0.06
+            qty_mult: 1.0
+          NORMAL:
+            ema_period: 20
+            use_adx_filter: true
+            min_adx: 20.0
+            sl_pct: 0.20
+            tp_pct: 0.30
+            trail_trigger_pct: 0.15
+            trail_buffer_pct: 0.08
+            qty_mult: 1.0
+          CHOPPY:
+            ema_period: 30
+            use_adx_filter: true
+            min_adx: 24.0
+            min_di_spread: 8.0
+            require_rsi_falling: true
+            sl_pct: 0.20
+            tp_pct: 0.30
+            trail_trigger_pct: 0.0
+            trail_buffer_pct: 0.0
+            qty_mult: 0.7
+          HIGH_VOL:
+            ema_period: 30
+            use_adx_filter: true
+            min_adx: 27.0
+            sl_pct: 0.20
+            tp_pct: 0.30
+            trail_trigger_pct: 0.20
+            trail_buffer_pct: 0.10
+            qty_mult: 0.5
+            first_entry_delay_minutes: 15
+          NO_TRADE:
+            disable_entries: true
+  - name: ema20_strategy
+    enabled: true
+    instruments:
+      - "FINNIFTY_IDX"
+    params:
+      ema_period: 20
+      timeframe_seconds: 300
+      use_adx_filter: false
+      adx_period: 14
+      min_adx: 18.0
+      require_bearish_di: true
+      min_di_spread: 0.0
+      square_off_time: "15:00"
+      sl_pct: 0.30
+      tp_pct: 0.30
+      trail_buffer_pct: 0.10
+      trail_trigger_pct: 0.15
+      dynamic_policy:
+        enabled: false
+        policy_id: ""
+        freeze_on_entry: true
+        hold_bars: 3
+        min_regime_hold_minutes: 0
+        thresholds:
+          adx_trend: 22
+          di_spread_trend: 8
+          atr_norm_high: 1.5
+          chop_adx_max: 18
+        profiles: {}
+  - name: ema20_strategy
+    enabled: true
+    instruments:
+      - "SENSEX_IDX"
+    params:
+      ema_period: 20
+      timeframe_seconds: 300
+      use_adx_filter: false
+      adx_period: 14
+      min_adx: 18.0
+      require_bearish_di: true
+      min_di_spread: 0.0
+      square_off_time: "15:00"
+      sl_pct: 0.30
+      tp_pct: 0.30
+      trail_buffer_pct: 0.10
+      trail_trigger_pct: 0.15
+      dynamic_policy:
+        enabled: false
+        policy_id: ""
+        freeze_on_entry: true
+        hold_bars: 3
+        min_regime_hold_minutes: 0
+        thresholds:
+          adx_trend: 22
+          di_spread_trend: 8
+          atr_norm_high: 1.5
+          chop_adx_max: 18
+        profiles: {}
+  - name: ema20_strategy
+    enabled: true
+    instruments:
+      - "MIDCPNIFTY_IDX"
+    params:
+      ema_period: 20
+      timeframe_seconds: 300
+      use_adx_filter: false
+      adx_period: 14
+      min_adx: 18.0
+      require_bearish_di: true
+      min_di_spread: 0.0
+      square_off_time: "15:00"
+      sl_pct: 0.30
+      tp_pct: 0.30
+      trail_buffer_pct: 0.10
+      trail_trigger_pct: 0.15
+      dynamic_policy:
+        enabled: false
+        policy_id: ""
+        freeze_on_entry: true
+        hold_bars: 3
+        min_regime_hold_minutes: 0
+        thresholds:
+          adx_trend: 22
+          di_spread_trend: 8
+          atr_norm_high: 1.5
+          chop_adx_max: 18
+        profiles: {}
+  - name: ema20_strategy
+    enabled: true
+    instruments:
+      - "NG_FUT"
+    params:
+      ema_period: 8
+      min_atr: 1.2                          # optimized: was 0.9 — PF 1.74->2.55, win% 71->86%
+      require_rsi_falling: false
+      timeframe_seconds: 300
+      signal_timeframe: 300
+      use_adx_filter: false
+      adx_period: 14
+      min_adx: 22.0
+      require_bearish_di: true
+      min_di_spread: 2.0
+      first_entry_time: "09:30"
+      square_off_time: "23:30"
+      sl_pct: 0.20
+      tp_pct: 0.30
+      trail_buffer_pct: 0.10
+      trail_trigger_pct: 0.20
+      prevent_same_bar_reentry: false          # backtest-only: keep disabled
+      cooldown_minutes_after_exit: 0           # backtest-only: keep disabled
+      max_entries_per_strike_per_day: null     # backtest-only: "none"
+      hard_sl_points: 3.0              # backtest-only guardrail
+      # skip_entry_hours_ist: [9, 13, 20, 21]  # backtest-only weak-hour filter
+      min_ema_gap_pct: 0.000           # backtest-only entry quality filter
+      dynamic_policy:
+        enabled: false
+        policy_id: ""
+        freeze_on_entry: true
+        hold_bars: 3
+        min_regime_hold_minutes: 0
+        thresholds:
+          adx_trend: 22
+          di_spread_trend: 8
+          atr_norm_high: 1.5
+          chop_adx_max: 18
+        profiles: {}
+  - name: "ce_pdh_rb"
+    enabled: true
+    instruments:
+      - "NIFTY_IDX"
+      - "BANKNIFTY_IDX"
+      - "FINNIFTY_IDX"
+      - "SENSEX_IDX"
+      - "MIDCPNIFTY_IDX"
+    params:
+      bar_minutes: 1
+      ib_end_time: "10:15"
+      max_gap_abs_pct: 0.003
+      max_ib_range_pct: 0.005
+      pre_breakout_band_pct: 0.004
+      breakout_buffer_pct: 0.0010
+      min_breakout_body_pct: 0.003
+      sl_pct: 0.25
+      target_pct: 0.40
+      lots_per_trade: 1
+      max_trades_per_day_per_symbol: 2
+      moneyness: "ATM"
+      itm_strike_offset: 0
+      first_entry_time: "10:15"
+      last_entry_time: "14:00"
+      square_off_time: "15:20"
+  - name: "exclusive_nifty_ce_buy"
+    enabled: true
+    instruments:
+      - "NIFTY_IDX"
+    params:
+      timeframe_seconds: 30
+      vol_quantile: 0.45
+      ema_atr_buffer: 0.05
+      rsi_min: 58
+      rsi_max: 72
+      macd_hist_min: 0.3
+      allow_near_macd: true
+      macd_near: 0.40
+      strict_trend: false
+      min_adx: 16.0
+      min_di_spread: 2.0
+      sl_atr: 2.2
+      tp_atr: 2.5
+      max_trades_per_day: 1
+      ema_fail_bars: 3
+      ema_fail_buffer_atr: 0.10
+      trail_active_atr: 0.8
+      trail_cushion_atr: 0.16
+      cooldown_bars: 2
+      session_start: "10:15"
+      last_entry_time: "14:45"
+      square_off_time: "15:15"
+      late_start: "14:45"
+      late_tp_cap_atr: 2.6
+      late_trail_cushion: 0.08
+      late_trail_active_atr: 0.6
+      moneyness: "ATM"
+      itm_strike_offset: 0
+      lots_per_trade: 1
+      product_type: "INTRADAY"
+      dynamic_policy:
+        enabled: true
+        policy_id: "exclusive_nifty_ce_v1"
+        freeze_on_entry: true
+        hold_bars: 3
+        min_regime_hold_minutes: 0
+        thresholds:
+          adx_trend: 25
+          di_spread_trend: 6
+          atr_norm_high: 1.5
+          chop_adx_max: 20
+        profiles:
+          TRENDING:
+            min_adx: 14.0
+            min_di_spread: 2.0
+            sl_atr: 2.2
+            tp_atr: 2.5
+            rsi_min: 55.0
+            rsi_max: 72.0
+          NORMAL:
+            min_adx: 16.0
+            min_di_spread: 2.0
+            sl_atr: 2.2
+            tp_atr: 2.5
+            rsi_min: 58.0
+            rsi_max: 72.0
+          CHOPPY:
+            disable_entries: true
+          HIGH_VOL:
+            min_adx: 22.0
+            min_di_spread: 5.0
+            sl_atr: 2.5
+            tp_atr: 2.0
+            qty_mult: 0.6
+            rsi_min: 58.0
+            rsi_max: 68.0
+          NO_TRADE:
+            disable_entries: true
+  - name: "put_momentum_scalper"
+    enabled: true
+    instruments:
+      - label: "NIFTY_IDX"
+        entry_start: "09:20"
+        entry_end: "14:45"
+        rsi_falling_bars_required: 1
+        max_bars_in_trade: 14
+      - label: "BANKNIFTY_IDX"
+        entry_start: "09:20"
+        entry_end: "14:45"
+        rsi_falling_bars_required: 1
+        max_bars_in_trade: 14
+      - "FINNIFTY_IDX"
+      - "SENSEX_IDX"
+      - "MIDCPNIFTY_IDX"
+    params:
+      timeframe_seconds_5m: 300
+      timeframe_seconds_15m: 900
+      min_atr_ratio: 0.0008
+      trend_ema_tolerance_ratio: 0.0015
+      rsi_min: 20                       # optimized: was 25 — widen oversold floor
+      rsi_max: 45                       # optimized: was 40 — widen for moderate-weakness entries
+      option_sl_pct: 0.25
+      partial_tp_r: 1.0
+      final_tp_r: 1.5
+      rsi_falling_bars_required: 1      # optimized: was 2 — single declining bar sufficient
+      lookback_breakdown_bars: 8        # optimized: was 10 — shorter lookback, more signals
+      volume_mult: 1.4
+      max_bars_in_trade: 8             # optimized: was 6 — let profitable trades run longer
+      strike_mode: "ATM"
+      lots_per_trade: 1
+      morning_start: "09:20"
+      morning_end: "11:00"
+      afternoon_start: "13:30"
+      afternoon_end: "14:45"
+      dynamic_policy:
+        enabled: true
+        policy_id: "put_momentum_nifty_banknifty_v1"
+        freeze_on_entry: true
+        hold_bars: 3
+        min_regime_hold_minutes: 0
+        thresholds:
+          adx_trend: 22
+          di_spread_trend: 8
+          atr_norm_high: 1.5
+          chop_adx_max: 18
+        profiles: {}
+  - name: "put_reversion_writer"
+    enabled: true
+    instruments:
+      - "NIFTY_IDX"
+      - "BANKNIFTY_IDX"
+      - "FINNIFTY_IDX"
+      - "SENSEX_IDX"
+      - "MIDCPNIFTY_IDX"
+    params:
+      timeframe_seconds_5m: 300
+      timeframe_seconds_15m: 900
+      support_lookback_bars: 20
+      initial_window_bars: 6
+      breakdown_buffer_pct: 0.0020
+      rsi_oversold_level: 30
+      rsi_recovery_level: 45
+      sl_pct: 0.35
+      tp_decay_pct: 0.40
+      max_bars_in_trade: 10
+      invalidation_buffer_pct: 0.0020
+      lots_per_trade: 1
+      otm_steps: 1
+      morning_entry_start: "10:00"
+      morning_entry_end: "11:00"
+      afternoon_entry_start: "13:30"
+      afternoon_entry_end: "14:15"
+  - name: "put_buy"
+    enabled: true
+    instruments:
+      - "NIFTY_IDX"
+      - "BANKNIFTY_IDX"
+      - "FINNIFTY_IDX"
+      - "SENSEX_IDX"
+      - "MIDCPNIFTY_IDX"
+    params:
+      timeframe_seconds_5m: 300
+      timeframe_seconds_15m: 900
+      lots_per_trade: 1
+      product_type: "INTRADAY"
+      option_moneyness: "ATM"
+      expiry_mode: "NEAREST"
+      use_volume_filter: false
+  - name: "nifty_weekly_credit_spreads"
+    enabled: true
+    instruments:
+      - "NIFTY_IDX"
+    params:
+      lot_size: 1
+      entry_start_time: "10:10"
+      entry_end_time: "13:30"
+      min_days_to_expiry: 1
+      max_days_to_expiry: 5
+      force_flatten_on_expiry: true
+      exit_time_eod: "15:15"
+      atm_straddle_min_pct: 0.014
+      atm_straddle_max_pct: 0.030
+      atr_max_pct_5m: 0.0040
+      ema_period_5m: 20
+      rsi_period_5m: 14
+      bullish_rsi_min: 55.0
+      bullish_rsi_max: 70.0
+      bearish_rsi_min: 30.0
+      bearish_rsi_max: 45.0
+      neutral_rsi_min: 45.0
+      neutral_rsi_max: 55.0
+      macd_hist_flat_factor: 0.0002
+      flat_range_lookback_bars: 10
+      flat_range_max_pct: 0.008
+      short_otm_pct: 0.008
+      condor_short_otm_pct: 0.012
+      spread_width_pct: 0.015
+      min_width_pts: 150.0
+      min_credit_pct_of_width: 0.35
+      min_condor_total_credit_pct: 0.40
+      risk_per_trade_pct: 0.01
+      max_total_risk_pct: 0.05
+      max_open_spreads: 2
+      take_profit_pct_of_credit: 0.60
+      stop_loss_mult_credit: 1.8
+      account_equity: 20000
+
+instruments:
+  NIFTY_IDX:
+    enabled: true
+    allowed_strategies: ["ema20_strategy", "exclusive_nifty_ce_buy", "put_momentum_scalper"]
+  BANKNIFTY_IDX:
+    enabled: true
+    allowed_strategies: ["ema20_strategy", "put_momentum_scalper"]
+  FINNIFTY_IDX:
+    enabled: false
+    allowed_strategies: ["ema20_strategy"]
+  MIDCPNIFTY_IDX:
+    enabled: false
+    allowed_strategies: ["ema20_strategy"]
+  SENSEX_IDX:
+    enabled: false
+    allowed_strategies: ["ema20_strategy"]
+  NG_FUT:
+    enabled: true
+    allowed_strategies: ["ema20_strategy"]
+
+strategy_selection:
+  enabled: true
+  max_active_per_underlying: 2
+  min_hold_seconds: 180
+  # Authority rule (EMA20-5): EMA20 dynamic policy is the authoritative layer for
+  # EMA20 entry permissibility. When ema20_is_authoritative=true, ema20_strategy
+  # bypasses selector regime gating and is governed solely by its own per-regime
+  # dynamic profiles (disable_entries flag). This resolves the design conflict where
+  # selector NO_TRADE->[] suppressed EMA20 even when EMA20's NO_TRADE profile had
+  # disable_entries=false (incident: NIFTY/BANKNIFTY March 13, 2026).
+  # To reintroduce selector control over EMA20, set this to false AND align the
+  # selector mapping NO_TRADE entry with EMA20's dynamic profile before LIVE use.
+  ema20_is_authoritative: true
+  mapping:
+    NIFTY_IDX:
+      TRENDING: ["put_momentum_scalper", "exclusive_nifty_ce_buy"]
+      NORMAL: ["ema20_strategy"]
+      CHOPPY: ["ema20_strategy"]
+      HIGH_VOL: ["put_momentum_scalper", "exclusive_nifty_ce_buy"]
+      NO_TRADE: []
+    BANKNIFTY_IDX:
+      TRENDING: ["put_momentum_scalper"]
+      NORMAL: ["ema20_strategy"]
+      CHOPPY: ["ema20_strategy"]
+      HIGH_VOL: ["put_momentum_scalper"]
+      NO_TRADE: []
+    NG_FUT:
+      TRENDING: ["ema20_strategy"]
+      NORMAL: ["ema20_strategy"]
+      CHOPPY: ["ema20_strategy"]
+      HIGH_VOL: ["ema20_strategy"]
+      NO_TRADE: []
+
+# Note: empty `allowed_strategies` means "allow all" by design.
+# Keep explicit lists in LIVE to avoid unintended strategy execution.
+# all strategies which can be assigned to instruments 
+# instruments:
+#   NIFTY_IDX:
+#     enabled: true
+#     allowed_strategies: ["delta_strangle", "option_strategy", "ema20_strategy", "ce_orb", "ce_pdh_rb", "exclusive_nifty_ce_buy", "put_momentum_scalper", "put_reversion_writer", "nifty_weekly_credit_spreads"]
+#   BANKNIFTY_IDX:
+#     enabled: true
+#     allowed_strategies: ["delta_strangle", "option_strategy", "ema20_strategy", "ce_orb", "ce_pdh_rb", "put_momentum_scalper", "put_reversion_writer"]
+#   FINNIFTY_IDX:
+#     enabled: true
+#     allowed_strategies: ["option_strategy", "ema20_strategy", "ce_pdh_rb", "put_momentum_scalper", "put_reversion_writer"]
+#   MIDCPNIFTY_IDX:
+#     enabled: true
+#     allowed_strategies: ["delta_strangle", "option_strategy", "ema20_strategy", "ce_pdh_rb", "put_momentum_scalper", "put_reversion_writer"]
+#   SENSEX_IDX:
+#     enabled: true
+#     allowed_strategies: ["option_strategy", "ema20_strategy", "ce_pdh_rb", "put_momentum_scalper", "put_reversion_writer"]
+#   NG_FUT:
+#     enabled: true
+#     allowed_strategies: ["option_strategy", "ema20_strategy"]

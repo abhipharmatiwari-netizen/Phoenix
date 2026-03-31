@@ -1,0 +1,77 @@
+
+.skip-to-content {
+  position: absolute;
+  top: -40px;
+  left: 0;
+  background: #2563eb;
+  color: #fff;
+  padding: 0.5rem 1rem;
+  z-index: 100;
+  font-size: 0.875rem;
+}
+
+.app-shell {
+  display: flex;
+  height: 100vh;
+}
+
+.main-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
+.content {
+  flex: 1;
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+.login-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+}
+
+.login-container form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 2rem;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  min-width: 320px;
+}
+
+.login-container input,
+.login-container select,
+.login-container button {
+  padding: 0.5rem;
+  font-size: 1rem;
+}
+
+.health-tiles {
+  display: flex;
+  gap: 1rem;
+}
+
+.health-tile {
+  padding: 1rem;
+  border-radius: 8px;
+  color: white;
+  min-width: 150px;
+}
+
+.health-tile.green {
+  background-color: #28a745;
+}
+
+.health-tile.yellow {
+  background-color: #ffc107;
+}
+
+.health-tile.red {
+  background-color: #dc3545;
+}
