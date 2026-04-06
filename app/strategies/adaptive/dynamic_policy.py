@@ -30,6 +30,10 @@ ALLOWED_OVERRIDE_KEYS = {
     "disable_entries",
     "qty_mult",
     "min_atr",
+    "sl_atr",
+    "tp_atr",
+    "rsi_min",
+    "rsi_max",
 }
 
 ENTRY_CRITICAL_KEYS = {
@@ -60,6 +64,10 @@ _KEY_SPEC: dict[str, tuple[type[Any], Optional[float], Optional[float]]] = {
     "disable_entries": (bool, None, None),
     "qty_mult": (float, 0.1, 2.0),
     "min_atr": (float, 0.0, None),
+    "sl_atr": (float, 0.1, 20.0),
+    "tp_atr": (float, 0.1, 20.0),
+    "rsi_min": (float, 0.0, 100.0),
+    "rsi_max": (float, 0.0, 100.0),
 }
 
 

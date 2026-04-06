@@ -819,11 +819,14 @@ strategy_selection:
   ema20_is_authoritative: true
   mapping:
     NIFTY_IDX:
+      # Keep EXCLUSIVE_CE on bar dispatch across all regimes; its own dynamic
+      # policy decides whether entries are allowed, and it still needs bars for
+      # diagnostics and private EMA maintenance when entries are disabled.
       TRENDING: ["put_momentum_scalper", "exclusive_nifty_ce_buy"]
-      NORMAL: ["ema20_strategy"]
-      CHOPPY: ["ema20_strategy"]
+      NORMAL: ["ema20_strategy", "exclusive_nifty_ce_buy"]
+      CHOPPY: ["ema20_strategy", "exclusive_nifty_ce_buy"]
       HIGH_VOL: ["put_momentum_scalper", "exclusive_nifty_ce_buy"]
-      NO_TRADE: []
+      NO_TRADE: ["exclusive_nifty_ce_buy"]
     BANKNIFTY_IDX:
       TRENDING: ["put_momentum_scalper"]
       NORMAL: ["ema20_strategy"]

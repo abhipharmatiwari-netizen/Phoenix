@@ -887,6 +887,8 @@ class PutMomentumScalperStrategy(BaseStrategy):
 
         ist_dt = candle.start_ts.astimezone(IST)
         self._reset_if_new_day(ist_dt)
+        if timeframe_seconds not in {self.timeframe_5m, self.timeframe_15m}:
+            return
         self._adaptive_policy.set_base_params(self._base_policy_params())
         self._adaptive_policy.refresh(
             candle=candle,

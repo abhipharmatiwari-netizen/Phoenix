@@ -246,6 +246,12 @@ class ExclusiveNiftyCeBuyStrategy(BaseStrategy):
         self._exit_failure_count = 0
         self._exit_circuit_open_until_mono = 0.0
         self._exit_last_alert_mono = 0.0
+        entry_skip_log_cfg = self._cfg.get_float(
+            "EXCLUSIVE_CE_ENTRY_SKIP_LOG_THROTTLE_SECONDS",
+            60.0,
+        )
+        self._entry_skip_log_throttle_seconds = max(0.0, entry_skip_log_cfg)
+        self._last_entry_skip_log_mono: Dict[str, float] = {}
         self.prev_macd: Optional[float] = None
         self.prev_macd_signal: Optional[float] = None
         self.last_atr: Optional[float] = None
@@ -352,6 +358,50 @@ class ExclusiveNiftyCeBuyStrategy(BaseStrategy):
             "tp_atr": float(self.tp_atr),
         }
 
+    def _dynamic_policy_skip_details(self, *, disable_entries: bool) -> Dict[str, Any]:
+        regime = getattr(self._adaptive_policy.regime, "value", str(self._adaptive_policy.regime))
+        context = self._adaptive_policy.last_context
+        payload: Dict[str, Any] = {
+            "regime": regime,
+            "disable_entries": bool(disable_entries),
+            "selected_profile": self._adaptive_policy.selected_profile(),
+            "atr_norm": None,
+            "adx14": None,
+            "di_spread": None,
+            "ema_slope": None,
+        }
+        if context is not None:
+            payload.update(
+                {
+                    "atr_norm": context.atr_norm,
+                    "adx14": context.adx14,
+                    "di_spread": context.di_spread,
+                    "ema_slope": context.ema_slope,
+                }
+            )
+        return payload
+
+    def _log_entry_skip(self, *, reason: str, candle: Any, **extra: Any) -> None:
+        now_mono = monotonic()
+        throttle = self._entry_skip_log_throttle_seconds
+        last_mono = self._last_entry_skip_log_mono.get(reason, 0.0)
+        if throttle > 0.0 and (now_mono - last_mono) < throttle:
+            return
+        self._last_entry_skip_log_mono[reason] = now_mono
+        detail_parts = []
+        for key, value in extra.items():
+            if value in (None, "", [], {}):
+                continue
+            detail_parts.append(f"{key}={value}")
+        details = f" {' '.join(detail_parts)}" if detail_parts else ""
+        logger.info(
+            "[%s] EXCLUSIVE_CE entry skipped | reason=%s bar_start_ts=%s%s",
+            self.env_prefix,
+            reason,
+            getattr(candle, "start_ts", None),
+            details,
+        )
+
     # Return current IST time.
     def _now_ist(self) -> datetime:
         return datetime.now(timezone.utc).astimezone(IST)
@@ -368,6 +418,7 @@ class ExclusiveNiftyCeBuyStrategy(BaseStrategy):
         self.prev_macd = None
         self.prev_macd_signal = None
         self.last_atr = None
+        self._last_entry_skip_log_mono = {}
         self._adaptive_policy.reset_runtime()
         self._reset_exit_retry_state()
         logger.info("[%s] Daily reset for %s", self.env_prefix, d)
@@ -1221,17 +1272,39 @@ class ExclusiveNiftyCeBuyStrategy(BaseStrategy):
             state.cooldown_bars -= 1
 
         if state.position:
+            self._log_entry_skip(
+                reason="position_open",
+                candle=candle,
+                option_label=state.position.option_label,
+            )
             return
 
         if live_disable_entries:
+            self._log_entry_skip(
+                reason="policy_disable_entries",
+                candle=candle,
+                **self._dynamic_policy_skip_details(disable_entries=live_disable_entries),
+            )
             return
         if self.max_trades_per_day > 0 and state.trades_today >= self.max_trades_per_day:
+            self._log_entry_skip(
+                reason="max_trades_reached",
+                candle=candle,
+                trades_today=state.trades_today,
+                max_trades_per_day=self.max_trades_per_day,
+            )
             return
         try:
             atr_now = float(indicators.get("atr"))
         except Exception:
             atr_now = None
         if atr_now is None or atr_now < live_min_atr:
+            self._log_entry_skip(
+                reason="min_atr_not_met",
+                candle=candle,
+                atr=atr_now,
+                min_atr=live_min_atr,
+            )
             return
 
         buy_signal, details = self._compute_buy_signal(
@@ -1245,13 +1318,30 @@ class ExclusiveNiftyCeBuyStrategy(BaseStrategy):
             min_di_spread=live_min_di_spread,
         )
         if not buy_signal:
+            self._log_entry_skip(
+                reason="no_buy_signal",
+                candle=candle,
+                signal_details=details,
+            )
             return
 
         next_bar_start = candle.end_ts or (candle.start_ts + timedelta(seconds=self.timeframe_seconds))
         entry_time = next_bar_start.astimezone(IST).time()
         if not self._within_entry_window(entry_time):
+            self._log_entry_skip(
+                reason="outside_entry_window",
+                candle=candle,
+                entry_time=entry_time.strftime("%H:%M"),
+                session_start=self.session_start.strftime("%H:%M"),
+                last_entry_time=self.last_entry_time.strftime("%H:%M"),
+            )
             return
         if state.cooldown_bars > 0:
+            self._log_entry_skip(
+                reason="cooldown_active",
+                candle=candle,
+                cooldown_bars=state.cooldown_bars,
+            )
             return
 
         state.pending_entry_at = next_bar_start
