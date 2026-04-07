@@ -753,6 +753,22 @@ def sync_positions_with_broker(
                 submission_strategy_context = dict(strategy_context_raw)
             if submission_strategy_name:
                 submission_template_name = submission_strategy_name
+        # §RC1-FIX: When the ATM-refresh/universe builder relabels an instrument after
+        # the strategy submitted its entry order, position_sync resolves the broker
+        # position to the new label (e.g. OTM→ATM).  The submission hint still carries
+        # the original order label.  Prefer the original label so we update the existing
+        # risk-manager entry rather than creating a duplicate BROKER_SYNC entry under
+        # the reclassified label.
+        if submission_hint and label not in risk_positions:
+            hint_label = str(submission_hint.get("position_label") or "").strip()
+            if hint_label and hint_label != label:
+                logger.info(
+                    "[POS_SYNC] Universe-relabeled broker position resolved as %s but "
+                    "submission hint points to %s; remapping to submission label",
+                    label,
+                    hint_label,
+                )
+                label = hint_label
         if label not in risk_positions:
             suppress_sync_entry = False
             suppress_sync_reason = ""
@@ -829,7 +845,10 @@ def sync_positions_with_broker(
                         role=None,
                         underlying=risk_manager._infer_underlying(label),  # type: ignore[attr-defined]
                         strategy_name=submission_strategy_name or "BROKER_SYNC",
-                        reason="BROKER_SYNC",
+                        # §RC2-FIX: When we have a submission hint the order was placed
+                        # by a known strategy — use FILL_SYNCED so the position is NOT
+                        # marked recovery-owned and bracket/exit logic is not skipped.
+                        reason="FILL_SYNCED" if submission_hint else "BROKER_SYNC",
                         ml_info=None,
                         strategy_context=submission_strategy_context,
                     )

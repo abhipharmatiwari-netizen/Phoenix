@@ -1455,6 +1455,22 @@ class ExclusiveNiftyCeBuyStrategy(BaseStrategy):
         if not pos:
             return
 
+        # §RC3-FIX: Guard against phantom SL/TP exits when the position has been
+        # reconciled externally (e.g. BROKER_SYNC under a universe-relabeled label).
+        # If the label no longer exists in the risk manager, the position is gone —
+        # clear stale state so the strategy does not fire a phantom SELL.
+        if self.risk_manager is not None:
+            open_positions = getattr(self.risk_manager, "open_positions", {})
+            if pos.option_label not in open_positions:
+                logger.warning(
+                    "[%s] Skipping SL/TP management — %s not in risk_manager.open_positions "
+                    "(position reconciled externally); clearing stale position state",
+                    self.env_prefix,
+                    pos.option_label,
+                )
+                state.position = None
+                return
+
         ist_time = candle.start_ts.astimezone(IST).time()
         if self.squareoff_time and ist_time >= self.squareoff_time:
             self._exit_position(reason="EOD_SQUAREOFF_1515")
@@ -1504,6 +1520,20 @@ class ExclusiveNiftyCeBuyStrategy(BaseStrategy):
             return
         if self._exit_in_flight:
             return
+        # §RC3-FIX: Abort exit if the position label is no longer in the risk manager.
+        # This prevents placing a phantom SELL when the position was reconciled away
+        # externally (e.g. BROKER_SYNC closed it under a universe-relabeled label).
+        if self.risk_manager is not None:
+            open_positions = getattr(self.risk_manager, "open_positions", {})
+            if pos.option_label not in open_positions:
+                logger.warning(
+                    "[%s] Aborting exit for %s — label not in risk_manager.open_positions "
+                    "(position reconciled externally); clearing stale position state",
+                    self.env_prefix,
+                    pos.option_label,
+                )
+                state.position = None
+                return
         now_mono = monotonic()
         if now_mono < self._exit_circuit_open_until_mono:
             if now_mono - self._exit_last_alert_mono >= self._exit_circuit_alert_interval_seconds:
