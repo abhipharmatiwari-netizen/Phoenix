@@ -64,6 +64,18 @@ def place_order_via_bridge(
             signal_metrics.mark_order_submitted()
         return response
 
+    # Readiness gate: block order submission until the runtime is fully initialized.
+    # The replay path above is intentionally exempt — replay bypasses live infrastructure.
+    # Lazy import to avoid the circular dependency:
+    #   strategy_bridge → app_runtime → multi_instrument_stream → strategy_bridge
+    from app.runtime.app_runtime import get_app_runtime  # noqa: PLC0415
+    _app_rt = get_app_runtime()
+    if not _app_rt.ready:
+        raise RuntimeError(
+            f"place_order_via_bridge: runtime not ready — order blocked during startup recovery "
+            f"(strategy_id={strategy_id})"
+        )
+
     # Multi-tenant hub path: run async OrderRouter.submit_order in a fresh loop
     runtime = get_hub_runtime()
     router = runtime.order_router
