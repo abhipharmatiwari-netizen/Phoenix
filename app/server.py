@@ -28,7 +28,7 @@ from fastapi import (
     status,
     Depends,
 )
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config.settings import get_settings
@@ -834,7 +834,7 @@ async def health() -> dict:
     """
     runtime = get_app_runtime()
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    ready = bool(getattr(runtime, "ready", True))
+    ready = bool(getattr(runtime, "ready", False))
     return {
         "status": "ok",
         "ready": ready,
@@ -857,6 +857,49 @@ async def health() -> dict:
 async def health_summary() -> dict:
     """Unified Docker/K8s health summary for runtime and broker-sync signals."""
     return _build_docker_health_summary()
+
+
+@app.get("/readyz")
+async def readyz() -> JSONResponse:
+    """
+    Machine-readable readiness probe for container orchestrators.
+
+    Returns HTTP 200 only when the runtime readiness latch is set AND at least
+    one hub AccountRunner is actively running (if multi-hub is enabled).
+    Returns HTTP 503 otherwise.
+
+    Use this as the Docker/compose healthcheck target instead of /health.
+    /health remains a liveness probe that always returns HTTP 200.
+    """
+    runtime = get_app_runtime()
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    payload: dict = {"timestamp": now}
+
+    if not runtime.ready:
+        payload["ready"] = False
+        payload["reason"] = "startup_recovery_in_progress"
+        return JSONResponse(status_code=503, content=payload)
+
+    settings = get_settings()
+    if settings.enable_multi_hub:
+        try:
+            hub = get_hub_runtime().hub
+            running = hub.running_runner_count
+            registered = hub.runner_count
+            payload["runner_count"] = registered
+            payload["running_runner_count"] = running
+            payload["failed_runner_count"] = hub.failed_runner_count
+            if registered > 0 and running == 0:
+                payload["ready"] = False
+                payload["reason"] = "no_runners_running"
+                return JSONResponse(status_code=503, content=payload)
+        except Exception as exc:
+            payload["ready"] = False
+            payload["reason"] = f"hub_unavailable:{exc}"
+            return JSONResponse(status_code=503, content=payload)
+
+    payload["ready"] = True
+    return JSONResponse(status_code=200, content=payload)
 
 
 @app.get("/metrics", response_class=PlainTextResponse)

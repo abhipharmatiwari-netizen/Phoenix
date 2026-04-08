@@ -111,6 +111,16 @@ class Hub:
     def runner_count(self) -> int:
         return len(self._account_runners)
 
+    # Return the number of runners that successfully started and are actively running.
+    @property
+    def running_runner_count(self) -> int:
+        return sum(1 for r in self._account_runners.values() if r.is_running)
+
+    # Return the number of runners that failed to start (registered but not running).
+    @property
+    def failed_runner_count(self) -> int:
+        return sum(1 for r in self._account_runners.values() if not r.is_running)
+
     # List broker account ids that have runners.
     def list_runner_ids(self) -> list[BrokerAccountId]:
         return list(self._account_runners.keys())

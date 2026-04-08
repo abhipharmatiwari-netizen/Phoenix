@@ -43,9 +43,11 @@ RUN mkdir -p /app/logs && chown -R appuser:appuser /app/logs \
 
 RUN chown -R appuser:appuser /app/app/config
 
-# Healthcheck for container orchestrators
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
+# Readiness probe: uses /readyz which returns HTTP 503 until the runtime is fully
+# initialized (recovery + reconciliation + hub runners up). start-period covers
+# the full startup sequence including broker login and outbox recovery.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8080}/readyz || exit 1
 
 # Run as non-root
 USER appuser
