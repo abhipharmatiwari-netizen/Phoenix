@@ -588,6 +588,11 @@ def validate_runtime_startup_settings(
             errors.append(
                 "TRADE_MODE=LIVE requires POSITION_OWNERSHIP_UNKNOWN_MODE=block_entries"
             )
+        if not bool(getattr(settings, "ownership_persist_pending_locks", False)):
+            errors.append(
+                "TRADE_MODE=LIVE requires OWNERSHIP_PERSIST_PENDING_LOCKS=true "
+                "so in-flight PENDING_LOCK entries survive restarts and prevent duplicate-entry windows"
+            )
         if not _positive_float(getattr(settings, "risk_max_daily_loss", None), minimum=0.0):
             errors.append("TRADE_MODE=LIVE requires RISK_MAX_DAILY_LOSS > 0")
         if not _positive_float(getattr(settings, "profit_daily_target", None), minimum=0.0):
@@ -610,6 +615,18 @@ def validate_runtime_startup_settings(
             errors.append(
                 "TRADE_MODE=LIVE requires CIRCUIT_BREAKER_PERSIST_STATE=true "
                 "so kill-switch state survives restarts (postgres-backed)"
+            )
+
+        # Gate 8: Circuit-breaker scope isolation — HUB_INSTANCE_NAME must be
+        # non-empty so each deployment gets its own circuit-breaker partition key.
+        # Without it scope_id falls through to "default", which is shared across
+        # all stacks on the same Postgres instance.
+        hub_instance_name = str(getattr(settings, "hub_instance_name", "") or "").strip()
+        if not hub_instance_name:
+            errors.append(
+                "TRADE_MODE=LIVE requires HUB_INSTANCE_NAME to be set to a non-empty string "
+                "so the circuit-breaker state is scoped to this deployment instance "
+                "(prevents state bleed across stacks sharing the same Postgres)"
             )
 
         # Gate: DASHBOARD_AUTH_DISABLED must be false in LIVE

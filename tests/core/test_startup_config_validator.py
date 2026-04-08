@@ -51,6 +51,8 @@ def _valid_runtime_settings(**overrides):
         "dashboard_hmac_secret": None,
         "circuit_breaker_persist_state": True,
         "eod_cancel_open_orders_enabled": True,
+        "ownership_persist_pending_locks": True,
+        "hub_instance_name": "phoenix-live-1",
     }
     values.update(overrides)
     return type("Cfg", (), values)()
@@ -868,3 +870,41 @@ def test_runtime_settings_validator_rejects_live_dashboard_auth_disabled():
                 "DASHBOARD_AUTH_DISABLED": "true",
             },
         )
+
+
+def test_runtime_settings_validator_rejects_live_without_ownership_persist_pending_locks():
+    """OWNERSHIP_PERSIST_PENDING_LOCKS must be true in LIVE to prevent duplicate-entry windows."""
+    with pytest.raises(
+        ValueError,
+        match="OWNERSHIP_PERSIST_PENDING_LOCKS=true",
+    ):
+        validate_runtime_startup_settings(
+            settings=_valid_runtime_settings(ownership_persist_pending_locks=False),
+            runtime_cfg=_valid_runtime_cfg(app_env="production"),
+            env=_valid_live_env(),
+        )
+
+
+def test_runtime_settings_validator_rejects_live_without_hub_instance_name():
+    """HUB_INSTANCE_NAME must be non-empty in LIVE to scope circuit-breaker state per deployment."""
+    with pytest.raises(
+        ValueError,
+        match="HUB_INSTANCE_NAME",
+    ):
+        validate_runtime_startup_settings(
+            settings=_valid_runtime_settings(hub_instance_name=""),
+            runtime_cfg=_valid_runtime_cfg(app_env="production"),
+            env=_valid_live_env(),
+        )
+
+
+def test_runtime_settings_validator_accepts_live_with_ownership_persist_and_instance_name():
+    """Both new LIVE gates pass when the required fields are configured."""
+    validate_runtime_startup_settings(
+        settings=_valid_runtime_settings(
+            ownership_persist_pending_locks=True,
+            hub_instance_name="phoenix-live-1",
+        ),
+        runtime_cfg=_valid_runtime_cfg(app_env="production"),
+        env=_valid_live_env(),
+    )

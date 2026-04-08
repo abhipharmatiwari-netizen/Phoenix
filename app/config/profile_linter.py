@@ -135,6 +135,11 @@ def _build_lint_settings(env: dict[str, str]) -> SimpleNamespace:
             env.get("CIRCUIT_BREAKER_PERSIST_STATE"),
             default=False,
         ),
+        ownership_persist_pending_locks=_parse_bool(
+            env.get("OWNERSHIP_PERSIST_PENDING_LOCKS"),
+            default=False,
+        ),
+        hub_instance_name=str(env.get("HUB_INSTANCE_NAME", "") or ""),
         dashboard_auth_disabled=_parse_bool(
             env.get("DASHBOARD_AUTH_DISABLED"),
             default=False,

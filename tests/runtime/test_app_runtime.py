@@ -124,6 +124,8 @@ def _live_safe_settings(**overrides):
         "schema_check_mode": "warn",
         "circuit_breaker_persist_state": True,
         "eod_cancel_open_orders_enabled": True,
+        "ownership_persist_pending_locks": True,
+        "hub_instance_name": "phoenix-live-1",
     }
     values.update(overrides)
     return SimpleNamespace(**values)
