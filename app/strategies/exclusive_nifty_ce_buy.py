@@ -263,6 +263,7 @@ class ExclusiveNiftyCeBuyStrategy(BaseStrategy):
         self.preseed_history = bool(cfg.get("preseed_history", True))
         self.preseed_history_path = cfg.get("preseed_history_path")
         self.preseed_history_rows = int(cfg.get("preseed_history_rows", 400))
+        self._debug_gate_listener = None
         self._restore_position_from_risk_manager()
 
         logger.info(
@@ -568,6 +569,7 @@ class ExclusiveNiftyCeBuyStrategy(BaseStrategy):
         self.state.pending_entry_atr = None
         self.state.pending_entry_underlying = None
         self._reset_exit_retry_state()
+        self._sync_position_state_to_risk_manager()
 
     # Reset retry/circuit-breaker state after a successful transition.
     def _reset_exit_retry_state(self) -> None:
@@ -575,6 +577,14 @@ class ExclusiveNiftyCeBuyStrategy(BaseStrategy):
         self._exit_failure_count = 0
         self._exit_circuit_open_until_mono = 0.0
         self._exit_last_alert_mono = 0.0
+
+    # Register a debug gate listener for testing signal readiness breakdowns.
+    def set_debug_gate_listener(self, callback: Any) -> None:
+        self._debug_gate_listener = callback
+
+    def _emit_gate_decision(self, decision: dict) -> None:
+        if self._debug_gate_listener is not None:
+            self._debug_gate_listener(decision)
 
     # Register a failed exit attempt and schedule either retry or circuit open.
     def _register_exit_failure(self, *, now_mono: float) -> tuple[int, float, bool]:
@@ -1085,7 +1095,16 @@ class ExclusiveNiftyCeBuyStrategy(BaseStrategy):
             for val in (atr, rsi, macd, macd_signal, macd_hist, ema20, ema50, ret_1, ret_5, vol_20, vol_thr)
         )
         if not ready:
-            return False, {"ready": False}
+            _breakdown: list[dict] = []
+            if rsi is None:
+                _breakdown.append({"gate": "indicator", "reason": "missing_rsi"})
+            if macd is None or macd_signal is None or macd_hist is None:
+                _breakdown.append({"gate": "indicator", "reason": "missing_macd"})
+            if ret_5 is None:
+                _breakdown.append({"gate": "indicator", "reason": "missing_ret_5_history"})
+            if vol_thr is None:
+                _breakdown.append({"gate": "indicator", "reason": "missing_vol_threshold"})
+            return False, {"ready": False, "gate_breakdown": _breakdown}
         if live_strict_trend and ema200 is None:
             return False, {"ready": False}
 
@@ -1299,6 +1318,8 @@ class ExclusiveNiftyCeBuyStrategy(BaseStrategy):
         except Exception:
             atr_now = None
         if atr_now is None or atr_now < live_min_atr:
+            if atr_now is None:
+                self._emit_gate_decision({"gate": "indicator", "reason": "missing_indicator"})
             self._log_entry_skip(
                 reason="min_atr_not_met",
                 candle=candle,
@@ -1318,6 +1339,8 @@ class ExclusiveNiftyCeBuyStrategy(BaseStrategy):
             min_di_spread=live_min_di_spread,
         )
         if not buy_signal:
+            for _dec in details.get("gate_breakdown", []):
+                self._emit_gate_decision(_dec)
             self._log_entry_skip(
                 reason="no_buy_signal",
                 candle=candle,

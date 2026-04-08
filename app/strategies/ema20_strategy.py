@@ -289,6 +289,7 @@ class Ema20Strategy(BaseStrategy):
             max(5.0, float(sync_grace_cfg)) if sync_grace_cfg is not None else 30.0
         )
 
+        self._lots_cache: Optional[tuple] = None
         lots, keys, values, selected_key = self._resolve_lots()
         self._warn_if_qty_looks_like_lot_size(lots=lots, key=selected_key, values=values)
         logger.info(
@@ -1431,8 +1432,10 @@ class Ema20Strategy(BaseStrategy):
             )
             return 0
 
-    # Resolve EMA20 lots with explicit env precedence.
+    # Resolve EMA20 lots with explicit env precedence (cached after first call).
     def _resolve_lots(self) -> tuple[int, list[str], list[str], Optional[str]]:
+        if self._lots_cache is not None:
+            return self._lots_cache
         underlying_key = self._underlying_key or (
             self.env_prefix.rstrip("_") or self.underlying_label.split("_")[0]
         )
@@ -1493,7 +1496,9 @@ class Ema20Strategy(BaseStrategy):
                 selected_val,
             )
 
-        return selected_val, keys, values, selected_key
+        result = (selected_val, keys, values, selected_key)
+        self._lots_cache = result
+        return result
 
     # Emit a warning when configured lots exactly match a known lot size.
     def _warn_if_qty_looks_like_lot_size(
@@ -2066,4 +2071,57 @@ class Ema20Position:
     strategy_context: Dict[str, Any] = field(default_factory=dict)
 
 
-__all__ = ["Ema20Strategy"]
+@dataclass
+class Ema20LotsResolution:
+    """Result of resolving EMA20 lot/quantity configuration."""
+
+    lots: int
+    selected_key: Optional[str]
+    defaulted: bool
+
+
+def resolve_ema20_lots_config(
+    *,
+    underlying_key: str,
+    env: Optional[Dict[str, Any]] = None,
+    params: Optional[Dict[str, Any]] = None,
+) -> Ema20LotsResolution:
+    """Resolve EMA20 lots from env/params without constructing a full strategy."""
+
+    _env = dict(env or {})
+    _params = dict(params or {})
+    keys = [
+        f"{underlying_key}_EMA20_LOTS",
+        "EMA20_LOTS",
+        f"{underlying_key}_EMA20_QTY",
+        "EMA20_QTY",
+    ]
+    selected_key: Optional[str] = None
+    selected_val: Optional[int] = None
+
+    for key in keys:
+        raw = _env.get(key) or _params.get(key) or _params.get(key.lower())
+        raw_str = str(raw or "").strip()
+        if not raw_str:
+            continue
+        try:
+            parsed = int(raw_str)
+            if parsed > 0:
+                selected_val = parsed
+                selected_key = key
+                break
+        except (TypeError, ValueError):
+            pass
+
+    defaulted = selected_val is None
+    if defaulted:
+        selected_val = 1
+
+    return Ema20LotsResolution(
+        lots=selected_val,
+        selected_key=selected_key,
+        defaulted=defaulted,
+    )
+
+
+__all__ = ["Ema20Strategy", "Ema20LotsResolution", "resolve_ema20_lots_config"]

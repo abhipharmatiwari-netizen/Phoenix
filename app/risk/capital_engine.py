@@ -38,7 +38,7 @@ class CapitalConfig:
     Values are in absolute currency units (e.g., INR) for now.
     """
 
-    max_notional_per_order: Optional[float] = 2_00_000.0  # 5L per order
+    max_notional_per_order: Optional[float] = 5_00_000.0  # 5L per order
     max_gross_exposure: Optional[float] = 10_00_000.0  # 10L per account
 
 

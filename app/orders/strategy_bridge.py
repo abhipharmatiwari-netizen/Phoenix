@@ -19,6 +19,7 @@ from app.orders.bridge_loop import (
     StrategyBridgeTimeoutError,
     get_shared_bridge_loop,
 )
+from app.orders.replay_context import get_replay_flag, get_replay_sink
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,22 @@ def place_order_via_bridge(
     """
     signal_metrics = get_signal_summary_metrics()
     signal_metrics.mark_signal_fired()
+
+    # Replay isolation: short-circuit before any hub/broker infrastructure
+    if get_replay_flag():
+        sink = get_replay_sink()
+        if sink is None:
+            raise RuntimeError(
+                "place_order_via_bridge: no replay-local order sink is active "
+                "(isolated replay flag is set but no sink is registered)"
+            )
+        response = sink.place_order(strategy_id=strategy_id, order_req=order_req)
+        if is_submitted_order_response(
+            status=getattr(response, "status", None),
+            broker_order_id=getattr(response, "broker_order_id", None),
+        ):
+            signal_metrics.mark_order_submitted()
+        return response
 
     # Multi-tenant hub path: run async OrderRouter.submit_order in a fresh loop
     runtime = get_hub_runtime()
