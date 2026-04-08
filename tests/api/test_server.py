@@ -1,0 +1,917 @@
+from datetime import datetime, timezone
+import json
+from types import SimpleNamespace
+
+import importlib
+import pytest
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
+import app.server as server
+from app.data.state_store import StateStore
+from app.core.dashboard_bus import DashboardBus
+from app.core.instrument_control import InstrumentController
+from app.core.strategy_switch import StrategySwitchboard
+from app.brokers.base import Position, ProductType
+from app.dashboard import auth as dashboard_auth
+
+
+class DummyAppRuntime:
+    def __init__(self) -> None:
+        self.started = 0
+        self.stopped = 0
+        self.worker_running_state = False
+        self.watchdog_running_state = False
+        self.schema_state = {
+            "status": "ok",
+            "checked_at": "2026-03-05T00:00:00Z",
+            "missing_tables": [],
+            "missing_indexes": [],
+        }
+        self.watchdog_state = {
+            "restart_attempts": 0,
+            "current_backoff_seconds": 0.0,
+            "next_restart_in_seconds": 0.0,
+        }
+        self.leader_lease_state = {
+            "enabled": False,
+            "owned": True,
+            "task_running": False,
+        }
+
+    async def start(self) -> None:
+        self.started += 1
+
+    async def stop(self) -> None:
+        self.stopped += 1
+
+    def stream_worker_running(self) -> bool:
+        return self.worker_running_state
+
+    def watchdog_running(self) -> bool:
+        return self.watchdog_running_state
+
+    def schema_status(self) -> dict:
+        return dict(self.schema_state)
+
+    def watchdog_status(self) -> dict:
+        return dict(self.watchdog_state)
+
+    def leader_lease_status(self) -> dict:
+        return dict(self.leader_lease_state)
+
+
+def test_import_module_succeeds():
+    mod = importlib.import_module("app.server")
+    assert hasattr(mod, "app")
+
+
+def test_dashboard_ws_prefers_delta_by_default_in_production(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(runtime=SimpleNamespace(app_env="production")),
+    )
+
+    assert server._dashboard_ws_prefers_delta(None) is True
+    assert server._dashboard_ws_prefers_delta("full") is False
+    assert server._dashboard_ws_prefers_delta("delta") is True
+
+
+def test_dashboard_ws_uses_full_by_default_in_local(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(runtime=SimpleNamespace(app_env="local")),
+    )
+
+    assert server._dashboard_ws_prefers_delta(None) is False
+
+
+def test_dashboard_auth_required_in_production_even_when_flag_disabled():
+    assert server._dashboard_auth_required(
+        SimpleNamespace(app_env="production", dashboard_auth_disabled=True)
+    ) is True
+
+
+def test_dashboard_auth_optional_only_in_local_when_disabled():
+    assert server._dashboard_auth_required(
+        SimpleNamespace(app_env="local", dashboard_auth_disabled=True)
+    ) is False
+
+
+@pytest.fixture
+def api_client(monkeypatch):
+    """Yield TestClient with worker/watchdog/switchboard patched to in-memory stubs."""
+    runtime = DummyAppRuntime()
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard({"s1": False}))
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController({"ABC": {"enabled": True}}))
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=False,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+
+    with TestClient(server.app) as client:
+        yield client, runtime
+
+
+def _fetch_dashboard_ws_ticket(client: TestClient, mode: str = "delta") -> str:
+    response = client.post(
+        f"/admin/dashboard/ws-ticket?mode={mode}",
+        headers={"X-Admin-Key": "test-admin"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mode"] == mode
+    return str(payload["ticket"])
+
+
+def test_health_reports_worker_status(api_client):
+    client, runtime = api_client
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = False
+
+    resp = client.get("/health")
+    payload = resp.json()
+
+    assert resp.status_code == 200
+    assert payload["status"] == "ok"
+    assert payload["runtime_path"] == "app_runtime_lifespan"
+    assert payload["order_path"] == "strategy_bridge_order_router"
+    assert "boot_config_created_at" in payload
+    assert payload["stream_worker_running"] is True
+    assert payload["watchdog_running"] is False
+    assert payload["leader_lease_status"]["owned"] is True
+
+
+def test_health_response_sets_correlation_headers(api_client):
+    client, _ = api_client
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.headers.get("X-Correlation-Id")
+    assert resp.headers.get("X-Request-Id")
+
+
+def test_health_summary_reports_required_fields(api_client, monkeypatch):
+    client, runtime = api_client
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = True
+
+    state_store = StateStore()
+    state_store.update_positions_status(
+        "acc-1",
+        status="OK",
+        last_ok_ts="2026-03-05T10:00:00+00:00",
+        last_count=1,
+        error_reason=None,
+        blocked_ts=None,
+        retry_after_seconds=None,
+    )
+    state_store.update_positions_status(
+        "acc-2",
+        status="BLOCKED",
+        last_ok_ts=None,
+        last_count=None,
+        error_reason="rate_limited",
+        blocked_ts="2026-03-05T11:00:00+00:00",
+        retry_after_seconds=30.0,
+    )
+    monkeypatch.setattr(
+        server,
+        "get_hub_runtime",
+        lambda: SimpleNamespace(
+            hub=SimpleNamespace(list_runner_ids=lambda: ["acc-1", "acc-2"]),
+            state_store=state_store,
+        ),
+    )
+
+    resp = client.get("/health/summary")
+    payload = resp.json()
+
+    assert resp.status_code == 200
+    assert payload["status"] == "ok"
+    assert payload["schema_status"] == "ok"
+    assert payload["stream_worker_running"] is True
+    assert payload["watchdog_running"] is True
+    assert payload["last_position_sync_ok_ts"] == "2026-03-05T10:00:00Z"
+    assert payload["last_broker_blocked_or_rate_limited_ts"] == "2026-03-05T11:00:00Z"
+
+
+def test_health_summary_does_not_expect_stream_worker_when_disabled(api_client, monkeypatch):
+    client, runtime = api_client
+    runtime.worker_running_state = False
+    runtime.watchdog_running_state = False
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            runtime=SimpleNamespace(
+                disable_stream_worker=True,
+                app_env="production",
+                dashboard_auth_disabled=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "get_hub_runtime",
+        lambda: SimpleNamespace(
+            hub=SimpleNamespace(list_runner_ids=lambda: []),
+            state_store=StateStore(),
+        ),
+    )
+
+    resp = client.get("/health/summary")
+    payload = resp.json()
+
+    assert resp.status_code == 200
+    assert payload["stream_worker_expected"] is False
+    assert "stream_worker_stopped" not in payload["degraded_reasons"]
+
+
+def test_strategy_selection_endpoint(api_client, monkeypatch):
+    client, _ = api_client
+    monkeypatch.setattr(
+        server.dashboard_bus,
+        "strategy_selection_snapshot",
+        lambda: {
+            "NIFTY_IDX": {
+                "underlying": "NIFTY_IDX",
+                "regime": "TRENDING",
+                "selected_strategies": ["ema20_strategy"],
+                "reason": "mapping",
+            }
+        },
+    )
+
+    resp = client.get(
+        "/admin/strategy-selection",
+        headers={"X-Admin-Key": "test-admin"},
+    )
+    payload = resp.json()
+    assert resp.status_code == 200
+    assert "NIFTY_IDX" in payload["strategy_selection"]
+    assert payload["strategy_selection"]["NIFTY_IDX"]["regime"] == "TRENDING"
+
+
+def test_dashboard_ws_delta_mode_emits_delta_then_compaction(api_client, monkeypatch):
+    client, _ = api_client
+    bus = DashboardBus()
+    bus._delta_full_interval = 3
+    ts_open = datetime(2024, 1, 1, 4, 0, tzinfo=timezone.utc)
+    bus.set_instrument_meta({"ABC": {"symbol": "ABC", "token": "101", "lot_size": 1}})
+    bus.record_tick("ABC", 100.0, ts_open)
+
+    sleep_calls = {"count": 0}
+
+    async def _fast_sleep(_: float) -> None:
+        sleep_calls["count"] += 1
+        if sleep_calls["count"] == 1:
+            bus.record_tick("ABC", 101.0, ts_open.replace(minute=1))
+        return None
+
+    monkeypatch.setattr(server, "dashboard_bus", bus)
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            runtime=SimpleNamespace(app_env="production", dashboard_auth_disabled=False)
+        ),
+    )
+    monkeypatch.setattr(server.asyncio, "sleep", _fast_sleep)
+    ticket = _fetch_dashboard_ws_ticket(client, mode="delta")
+
+    with client.websocket_connect(
+        f"/ws/dashboard?ticket={ticket}&mode=delta",
+    ) as websocket:
+        first_text = websocket.receive_text()
+        second_text = websocket.receive_text()
+        third_text = websocket.receive_text()
+
+    first_payload = json.loads(first_text)
+    second_payload = json.loads(second_text)
+    third_payload = json.loads(third_text)
+
+    assert first_payload["_mode"] == "full_snapshot"
+    assert second_payload["_mode"] == "delta"
+    assert "instruments" in second_payload
+    assert len(second_text) < len(first_text)
+    assert third_payload["_mode"] == "full_snapshot"
+
+
+def test_dashboard_ws_rejects_invalid_or_expired_ticket(api_client, monkeypatch):
+    client, _ = api_client
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            runtime=SimpleNamespace(app_env="production", dashboard_auth_disabled=False)
+        ),
+    )
+
+    with pytest.raises(WebSocketDisconnect) as invalid_exc:
+        with client.websocket_connect("/ws/dashboard?ticket=invalid-ticket&mode=delta"):
+            pass
+    assert invalid_exc.value.code == 1008
+
+    expired_ticket = dashboard_auth.issue_dashboard_ws_ticket(
+        admin_ctx=dashboard_auth.AdminContext(caller="admin"),
+        path="/ws/dashboard",
+        mode="delta",
+        settings=SimpleNamespace(
+            admin_api_key="test-admin",
+            dashboard_hmac_secret=None,
+        ),
+        now_ts=int(datetime.now(timezone.utc).timestamp()) - 120,
+        ttl_seconds=1,
+    ).token
+
+    with pytest.raises(WebSocketDisconnect) as expired_exc:
+        with client.websocket_connect(
+            f"/ws/dashboard?ticket={expired_ticket}&mode=delta"
+        ):
+            pass
+    assert expired_exc.value.code == 1008
+
+
+def test_lifespan_uses_app_runtime_start_stop(monkeypatch):
+    runtime = DummyAppRuntime()
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=False,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+    with TestClient(server.app):
+        pass
+
+    assert runtime.started == 1
+    assert runtime.stopped == 1
+
+
+def test_ready_when_multi_hub_disabled(api_client):
+    client, _ = api_client
+
+    resp = client.get("/ready")
+    payload = resp.json()
+
+    assert payload == {"status": "ready", "multi_hub_enabled": False}
+
+
+def test_ready_when_multi_hub_enabled(monkeypatch):
+    # Prepare stub runtime + hub before creating TestClient so startup hooks use it.
+    last_refresh = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    class DummyHub:
+        def __init__(self):
+            self.initialized = 0
+            self.started = 0
+            self.stopped = 0
+            self.runner_count = 2
+            self.last_subscription_refresh = last_refresh
+
+        async def initialize(self):
+            self.initialized += 1
+
+        async def start_all(self):
+            self.started += 1
+
+        async def stop_all(self):
+            self.stopped += 1
+
+    runtime = SimpleNamespace(hub=DummyHub())
+
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=True,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: runtime)
+    monkeypatch.setattr(server, "get_app_runtime", lambda: DummyAppRuntime())
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        server.dashboard_bus, "set_mode", lambda mode: None
+    )  # avoid thread mode mutation side effects
+    monkeypatch.setattr(
+        server, "refresh_daily_levels_cache", lambda: True
+    )
+    monkeypatch.setattr(
+        importlib.import_module("app.tenants.firestore_client"),
+        "get_all_tenants",
+        lambda: [SimpleNamespace(tenant_id="t1")],
+    )
+
+    with TestClient(server.app) as client:
+        resp = client.get("/ready?deep=true")
+        payload = resp.json()
+
+    assert payload["multi_hub_enabled"] is True
+    assert payload["runner_count"] == 2
+    assert payload["tenant_count"] == 1
+    assert payload["last_subscription_refresh"] == last_refresh.isoformat()
+
+
+def test_build_hub_positions_snapshot_resolves_ltp_from_dashboard_label(monkeypatch):
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [
+            Position(
+                symbol="NATURALGAS24MAR26310CE",
+                quantity=-1250,
+                avg_price=26.6,
+                product_type=ProductType.INTRADAY,
+            )
+        ],
+    )
+
+    runtime = SimpleNamespace(
+        hub=SimpleNamespace(
+            list_runner_ids=lambda: ["A1"],
+            get_runner=lambda broker_account_id: SimpleNamespace(tenant_id="tenant-1"),
+        ),
+        state_store=state_store,
+    )
+
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        server.dashboard_bus,
+        "get_last_price_for_instrument",
+        lambda **kwargs: 27.75 if kwargs.get("symbol") == "NATURALGAS24MAR26310CE" else None,
+    )
+
+    rows = server._build_hub_positions_snapshot()
+
+    assert len(rows) == 1
+    assert rows[0]["side"] == "SELL"
+    assert rows[0]["ltp"] == 27.75
+
+
+def test_build_hub_pnl_snapshot_aggregates_open_and_realized_pnl(monkeypatch):
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [
+            Position(
+                symbol="NATURALGAS24MAR26310CE",
+                quantity=-1250,
+                avg_price=26.6,
+                product_type=ProductType.INTRADAY,
+            )
+        ],
+    )
+
+    runtime = SimpleNamespace(
+        hub=SimpleNamespace(
+            list_runner_ids=lambda: ["A1"],
+            get_runner=lambda broker_account_id: SimpleNamespace(tenant_id="tenant-1"),
+        ),
+        state_store=state_store,
+        pnl_engine=SimpleNamespace(
+            get_current_realized_pnl=lambda tenant_id, broker_account_id: 150.0
+        ),
+    )
+
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        server.dashboard_bus,
+        "get_last_price_for_instrument",
+        lambda **kwargs: 27.75 if kwargs.get("symbol") == "NATURALGAS24MAR26310CE" else None,
+    )
+
+    rows = server._build_hub_positions_snapshot()
+    pnl = server._build_hub_pnl_snapshot(rows)
+
+    assert pnl["realized"] == 150.0
+    assert pnl["open"] == pytest.approx(-1437.5)
+    assert pnl["total"] == pytest.approx(-1287.5)
+    assert pnl["by_instrument"] == {"NATURALGAS24MAR26310CE": pytest.approx(-1437.5)}
+
+
+def test_build_hub_pnl_snapshot_keeps_realized_when_positions_are_flat(monkeypatch):
+    runtime = SimpleNamespace(
+        hub=SimpleNamespace(
+            list_runner_ids=lambda: ["A1"],
+            get_runner=lambda broker_account_id: SimpleNamespace(tenant_id="tenant-1"),
+        ),
+        state_store=StateStore(),
+        pnl_engine=SimpleNamespace(
+            get_current_realized_pnl=lambda tenant_id, broker_account_id: 99.25
+        ),
+    )
+
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: runtime)
+
+    pnl = server._build_hub_pnl_snapshot([])
+
+    assert pnl == {
+        "by_instrument": {},
+        "total": 99.25,
+        "realized": 99.25,
+        "open": 0.0,
+    }
+
+
+def test_toggle_strategy_endpoint_updates_switchboard(api_client):
+    client, _ = api_client
+
+    resp = client.post(
+        "/admin/strategies/toggle",
+        json={"name": "s1", "enabled": True},
+        headers={"X-Admin-Key": "test-admin"},
+    )
+    payload = resp.json()
+
+    assert resp.status_code == 200
+    assert payload == {"name": "s1", "enabled": True}
+
+    resp_missing = client.post(
+        "/admin/strategies/toggle",
+        json={"name": "", "enabled": True},
+        headers={"X-Admin-Key": "test-admin"},
+    )
+    assert resp_missing.status_code == 400
+
+
+def test_toggle_strategy_endpoint_emits_app_log(api_client, caplog):
+    client, _ = api_client
+    caplog.set_level("INFO", logger="app.server")
+
+    resp = client.post(
+        "/admin/strategies/toggle",
+        json={"name": "s1", "enabled": True},
+        headers={"X-Admin-Key": "test-admin", "X-Request-Id": "req-123"},
+    )
+
+    assert resp.status_code == 200
+    assert "event_type=ADMIN_STRATEGY_TOGGLE" in caplog.text
+    assert "request_id=req-123" in caplog.text
+
+
+def test_strategy_alias_usage_endpoint(api_client):
+    client, _ = api_client
+
+    client.post(
+        "/admin/strategies/toggle",
+        json={"name": "options_generic", "enabled": True},
+        headers={"X-Admin-Key": "test-admin"},
+    )
+    resp = client.get(
+        "/admin/strategies/aliases",
+        headers={"X-Admin-Key": "test-admin"},
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert "strategy_alias_usage" in payload
+    assert any("options_generic->option_strategy" in k for k in payload["strategy_alias_usage"].keys())
+
+
+def test_toggle_strategy_endpoint_canonicalizes_aliases(api_client):
+    client, _ = api_client
+
+    resp = client.post(
+        "/admin/strategies/toggle",
+        json={"name": "options_generic", "enabled": True},
+        headers={"X-Admin-Key": "test-admin"},
+    )
+    payload = resp.json()
+
+    assert resp.status_code == 200
+    assert payload == {"name": "option_strategy", "enabled": True}
+
+
+def test_instrument_update_endpoint(api_client):
+    client, _ = api_client
+
+    resp = client.post(
+        "/admin/instruments/update",
+        json={"underlying": "abc", "enabled": False, "allowed_strategies": ["one", "two"]},
+        headers={"X-Admin-Key": "test-admin"},
+    )
+    payload = resp.json()
+
+    assert resp.status_code == 200
+    assert payload["underlying"] == "abc"
+    assert payload["state"]["enabled"] is False
+    assert set(payload["state"]["allowed_strategies"]) == {"one", "two"}
+
+    resp_missing = client.post(
+        "/admin/instruments/update",
+        json={"underlying": ""},
+        headers={"X-Admin-Key": "test-admin"},
+    )
+    assert resp_missing.status_code == 400
+
+
+def test_instrument_update_endpoint_emits_app_log(api_client, caplog):
+    client, _ = api_client
+    caplog.set_level("INFO", logger="app.server")
+
+    resp = client.post(
+        "/admin/instruments/update",
+        json={"underlying": "abc", "enabled": False, "allowed_strategies": ["one"]},
+        headers={"X-Admin-Key": "test-admin", "X-Request-Id": "req-456"},
+    )
+
+    assert resp.status_code == 200
+    assert "event_type=ADMIN_INSTRUMENT_UPDATE" in caplog.text
+    assert "instrument=ABC" in caplog.text
+
+
+def test_instrument_update_endpoint_canonicalizes_allowed_strategies(api_client):
+    client, _ = api_client
+
+    resp = client.post(
+        "/admin/instruments/update",
+        json={
+            "underlying": "abc",
+            "allowed_strategies": ["options_generic", "ema20", "put-buy"],
+        },
+        headers={"X-Admin-Key": "test-admin"},
+    )
+    payload = resp.json()
+
+    assert resp.status_code == 200
+    assert set(payload["state"]["allowed_strategies"]) == {
+        "option_strategy",
+        "ema20_strategy",
+        "put_buy",
+    }
+
+
+def test_ml_health_reports_disabled_without_model_loading(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            ml_config=SimpleNamespace(enabled=False, mode="OFF", models_dir=""),
+            runtime=SimpleNamespace(dashboard_auth_disabled=False),
+        ),
+    )
+    monkeypatch.setattr(server, "get_app_runtime", lambda: DummyAppRuntime())
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=False,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+
+    with TestClient(server.app) as client:
+        resp = client.get("/ml/health")
+        payload = resp.json()
+
+    assert payload["ml_enabled"] is False
+    assert payload["global_mode"] == "OFF"
+    assert payload["models_dir"] == ""
+    assert payload["underlyings"] == []
+
+
+def test_angel_postback_updates_state_store(api_client, monkeypatch):
+    client, _ = api_client
+    runtime = SimpleNamespace(state_store=StateStore())
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        server,
+        "get_broker_account_by_client_code",
+        lambda client_code: SimpleNamespace(
+            broker_account_id="acc-1", tenant_id="tenant-1"
+        ),
+    )
+
+    payload = {
+        "clientcode": "DUMMY123",
+        "orderid": "111111111111111",
+        "tradingsymbol": "SBIN-EQ",
+        "transactiontype": "BUY",
+        "orderstatus": "open",
+        "ordertype": "MARKET",
+        "producttype": "DELIVERY",
+        "duration": "DAY",
+        "price": 0.0,
+        "quantity": "1000",
+        "averageprice": 584.7,
+        "filledshares": "74",
+        "exchange": "NSE",
+        "updatetime": "09-Oct-2023 18:22:02",
+    }
+
+    resp = client.post(
+        "/webhook/angel/postback",
+        json=payload,
+        headers={"X-Admin-Key": "test-admin"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert data["broker_account_id"] == "acc-1"
+
+    orders = runtime.state_store.get_orders("acc-1")
+    assert len(orders) == 1
+    order = orders[0]
+    assert order.order_id == "111111111111111"
+    assert order.symbol == "SBIN-EQ"
+    assert order.side == "BUY"
+    assert order.status == "open"
+    assert order.quantity == 1000
+    assert order.filled_quantity == 74
+    assert order.average_price == 584.7
+    assert order.order_type == "MARKET"
+    assert order.product_type == "DELIVERY"
+
+
+def _postback_payload() -> dict[str, object]:
+    return {
+        "clientcode": "DUMMY123",
+        "orderid": "111111111111111",
+        "tradingsymbol": "SBIN-EQ",
+        "transactiontype": "BUY",
+        "orderstatus": "open",
+        "ordertype": "MARKET",
+        "producttype": "DELIVERY",
+        "duration": "DAY",
+        "price": 0.0,
+        "quantity": "1000",
+        "averageprice": 584.7,
+        "filledshares": "74",
+        "exchange": "NSE",
+        "updatetime": "09-Oct-2023 18:22:02",
+    }
+
+
+def _postback_settings(**overrides):
+    base = {
+        "enable_multi_hub": False,
+        "log_level": "INFO",
+        "admin_api_key": "test-admin",
+        "dashboard_hmac_auth_enabled": False,
+        "dashboard_hmac_secret": None,
+        "dashboard_hmac_max_skew_seconds": 300,
+        "angel_postback_token": "broker-secret",
+        "angel_postback_relay_token": "relay-secret",
+        "hub_default_broker_account_id": "",
+        "hub_default_tenant_id": "tenant-1",
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_angel_postback_legacy_mode_keeps_admin_auth(api_client, monkeypatch):
+    client, _ = api_client
+    monkeypatch.setenv("ANGEL_POSTBACK_AUTH_MODE", "LEGACY")
+    monkeypatch.setattr(server, "get_settings", lambda: _postback_settings())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: _postback_settings(),
+    )
+
+    resp = client.post("/webhook/angel/postback", json=_postback_payload())
+
+    assert resp.status_code == 401
+
+
+def test_angel_postback_direct_broker_mode_accepts_broker_token_without_admin(
+    api_client,
+    monkeypatch,
+):
+    client, _ = api_client
+    runtime = SimpleNamespace(state_store=StateStore())
+    monkeypatch.setenv("ANGEL_POSTBACK_AUTH_MODE", "DIRECT_BROKER")
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: runtime)
+    monkeypatch.setattr(server, "get_settings", lambda: _postback_settings())
+    monkeypatch.setattr(
+        server,
+        "get_broker_account_by_client_code",
+        lambda client_code: SimpleNamespace(
+            broker_account_id="acc-1", tenant_id="tenant-1"
+        ),
+    )
+
+    resp = client.post(
+        "/webhook/angel/postback",
+        json=_postback_payload(),
+        headers={"X-Angel-Postback-Token": "broker-secret"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+
+
+def test_angel_postback_direct_broker_mode_rejects_invalid_request(
+    api_client,
+    monkeypatch,
+):
+    client, _ = api_client
+    monkeypatch.setenv("ANGEL_POSTBACK_AUTH_MODE", "DIRECT_BROKER")
+    monkeypatch.setattr(server, "get_settings", lambda: _postback_settings())
+
+    unauthorized = client.post(
+        "/webhook/angel/postback",
+        json=_postback_payload(),
+        headers={"X-Angel-Postback-Token": "wrong-token"},
+    )
+    malformed = client.post(
+        "/webhook/angel/postback",
+        json={"clientcode": "DUMMY123"},
+        headers={"X-Angel-Postback-Token": "broker-secret"},
+    )
+
+    assert unauthorized.status_code == 401
+    assert malformed.status_code == 400
+
+
+def test_angel_postback_relay_mode_accepts_relay_and_rejects_direct(
+    api_client,
+    monkeypatch,
+):
+    client, _ = api_client
+    runtime = SimpleNamespace(state_store=StateStore())
+    monkeypatch.setenv("ANGEL_POSTBACK_AUTH_MODE", "RELAY")
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: runtime)
+    monkeypatch.setattr(server, "get_settings", lambda: _postback_settings())
+    monkeypatch.setattr(
+        server,
+        "get_broker_account_by_client_code",
+        lambda client_code: SimpleNamespace(
+            broker_account_id="acc-1", tenant_id="tenant-1"
+        ),
+    )
+
+    ok = client.post(
+        "/webhook/angel/postback",
+        json=_postback_payload(),
+        headers={"X-Relay-Token": "relay-secret"},
+    )
+    rejected = client.post(
+        "/webhook/angel/postback",
+        json=_postback_payload(),
+        headers={"X-Angel-Postback-Token": "broker-secret"},
+    )
+
+    assert ok.status_code == 200
+    assert rejected.status_code == 401
+
+
+def test_daily_levels_refresh_response(monkeypatch):
+    monkeypatch.setattr(server, "refresh_daily_levels_cache", lambda: False)
+    monkeypatch.setattr(server, "get_app_runtime", lambda: DummyAppRuntime())
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=False,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+    with TestClient(server.app) as client:
+        resp = client.post(
+            "/admin/daily-levels/refresh",
+            headers={"X-Admin-Key": "test-admin"},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "skipped"}
