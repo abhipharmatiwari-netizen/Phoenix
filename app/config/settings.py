@@ -249,7 +249,7 @@ class Settings(BaseSettings):
         validation_alias="RISK_CAPITAL_AUTO_RESIZE_ENABLED",
     )
     capital_margin_short_option_per_lot: float = Field(
-        default=300000.0,
+        default=200000.0,
         validation_alias="CAPITAL_MARGIN_SHORT_OPTION_PER_LOT",
         description="Conservative per-lot margin estimate used for short option sells when margin mode is SHADOW or ENFORCE.",
     )
