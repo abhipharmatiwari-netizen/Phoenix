@@ -96,6 +96,7 @@ For the bundled Docker/Desktop path, nginx is the browser-facing entrypoint. Dir
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Authoritative production contract |
 | [`ABOUTME.md`](ABOUTME.md) | Plain-language operational summary |
 | [Docker Desktop LIVE Deployment](docs/runbooks/docker_desktop_live_deployment.md) | Bundled Docker/Desktop implementation runbook |
+| [Capital limits configuration](docs/runbooks/capital_limits_configuration.md) | Per-account notional/margin limits and `CAPITAL_LIMITS_JSON` format |
 | [Broker credential update runbook](docs/runbooks/update_broker_credentials.md) | How to rotate SmartAPI credentials in Postgres |
 | [Blue/Green cutover](docs/runbooks/blue_green_cutover.md) | Controlled writer handoff |
 | [Restore drill](docs/runbooks/restore_drill.md) | Backup / restore validation |
@@ -113,15 +114,38 @@ app/                              Backend service and trading runtime
 frontend/                         React operations console
 nginx/                            Reverse proxy and frontend image config
 migrations/                       SQL migrations and bootstrap assets
-scripts/                          Operator utility scripts (e.g. generate_sbom.py)
-tests/                            Test suite
+scripts/                          Operator utility scripts (generate_sbom.py, replay engine, etc.)
+scripts/replay/                   Bar-by-bar deterministic replay harness and optimizer
+tests/                            Test suite (1551 tests)
 docs/runbooks/                    Operator procedures
-Dockerfile                        Backend image build
-docker.env                        Local PAPER profile only
+.github/workflows/                CI — security scan (gitleaks, pip-audit, SBOM generation)
+Dockerfile                        Backend image build (multi-stage, non-root, healthcheck built in)
+docker.env                        Local SHADOW/dev profile only — not used by production compose
 docker-compose.live.single.yml    Bundled Docker/Desktop LIVE manifest
-start-docker-secretstore.ps1      PowerShell helper — exports secrets into session before Compose
+start-docker-secretstore.ps1      PowerShell helper — loads SecretStore secrets into session before Compose
 start-docker-secretstore.cmd      Convenience launcher for the PowerShell helper from Windows Explorer
 ```
+
+---
+
+## Capital risk configuration
+
+Production limits are pinned explicitly in [`docker-compose.live.single.yml`](docker-compose.live.single.yml):
+
+| Env var | Production value | What it controls |
+|---|---|---|
+| `CAPITAL_MARGIN_CHECK_MODE` | `enforce` | Blocks orders when estimated margin > available balance |
+| `CAPITAL_MARGIN_SHORT_OPTION_PER_LOT` | 2,00,000 | Per-lot margin floor for short CE/PE SELL orders |
+| `CAPITAL_MARGIN_FUTURES_PER_LOT` | 2,00,000 | Per-lot margin floor for futures orders |
+| `CAPITAL_MARGIN_FUTURES_RATE` | 0.12 | Fraction of futures notional used as margin estimate |
+| `CAPITAL_LIMITS_JSON` | `{}` | Per-account notional/exposure overrides (empty = use defaults) |
+
+`max_notional_per_order` defaults to 5L per order and `max_gross_exposure` to 10L.
+Both can be overridden per-account via `CAPITAL_LIMITS_JSON` without a redeploy.
+See the [capital limits runbook](docs/runbooks/capital_limits_configuration.md) for the full override format.
+
+> `CAPITAL_MARGIN_CHECK_MODE=off` is auto-upgraded to `enforce` whenever `TRADE_MODE=LIVE`
+> even if not explicitly set — but the compose file sets it explicitly for full auditability.
 
 ---
 
