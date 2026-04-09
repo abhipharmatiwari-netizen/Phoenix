@@ -69,10 +69,13 @@ class LoginResponse(BaseModel):
     """Login response."""
 
     token: str
+    refresh_token: Optional[str] = None
+    expires_in: int = _TOKEN_TTL_SECONDS
     user: dict[str, Any]
 
 
-_TOKEN_TTL_SECONDS = 60 * 60
+_TOKEN_TTL_SECONDS = 60 * 60  # 1 hour access token
+_REFRESH_INCLUDE = True  # set False to disable refresh token issuance
 
 
 @contextmanager
@@ -124,13 +127,15 @@ def _normalize_role(value: object) -> Role:
         ) from exc
 
 
-def _make_token(*, user_id: str, email: str, role: Role) -> str:
+def _make_token(*, user_id: str, email: str, role: Role, jti: Optional[str] = None) -> str:
     now = int(time.time())
+    token_jti = jti or secrets.token_hex(16)
     header = {"alg": "HS256", "typ": "JWT"}
     payload = {
         "sub": user_id,
         "email": email,
         "role": role.value,
+        "jti": token_jti,
         "iat": now,
         "exp": now + _TOKEN_TTL_SECONDS,
     }
@@ -167,6 +172,15 @@ def _parse_token(token: str) -> dict | None:
         exp = int(payload_obj.get("exp", 0))
         if exp <= int(time.time()):
             return None
+        # PHX-SEC-005: check revocation list
+        jti = str(payload_obj.get("jti") or "").strip()
+        if jti:
+            try:
+                from app.core.session_store import is_revoked
+                if is_revoked(jti):
+                    return None
+            except Exception:
+                pass
         return payload_obj
     except Exception:
         return None
@@ -397,7 +411,7 @@ async def register(request: SignupRequest) -> SignupResponse:
 
 @router.post("/login", response_model=LoginResponse)
 async def login(request: LoginRequest) -> LoginResponse:
-    """Login user."""
+    """Login user. Returns a short-lived access token and a long-lived refresh token."""
     user = _get_user_by_email(request.email)
     if not user or not _verify_password(request.password, str(user.get("password_hash", ""))):
         raise HTTPException(
@@ -409,8 +423,22 @@ async def login(request: LoginRequest) -> LoginResponse:
     token = _make_token(user_id=str(user["id"]), email=str(user["email"]), role=role)
     logger.info("User logged in: %s", request.email)
 
+    refresh_token: Optional[str] = None
+    if _REFRESH_INCLUDE:
+        try:
+            from app.core.session_store import issue_refresh_token
+            refresh_token, _ = issue_refresh_token(
+                user_id=str(user["id"]),
+                email=str(user["email"]),
+                role=role.value,
+            )
+        except Exception:
+            logger.debug("Refresh token issuance skipped", exc_info=True)
+
     return LoginResponse(
         token=token,
+        refresh_token=refresh_token,
+        expires_in=_TOKEN_TTL_SECONDS,
         user={
             "id": user["id"],
             "email": user["email"],
@@ -418,6 +446,94 @@ async def login(request: LoginRequest) -> LoginResponse:
             "role": role.value,
         },
     )
+
+
+@router.post("/refresh")
+async def refresh_access_token(
+    body: dict,
+) -> dict:
+    """Exchange a refresh token for a new access token (PHX-SEC-005)."""
+    refresh_token = str(body.get("refresh_token") or "").strip()
+    if not refresh_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="refresh_token is required",
+        )
+    try:
+        from app.core.session_store import consume_refresh_token
+        data = consume_refresh_token(refresh_token)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Session store error",
+        ) from exc
+
+    if data is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token",
+        )
+
+    user = _get_user_by_id(str(data["user_id"]))
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+
+    role = _normalize_role(user["role"])
+    new_token = _make_token(user_id=str(user["id"]), email=str(user["email"]), role=role)
+
+    from app.core.session_store import issue_refresh_token
+    new_refresh, _ = issue_refresh_token(
+        user_id=str(user["id"]),
+        email=str(user["email"]),
+        role=role.value,
+    )
+    logger.info("Token refreshed for user: %s", user["email"])
+    return {
+        "token": new_token,
+        "refresh_token": new_refresh,
+        "expires_in": _TOKEN_TTL_SECONDS,
+    }
+
+
+@router.post("/logout")
+async def logout(
+    current_user: dict[str, Any] = Depends(require_authenticated_user),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+) -> dict:
+    """Revoke the current session token and all refresh tokens (PHX-SEC-005)."""
+    token = _extract_bearer_token(authorization)
+    payload = _parse_token.__wrapped__(token) if hasattr(_parse_token, "__wrapped__") else None
+    # Re-parse without revocation check to get the jti
+    try:
+        header_part, payload_part, _ = token.split(".", 2)
+        import json as _json
+        raw = _json.loads(_b64url_decode(payload_part).decode("utf-8"))
+        jti = str(raw.get("jti") or "").strip()
+        exp = int(raw.get("exp", 0))
+        if jti:
+            from app.core.session_store import revoke_token
+            revoke_token(jti, exp)
+    except Exception:
+        logger.debug("Could not extract jti for revocation", exc_info=True)
+
+    try:
+        from app.core.session_store import revoke_all_for_user
+        revoke_all_for_user(str(current_user["id"]))
+    except Exception:
+        logger.debug("Refresh token revocation failed", exc_info=True)
+
+    emit_audit_event(
+        actor=str(current_user["email"]),
+        action="logout",
+        resource_type="session",
+        resource_id=str(current_user["id"]),
+        metadata={"user_id": str(current_user["id"])},
+    )
+    logger.info("User logged out: %s", current_user["email"])
+    return {"message": "Logged out successfully"}
 
 
 @router.get("/me")
@@ -497,4 +613,5 @@ __all__ = [
     "_get_user_by_id",
     "_parse_token",
     "_token_secret",
+    "_make_token",
 ]

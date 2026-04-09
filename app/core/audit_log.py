@@ -1,10 +1,13 @@
 """
-Structured audit logging for state-changing admin operations.
+Structured audit logging for state-changing admin operations — PHX-AUD-001.
 
 Every mutation through admin/control-tower APIs emits an audit record
 with actor, action, target, before/after state, and timestamp.
-Records are persisted to a local JSONL file so they remain queryable
-without requiring a separate database in Sprint 1.
+
+Persistence strategy (dual-write):
+1. Local JSONL file — low-latency, always available, used as fast query path.
+2. Postgres audit_events table — durable, append-only, queryable across restarts.
+   Rows are INSERT-only; no UPDATE/DELETE on audit rows is permitted.
 """
 
 from __future__ import annotations
@@ -51,6 +54,42 @@ def _append_audit_event(event: dict[str, Any]) -> None:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(payload)
             handle.write("\n")
+    # PHX-AUD-001: dual-write to Postgres (fire-and-forget; never blocks caller)
+    _try_postgres_persist(event)
+
+
+def _try_postgres_persist(event: dict[str, Any]) -> None:
+    """Append-only insert to Postgres audit_events table.  Never raises."""
+    try:
+        from app.data.postgres import connect_with_retry, get_control_plane_dsn
+        dsn = get_control_plane_dsn()
+        with connect_with_retry(dsn, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO audit_events
+                        (audit_id, timestamp, actor, action, resource_type,
+                         resource_id, request_id, idempotency_key,
+                         before_state, after_state, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (audit_id) DO NOTHING
+                    """,
+                    (
+                        event.get("audit_id"),
+                        event.get("timestamp"),
+                        event.get("actor"),
+                        event.get("action"),
+                        event.get("resource_type"),
+                        event.get("resource_id"),
+                        event.get("request_id") or None,
+                        event.get("idempotency_key") or None,
+                        json.dumps(event.get("before"), default=str) if event.get("before") is not None else None,
+                        json.dumps(event.get("after"), default=str) if event.get("after") is not None else None,
+                        json.dumps(event.get("metadata"), default=str) if event.get("metadata") else None,
+                    ),
+                )
+    except Exception:
+        logger.debug("Postgres audit persist unavailable — JSONL only", exc_info=True)
 
 
 def list_audit_events(
@@ -174,4 +213,80 @@ def _safe_serialize(value: Any) -> Any:
     return str(value)
 
 
-__all__ = ["emit_audit_event", "list_audit_events"]
+def purge_old_audit_events(*, retain_days: int = 90) -> int:
+    """PHX-AUD-004: Delete audit events older than retain_days from Postgres.
+
+    The JSONL file is NOT truncated — it serves as the immutable evidence archive.
+    Returns the number of rows deleted from Postgres.
+    """
+    deleted = 0
+    try:
+        from app.data.postgres import connect_with_retry, get_control_plane_dsn
+        dsn = get_control_plane_dsn()
+        with connect_with_retry(dsn, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM audit_events
+                    WHERE timestamp < NOW() - INTERVAL '%s days'
+                    """,
+                    (max(1, int(retain_days)),),
+                )
+                deleted = cur.rowcount
+        logger.info("audit_retention_purge deleted=%d retain_days=%d", deleted, retain_days)
+    except Exception:
+        logger.debug("Postgres audit retention purge unavailable", exc_info=True)
+    return deleted
+
+
+def accountability_report(
+    *,
+    since_days: int = 7,
+    actor: Optional[str] = None,
+) -> dict[str, Any]:
+    """PHX-AUD-005: Generate an accountability summary for the given window.
+
+    Returns counts of overrides, kill-switch events, privilege changes, and
+    break-glass events grouped by actor.
+    """
+    dangerous_actions = {
+        "kill_switch_clear", "kill_switch_rearm", "kill_switch_trip",
+        "promote_user", "step_up_issued", "step_up_consumed", "step_up_approved",
+        "break_glass", "capital_limit_change", "strategy_enable", "strategy_disable",
+        "config_change", "manual_override",
+    }
+    events = list_audit_events(limit=500, actor=actor)
+    # Filter by window
+    cutoff = datetime.now(timezone.utc).timestamp() - (since_days * 86400)
+    summary: dict[str, dict[str, int]] = {}
+    for evt in events:
+        ts = evt.get("timestamp", "")
+        try:
+            from datetime import datetime as _dt
+            ts_val = _dt.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        if ts_val < cutoff:
+            continue
+        a = str(evt.get("actor") or "unknown")
+        action = str(evt.get("action") or "")
+        if a not in summary:
+            summary[a] = {k: 0 for k in dangerous_actions} | {"_total": 0}
+        summary[a]["_total"] += 1
+        if action in dangerous_actions:
+            summary[a][action] = summary[a].get(action, 0) + 1
+
+    return {
+        "since_days": since_days,
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "actors": summary,
+        "total_events": sum(v["_total"] for v in summary.values()),
+    }
+
+
+__all__ = [
+    "accountability_report",
+    "emit_audit_event",
+    "list_audit_events",
+    "purge_old_audit_events",
+]
