@@ -31,7 +31,6 @@ from app.core.startup_config_validator import (
 from app.core.strategy_switch import StrategySwitchboard
 from app.data.schema_guard import check_startup_schema
 from app.hub.runtime import get_hub_runtime
-from app.runners.multi_instrument_stream import stream_multi_instruments
 from app.strategies.naming import all_canonical_strategy_names
 
 logger = logging.getLogger(__name__)
@@ -82,6 +81,8 @@ class StreamWorker:
 
     def _run(self) -> None:
         try:
+            from app.runners.multi_instrument_stream import stream_multi_instruments
+
             stream_multi_instruments(
                 stop_event=self._stop_event,
                 start_health_server=False,

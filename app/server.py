@@ -38,7 +38,6 @@ from app.core.dashboard_bus import dashboard_bus
 from app.core.feature_flags import load_stability_feature_flags
 from app.core.identifiers import BrokerAccountId, TenantId
 from app.core.rate_limit_middleware import check_rate_limit
-from app.runners.multi_instrument_stream import refresh_daily_levels_cache
 from app.core.lot_size import lot_size_for_symbol, qty_to_lots
 from app.core.logging_utils import log_event, reset_log_context, set_log_context
 from app.dashboard.admin_routes import router as admin_router
@@ -72,6 +71,14 @@ logger = logging.getLogger(__name__)
 _REAL_ASYNCIO_SLEEP = asyncio.sleep
 _ACTIVE_DASHBOARD_SOCKETS: dict[int, WebSocket] = {}
 _ACTIVE_DASHBOARD_SOCKETS_LOCK = threading.Lock()
+
+
+def refresh_daily_levels_cache() -> bool:
+    from app.runners.multi_instrument_stream import (
+        refresh_daily_levels_cache as _refresh_daily_levels_cache,
+    )
+
+    return bool(_refresh_daily_levels_cache())
 
 
 def _boot_config_created_at_for_health() -> str | None:

@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+_TOKEN_TTL_SECONDS = 60 * 60  # 1 hour access token
+_REFRESH_INCLUDE = True  # set False to disable refresh token issuance
+
 
 class SignupRequest(BaseModel):
     """User signup request."""
@@ -72,10 +75,6 @@ class LoginResponse(BaseModel):
     refresh_token: Optional[str] = None
     expires_in: int = _TOKEN_TTL_SECONDS
     user: dict[str, Any]
-
-
-_TOKEN_TTL_SECONDS = 60 * 60  # 1 hour access token
-_REFRESH_INCLUDE = True  # set False to disable refresh token issuance
 
 
 @contextmanager

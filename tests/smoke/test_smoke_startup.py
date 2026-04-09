@@ -11,6 +11,7 @@ Validates:
 
 from __future__ import annotations
 
+import importlib
 import os
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -60,6 +61,10 @@ class TestSettingsLoad:
 class TestCoreImports:
     """Critical modules import without error."""
 
+    def test_import_auth_routes(self):
+        mod = importlib.import_module("app.api.auth_routes")
+        assert hasattr(mod, "router")
+
     def test_import_order_router(self):
         from app.orders import router
         assert hasattr(router, "OrderRouter") or hasattr(router, "route_order")
@@ -91,6 +96,12 @@ class TestCoreImports:
         ic = InstrumentController()
         snapshot = ic.snapshot()
         assert isinstance(snapshot, dict)
+
+    def test_uvicorn_import_string_resolves_server_app(self):
+        from uvicorn.importer import import_from_string
+
+        app = import_from_string("app.server:app")
+        assert app.title == "Multi-instrument stream"
 
 
 class TestHealthEndpoints:
