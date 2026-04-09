@@ -49,6 +49,7 @@ class RuntimeConfig:
     stream_watchdog_stable_run_window_seconds: float
     disable_stream_worker: bool
     leader_lease_enabled_override: Optional[bool]
+    leader_lease_backend: str
     leader_lease_id: Optional[str]
     leader_lease_ttl_seconds: int
     leader_lease_renew_seconds: int
@@ -100,6 +101,9 @@ class RuntimeConfig:
                 default=False,
             ),
             leader_lease_enabled_override=leader_override,
+            leader_lease_backend=(
+                str(env.get("LEADER_LEASE_BACKEND", "")).strip().lower()
+            ),
             leader_lease_id=(
                 str(env.get("LEADER_LEASE_ID", "")).strip() or None
             ),

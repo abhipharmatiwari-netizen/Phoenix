@@ -1037,6 +1037,11 @@ def test_readyz_returns_503_when_no_runners_are_registered_in_live(monkeypatch):
     runtime.ready = True
     runtime.worker_running_state = True
     runtime.watchdog_running_state = True
+    runtime.leader_lease_state = {
+        "enabled": True,
+        "owned": True,
+        "task_running": True,
+    }
 
     hub_stub = SimpleNamespace(
         registered_runner_count=0,
@@ -1179,6 +1184,11 @@ def test_readyz_returns_503_when_single_registered_runner_is_not_running(monkeyp
     runtime.ready = True
     runtime.worker_running_state = True
     runtime.watchdog_running_state = True
+    runtime.leader_lease_state = {
+        "enabled": True,
+        "owned": True,
+        "task_running": True,
+    }
 
     hub_stub = SimpleNamespace(
         registered_runner_count=1,
@@ -1230,6 +1240,11 @@ def test_readyz_returns_503_when_some_registered_runners_are_not_running(monkeyp
     runtime.ready = True
     runtime.worker_running_state = True
     runtime.watchdog_running_state = True
+    runtime.leader_lease_state = {
+        "enabled": True,
+        "owned": True,
+        "task_running": True,
+    }
 
     hub_stub = SimpleNamespace(
         registered_runner_count=2,
@@ -1273,6 +1288,11 @@ def test_readyz_returns_200_when_single_runner_is_running(monkeypatch):
     runtime.ready = True
     runtime.worker_running_state = True
     runtime.watchdog_running_state = True
+    runtime.leader_lease_state = {
+        "enabled": True,
+        "owned": True,
+        "task_running": True,
+    }
 
     hub_stub = SimpleNamespace(
         registered_runner_count=1,
@@ -1315,9 +1335,100 @@ def test_readyz_returns_200_when_single_runner_is_running(monkeypatch):
     assert payload["registered_runner_count"] == 1
     assert payload["running_runner_count"] == 1
     assert payload["failed_runner_count"] == 0
+    assert payload["leader_lease_status"]["enabled"] is True
+    assert payload["leader_lease_status"]["owned"] is True
     assert payload["stream_worker_expected"] is True
     assert payload["stream_worker_running"] is True
     assert payload["watchdog_running"] is True
+
+
+def test_readyz_returns_503_when_live_leader_lease_is_not_owned(monkeypatch):
+    """/readyz must fail closed on a standby stack that did not acquire the shared LIVE lease."""
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+    runtime.leader_lease_state = {
+        "enabled": True,
+        "owned": False,
+        "task_running": False,
+        "backend": "postgres",
+        "lease_id": "phoenix-live-single-stack",
+    }
+
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            env={"TRADE_MODE": "LIVE"},
+            runtime=SimpleNamespace(app_env="production", disable_stream_worker=False),
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=False,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 503
+    payload = resp.json()
+    assert payload["reason"] == "leader_lease_not_owned"
+    assert payload["leader_lease_status"]["backend"] == "postgres"
+    assert payload["leader_lease_status"]["lease_id"] == "phoenix-live-single-stack"
+
+
+def test_readyz_returns_503_when_live_leader_lease_task_is_not_running(monkeypatch):
+    """/readyz must fail closed if the LIVE lease renew loop is no longer running."""
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+    runtime.leader_lease_state = {
+        "enabled": True,
+        "owned": True,
+        "task_running": False,
+        "backend": "postgres",
+    }
+
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            env={"TRADE_MODE": "LIVE"},
+            runtime=SimpleNamespace(app_env="production", disable_stream_worker=False),
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=False,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 503
+    payload = resp.json()
+    assert payload["reason"] == "leader_lease_task_not_running"
 
 
 def test_readyz_returns_200_when_runners_are_running(monkeypatch):
@@ -1366,6 +1477,11 @@ def test_readyz_returns_503_when_live_stream_worker_is_stopped(monkeypatch):
     runtime.ready = True
     runtime.worker_running_state = False
     runtime.watchdog_running_state = True
+    runtime.leader_lease_state = {
+        "enabled": True,
+        "owned": True,
+        "task_running": True,
+    }
 
     hub_stub = SimpleNamespace(
         registered_runner_count=1,
@@ -1418,6 +1534,11 @@ def test_readyz_returns_503_when_live_stream_worker_has_fatal_error(monkeypatch)
     runtime.worker_running_state = False
     runtime.watchdog_running_state = True
     runtime.worker_fatal_error_state = "BROKER_SECRET_BACKEND=postgres invalid credentials"
+    runtime.leader_lease_state = {
+        "enabled": True,
+        "owned": True,
+        "task_running": True,
+    }
 
     hub_stub = SimpleNamespace(
         registered_runner_count=1,
@@ -1470,6 +1591,11 @@ def test_readyz_returns_503_when_live_stream_watchdog_is_not_running(monkeypatch
     runtime.ready = True
     runtime.worker_running_state = True
     runtime.watchdog_running_state = False
+    runtime.leader_lease_state = {
+        "enabled": True,
+        "owned": True,
+        "task_running": True,
+    }
 
     hub_stub = SimpleNamespace(
         registered_runner_count=1,
@@ -1521,6 +1647,11 @@ def test_readyz_allows_disabled_live_stream_worker_path(monkeypatch):
     runtime.ready = True
     runtime.worker_running_state = False
     runtime.watchdog_running_state = False
+    runtime.leader_lease_state = {
+        "enabled": True,
+        "owned": True,
+        "task_running": True,
+    }
 
     hub_stub = SimpleNamespace(
         registered_runner_count=1,

@@ -152,6 +152,30 @@ def _stream_worker_expected_for_readiness(runtime: Any) -> bool:
     return bool(lease_owned and not disable_stream_worker)
 
 
+def _leader_lease_readiness_snapshot(runtime: Any) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "enabled": False,
+        "owned": True,
+        "task_running": False,
+    }
+    lease_getter = getattr(runtime, "leader_lease_status", None)
+    if callable(lease_getter):
+        try:
+            raw = dict(lease_getter())
+        except Exception:
+            raw = {}
+        if "enabled" in raw:
+            snapshot["enabled"] = bool(raw.get("enabled"))
+        if "owned" in raw:
+            snapshot["owned"] = bool(raw.get("owned"))
+        if "task_running" in raw:
+            snapshot["task_running"] = bool(raw.get("task_running"))
+        for key in ("backend", "lease_id", "owner_id", "renew_failures", "last_failure_at"):
+            if raw.get(key) is not None:
+                snapshot[key] = raw.get(key)
+    return snapshot
+
+
 def _stream_worker_readiness_snapshot(runtime: Any) -> dict[str, Any]:
     snapshot: dict[str, Any] = {
         "expected": _stream_worker_expected_for_readiness(runtime),
@@ -950,6 +974,22 @@ async def readyz() -> JSONResponse:
     runtime = get_app_runtime()
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     payload: dict = {"timestamp": now}
+
+    if _readiness_trade_mode() == "LIVE":
+        leader_lease_snapshot = _leader_lease_readiness_snapshot(runtime)
+        payload["leader_lease_status"] = leader_lease_snapshot
+        if leader_lease_snapshot["enabled"] and not leader_lease_snapshot["owned"]:
+            payload["ready"] = False
+            payload["reason"] = "leader_lease_not_owned"
+            return JSONResponse(status_code=503, content=payload)
+        if (
+            leader_lease_snapshot["enabled"]
+            and leader_lease_snapshot["owned"]
+            and not leader_lease_snapshot["task_running"]
+        ):
+            payload["ready"] = False
+            payload["reason"] = "leader_lease_task_not_running"
+            return JSONResponse(status_code=503, content=payload)
 
     if not runtime.ready:
         payload["ready"] = False

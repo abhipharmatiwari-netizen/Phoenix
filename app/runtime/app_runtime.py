@@ -29,6 +29,7 @@ from app.core.startup_config_validator import (
     validate_startup_config,
 )
 from app.core.strategy_switch import StrategySwitchboard
+from app.data.postgres import get_control_plane_dsn
 from app.data.schema_guard import check_startup_schema
 from app.hub.runtime import get_hub_runtime
 from app.strategies.naming import all_canonical_strategy_names
@@ -539,23 +540,42 @@ class AppRuntime:
             if runtime_cfg.leader_lease_enabled_override is not None
             else bool(os.getenv("K_SERVICE"))
         )
+        lease_backend = str(
+            getattr(runtime_cfg, "leader_lease_backend", "") or ""
+        ).strip().lower()
+        if not lease_backend:
+            lease_backend = (
+                "postgres"
+                if trade_mode == "LIVE"
+                and str(getattr(settings, "control_plane_backend", "")).strip().lower()
+                == "postgres"
+                else "firestore"
+            )
         self._is_leader = True
 
         if enable_leader_lease:
             lease_id = (
                 runtime_cfg.leader_lease_id
+                or ("phoenix-live-single-stack" if trade_mode == "LIVE" else None)
                 or os.getenv("K_SERVICE")
                 or "trading-worker"
             )
             lease_ttl = int(runtime_cfg.leader_lease_ttl_seconds)
             lease_renew = int(runtime_cfg.leader_lease_renew_seconds)
             lease_collection = runtime_cfg.leader_lease_collection
+            lease_dsn = (
+                get_control_plane_dsn(settings)
+                if lease_backend == "postgres"
+                else None
+            )
             self._leader_lease = self._leader_lease_factory(
                 lease_id=lease_id,
                 ttl_seconds=lease_ttl,
                 renew_seconds=lease_renew,
                 collection=lease_collection,
                 enabled=True,
+                backend=lease_backend,
+                postgres_dsn=lease_dsn,
             )
             self._is_leader = await self._leader_lease.start()
             if not self._is_leader:
@@ -640,6 +660,8 @@ class AppRuntime:
     @property
     def ready(self) -> bool:
         """True only after full startup (recovery + reconciliation + hub init)."""
+        if self._leader_lease is not None and not self._is_leader:
+            return False
         return self._ready
 
     async def stop(self) -> None:

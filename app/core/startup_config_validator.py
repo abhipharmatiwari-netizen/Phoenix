@@ -417,6 +417,16 @@ def validate_runtime_startup_settings(
             settings=settings,
             runtime_cfg=runtime_cfg,
         )
+        leader_lease_backend = str(
+            getattr(runtime_cfg, "leader_lease_backend", "") or ""
+        ).strip().lower()
+        if not leader_lease_backend:
+            leader_lease_backend = (
+                "postgres"
+                if str(getattr(settings, "control_plane_backend", "")).strip().lower()
+                == "postgres"
+                else "firestore"
+            )
         live_summary = {
             "control_plane_backend": str(
                 getattr(settings, "control_plane_backend", "")
@@ -476,6 +486,14 @@ def validate_runtime_startup_settings(
             "disable_stream_worker": bool(
                 getattr(runtime_cfg, "disable_stream_worker", False)
             ),
+            "leader_lease_enabled": bool(
+                getattr(runtime_cfg, "leader_lease_enabled_override", False)
+            ),
+            "leader_lease_backend": leader_lease_backend,
+            "leader_lease_id": str(
+                getattr(runtime_cfg, "leader_lease_id", "") or ""
+            ).strip()
+            or "phoenix-live-single-stack",
             "operating_mode": (
                 operating_mode.mode.value
                 if operating_mode.mode is not None
@@ -524,6 +542,16 @@ def validate_runtime_startup_settings(
             errors.append("TRADE_MODE=LIVE requires CONTROL_PLANE_BACKEND=postgres")
         if str(getattr(settings, "sweep_state_backend", "")).strip().lower() != "postgres":
             errors.append("TRADE_MODE=LIVE requires SWEEP_STATE_BACKEND=postgres")
+        if getattr(runtime_cfg, "leader_lease_enabled_override", None) is not True:
+            errors.append(
+                "TRADE_MODE=LIVE requires LEADER_LEASE_ENABLED=true "
+                "so exactly one Phoenix LIVE stack becomes authoritative against the target Postgres"
+            )
+        if leader_lease_backend != "postgres":
+            errors.append(
+                "TRADE_MODE=LIVE requires LEADER_LEASE_BACKEND=postgres "
+                "so single-stack authority is enforced at the shared control-plane database"
+            )
         if operating_mode.is_ambiguous:
             errors.append(
                 "TRADE_MODE=LIVE requires ENABLE_MULTI_HUB and USE_HUB_ROUTER to resolve exactly one authority path"

@@ -45,6 +45,7 @@ def test_runtime_config_from_env_parses_types():
             "STREAM_WATCHDOG_STABLE_RUN_WINDOW_SECONDS": "60",
             "DISABLE_STREAM_WORKER": "true",
             "LEADER_LEASE_ENABLED": "0",
+            "LEADER_LEASE_BACKEND": "postgres",
             "LEADER_LEASE_TTL_SECONDS": "120",
             "LEADER_LEASE_RENEW_SECONDS": "45",
             "LEADER_LEASE_COLLECTION": "leases_v2",
@@ -63,6 +64,7 @@ def test_runtime_config_from_env_parses_types():
     assert cfg.stream_watchdog_stable_run_window_seconds == 60.0
     assert cfg.disable_stream_worker is True
     assert cfg.leader_lease_enabled_override is False
+    assert cfg.leader_lease_backend == "postgres"
     assert cfg.leader_lease_ttl_seconds == 120
     assert cfg.leader_lease_renew_seconds == 45
     assert cfg.leader_lease_collection == "leases_v2"

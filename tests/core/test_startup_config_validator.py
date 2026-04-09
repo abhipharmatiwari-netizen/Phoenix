@@ -66,6 +66,12 @@ def _valid_runtime_cfg(**overrides):
         "stream_watchdog_restart_backoff_jitter_ratio": 0.2,
         "stream_watchdog_stable_run_window_seconds": 180.0,
         "disable_stream_worker": False,
+        "leader_lease_enabled_override": True,
+        "leader_lease_backend": "postgres",
+        "leader_lease_id": "phoenix-live-single-stack",
+        "leader_lease_ttl_seconds": 90,
+        "leader_lease_renew_seconds": 30,
+        "leader_lease_collection": "leader_leases",
         "app_env": "local",
         "dashboard_auth_disabled": False,
     }
@@ -535,6 +541,38 @@ def test_runtime_settings_validator_accepts_live_safe_defaults():
         settings=_valid_runtime_settings(),
         runtime_cfg=_valid_runtime_cfg(app_env="production", disable_stream_worker=False),
         env=_valid_live_env(),
+        )
+
+
+def test_runtime_settings_validator_rejects_live_without_leader_lease():
+    with pytest.raises(
+        ValueError,
+        match="TRADE_MODE=LIVE requires LEADER_LEASE_ENABLED=true",
+    ):
+        validate_runtime_startup_settings(
+            settings=_valid_runtime_settings(),
+            runtime_cfg=_valid_runtime_cfg(
+                app_env="production",
+                disable_stream_worker=False,
+                leader_lease_enabled_override=False,
+            ),
+            env=_valid_live_env(),
+        )
+
+
+def test_runtime_settings_validator_rejects_live_without_postgres_leader_lease():
+    with pytest.raises(
+        ValueError,
+        match="TRADE_MODE=LIVE requires LEADER_LEASE_BACKEND=postgres",
+    ):
+        validate_runtime_startup_settings(
+            settings=_valid_runtime_settings(),
+            runtime_cfg=_valid_runtime_cfg(
+                app_env="production",
+                disable_stream_worker=False,
+                leader_lease_backend="firestore",
+            ),
+            env=_valid_live_env(),
         )
 
 

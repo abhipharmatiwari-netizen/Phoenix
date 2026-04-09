@@ -29,6 +29,18 @@ def test_live_compose_sets_non_empty_hub_instance_name_default():
     assert match.group(1).strip() != ""
 
 
+def test_live_compose_enables_postgres_leader_lease_single_stack_guard():
+    text = _read_text(LIVE_COMPOSE_PATH)
+    assert 'LEADER_LEASE_ENABLED: "true"' in text
+    assert 'LEADER_LEASE_BACKEND: "postgres"' in text
+    match = re.search(
+        r'LEADER_LEASE_ID:\s*"\$\{LEADER_LEASE_ID:-([^}]+)\}"',
+        text,
+    )
+    assert match is not None
+    assert match.group(1).strip() == "phoenix-live-single-stack"
+
+
 def test_live_deployment_probes_use_readyz():
     compose_text = _read_text(LIVE_COMPOSE_PATH)
     dockerfile_text = _read_text(DOCKERFILE_PATH)

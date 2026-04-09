@@ -118,6 +118,12 @@ def _live_safe_settings(**overrides):
         "control_plane_backend": "postgres",
         "sweep_state_backend": "postgres",
         "broker_secret_backend": "secret_manager",
+        "control_plane_pg_host": "127.0.0.1",
+        "control_plane_pg_port": 5432,
+        "control_plane_pg_db": "phoenix",
+        "control_plane_pg_user": "phoenix_app",
+        "control_plane_pg_password": "secret",
+        "control_plane_pg_sslmode": "disable",
         "admin_api_key": "test-admin",
         "dashboard_hmac_auth_enabled": False,
         "dashboard_hmac_secret": None,
@@ -135,6 +141,9 @@ def _live_safe_settings(**overrides):
 def _set_live_safe_env(monkeypatch) -> None:
     monkeypatch.setenv("TRADE_MODE", "LIVE")
     monkeypatch.setenv("DISABLE_TRADING_WINDOW_FILTER", "false")
+    monkeypatch.setenv("LEADER_LEASE_ENABLED", "true")
+    monkeypatch.setenv("LEADER_LEASE_BACKEND", "postgres")
+    monkeypatch.setenv("LEADER_LEASE_ID", "phoenix-live-single-stack")
     monkeypatch.setenv("CLIENT_LOCAL_IP", "10.0.0.10")
     monkeypatch.setenv("CLIENT_PUBLIC_IP", "203.0.113.10")
     monkeypatch.setenv("MAC_ADDRESS", "02:00:00:00:00:20")
@@ -290,6 +299,7 @@ async def test_app_runtime_skips_worker_and_hub_when_not_leader(monkeypatch):
     assert alert_evaluator.started == 0
     assert hub.initialized == 0
     assert hub.started == 0
+    assert runtime.ready is False
 
     await runtime.stop()
 
@@ -297,6 +307,67 @@ async def test_app_runtime_skips_worker_and_hub_when_not_leader(monkeypatch):
     assert worker.stopped == 1
     assert watchdog.stopped == 1
     assert alert_evaluator.stopped == 1
+
+
+@pytest.mark.anyio
+async def test_app_runtime_uses_postgres_leader_lease_in_live(monkeypatch):
+    monkeypatch.setenv("DISABLE_STREAM_WORKER", "1")
+    _set_live_safe_env(monkeypatch)
+    monkeypatch.setattr(app_runtime, "validate_runtime_startup_settings", lambda **_: None)
+    monkeypatch.setattr(app_runtime, "validate_startup_config", lambda **_: None)
+    monkeypatch.setattr(
+        app_runtime,
+        "get_control_plane_dsn",
+        lambda *_: "postgresql://phoenix_app:secret@127.0.0.1:5432/phoenix",
+    )
+    monkeypatch.setattr(
+        app_runtime,
+        "check_startup_schema",
+        lambda **_: SimpleNamespace(missing_tables=(), missing_indexes=()),
+    )
+    observed: dict[str, object] = {}
+    hub = _DummyHub()
+
+    class _ObservedLease:
+        def __init__(self, **kwargs) -> None:
+            observed.update(kwargs)
+
+        async def start(self) -> bool:
+            return True
+
+        async def stop(self) -> None:
+            return None
+
+        def status_snapshot(self) -> dict[str, object]:
+            return {
+                "enabled": True,
+                "backend": observed.get("backend"),
+                "lease_id": observed.get("lease_id"),
+                "owned": True,
+                "task_running": True,
+            }
+
+    runtime = AppRuntime(
+        settings_getter=lambda: _live_safe_settings(
+            control_plane_pg_host="127.0.0.1",
+            control_plane_pg_port=5432,
+            control_plane_pg_db="phoenix",
+            control_plane_pg_user="phoenix_app",
+            control_plane_pg_password="secret",
+            broker_secret_backend="postgres",
+        ),
+        hub_runtime_getter=lambda: SimpleNamespace(hub=hub),
+        leader_lease_factory=lambda **kwargs: _ObservedLease(**kwargs),
+    )
+    _attach_dummy_workers(runtime)
+
+    await runtime.start()
+
+    assert observed["backend"] == "postgres"
+    assert observed["lease_id"] == "phoenix-live-single-stack"
+    assert isinstance(observed["postgres_dsn"], str)
+
+    await runtime.stop()
 
 
 @pytest.mark.anyio
@@ -352,6 +423,8 @@ async def test_app_runtime_forces_strict_schema_check_in_live(monkeypatch):
     monkeypatch.setenv("DISABLE_STREAM_WORKER", "0")
     _set_live_safe_env(monkeypatch)
     monkeypatch.delenv("LEADER_LEASE_ENABLED", raising=False)
+    monkeypatch.setattr(app_runtime, "validate_runtime_startup_settings", lambda **_: None)
+    monkeypatch.setattr(app_runtime, "validate_startup_config", lambda **_: None)
     observed: dict[str, str] = {}
 
     def _capture_schema_mode(**kwargs):
@@ -376,6 +449,8 @@ async def test_app_runtime_records_operating_mode_status(monkeypatch):
     monkeypatch.setenv("DISABLE_STREAM_WORKER", "0")
     _set_live_safe_env(monkeypatch)
     monkeypatch.delenv("LEADER_LEASE_ENABLED", raising=False)
+    monkeypatch.setattr(app_runtime, "validate_runtime_startup_settings", lambda **_: None)
+    monkeypatch.setattr(app_runtime, "validate_startup_config", lambda **_: None)
     monkeypatch.setattr(
         app_runtime,
         "check_startup_schema",
