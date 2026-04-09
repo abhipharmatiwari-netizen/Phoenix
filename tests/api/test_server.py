@@ -23,6 +23,11 @@ class DummyAppRuntime:
         self.worker_running_state = False
         self.watchdog_running_state = False
         self.ready = True  # default: ready so existing tests are unaffected
+        self.startup_recovery_state = {
+            "status": "ok",
+            "reason": None,
+            "summary": {},
+        }
         self.schema_state = {
             "status": "ok",
             "checked_at": "2026-03-05T00:00:00Z",
@@ -60,6 +65,9 @@ class DummyAppRuntime:
 
     def leader_lease_status(self) -> dict:
         return dict(self.leader_lease_state)
+
+    def startup_recovery_status(self) -> dict:
+        return dict(self.startup_recovery_state)
 
 
 def test_import_module_succeeds():
@@ -950,6 +958,42 @@ def test_readyz_returns_503_when_runtime_not_ready(monkeypatch):
     assert payload["reason"] == "startup_recovery_in_progress"
 
 
+def test_readyz_returns_503_when_startup_recovery_is_degraded(monkeypatch):
+    """/readyz must stay unready when strict startup recovery completed in a degraded state."""
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+    runtime.startup_recovery_state = {
+        "status": "degraded",
+        "reason": "startup_recovery_degraded_failed_1_unresolved_0",
+        "summary": {"failed": 1, "unresolved_active": 0},
+    }
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=False,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 503
+    payload = resp.json()
+    assert payload["ready"] is False
+    assert payload["reason"] == "startup_recovery_degraded_failed_1_unresolved_0"
+    assert payload["startup_recovery_status"] == "degraded"
+    assert payload["startup_recovery_summary"] == {"failed": 1, "unresolved_active": 0}
+
+
 def test_readyz_returns_200_when_runtime_ready_no_multi_hub(monkeypatch):
     """/readyz must return HTTP 200 when ready and multi-hub is disabled."""
     runtime = DummyAppRuntime()
@@ -1014,7 +1058,49 @@ def test_readyz_returns_503_when_all_runners_failed(monkeypatch):
     assert payload["ready"] is False
     assert payload["reason"] == "no_runners_running"
     assert payload["runner_count"] == 2
+    assert payload["registered_runner_count"] == 2
     assert payload["running_runner_count"] == 0
+
+
+def test_readyz_returns_503_when_some_registered_runners_are_not_running(monkeypatch):
+    """/readyz must fail if registered runners exist but not all of them are actually running."""
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+
+    hub_stub = SimpleNamespace(
+        registered_runner_count=2,
+        running_runner_count=1,
+        failed_runner_count=1,
+    )
+    hub_runtime_stub = SimpleNamespace(hub=hub_stub)
+
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: hub_runtime_stub)
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=True,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 503
+    payload = resp.json()
+    assert payload["ready"] is False
+    assert payload["reason"] == "runner_startup_incomplete"
+    assert payload["registered_runner_count"] == 2
+    assert payload["running_runner_count"] == 1
+    assert payload["failed_runner_count"] == 1
 
 
 def test_readyz_returns_200_when_runners_are_running(monkeypatch):
@@ -1052,5 +1138,6 @@ def test_readyz_returns_200_when_runners_are_running(monkeypatch):
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["ready"] is True
+    assert payload["registered_runner_count"] == 2
     assert payload["running_runner_count"] == 2
     assert payload["failed_runner_count"] == 0

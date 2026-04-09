@@ -872,7 +872,7 @@ async def readyz() -> JSONResponse:
     Machine-readable readiness probe for container orchestrators.
 
     Returns HTTP 200 only when the runtime readiness latch is set AND at least
-    one hub AccountRunner is actively running (if multi-hub is enabled).
+    all expected hub AccountRunners are actively running (if multi-hub is enabled).
     Returns HTTP 503 otherwise.
 
     Use this as the Docker/compose healthcheck target instead of /health.
@@ -887,18 +887,49 @@ async def readyz() -> JSONResponse:
         payload["reason"] = "startup_recovery_in_progress"
         return JSONResponse(status_code=503, content=payload)
 
+    startup_recovery_getter = getattr(runtime, "startup_recovery_status", None)
+    if callable(startup_recovery_getter):
+        startup_recovery = startup_recovery_getter()
+        if isinstance(startup_recovery, dict):
+            recovery_status = str(startup_recovery.get("status") or "").strip().lower()
+            recovery_reason = str(startup_recovery.get("reason") or "").strip() or None
+            recovery_summary = startup_recovery.get("summary")
+            if recovery_status:
+                payload["startup_recovery_status"] = recovery_status
+            if recovery_reason:
+                payload["startup_recovery_reason"] = recovery_reason
+            if isinstance(recovery_summary, dict) and recovery_summary:
+                payload["startup_recovery_summary"] = dict(recovery_summary)
+            if recovery_status == "degraded":
+                payload["ready"] = False
+                payload["reason"] = recovery_reason or "startup_recovery_degraded"
+                return JSONResponse(status_code=503, content=payload)
+
     settings = get_settings()
     if settings.enable_multi_hub:
         try:
             hub = get_hub_runtime().hub
             running = hub.running_runner_count
-            registered = hub.runner_count
+            registered = int(
+                getattr(
+                    hub,
+                    "registered_runner_count",
+                    getattr(hub, "runner_count", 0),
+                )
+                or 0
+            )
+            failed = int(getattr(hub, "failed_runner_count", 0) or 0)
             payload["runner_count"] = registered
+            payload["registered_runner_count"] = registered
             payload["running_runner_count"] = running
-            payload["failed_runner_count"] = hub.failed_runner_count
+            payload["failed_runner_count"] = failed
             if registered > 0 and running == 0:
                 payload["ready"] = False
                 payload["reason"] = "no_runners_running"
+                return JSONResponse(status_code=503, content=payload)
+            if registered > running:
+                payload["ready"] = False
+                payload["reason"] = "runner_startup_incomplete"
                 return JSONResponse(status_code=503, content=payload)
         except Exception as exc:
             payload["ready"] = False

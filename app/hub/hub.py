@@ -109,6 +109,11 @@ class Hub:
     # Return the number of registered account runners.
     @property
     def runner_count(self) -> int:
+        return self.registered_runner_count
+
+    # Return the number of registered account runners.
+    @property
+    def registered_runner_count(self) -> int:
         return len(self._account_runners)
 
     # Return the number of runners that successfully started and are actively running.

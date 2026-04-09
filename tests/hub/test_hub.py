@@ -156,6 +156,7 @@ async def test_control_plane_ready_failure_sets_backoff(monkeypatch):
 def test_hub_running_and_failed_runner_count_with_no_runners():
     hub = Hub()
     assert hub.runner_count == 0
+    assert hub.registered_runner_count == 0
     assert hub.running_runner_count == 0
     assert hub.failed_runner_count == 0
 
@@ -169,6 +170,7 @@ def test_hub_running_runner_count_reflects_is_running():
     hub._account_runners["ba3"] = r_failed
 
     assert hub.runner_count == 3
+    assert hub.registered_runner_count == 3
     assert hub.running_runner_count == 1
     assert hub.failed_runner_count == 2
 
@@ -178,6 +180,7 @@ def test_hub_running_runner_count_all_running():
     hub._account_runners["ba1"] = SimpleNamespace(is_running=True)
     hub._account_runners["ba2"] = SimpleNamespace(is_running=True)
 
+    assert hub.registered_runner_count == 2
     assert hub.running_runner_count == 2
     assert hub.failed_runner_count == 0
 
@@ -187,5 +190,6 @@ def test_hub_running_runner_count_none_running():
     hub._account_runners["ba1"] = SimpleNamespace(is_running=False)
     hub._account_runners["ba2"] = SimpleNamespace(is_running=False)
 
+    assert hub.registered_runner_count == 2
     assert hub.running_runner_count == 0
     assert hub.failed_runner_count == 2
