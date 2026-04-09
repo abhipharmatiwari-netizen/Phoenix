@@ -1,6 +1,7 @@
 """User authentication routes for the Phoenix platform.
 
-Implements a PostgreSQL-backed user store with register, login, and me endpoints.
+Implements a PostgreSQL-backed user store with register, login, and authenticated
+identity endpoints.
 """
 
 from __future__ import annotations
@@ -14,15 +15,20 @@ import os
 import secrets
 import time
 from contextlib import contextmanager
-from typing import Optional
+from typing import Any, Optional
 
-import psycopg
-from psycopg.rows import dict_row
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+
+try:  # pragma: no cover - optional in lightweight test environments
+    from psycopg.rows import dict_row  # type: ignore
+except Exception:  # pragma: no cover - optional in lightweight test environments
+    dict_row = None
 from pydantic import BaseModel, EmailStr
 
 from app.api.models import Role
+from app.core.audit_log import emit_audit_event
 from app.data.postgres import connect_with_retry, get_control_plane_dsn
+from app.security.entitlements import resolve_user_entitlements
 
 try:  # pragma: no cover - optional dependency in local/dev
     import bcrypt  # type: ignore
@@ -63,7 +69,7 @@ class LoginResponse(BaseModel):
     """Login response."""
 
     token: str
-    user: dict
+    user: dict[str, Any]
 
 
 _TOKEN_TTL_SECONDS = 60 * 60
@@ -88,8 +94,13 @@ def _b64url_decode(raw: str) -> bytes:
     return base64.urlsafe_b64decode(padded.encode("ascii"))
 
 
+def _app_env() -> str:
+    return str(os.getenv("APP_ENV") or os.getenv("ENV") or "local").strip().lower() or "local"
+
+
 def _token_secret() -> str:
     from app.config.settings import get_settings
+
     settings = get_settings()
     configured = str(
         getattr(settings, "demo_auth_token_secret", None)
@@ -97,7 +108,20 @@ def _token_secret() -> str:
     ).strip()
     if configured:
         return configured
-    return "phoenix-demo-auth-secret"
+    raise RuntimeError(
+        "DEMO_AUTH_TOKEN_SECRET must be configured explicitly; implicit auth-secret fallback is disabled"
+    )
+
+
+def _normalize_role(value: object) -> Role:
+    token = value.value if isinstance(value, Role) else str(value or "").strip().lower()
+    try:
+        return Role(token)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid user role",
+        ) from exc
 
 
 def _make_token(*, user_id: str, email: str, role: Role) -> str:
@@ -183,6 +207,8 @@ def _verify_password(password: str, password_hash: str) -> bool:
 
 
 def _get_user_by_email(email: str) -> dict | None:
+    if dict_row is None:
+        raise RuntimeError("psycopg is required for auth database operations")
     with _conn() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -193,6 +219,8 @@ def _get_user_by_email(email: str) -> dict | None:
 
 
 def _get_user_by_id(user_id: str) -> dict | None:
+    if dict_row is None:
+        raise RuntimeError("psycopg is required for auth database operations")
     with _conn() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -242,6 +270,102 @@ def _next_user_id() -> str:
     return f"user_{count + 1}"
 
 
+def _extract_bearer_token(authorization: Optional[str]) -> str:
+    value = str(authorization or "").strip()
+    if not value:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Authorization header.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    scheme, _, token = value.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Authorization header.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return token.strip()
+
+
+def _serialize_user(user: dict[str, Any]) -> dict[str, Any]:
+    role = _normalize_role(user.get("role"))
+    entitlements = resolve_user_entitlements(
+        user_id=str(user.get("id") or "").strip(),
+        email=str(user.get("email") or "").strip(),
+        role=role,
+    )
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "name": user["name"],
+        "role": role.value,
+        "tenant_ids": list(entitlements.tenant_ids),
+        "broker_account_ids": list(entitlements.broker_account_ids),
+        "can_access_all_tenants": entitlements.all_tenants,
+        "entitlements_source": entitlements.source,
+    }
+
+
+def authenticate_bearer_token(authorization: Optional[str]) -> dict[str, Any]:
+    token = _extract_bearer_token(authorization)
+    payload = _parse_token(token)
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    email = str(payload.get("email") or "").strip()
+    user_id = str(payload.get("sub") or "").strip()
+    if not email or not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = _get_user_by_id(user_id) or _get_user_by_email(email)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if str(user.get("id") or "") != user_id or str(user.get("email") or "").strip() != email:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return {
+        "id": str(user["id"]),
+        "email": str(user["email"]),
+        "name": str(user.get("name") or ""),
+        "role": _normalize_role(user.get("role")),
+    }
+
+
+async def require_authenticated_user(
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+) -> dict[str, Any]:
+    return authenticate_bearer_token(authorization)
+
+
+async def require_admin_user(
+    current_user: dict[str, Any] = Depends(require_authenticated_user),
+) -> dict[str, Any]:
+    if current_user["role"] != Role.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role required.",
+        )
+    return current_user
+
+
 @router.post("/register", response_model=SignupResponse)
 async def register(request: SignupRequest) -> SignupResponse:
     """Register a new user."""
@@ -281,46 +405,33 @@ async def login(request: LoginRequest) -> LoginResponse:
             detail="Invalid email or password",
         )
 
-    role = Role(user["role"])
+    role = _normalize_role(user["role"])
     token = _make_token(user_id=str(user["id"]), email=str(user["email"]), role=role)
     logger.info("User logged in: %s", request.email)
 
     return LoginResponse(
         token=token,
-        user={"id": user["id"], "email": user["email"], "name": user["name"], "role": user["role"]},
+        user={
+            "id": user["id"],
+            "email": user["email"],
+            "name": user["name"],
+            "role": role.value,
+        },
     )
 
 
 @router.get("/me")
-async def get_current_user(token: Optional[str] = None) -> dict:
-    """Get current user info."""
-    if not token:
+async def get_current_user(
+    token: Optional[str] = Query(default=None),
+    current_user: dict[str, Any] = Depends(require_authenticated_user),
+) -> dict[str, Any]:
+    """Return the authenticated user and server-side entitlements."""
+    if token is not None:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token query parameters are no longer accepted; use Authorization: Bearer.",
         )
-
-    payload = _parse_token(token)
-    if payload is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token",
-        )
-
-    email = str(payload.get("email") or "").strip()
-    user_id = str(payload.get("sub") or "").strip()
-    user = _get_user_by_email(email)
-    if user is None or str(user.get("id") or "") != user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token",
-        )
-    return {
-        "id": user["id"],
-        "email": user["email"],
-        "name": user["name"],
-        "role": user["role"],
-    }
+    return _serialize_user(current_user)
 
 
 class PromoteRequest(BaseModel):
@@ -329,19 +440,61 @@ class PromoteRequest(BaseModel):
 
 
 @router.post("/promote")
-async def promote_user(request: PromoteRequest):
-    """Promote a user to a new role."""
+async def promote_user(
+    request: PromoteRequest,
+    actor: dict[str, Any] = Depends(require_admin_user),
+):
+    """Promote a user to a new role. Admin-only and always audited."""
+    before = _get_user_by_email(request.email)
+    if before is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
     updated = _update_user_role(request.email, request.role)
     if not updated:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-    logger.info("User %s promoted to %s", request.email, request.role)
-    return {"message": f"User {request.email} promoted to {request.role}"}
+    logger.warning(
+        "User role updated actor=%s target=%s new_role=%s app_env=%s",
+        actor["email"],
+        request.email,
+        request.role.value,
+        _app_env(),
+    )
+    emit_audit_event(
+        actor=str(actor["email"]),
+        action="promote_user",
+        resource_type="user",
+        resource_id=str(before["id"]),
+        before={"email": before["email"], "role": str(before.get("role") or "")},
+        after={"email": request.email, "role": request.role.value},
+        metadata={
+            "actor_user_id": str(actor["id"]),
+            "target_email": str(request.email),
+        },
+    )
+    return {
+        "message": f"User {request.email} promoted to {request.role.value}",
+        "changed_by": actor["email"],
+    }
 
 
 @router.get("/callback")
 async def oauth_callback():
     """SmartAPI portal compliance endpoint. Phoenix uses server-side TOTP login; this redirect is never triggered."""
     return {"status": "ok"}
+
+
+__all__ = [
+    "authenticate_bearer_token",
+    "require_admin_user",
+    "require_authenticated_user",
+    "router",
+    "_get_user_by_email",
+    "_get_user_by_id",
+    "_parse_token",
+    "_token_secret",
+]

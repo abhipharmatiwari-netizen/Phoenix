@@ -45,7 +45,9 @@ from app.dashboard.admin_routes import router as admin_router
 from app.dashboard.auth import (
     AdminContext,
     AdminRole,
+    TenantContext,
     get_admin_context,
+    get_tenant_context,
     issue_dashboard_ws_ticket,
     safe_compare_token,
     verify_dashboard_ws_ticket,
@@ -67,6 +69,7 @@ from pydantic import BaseModel
 from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
+_REAL_ASYNCIO_SLEEP = asyncio.sleep
 _ACTIVE_DASHBOARD_SOCKETS: dict[int, WebSocket] = {}
 _ACTIVE_DASHBOARD_SOCKETS_LOCK = threading.Lock()
 
@@ -154,6 +157,7 @@ async def _dashboard_ws_sender_loop(
         first_message = False
         await websocket.send_text(json.dumps(payload))
         await asyncio.sleep(1.0)
+        await _REAL_ASYNCIO_SLEEP(0)
 
 
 async def _dashboard_ws_disconnect_watcher(websocket: WebSocket) -> None:
@@ -256,39 +260,42 @@ app.include_router(bff_proxy_router)
 @app.get("/positions")
 async def get_positions_legacy(
     broker_account_id: str = Query(None, alias="broker_account_id"),
-    x_tenant_id: str = Header(None, alias="X-Tenant-Id"),
-    ctx: AdminContext = Depends(get_admin_context),
+    tenant_ctx: TenantContext = Depends(get_tenant_context),
 ):
     """
     Legacy endpoint for backward compatibility.
-    Delegates to tenant-scoped endpoint.
-    
+    Delegates to tenant-scoped authorization and server-side tenant entitlements.
+
     Requires either:
-    - X-Tenant-Id header + broker_account_id query param
-    - Or just broker_account_id (will attempt to resolve first account)
+    - Authorization or X-Admin-Key plus X-Tenant-Id when multiple tenants are available
+    - Or Authorization or X-Admin-Key only when a single tenant/account can be resolved
     """
-    if not x_tenant_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="X-Tenant-Id header is required",
-        )
+    resolved_tenant_id = str(tenant_ctx.tenant_id)
 
     if not broker_account_id:
-        # Try to resolve first account for tenant
-        accounts = get_broker_accounts_for_tenant(x_tenant_id)
+        accounts = list(get_broker_accounts_for_tenant(resolved_tenant_id))
+        if tenant_ctx.broker_account_ids:
+            accounts = [
+                account for account in accounts
+                if str(getattr(account, "broker_account_id", "") or "") in tenant_ctx.broker_account_ids
+            ]
         if not accounts:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="No broker accounts found for tenant",
             )
-        broker_account_id = accounts[0].get("broker_account_id")
+        first_account = accounts[0]
+        broker_account_id = str(
+            getattr(first_account, "broker_account_id", None)
+            or (first_account.get("broker_account_id") if isinstance(first_account, dict) else "")
+            or ""
+        )
 
-    # Call tenant-scoped endpoint logic
     runtime = get_hub_runtime()
     try:
         positions = runtime.state_store.get_positions(broker_account_id)
         return {
-            "tenant_id": x_tenant_id,
+            "tenant_id": resolved_tenant_id,
             "broker_account_id": broker_account_id,
             "positions": positions,
         }

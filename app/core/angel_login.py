@@ -4,8 +4,12 @@
 # Provides token generation and best-effort logout for the broker session.
 import http.client
 import json
-import pyotp
 import os
+
+try:  # pragma: no cover - optional in lightweight test environments
+    import pyotp  # type: ignore
+except Exception:  # pragma: no cover - optional in lightweight test environments
+    pyotp = None
 import logging
 import random
 import re
@@ -49,6 +53,11 @@ STATE_VARIABLE = "WEB"
 
 logger = logging.getLogger("angel_login")
 """Module logger for Angel login helper."""
+
+def _require_pyotp():
+    if pyotp is None:
+        raise RuntimeError("pyotp is required for Angel TOTP login flows but is not installed")
+    return pyotp
 
 _RETRYABLE_LOGIN_DELAY_SECONDS = (0.2, 0.8)
 _LOGIN_SNIPPET_LIMIT = 200
@@ -325,7 +334,7 @@ def angel_login_and_get_tokens():
         raise ValueError("ANGEL_TOTP_SECRET environment variable not set")
 
     # 2) Generate TOTP using the *local* variable
-    current_totp = pyotp.TOTP(totp_secret).now()
+    current_totp = _require_pyotp().TOTP(totp_secret).now()
 
     conn = http.client.HTTPSConnection("apiconnect.angelone.in")
 
@@ -418,7 +427,7 @@ def angel_login_with_secrets(secrets: AngelSecrets) -> AngelLoginTokens:
     """
     Login using explicitly provided secrets instead of env/global constants.
     """
-    current_totp = pyotp.TOTP(secrets.totp_secret).now()
+    current_totp = _require_pyotp().TOTP(secrets.totp_secret).now()
 
     conn = http.client.HTTPSConnection("apiconnect.angelone.in")
 

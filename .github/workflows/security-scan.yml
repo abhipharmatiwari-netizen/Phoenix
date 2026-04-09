@@ -1,48 +1,44 @@
-name: Security Scan
+name: security-scan
 
 on:
   push:
     branches: [main, master]
   pull_request:
-    branches: [main, master]
-  schedule:
-    - cron: '0 3 * * 1'
+  workflow_dispatch:
 
 jobs:
-  gitleaks:
-    name: Secret Detection (gitleaks)
+  supply-chain-and-secrets:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          fetch-depth: 0
+          python-version: '3.13'
+
+      - name: Install security tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit cyclonedx-bom
+
       - name: Run gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  dependency-audit:
-    name: Dependency Audit (pip-audit)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install pip-audit
-        run: pip install pip-audit
-      - name: Run pip_audit
+      - name: Audit Python dependencies
         run: pip-audit -r requirements.txt
 
-  sbom:
-    name: Generate SBOM
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install dependencies
-        run: pip install -r requirements.txt
       - name: Generate SBOM
         run: python scripts/generate_sbom.py
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: phoenix-sbom
+          path: |
+            sbom.json
+            sbom.cdx.json
+          if-no-files-found: warn

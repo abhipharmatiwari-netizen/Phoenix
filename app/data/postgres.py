@@ -1,15 +1,23 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 import logging
 import os
 import re
 import socket
 import time
 
-import psycopg
+try:  # pragma: no cover - optional in lightweight test environments
+    import psycopg  # type: ignore
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo  # type: ignore
+except Exception:  # pragma: no cover - optional in lightweight test environments
+    psycopg = None  # type: ignore[assignment]
 
-from psycopg.conninfo import conninfo_to_dict, make_conninfo
+    def conninfo_to_dict(dsn: str) -> dict[str, str]:
+        return {"dsn": dsn}
+
+    def make_conninfo(**params: object) -> str:
+        return " ".join(f"{key}={value}" for key, value in params.items() if value not in (None, ""))
 
 from app.config.settings import Settings, get_settings
 
@@ -89,10 +97,12 @@ def connect_with_retry(
     autocommit: bool = True,
     max_attempts: int = 3,
     base_backoff_seconds: float = 0.5,
-) -> psycopg.Connection:
+) -> Any:
     """
     Connect to Postgres with a small retry/backoff and a configurable connect timeout.
     """
+    if psycopg is None:
+        raise RuntimeError("psycopg is required for Postgres operations but is not installed")
     try:
         connect_timeout = int(os.getenv("POSTGRES_CONNECT_TIMEOUT_SECONDS", "5"))
     except Exception:

@@ -1,9 +1,8 @@
-"""
-Auth and context helpers for dashboard APIs.
+"""Auth and context helpers for dashboard APIs.
 
 Provides:
-- AdminContext: gated by a static X-Admin-Key header or HMAC signature.
-- TenantContext: identified by X-Tenant-Id header and validated via Firestore.
+- AdminContext resolved from authenticated bearer identity, static admin key, or HMAC.
+- TenantContext resolved from entitlement-backed tenant scope.
 - Role-based access control: READONLY, OPERATOR, ADMIN roles.
 - Non-local auth enforcement: auth is mandatory when APP_ENV is not local/dev.
 """
@@ -22,11 +21,14 @@ from enum import Enum
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import Header, HTTPException, Request, status
+from fastapi import Depends, Header, HTTPException, Request, status
 
+from app.api.auth_routes import authenticate_bearer_token
+from app.api.models import Role
 from app.config.settings import get_settings
-from app.tenants.firestore_client import get_tenant
 from app.core.identifiers import TenantId
+from app.security.entitlements import resolve_user_entitlements
+from app.tenants.firestore_client import get_tenant
 
 logger = logging.getLogger(__name__)
 _DASHBOARD_WS_TICKET_VERSION = 1
@@ -51,7 +53,6 @@ class DashboardWebsocketTicket:
     role: AdminRole
 
 
-# Role hierarchy: admin > operator > readonly
 _ROLE_HIERARCHY = {
     AdminRole.READONLY: 0,
     AdminRole.OPERATOR: 1,
@@ -77,11 +78,27 @@ def _resolve_role_from_key(admin_key: Optional[str]) -> AdminRole:
     return AdminRole.ADMIN
 
 
-# Request context for admin-authenticated routes.
 class AdminContext:
-    def __init__(self, caller: str = "admin", role: AdminRole = AdminRole.ADMIN) -> None:
+    def __init__(
+        self,
+        caller: str = "admin",
+        role: AdminRole = AdminRole.ADMIN,
+        *,
+        user_id: str | None = None,
+        email: str | None = None,
+        auth_source: str = "admin_key",
+        tenant_ids: tuple[str, ...] = (),
+        broker_account_ids: tuple[str, ...] = (),
+        all_tenants: bool = False,
+    ) -> None:
         self.caller = caller
         self.role = role
+        self.user_id = user_id
+        self.email = email
+        self.auth_source = auth_source
+        self.tenant_ids = tenant_ids
+        self.broker_account_ids = broker_account_ids
+        self.all_tenants = all_tenants
 
     def require_role(self, required: AdminRole) -> None:
         """Raise 403 if current role is insufficient."""
@@ -91,11 +108,33 @@ class AdminContext:
                 detail=f"Requires {required.value} role, current role is {self.role.value}.",
             )
 
+    def can_access_tenant(self, tenant_id: str) -> bool:
+        if self.all_tenants:
+            return True
+        token = str(tenant_id or "").strip()
+        return bool(token and token in self.tenant_ids)
 
-# Request context for tenant-authenticated routes.
+    def can_access_broker_account(self, broker_account_id: str) -> bool:
+        if self.all_tenants:
+            return True
+        if not self.broker_account_ids:
+            return True
+        token = str(broker_account_id or "").strip()
+        return bool(token and token in self.broker_account_ids)
+
+
 class TenantContext:
-    def __init__(self, tenant_id: TenantId) -> None:
+    def __init__(
+        self,
+        tenant_id: TenantId,
+        *,
+        broker_account_ids: tuple[str, ...] = (),
+        source: str = "header",
+    ) -> None:
         self.tenant_id = tenant_id
+        self.broker_account_ids = broker_account_ids
+        self.source = source
+
 
 
 def safe_compare_token(expected: Optional[str], actual: Optional[str]) -> bool:
@@ -104,6 +143,7 @@ def safe_compare_token(expected: Optional[str], actual: Optional[str]) -> bool:
     if not expected_text or not actual_text:
         return False
     return hmac.compare_digest(expected_text, actual_text)
+
 
 
 def _dashboard_ws_ticket_secret(settings: object | None = None) -> str:
@@ -118,8 +158,10 @@ def _dashboard_ws_ticket_secret(settings: object | None = None) -> str:
     return secret
 
 
+
 def _urlsafe_b64encode_bytes(payload: bytes) -> str:
     return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
 
 
 def _urlsafe_b64decode_text(payload: str) -> bytes:
@@ -133,11 +175,13 @@ def _urlsafe_b64decode_text(payload: str) -> bytes:
         raise ValueError("invalid base64 token segment") from exc
 
 
+
 def _dashboard_ws_mode_token(mode: object) -> str:
     token = str(mode or "delta").strip().lower()
     if token not in {"delta", "full"}:
         raise ValueError(f"Unsupported dashboard websocket mode: {token!r}")
     return token
+
 
 
 def issue_dashboard_ws_ticket(
@@ -187,6 +231,7 @@ def issue_dashboard_ws_ticket(
         caller=admin_ctx.caller,
         role=admin_ctx.role,
     )
+
 
 
 def verify_dashboard_ws_ticket(
@@ -242,7 +287,8 @@ def verify_dashboard_ws_ticket(
     role_value = str(payload.get("role") or AdminRole.ADMIN.value).strip().lower()
     role = AdminRole(role_value) if role_value in {r.value for r in AdminRole} else AdminRole.ADMIN
     caller = str(payload.get("caller") or "dashboard_ticket").strip() or "dashboard_ticket"
-    return AdminContext(caller=caller, role=role)
+    return AdminContext(caller=caller, role=role, auth_source="ws_ticket")
+
 
 
 def _normalized_signature(value: str) -> str:
@@ -250,6 +296,7 @@ def _normalized_signature(value: str) -> str:
     if token.lower().startswith("sha256="):
         token = token.split("=", 1)[1]
     return token.lower()
+
 
 
 def _header_text(value: object) -> Optional[str]:
@@ -260,6 +307,7 @@ def _header_text(value: object) -> Optional[str]:
         token = value.strip()
         return token or None
     return None
+
 
 
 def _is_valid_admin_hmac(
@@ -309,29 +357,66 @@ def _is_valid_admin_hmac(
     )
 
 
+
 def _is_auth_required() -> bool:
     """Auth is mandatory unless APP_ENV is explicitly local or dev."""
     app_env = os.getenv("APP_ENV", "").strip().lower()
     dashboard_auth_disabled = os.getenv("DASHBOARD_AUTH_DISABLED", "").strip().lower()
     if app_env in ("local", "dev", "test"):
         return dashboard_auth_disabled not in ("1", "true", "yes", "on")
-    # Non-local: auth is always required regardless of DASHBOARD_AUTH_DISABLED
     return True
 
 
-# Validate admin API key and return AdminContext.
+
+def _admin_role_from_user_role(role: object) -> AdminRole:
+    token = role.value if isinstance(role, Role) else str(role or "").strip().lower()
+    if token == Role.ADMIN.value:
+        return AdminRole.ADMIN
+    if token == Role.OPERATOR.value:
+        return AdminRole.OPERATOR
+    return AdminRole.READONLY
+
+
+
+def _user_admin_context(authorization: Optional[str]) -> AdminContext:
+    user = authenticate_bearer_token(authorization)
+    entitlements = resolve_user_entitlements(
+        user_id=str(user.get("id") or ""),
+        email=str(user.get("email") or ""),
+        role=user.get("role"),
+    )
+    email = str(user.get("email") or "").strip()
+    return AdminContext(
+        caller=email or str(user.get("id") or "user"),
+        role=_admin_role_from_user_role(user.get("role")),
+        user_id=str(user.get("id") or "").strip() or None,
+        email=email or None,
+        auth_source="bearer",
+        tenant_ids=tuple(entitlements.tenant_ids),
+        broker_account_ids=tuple(entitlements.broker_account_ids),
+        all_tenants=bool(entitlements.all_tenants),
+    )
+
+
 async def get_admin_context(
     request: Request,
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
     x_admin_key: Optional[str] = Header(default=None, alias="X-Admin-Key"),
     x_admin_timestamp: Optional[str] = Header(default=None, alias="X-Admin-Timestamp"),
     x_admin_signature: Optional[str] = Header(default=None, alias="X-Admin-Signature"),
     x_admin_role: Optional[str] = Header(default=None, alias="X-Admin-Role"),
 ) -> AdminContext:
     auth_required = _is_auth_required()
+    authz_header = _header_text(authorization)
     admin_key = _header_text(x_admin_key)
     admin_timestamp = _header_text(x_admin_timestamp)
     admin_signature = _header_text(x_admin_signature)
     admin_role = _header_text(x_admin_role)
+
+    if authz_header:
+        ctx = _user_admin_context(authz_header)
+        request.state.admin_context = ctx
+        return ctx
 
     if admin_timestamp or admin_signature:
         if _is_valid_admin_hmac(
@@ -344,7 +429,9 @@ async def get_admin_context(
                 if admin_role and admin_role in {r.value for r in AdminRole}
                 else AdminRole.ADMIN
             )
-            return AdminContext(caller="admin_hmac", role=role)
+            ctx = AdminContext(caller="admin_hmac", role=role, auth_source="admin_hmac", all_tenants=True)
+            request.state.admin_context = ctx
+            return ctx
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid admin HMAC headers.",
@@ -353,9 +440,10 @@ async def get_admin_context(
     settings = get_settings()
 
     if not auth_required:
-        # Local/dev with auth disabled — allow through as admin
         if not settings.admin_api_key or not admin_key:
-            return AdminContext(caller="local_bypass", role=AdminRole.ADMIN)
+            ctx = AdminContext(caller="local_bypass", role=AdminRole.ADMIN, auth_source="local_bypass", all_tenants=True)
+            request.state.admin_context = ctx
+            return ctx
 
     if not settings.admin_api_key:
         if auth_required:
@@ -364,17 +452,20 @@ async def get_admin_context(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Admin API key not configured.",
             )
-        return AdminContext(caller="unconfigured", role=AdminRole.ADMIN)
+        ctx = AdminContext(caller="unconfigured", role=AdminRole.ADMIN, auth_source="unconfigured", all_tenants=True)
+        request.state.admin_context = ctx
+        return ctx
 
     if not admin_key:
         if auth_required:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Missing X-Admin-Key header.",
+                detail="Missing Authorization or X-Admin-Key header.",
             )
-        return AdminContext(caller="local_bypass", role=AdminRole.ADMIN)
+        ctx = AdminContext(caller="local_bypass", role=AdminRole.ADMIN, auth_source="local_bypass", all_tenants=True)
+        request.state.admin_context = ctx
+        return ctx
 
-    # Strip role suffix for comparison: key might be "secret:readonly"
     compare_key = admin_key.rsplit(":", 1)[0] if ":" in admin_key else admin_key
     if not safe_compare_token(settings.admin_api_key, compare_key):
         raise HTTPException(
@@ -383,27 +474,68 @@ async def get_admin_context(
         )
 
     role = _resolve_role_from_key(admin_key)
-    return AdminContext(caller="admin", role=role)
+    ctx = AdminContext(caller="admin", role=role, auth_source="admin_key", all_tenants=True)
+    request.state.admin_context = ctx
+    return ctx
 
 
-# Validate tenant id header and return TenantContext.
 async def get_tenant_context(
+    request: Request,
+    admin_ctx: AdminContext = Depends(get_admin_context),
     x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
 ) -> TenantContext:
-    if not x_tenant_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing X-Tenant-Id header.",
-        )
+    requested_tenant_id = _header_text(x_tenant_id)
 
-    tenant = get_tenant(x_tenant_id)
+    if admin_ctx.auth_source == "bearer":
+        if admin_ctx.all_tenants:
+            if not requested_tenant_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Tenant selection is required.",
+                )
+            resolved_tenant_id = requested_tenant_id
+        else:
+            if not admin_ctx.tenant_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="No tenant entitlements configured for this user.",
+                )
+            if requested_tenant_id:
+                resolved_tenant_id = requested_tenant_id
+            elif len(admin_ctx.tenant_ids) == 1:
+                resolved_tenant_id = admin_ctx.tenant_ids[0]
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Tenant selection is required.",
+                )
+            if resolved_tenant_id not in admin_ctx.tenant_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Tenant access denied.",
+                )
+    else:
+        if not requested_tenant_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing X-Tenant-Id header.",
+            )
+        resolved_tenant_id = requested_tenant_id
+
+    tenant = get_tenant(resolved_tenant_id)
     if tenant is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Tenant not found.",
         )
 
-    return TenantContext(tenant_id=tenant.tenant_id)
+    ctx = TenantContext(
+        tenant_id=tenant.tenant_id,
+        broker_account_ids=tuple(admin_ctx.broker_account_ids) if admin_ctx.auth_source == "bearer" and not admin_ctx.all_tenants else (),
+        source=admin_ctx.auth_source,
+    )
+    request.state.tenant_context = ctx
+    return ctx
 
 
 __all__ = [

@@ -26,3 +26,8 @@ Thumbs.db
 
 # Claude memory (local session state)
 .claude/
+
+# Runtime env injections / operator-only files
+*.env.runtime
+*.runtime.env
+.env.runtime

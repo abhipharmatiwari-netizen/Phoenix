@@ -12,8 +12,15 @@ from typing import Optional, Dict
 from zoneinfo import ZoneInfo
 import logging
 
-from google.cloud import firestore  # type: ignore
-from psycopg.rows import dict_row
+try:  # pragma: no cover - optional in lightweight test environments
+    from google.cloud import firestore  # type: ignore
+except Exception:  # pragma: no cover - optional in lightweight test environments
+    firestore = None
+
+try:  # pragma: no cover - optional in lightweight test environments
+    from psycopg.rows import dict_row  # type: ignore
+except Exception:  # pragma: no cover - optional in lightweight test environments
+    dict_row = None
 
 from app.core.identifiers import BrokerAccountId, TenantId
 from app.data.postgres import connect_with_retry
@@ -47,7 +54,7 @@ class EODStateStore:
     """Manages persistent EOD state in Firestore."""
     COLLECTION_NAME = "eod_states"
     
-    def __init__(self, firestore_client: firestore.Client, default_time_zone: str = "Asia/Kolkata"):
+    def __init__(self, firestore_client, default_time_zone: str = "Asia/Kolkata"):
         self.firestore_client = firestore_client
         self._tz = ZoneInfo(default_time_zone)
     
@@ -77,6 +84,8 @@ class PostgresEODStateStore:
     TABLE_NAME = "eod_states"
 
     def __init__(self, dsn: str, default_time_zone: str = "Asia/Kolkata"):
+        if dict_row is None:
+            raise RuntimeError("psycopg is required for Postgres EOD state store")
         self.dsn = dsn
         self._tz = ZoneInfo(default_time_zone)
         self._ensure_schema()

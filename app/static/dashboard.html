@@ -471,10 +471,12 @@
         <div class="panel">
           <div class="panel-title">Tenant Positions (API)</div>
           <div class="muted" style="margin-bottom: 8px; font-size: 12px;">
-            Reads /tenant positions (requires X-Tenant-Id header).
+            Reads /tenant positions for an admin-approved tenant scope.
           </div>
           <div class="form-row">
-            <input id="tenant-id-input" class="text-input" placeholder="Tenant ID" />
+            <select id="tenant-id-input" class="text-input">
+              <option value="">Select tenant</option>
+            </select>
             <button id="tenant-load-btn" class="btn">Load</button>
           </div>
           <div id="tenant-positions-status" class="muted" style="margin-bottom: 6px;"></div>
@@ -516,6 +518,7 @@
     const controlStatusEl = document.getElementById("control-tower-status");
     const tenantIdInput = document.getElementById("tenant-id-input");
     const tenantLoadBtn = document.getElementById("tenant-load-btn");
+    let tenantOptionsLoaded = false;
     const tenantPositionsTableEl = document.getElementById("tenant-positions-table");
     const tenantPositionsStatusEl = document.getElementById("tenant-positions-status");
 
@@ -1144,18 +1147,53 @@
       tenantPositionsStatusEl.textContent = message || "";
     }
 
+    function renderTenantOptions(tenants) {
+      if (!tenantIdInput) return;
+      const savedTenant = (() => {
+        try {
+          return localStorage.getItem("dashboard_tenant_id") || "";
+        } catch (err) {
+          return "";
+        }
+      })();
+      const options = ['<option value="">Select tenant</option>'];
+      (tenants || []).forEach((tenant) => {
+        const tenantId = String(tenant.tenant_id || tenant.tenantId || "").trim();
+        if (!tenantId) return;
+        const label = String(tenant.name || tenantId);
+        const selected = savedTenant && savedTenant === tenantId ? ' selected' : '';
+        options.push(`<option value="${tenantId}"${selected}>${label}</option>`);
+      });
+      tenantIdInput.innerHTML = options.join("");
+      tenantOptionsLoaded = true;
+    }
+
+    async function loadTenantOptions() {
+      if (!tenantIdInput || tenantOptionsLoaded) return;
+      try {
+        const response = await apiFetch("/admin/tenants");
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        renderTenantOptions(payload.tenants || []);
+      } catch (err) {
+        setTenantStatus("Failed to load tenant options.");
+      }
+    }
+
     async function loadTenantPositions() {
       if (!tenantIdInput || !tenantPositionsTableEl) return;
       const tenantId = (tenantIdInput.value || "").trim();
       if (!tenantId) {
-        setTenantStatus("Enter a tenant id first.");
+        setTenantStatus("Select a tenant first.");
         tenantPositionsTableEl.innerHTML = "";
         return;
       }
       setTenantStatus("Loading...");
       if (tenantLoadBtn) tenantLoadBtn.disabled = true;
       try {
-        const accountsRes = await fetch("/tenant/me/accounts", {
+        const accountsRes = await apiFetch("/tenant/me/accounts", {
           headers: { "X-Tenant-Id": tenantId },
         });
         if (!accountsRes.ok) {
@@ -1190,7 +1228,7 @@
             // Add small delay between requests to avoid rate limiting
             await new Promise(resolve => setTimeout(resolve, index * 100));
             try {
-              const res = await fetch(
+              const res = await apiFetch(
                 `/tenant/me/accounts/${encodeURIComponent(accountId)}/positions`,
                 { headers: { "X-Tenant-Id": tenantId } }
               );
@@ -1330,22 +1368,17 @@
 
     connect();
     loadControlTower();
+    loadTenantOptions();
     if (tenantIdInput) {
-      try {
-        const savedTenant = localStorage.getItem("dashboard_tenant_id");
-        if (savedTenant) tenantIdInput.value = savedTenant;
-      } catch (err) {
-        // ignore localStorage failures
-      }
-      tenantIdInput.addEventListener("keydown", (ev) => {
-        if (ev.key === "Enter") {
-          ev.preventDefault();
-          loadTenantPositions();
-        }
+      tenantIdInput.addEventListener("change", () => {
+        setTenantStatus("");
       });
     }
     if (tenantLoadBtn) {
-      tenantLoadBtn.addEventListener("click", () => loadTenantPositions());
+      tenantLoadBtn.addEventListener("click", async () => {
+        await loadTenantOptions();
+        loadTenantPositions();
+      });
     }
   </script>
 </body>

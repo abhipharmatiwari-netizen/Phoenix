@@ -51,14 +51,14 @@ class _StubAsyncClient:
         )
 
 
-def test_bff_get_forwards_admin_and_tenant_headers(monkeypatch):
+
+def test_bff_get_forwards_user_and_tenant_headers(monkeypatch):
     calls: list[dict[str, object]] = []
 
     monkeypatch.setattr(
         bff_proxy,
         "get_settings",
         lambda: SimpleNamespace(
-            admin_api_key="test-admin",
             backend_url="http://backend:8080",
         ),
     )
@@ -72,6 +72,7 @@ def test_bff_get_forwards_admin_and_tenant_headers(monkeypatch):
     response = client.get(
         "/bff/tenant/me/accounts?limit=10",
         headers={
+            "Authorization": "Bearer user-token",
             "X-Tenant-Id": "tenant-123",
             "X-Request-Id": "req-1",
         },
@@ -84,9 +85,11 @@ def test_bff_get_forwards_admin_and_tenant_headers(monkeypatch):
     assert forwarded["method"] == "GET"
     assert forwarded["url"] == "http://backend:8080/tenant/me/accounts"
     assert forwarded["params"] == {"limit": "10"}
-    assert forwarded["headers"]["X-Admin-Key"] == "test-admin"
+    assert forwarded["headers"]["Authorization"] == "Bearer user-token"
     assert forwarded["headers"]["X-Tenant-Id"] == "tenant-123"
     assert forwarded["headers"]["X-Request-Id"] == "req-1"
+    assert "X-Admin-Key" not in forwarded["headers"]
+
 
 
 def test_bff_post_forwards_json_body_and_query_params(monkeypatch):
@@ -96,7 +99,6 @@ def test_bff_post_forwards_json_body_and_query_params(monkeypatch):
         bff_proxy,
         "get_settings",
         lambda: SimpleNamespace(
-            admin_api_key="test-admin",
             backend_url="http://backend:8080/",
         ),
     )
@@ -109,7 +111,10 @@ def test_bff_post_forwards_json_body_and_query_params(monkeypatch):
     client = TestClient(app)
     response = client.post(
         "/bff/api/control_tower/toggle?dry_run=true",
-        headers={"X-Correlation-Id": "corr-1"},
+        headers={
+            "Authorization": "Bearer operator-token",
+            "X-Correlation-Id": "corr-1",
+        },
         json={"tenant_id": "tenant-1", "strategy_id": "strat-1", "enabled": True},
     )
 
@@ -125,6 +130,6 @@ def test_bff_post_forwards_json_body_and_query_params(monkeypatch):
         "strategy_id": "strat-1",
         "enabled": True,
     }
-    assert forwarded["headers"]["X-Admin-Key"] == "test-admin"
+    assert forwarded["headers"]["Authorization"] == "Bearer operator-token"
     assert forwarded["headers"]["X-Correlation-Id"] == "corr-1"
     assert forwarded["headers"]["Content-Type"] == "application/json"

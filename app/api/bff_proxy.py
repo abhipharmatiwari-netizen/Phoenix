@@ -25,18 +25,14 @@ def _proxy_headers(
     *,
     include_json_content_type: bool = False,
 ) -> dict[str, str]:
-    settings = get_settings()
     headers: dict[str, str] = {}
 
-    admin_key = str(settings.admin_api_key or "").strip()
-    if admin_key:
-        headers["X-Admin-Key"] = admin_key
-
     for name in (
+        "Authorization",
+        "X-Admin-Key",
         "X-Tenant-Id",
         "X-Request-Id",
         "X-Correlation-Id",
-        "Authorization",
     ):
         value = str(request.headers.get(name) or "").strip()
         if value:

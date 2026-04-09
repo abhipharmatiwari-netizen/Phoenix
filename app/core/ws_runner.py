@@ -11,7 +11,10 @@ import time
 import threading
 from typing import Callable, Optional
 
-from SmartApi.smartWebSocketV2 import SmartWebSocketV2
+try:  # pragma: no cover - optional in lightweight test environments
+    from SmartApi.smartWebSocketV2 import SmartWebSocketV2  # type: ignore
+except Exception:  # pragma: no cover - optional in lightweight test environments
+    SmartWebSocketV2 = None
 from app.core.signal_metrics import get_labeled_metrics
 
 try:  # websocket-client import path
@@ -115,6 +118,8 @@ class SmartWebSocketRunner:
         retry_delay: int = 10,
         retry_duration: int = 60,
     ) -> None:
+        if SmartWebSocketV2 is None:
+            raise RuntimeError("SmartApi websocket client is required for live websocket runner")
         self.sws = SmartWebSocketV2(
             auth_header_value,
             api_key,

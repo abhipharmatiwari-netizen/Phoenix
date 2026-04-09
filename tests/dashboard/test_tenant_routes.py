@@ -58,7 +58,7 @@ def test_tenant_routes_require_admin_key(monkeypatch):
             headers={"X-Tenant-Id": "tenant-123"},
         )
         assert resp.status_code == 401
-        assert resp.json()["detail"] == "Missing X-Admin-Key header."
+        assert "Authorization" in resp.json()["detail"] or "X-Admin-Key" in resp.json()["detail"]
     finally:
         server.app.dependency_overrides.clear()
 

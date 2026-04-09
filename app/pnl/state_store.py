@@ -16,7 +16,10 @@ import os
 from datetime import date, datetime
 from typing import Any, Dict, Optional, Protocol
 
-from psycopg.rows import dict_row
+try:  # pragma: no cover - optional in lightweight test environments
+    from psycopg.rows import dict_row  # type: ignore
+except Exception:  # pragma: no cover - optional in lightweight test environments
+    dict_row = None
 
 from app.config.settings import Settings, get_settings
 from app.core.identifiers import BrokerAccountId, StrategyId, TenantId

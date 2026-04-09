@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api import auth_routes
+from app.api.models import Role
 
 
 @pytest.fixture
@@ -39,13 +40,34 @@ def auth_client(monkeypatch):
     )
     monkeypatch.setattr(
         auth_routes,
+        "_update_user_role",
+        lambda email, role: bool(users_db.get(email)) and not users_db[email].__setitem__("role", role),
+    )
+    monkeypatch.setattr(
+        auth_routes,
         "_token_secret",
         lambda: "unit-test-demo-auth-secret",
+    )
+    monkeypatch.setattr(
+        auth_routes,
+        "resolve_user_entitlements",
+        lambda **_: type("Entitlements", (), {
+            "tenant_ids": ("tenant-123",),
+            "broker_account_ids": (),
+            "all_tenants": False,
+            "source": "unit-test",
+        })(),
     )
     app = FastAPI()
     app.include_router(auth_routes.router)
     with TestClient(app) as client:
         yield client, users_db
+
+
+
+def _auth_header(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
 
 
 def test_register_hashes_password_and_disallows_duplicate_email(auth_client):
@@ -74,6 +96,7 @@ def test_register_hashes_password_and_disallows_duplicate_email(auth_client):
     assert duplicate.status_code == 409
 
 
+
 def test_login_returns_signed_token_and_me_validates_it(auth_client):
     client, _users_db = auth_client
     register = client.post(
@@ -95,12 +118,101 @@ def test_login_returns_signed_token_and_me_validates_it(auth_client):
     assert "token" in payload
     assert not payload["token"].startswith("token_")
 
-    me = client.get(f"/auth/me?token={payload['token']}")
+    me = client.get("/auth/me", headers=_auth_header(payload["token"]))
     assert me.status_code == 200
     assert me.json()["email"] == "demo@example.com"
+    assert me.json()["tenant_ids"] == ["tenant-123"]
+
 
 
 def test_me_rejects_invalid_token(auth_client):
     client, _users_db = auth_client
-    invalid = client.get("/auth/me?token=invalid-token")
+    invalid = client.get("/auth/me", headers=_auth_header("invalid-token"))
     assert invalid.status_code == 401
+
+
+
+def test_me_rejects_query_param_tokens(auth_client):
+    client, _users_db = auth_client
+    register = client.post(
+        "/auth/register",
+        json={
+            "name": "Demo User",
+            "email": "query@example.com",
+            "password": "password-123",
+        },
+    )
+    assert register.status_code == 200
+    login = client.post(
+        "/auth/login",
+        json={"email": "query@example.com", "password": "password-123"},
+    )
+    token = login.json()["token"]
+    response = client.get(f"/auth/me?token={token}", headers=_auth_header(token))
+    assert response.status_code == 400
+    assert "Authorization" in response.json()["detail"]
+
+
+
+def test_promote_requires_admin_identity(auth_client):
+    client, users_db = auth_client
+    client.post(
+        "/auth/register",
+        json={
+            "name": "Target User",
+            "email": "target@example.com",
+            "password": "password-123",
+        },
+    )
+    client.post(
+        "/auth/register",
+        json={
+            "name": "Viewer User",
+            "email": "viewer@example.com",
+            "password": "password-123",
+        },
+    )
+    viewer_login = client.post(
+        "/auth/login",
+        json={"email": "viewer@example.com", "password": "password-123"},
+    )
+    response = client.post(
+        "/auth/promote",
+        json={"email": "target@example.com", "role": Role.ADMIN.value},
+        headers=_auth_header(viewer_login.json()["token"]),
+    )
+    assert response.status_code == 403
+    assert users_db["target@example.com"]["role"] == Role.VIEWER
+
+
+
+def test_promote_allows_admin_identity(auth_client):
+    client, users_db = auth_client
+    client.post(
+        "/auth/register",
+        json={
+            "name": "Target User",
+            "email": "target@example.com",
+            "password": "password-123",
+        },
+    )
+    client.post(
+        "/auth/register",
+        json={
+            "name": "Admin User",
+            "email": "admin@example.com",
+            "password": "password-123",
+        },
+    )
+    users_db["admin@example.com"]["role"] = Role.ADMIN
+    admin_login = client.post(
+        "/auth/login",
+        json={"email": "admin@example.com", "password": "password-123"},
+    )
+    response = client.post(
+        "/auth/promote",
+        json={"email": "target@example.com", "role": Role.ADMIN.value},
+        headers=_auth_header(admin_login.json()["token"]),
+    )
+    assert response.status_code == 200
+    assert users_db["target@example.com"]["role"] == Role.ADMIN

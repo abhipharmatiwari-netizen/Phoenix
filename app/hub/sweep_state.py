@@ -13,9 +13,17 @@ from typing import Optional, Dict, Tuple
 from zoneinfo import ZoneInfo
 import logging
 
-from google.cloud import firestore  # type: ignore
-import psycopg
-from psycopg.rows import dict_row
+try:  # pragma: no cover - optional in lightweight test environments
+    from google.cloud import firestore  # type: ignore
+except Exception:  # pragma: no cover - optional in lightweight test environments
+    firestore = None
+
+try:  # pragma: no cover - optional in lightweight test environments
+    import psycopg  # type: ignore
+    from psycopg.rows import dict_row  # type: ignore
+except Exception:  # pragma: no cover - optional in lightweight test environments
+    psycopg = None  # type: ignore[assignment]
+    dict_row = None
 
 from app.core.identifiers import BrokerAccountId, TenantId
 from app.data.postgres import connect_with_retry
@@ -71,7 +79,7 @@ class SweepStateStore:
     COLLECTION_NAME = "sweep_states"
     
     # Initialize Firestore client and time zone handling.
-    def __init__(self, firestore_client: firestore.Client, default_time_zone: str = "Asia/Kolkata"):
+    def __init__(self, firestore_client, default_time_zone: str = "Asia/Kolkata"):
         """Initialize the sweep state store.
         
         Args:
@@ -302,6 +310,8 @@ class PostgresSweepStateStore:
     """Manages persistent sweep state in Postgres."""
 
     def __init__(self, dsn: str, default_time_zone: str = "Asia/Kolkata"):
+        if dict_row is None or psycopg is None:
+            raise RuntimeError("psycopg is required for Postgres sweep state store")
         self.dsn = dsn
         self.default_time_zone = default_time_zone
         self._tz = ZoneInfo(default_time_zone)

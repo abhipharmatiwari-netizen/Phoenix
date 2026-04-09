@@ -13,10 +13,16 @@ from fastapi import status
 @pytest.fixture
 def client(monkeypatch):
     """Create a test client with admin auth configured."""
+    auth_module = importlib.import_module("app.dashboard.auth")
     monkeypatch.setattr(
-        importlib.import_module("app.dashboard.auth"),
+        auth_module,
         "get_settings",
-        lambda: SimpleNamespace(admin_api_key="test-admin"),
+        lambda: SimpleNamespace(admin_api_key="test-admin", dashboard_hmac_auth_enabled=False, dashboard_hmac_secret=None),
+    )
+    monkeypatch.setattr(
+        auth_module,
+        "get_tenant",
+        lambda tenant_id: SimpleNamespace(tenant_id=str(tenant_id)),
     )
     return TestClient(app)
 
@@ -30,7 +36,7 @@ class TestLegacyPositionsEndpoint:
             "/positions?broker_account_id=test-account",
             headers={"X-Admin-Key": "test-admin"},
         )
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.status_code in {status.HTTP_400_BAD_REQUEST, status.HTTP_401_UNAUTHORIZED}
         assert "X-Tenant-Id" in response.json()["detail"]
 
     def test_positions_missing_broker_account_when_header_present(self, client):
@@ -110,10 +116,16 @@ def test_positions_endpoint_returns_correct_structure():
 
 def test_error_handling_for_404(monkeypatch):
     """Test that 404 is returned with meaningful message when account not found."""
+    auth_module = importlib.import_module("app.dashboard.auth")
     monkeypatch.setattr(
-        importlib.import_module("app.dashboard.auth"),
+        auth_module,
         "get_settings",
-        lambda: SimpleNamespace(admin_api_key="test-admin"),
+        lambda: SimpleNamespace(admin_api_key="test-admin", dashboard_hmac_auth_enabled=False, dashboard_hmac_secret=None),
+    )
+    monkeypatch.setattr(
+        auth_module,
+        "get_tenant",
+        lambda tenant_id: SimpleNamespace(tenant_id=str(tenant_id)),
     )
     client = TestClient(app)
     

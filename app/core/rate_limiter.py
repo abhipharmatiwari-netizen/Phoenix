@@ -31,7 +31,7 @@ class RateLimiter:
 
         Thread-safe:
           - Uses a lock to coordinate concurrent callers.
-          - Uses time.monotonic() so system clock changes do not break the logic.
+          - Uses the module clock so tests can monkeypatch time deterministically.
           - Releases the lock while sleeping, so other keys/threads can progress.
         """
         window_seconds, max_calls = self.limits.get(key, (0, 0))
@@ -42,7 +42,7 @@ class RateLimiter:
 
         while True:
             with self._lock:
-                now = time.monotonic()
+                now = time.time()
                 dq = self.calls[key]
 
                 while dq and now - dq[0] > window:

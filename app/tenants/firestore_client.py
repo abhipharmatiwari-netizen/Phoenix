@@ -13,7 +13,10 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Type, TypeVar
 
-from google.cloud import firestore  # type: ignore
+try:  # pragma: no cover - optional in lightweight test environments
+    from google.cloud import firestore  # type: ignore
+except Exception:  # pragma: no cover - optional in lightweight test environments
+    firestore = None
 
 from app.config.settings import get_settings
 from app.core.identifiers import BrokerAccountId, TenantId
@@ -33,7 +36,7 @@ BROKER_ACCOUNTS_COLLECTION = "broker_accounts"
 SUBSCRIPTIONS_COLLECTION = "subscriptions"
 STRATEGY_CONFIGS_COLLECTION = "strategy_configs"
 
-_firestore_client: Optional[firestore.Client] = None
+_firestore_client: Optional[Any] = None
 _ModelT = TypeVar(
     "_ModelT",
     bound=TenantModel | BrokerAccountModel | SubscriptionModel | StrategyConfigModel,
@@ -399,8 +402,10 @@ def _fs_upsert_strategy_config(model: StrategyConfigModel) -> StrategyConfigMode
     ).set(model.dict(), merge=True)
     return model
 # Return the shared Firestore client (or a mock if enabled).
-def _client() -> firestore.Client:
+def _client() -> Any:
     global _firestore_client
+    if firestore is None:
+        raise RuntimeError("google-cloud-firestore is required for Firestore control-plane operations")
     if _firestore_client is None:
         # Check if we're in mock/development mode
         if os.getenv("MOCK_FIRESTORE", "").lower() == "true":

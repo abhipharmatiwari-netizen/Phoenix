@@ -152,3 +152,5 @@ See the [capital limits runbook](docs/runbooks/capital_limits_configuration.md) 
 ## Non-LIVE usage
 
 The repo may still contain local or compatibility assets such as `docker.env`, `.docker-live.env`, `docker-compose.live.yml`, `docker-compose.postgres.override.yml`, and `cloudrun.env`. Those assets are not proof of LIVE readiness by themselves. LIVE approval depends on conformance to [`ARCHITECTURE.md`](ARCHITECTURE.md), the effective runtime environment, and release evidence.
+
+Clean promotion artifacts should be produced with `scripts/build_release_artifact.py`. The builder now works even from a source snapshot without `.git`, and it excludes runtime injection files such as `*.env.runtime`, logs, caches, and tests from the release zip.

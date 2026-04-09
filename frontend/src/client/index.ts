@@ -11,6 +11,7 @@ import {
 } from '../types/trading';
 
 const TENANT_STORAGE_KEY = 'phoenix.tenant_id';
+const AUTH_TOKEN_STORAGE_KEY = 'token';
 
 interface LoginPayload {
   email: string;
@@ -25,6 +26,16 @@ interface LoginResponse {
     name: string;
     role: string;
   };
+}
+
+interface AuthenticatedUserResponse {
+  id: string;
+  email: string;
+  name: string;
+  role: string;
+  tenant_ids?: string[];
+  broker_account_ids?: string[];
+  can_access_all_tenants?: boolean;
 }
 
 interface ListTenantsResponse {
@@ -137,7 +148,6 @@ export function getTenantId(): string {
   return (
     readTenantIdFromStorage()
     || String(process.env.REACT_APP_TENANT_ID || '').trim()
-    || 'tenant-default'
   );
 }
 
@@ -151,6 +161,14 @@ export function setTenantId(tenantId: string): void {
   } else {
     window.localStorage.removeItem(TENANT_STORAGE_KEY);
   }
+}
+
+function readStoredAuthToken(): string | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  const token = window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+  return token ? token.trim() : null;
 }
 
 function bffPath(path: string): string {
@@ -170,8 +188,15 @@ async function request<T>({
   if (!requestHeaders.has('Accept')) {
     requestHeaders.set('Accept', 'application/json');
   }
+  const storedToken = readStoredAuthToken();
+  if (storedToken && !requestHeaders.has('Authorization')) {
+    requestHeaders.set('Authorization', `Bearer ${storedToken}`);
+  }
   if (includeTenantHeader && !requestHeaders.has('X-Tenant-Id')) {
-    requestHeaders.set('X-Tenant-Id', getTenantId());
+    const tenantId = getTenantId();
+    if (tenantId) {
+      requestHeaders.set('X-Tenant-Id', tenantId);
+    }
   }
   if (body !== undefined && !requestHeaders.has('Content-Type')) {
     requestHeaders.set('Content-Type', 'application/json');
@@ -238,6 +263,10 @@ export const AuthService = {
       method: 'POST',
       body: payload,
     });
+  },
+
+  me(): Promise<AuthenticatedUserResponse> {
+    return request<AuthenticatedUserResponse>({ path: '/auth/me' });
   },
 };
 

@@ -1,8 +1,9 @@
 """
 Tenant-facing APIs.
 
-All endpoints require admin authentication plus a TenantContext
-(X-Tenant-Id header) and return data scoped to that tenant only.
+All endpoints require authenticated admin/user context plus an entitlement-backed
+TenantContext. Client-supplied tenant selectors may only choose from the caller's
+server-authorized tenant scope.
 """
 
 from __future__ import annotations
@@ -182,6 +183,48 @@ def _build_live_account_mark_snapshot(positions: list[Any]) -> dict[str, float]:
     }
 
 
+def _account_allowed_for_context(account: Any, ctx: TenantContext) -> bool:
+    if account is None:
+        return False
+    account_tenant_id = str(getattr(account, "tenant_id", "") or "").strip()
+    if account_tenant_id != str(ctx.tenant_id):
+        return False
+    if not ctx.broker_account_ids:
+        return True
+    account_id = str(getattr(account, "broker_account_id", "") or "").strip()
+    return bool(account_id and account_id in ctx.broker_account_ids)
+
+
+def _filter_accounts_for_context(accounts: list[Any], ctx: TenantContext) -> list[Any]:
+    if not ctx.broker_account_ids:
+        return list(accounts)
+    filtered: list[Any] = []
+    for account in accounts:
+        account_id = str(
+            getattr(account, "broker_account_id", None)
+            or (account.get("broker_account_id") if isinstance(account, dict) else "")
+            or ""
+        ).strip()
+        if account_id and account_id in ctx.broker_account_ids:
+            filtered.append(account)
+    return filtered
+
+
+def _filter_trades_for_context(trades: list[Any], ctx: TenantContext) -> list[Any]:
+    if not ctx.broker_account_ids:
+        return list(trades)
+    filtered: list[Any] = []
+    for trade in trades:
+        broker_account_id = str(
+            getattr(trade, "broker_account_id", None)
+            or (trade.get("broker_account_id") if isinstance(trade, dict) else "")
+            or ""
+        ).strip()
+        if broker_account_id and broker_account_id in ctx.broker_account_ids:
+            filtered.append(trade)
+    return filtered
+
+
 # List broker accounts for the current tenant.
 @router.get("/me/accounts")
 async def list_my_accounts(
@@ -190,7 +233,7 @@ async def list_my_accounts(
     """
     Return broker accounts belonging to the current tenant.
     """
-    accounts = get_broker_accounts_for_tenant(ctx.tenant_id)
+    accounts = _filter_accounts_for_context(get_broker_accounts_for_tenant(ctx.tenant_id), ctx)
     return {"tenant_id": ctx.tenant_id, "accounts": accounts}
 
 
@@ -201,7 +244,7 @@ async def get_account_balance(
     ctx: TenantContext = Depends(get_tenant_context),
 ):
     account = get_broker_account(broker_account_id)
-    if account is None or account.tenant_id != ctx.tenant_id:
+    if not _account_allowed_for_context(account, ctx):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Broker account not found for this tenant.",
@@ -223,7 +266,7 @@ async def get_account_positions(
     ctx: TenantContext = Depends(get_tenant_context),
 ):
     account = get_broker_account(broker_account_id)
-    if account is None or account.tenant_id != ctx.tenant_id:
+    if not _account_allowed_for_context(account, ctx):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Broker account not found for this tenant.",
@@ -250,7 +293,7 @@ async def get_account_orders(
     ctx: TenantContext = Depends(get_tenant_context),
 ):
     account = get_broker_account(broker_account_id)
-    if account is None or account.tenant_id != ctx.tenant_id:
+    if not _account_allowed_for_context(account, ctx):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Broker account not found for this tenant.",
@@ -275,7 +318,7 @@ async def get_account_pnl(
     ctx: TenantContext = Depends(get_tenant_context),
 ):
     account = get_broker_account(broker_account_id)
-    if account is None or account.tenant_id != ctx.tenant_id:
+    if not _account_allowed_for_context(account, ctx):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Broker account not found for this tenant.",
@@ -356,6 +399,11 @@ async def get_my_trades(
     Return recent trades for the current tenant, optionally filtered by
     broker_account_id and time window.
     """
+    if broker_account_id is not None and ctx.broker_account_ids and str(broker_account_id) not in ctx.broker_account_ids:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Broker account not found for this tenant.",
+        )
     trades = fetch_trades_for_tenant(
         tenant_id=ctx.tenant_id,
         broker_account_id=broker_account_id,
@@ -363,10 +411,11 @@ async def get_my_trades(
         end_time=to_time,
         limit=limit,
     )
+    scoped_trades = _filter_trades_for_context(trades, ctx)
     return {
         "tenant_id": ctx.tenant_id,
-        "count": len(trades),
-        "trades": trades,
+        "count": len(scoped_trades),
+        "trades": scoped_trades,
     }
 
 

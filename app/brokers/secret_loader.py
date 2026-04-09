@@ -18,7 +18,10 @@ import os
 from functools import lru_cache
 from typing import Any, Dict, Optional
 
-from google.cloud import secretmanager  # type: ignore
+try:  # pragma: no cover - optional in lightweight test environments
+    from google.cloud import secretmanager  # type: ignore
+except Exception:  # pragma: no cover - optional in lightweight test environments
+    secretmanager = None
 
 from app.config.settings import get_settings
 from app.brokers.secrets import AngelSecrets
@@ -38,7 +41,9 @@ _LIVE_SECRET_BACKENDS = {
 
 
 @lru_cache(maxsize=1)
-def get_secret_manager_client() -> secretmanager.SecretManagerServiceClient:
+def get_secret_manager_client():
+    if secretmanager is None:
+        raise RuntimeError("google-cloud-secret-manager is required for secret manager backends")
     return secretmanager.SecretManagerServiceClient()
 
 
