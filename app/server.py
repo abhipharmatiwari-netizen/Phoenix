@@ -119,6 +119,14 @@ def _dashboard_auth_required(runtime_cfg: RuntimeConfig | None = None) -> bool:
     return True
 
 
+def _readiness_trade_mode() -> str:
+    try:
+        trade_mode = str(get_boot_config().env.get("TRADE_MODE", "PAPER") or "PAPER")
+    except Exception:
+        trade_mode = str(os.getenv("TRADE_MODE", "PAPER") or "PAPER")
+    return trade_mode.strip().upper() or "PAPER"
+
+
 def _dashboard_ws_mode_token(requested_mode: str | None) -> str:
     return "delta" if _dashboard_ws_prefers_delta(requested_mode) else "full"
 
@@ -930,6 +938,10 @@ async def readyz() -> JSONResponse:
             payload["registered_runner_count"] = registered
             payload["running_runner_count"] = running
             payload["failed_runner_count"] = failed
+            if _readiness_trade_mode() == "LIVE" and registered == 0:
+                payload["ready"] = False
+                payload["reason"] = "no_runners_registered"
+                return JSONResponse(status_code=503, content=payload)
             if registered > 0 and running == 0:
                 payload["ready"] = False
                 payload["reason"] = "no_runners_running"
@@ -937,6 +949,10 @@ async def readyz() -> JSONResponse:
             if registered > running:
                 payload["ready"] = False
                 payload["reason"] = "runner_startup_incomplete"
+                return JSONResponse(status_code=503, content=payload)
+            if failed > 0:
+                payload["ready"] = False
+                payload["reason"] = "runner_failures_present"
                 return JSONResponse(status_code=503, content=payload)
         except Exception as exc:
             payload["ready"] = False

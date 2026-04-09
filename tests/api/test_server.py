@@ -1021,6 +1021,103 @@ def test_readyz_returns_200_when_runtime_ready_no_multi_hub(monkeypatch):
     assert resp.json()["ready"] is True
 
 
+def test_readyz_returns_503_when_no_runners_are_registered_in_live(monkeypatch):
+    """/readyz must stay unready in LIVE until at least one runner is registered."""
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+
+    hub_stub = SimpleNamespace(
+        registered_runner_count=0,
+        running_runner_count=0,
+        failed_runner_count=0,
+    )
+    hub_runtime_stub = SimpleNamespace(hub=hub_stub)
+
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: hub_runtime_stub)
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            env={"TRADE_MODE": "LIVE"},
+            runtime=SimpleNamespace(app_env="production"),
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=True,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 503
+    payload = resp.json()
+    assert payload["ready"] is False
+    assert payload["reason"] == "no_runners_registered"
+    assert payload["registered_runner_count"] == 0
+    assert payload["running_runner_count"] == 0
+    assert payload["failed_runner_count"] == 0
+
+
+def test_readyz_allows_zero_runners_outside_live(monkeypatch):
+    """/readyz may stay green outside LIVE when no runners are registered yet."""
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+
+    hub_stub = SimpleNamespace(
+        registered_runner_count=0,
+        running_runner_count=0,
+        failed_runner_count=0,
+    )
+    hub_runtime_stub = SimpleNamespace(hub=hub_stub)
+
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: hub_runtime_stub)
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            env={"TRADE_MODE": "PAPER"},
+            runtime=SimpleNamespace(app_env="local"),
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=True,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+    with TestClient(server.app) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["ready"] is True
+    assert payload["registered_runner_count"] == 0
+    assert payload["running_runner_count"] == 0
+    assert payload["failed_runner_count"] == 0
+
+
 def test_readyz_returns_503_when_all_runners_failed(monkeypatch):
     """/readyz must return HTTP 503 when runners are registered but none is running."""
     runtime = DummyAppRuntime()
@@ -1062,6 +1159,55 @@ def test_readyz_returns_503_when_all_runners_failed(monkeypatch):
     assert payload["running_runner_count"] == 0
 
 
+def test_readyz_returns_503_when_single_registered_runner_is_not_running(monkeypatch):
+    """/readyz must fail when one expected runner exists but never reaches running state."""
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+
+    hub_stub = SimpleNamespace(
+        registered_runner_count=1,
+        running_runner_count=0,
+        failed_runner_count=1,
+    )
+    hub_runtime_stub = SimpleNamespace(hub=hub_stub)
+
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: hub_runtime_stub)
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            env={"TRADE_MODE": "LIVE"},
+            runtime=SimpleNamespace(app_env="production"),
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=True,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 503
+    payload = resp.json()
+    assert payload["ready"] is False
+    assert payload["reason"] == "no_runners_running"
+    assert payload["registered_runner_count"] == 1
+    assert payload["running_runner_count"] == 0
+    assert payload["failed_runner_count"] == 1
+
+
 def test_readyz_returns_503_when_some_registered_runners_are_not_running(monkeypatch):
     """/readyz must fail if registered runners exist but not all of them are actually running."""
     runtime = DummyAppRuntime()
@@ -1101,6 +1247,54 @@ def test_readyz_returns_503_when_some_registered_runners_are_not_running(monkeyp
     assert payload["registered_runner_count"] == 2
     assert payload["running_runner_count"] == 1
     assert payload["failed_runner_count"] == 1
+
+
+def test_readyz_returns_200_when_single_runner_is_running(monkeypatch):
+    """/readyz must return HTTP 200 when LIVE has one registered runner and it is running."""
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+
+    hub_stub = SimpleNamespace(
+        registered_runner_count=1,
+        running_runner_count=1,
+        failed_runner_count=0,
+    )
+    hub_runtime_stub = SimpleNamespace(hub=hub_stub)
+
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: hub_runtime_stub)
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            env={"TRADE_MODE": "LIVE"},
+            runtime=SimpleNamespace(app_env="production"),
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=True,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+    with TestClient(server.app) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["ready"] is True
+    assert payload["registered_runner_count"] == 1
+    assert payload["running_runner_count"] == 1
+    assert payload["failed_runner_count"] == 0
 
 
 def test_readyz_returns_200_when_runners_are_running(monkeypatch):
