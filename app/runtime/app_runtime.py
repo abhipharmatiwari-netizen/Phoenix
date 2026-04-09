@@ -112,6 +112,15 @@ class StreamWorker:
         with self._lock:
             return self._fatal_error
 
+    def status_snapshot(self) -> dict[str, object]:
+        with self._lock:
+            thread = self._thread
+            return {
+                "running": bool(thread and thread.is_alive()),
+                "fatal_error": self._fatal_error,
+                "stop_requested": bool(self._stop_event.is_set()),
+            }
+
 
 class WorkerWatchdog:
     """Restart stream worker if it stops unexpectedly."""
@@ -674,6 +683,32 @@ class AppRuntime:
 
     def stream_worker_running(self) -> bool:
         return self.stream_worker.running()
+
+    def stream_worker_fatal_error(self) -> str | None:
+        fatal_getter = getattr(self.stream_worker, "fatal_error", None)
+        if callable(fatal_getter):
+            try:
+                fatal_error = fatal_getter()
+            except Exception:
+                return None
+            if fatal_error:
+                return str(fatal_error)
+        return None
+
+    def stream_worker_status(self) -> dict[str, object]:
+        snapshot_getter = getattr(self.stream_worker, "status_snapshot", None)
+        if callable(snapshot_getter):
+            try:
+                return dict(snapshot_getter())
+            except Exception:
+                return {}
+        snapshot: dict[str, object] = {
+            "running": bool(self.stream_worker_running()),
+        }
+        fatal_error = self.stream_worker_fatal_error()
+        if fatal_error:
+            snapshot["fatal_error"] = fatal_error
+        return snapshot
 
     def watchdog_running(self) -> bool:
         return self.watchdog.running()

@@ -22,6 +22,7 @@ class DummyAppRuntime:
         self.stopped = 0
         self.worker_running_state = False
         self.watchdog_running_state = False
+        self.worker_fatal_error_state = None
         self.ready = True  # default: ready so existing tests are unaffected
         self.startup_recovery_state = {
             "status": "ok",
@@ -56,6 +57,15 @@ class DummyAppRuntime:
 
     def watchdog_running(self) -> bool:
         return self.watchdog_running_state
+
+    def stream_worker_fatal_error(self):
+        return self.worker_fatal_error_state
+
+    def stream_worker_status(self) -> dict:
+        return {
+            "running": self.worker_running_state,
+            "fatal_error": self.worker_fatal_error_state,
+        }
 
     def schema_status(self) -> dict:
         return dict(self.schema_state)
@@ -1025,6 +1035,8 @@ def test_readyz_returns_503_when_no_runners_are_registered_in_live(monkeypatch):
     """/readyz must stay unready in LIVE until at least one runner is registered."""
     runtime = DummyAppRuntime()
     runtime.ready = True
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = True
 
     hub_stub = SimpleNamespace(
         registered_runner_count=0,
@@ -1122,6 +1134,8 @@ def test_readyz_returns_503_when_all_runners_failed(monkeypatch):
     """/readyz must return HTTP 503 when runners are registered but none is running."""
     runtime = DummyAppRuntime()
     runtime.ready = True
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = True
 
     hub_stub = SimpleNamespace(
         runner_count=2,
@@ -1163,6 +1177,8 @@ def test_readyz_returns_503_when_single_registered_runner_is_not_running(monkeyp
     """/readyz must fail when one expected runner exists but never reaches running state."""
     runtime = DummyAppRuntime()
     runtime.ready = True
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = True
 
     hub_stub = SimpleNamespace(
         registered_runner_count=1,
@@ -1212,6 +1228,8 @@ def test_readyz_returns_503_when_some_registered_runners_are_not_running(monkeyp
     """/readyz must fail if registered runners exist but not all of them are actually running."""
     runtime = DummyAppRuntime()
     runtime.ready = True
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = True
 
     hub_stub = SimpleNamespace(
         registered_runner_count=2,
@@ -1253,6 +1271,8 @@ def test_readyz_returns_200_when_single_runner_is_running(monkeypatch):
     """/readyz must return HTTP 200 when LIVE has one registered runner and it is running."""
     runtime = DummyAppRuntime()
     runtime.ready = True
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = True
 
     hub_stub = SimpleNamespace(
         registered_runner_count=1,
@@ -1295,6 +1315,9 @@ def test_readyz_returns_200_when_single_runner_is_running(monkeypatch):
     assert payload["registered_runner_count"] == 1
     assert payload["running_runner_count"] == 1
     assert payload["failed_runner_count"] == 0
+    assert payload["stream_worker_expected"] is True
+    assert payload["stream_worker_running"] is True
+    assert payload["watchdog_running"] is True
 
 
 def test_readyz_returns_200_when_runners_are_running(monkeypatch):
@@ -1335,3 +1358,207 @@ def test_readyz_returns_200_when_runners_are_running(monkeypatch):
     assert payload["registered_runner_count"] == 2
     assert payload["running_runner_count"] == 2
     assert payload["failed_runner_count"] == 0
+
+
+def test_readyz_returns_503_when_live_stream_worker_is_stopped(monkeypatch):
+    """/readyz must fail closed in LIVE when the stream worker is expected but not running."""
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+    runtime.worker_running_state = False
+    runtime.watchdog_running_state = True
+
+    hub_stub = SimpleNamespace(
+        registered_runner_count=1,
+        running_runner_count=1,
+        failed_runner_count=0,
+    )
+    hub_runtime_stub = SimpleNamespace(hub=hub_stub)
+
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: hub_runtime_stub)
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            env={"TRADE_MODE": "LIVE"},
+            runtime=SimpleNamespace(app_env="production", disable_stream_worker=False),
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=True,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 503
+    payload = resp.json()
+    assert payload["ready"] is False
+    assert payload["reason"] == "stream_worker_not_running"
+    assert payload["stream_worker_expected"] is True
+    assert payload["stream_worker_running"] is False
+    assert payload["watchdog_running"] is True
+
+
+def test_readyz_returns_503_when_live_stream_worker_has_fatal_error(monkeypatch):
+    """/readyz must fail closed in LIVE when the stream worker is in a fatal state."""
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+    runtime.worker_running_state = False
+    runtime.watchdog_running_state = True
+    runtime.worker_fatal_error_state = "BROKER_SECRET_BACKEND=postgres invalid credentials"
+
+    hub_stub = SimpleNamespace(
+        registered_runner_count=1,
+        running_runner_count=1,
+        failed_runner_count=0,
+    )
+    hub_runtime_stub = SimpleNamespace(hub=hub_stub)
+
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: hub_runtime_stub)
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            env={"TRADE_MODE": "LIVE"},
+            runtime=SimpleNamespace(app_env="production", disable_stream_worker=False),
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=True,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 503
+    payload = resp.json()
+    assert payload["ready"] is False
+    assert payload["reason"] == "stream_worker_fatal_error"
+    assert payload["stream_worker_expected"] is True
+    assert payload["stream_worker_running"] is False
+    assert payload["watchdog_running"] is True
+    assert payload["stream_worker_failure_state"] == "fatal_error"
+
+
+def test_readyz_returns_503_when_live_stream_watchdog_is_not_running(monkeypatch):
+    """/readyz must fail closed when the worker is expected but the watchdog is down."""
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = False
+
+    hub_stub = SimpleNamespace(
+        registered_runner_count=1,
+        running_runner_count=1,
+        failed_runner_count=0,
+    )
+    hub_runtime_stub = SimpleNamespace(hub=hub_stub)
+
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: hub_runtime_stub)
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            env={"TRADE_MODE": "LIVE"},
+            runtime=SimpleNamespace(app_env="production", disable_stream_worker=False),
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=True,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 503
+    payload = resp.json()
+    assert payload["ready"] is False
+    assert payload["reason"] == "stream_watchdog_not_running"
+    assert payload["stream_worker_expected"] is True
+    assert payload["stream_worker_running"] is True
+    assert payload["watchdog_running"] is False
+
+
+def test_readyz_allows_disabled_live_stream_worker_path(monkeypatch):
+    """/readyz may stay green in LIVE when the stream worker is explicitly disabled."""
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+    runtime.worker_running_state = False
+    runtime.watchdog_running_state = False
+
+    hub_stub = SimpleNamespace(
+        registered_runner_count=1,
+        running_runner_count=1,
+        failed_runner_count=0,
+    )
+    hub_runtime_stub = SimpleNamespace(hub=hub_stub)
+
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: hub_runtime_stub)
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            env={"TRADE_MODE": "LIVE"},
+            runtime=SimpleNamespace(app_env="production", disable_stream_worker=True),
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=True,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+    with TestClient(server.app) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["ready"] is True
+    assert payload["stream_worker_expected"] is False
+    assert payload["stream_worker_running"] is False

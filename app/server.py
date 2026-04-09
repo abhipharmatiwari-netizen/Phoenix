@@ -127,6 +127,60 @@ def _readiness_trade_mode() -> str:
     return trade_mode.strip().upper() or "PAPER"
 
 
+def _stream_worker_expected_for_readiness(runtime: Any) -> bool:
+    lease_owned = True
+    lease_getter = getattr(runtime, "leader_lease_status", None)
+    if callable(lease_getter):
+        try:
+            lease_owned = bool(dict(lease_getter()).get("owned", True))
+        except Exception:
+            lease_owned = True
+
+    disable_stream_worker = False
+    try:
+        disable_stream_worker = bool(
+            getattr(get_boot_config().runtime, "disable_stream_worker", False)
+        )
+    except Exception:
+        try:
+            disable_stream_worker = bool(
+                RuntimeConfig.from_env(dict(os.environ)).disable_stream_worker
+            )
+        except Exception:
+            disable_stream_worker = False
+
+    return bool(lease_owned and not disable_stream_worker)
+
+
+def _stream_worker_readiness_snapshot(runtime: Any) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "expected": _stream_worker_expected_for_readiness(runtime),
+        "running": bool(runtime.stream_worker_running()),
+        "watchdog_running": bool(runtime.watchdog_running()),
+        "fatal_error": None,
+    }
+    status_getter = getattr(runtime, "stream_worker_status", None)
+    if callable(status_getter):
+        try:
+            raw = dict(status_getter())
+        except Exception:
+            raw = {}
+        if "running" in raw:
+            snapshot["running"] = bool(raw.get("running"))
+        if "fatal_error" in raw and raw.get("fatal_error"):
+            snapshot["fatal_error"] = str(raw.get("fatal_error"))
+    if not snapshot["fatal_error"]:
+        fatal_getter = getattr(runtime, "stream_worker_fatal_error", None)
+        if callable(fatal_getter):
+            try:
+                fatal_error = fatal_getter()
+            except Exception:
+                fatal_error = None
+            if fatal_error:
+                snapshot["fatal_error"] = str(fatal_error)
+    return snapshot
+
+
 def _dashboard_ws_mode_token(requested_mode: str | None) -> str:
     return "delta" if _dashboard_ws_prefers_delta(requested_mode) else "full"
 
@@ -958,6 +1012,27 @@ async def readyz() -> JSONResponse:
             payload["ready"] = False
             payload["reason"] = f"hub_unavailable:{exc}"
             return JSONResponse(status_code=503, content=payload)
+
+    if _readiness_trade_mode() == "LIVE":
+        stream_status = _stream_worker_readiness_snapshot(runtime)
+        payload["stream_worker_expected"] = bool(stream_status["expected"])
+        payload["stream_worker_running"] = bool(stream_status["running"])
+        payload["watchdog_running"] = bool(stream_status["watchdog_running"])
+        if stream_status["fatal_error"]:
+            payload["stream_worker_failure_state"] = "fatal_error"
+        if payload["stream_worker_expected"]:
+            if stream_status["fatal_error"]:
+                payload["ready"] = False
+                payload["reason"] = "stream_worker_fatal_error"
+                return JSONResponse(status_code=503, content=payload)
+            if not payload["stream_worker_running"]:
+                payload["ready"] = False
+                payload["reason"] = "stream_worker_not_running"
+                return JSONResponse(status_code=503, content=payload)
+            if not payload["watchdog_running"]:
+                payload["ready"] = False
+                payload["reason"] = "stream_watchdog_not_running"
+                return JSONResponse(status_code=503, content=payload)
 
     payload["ready"] = True
     return JSONResponse(status_code=200, content=payload)

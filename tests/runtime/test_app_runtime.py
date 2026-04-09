@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from types import SimpleNamespace
+import sys
 
 import pytest
 
@@ -425,7 +426,11 @@ def test_stream_worker_marks_non_retryable_error_and_blocks_restart(monkeypatch)
         call_count["count"] += 1
         raise ValueError("ANGEL_TOTP_SECRET environment variable not set")
 
-    monkeypatch.setattr(app_runtime, "stream_multi_instruments", _raise_non_retryable)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.runners.multi_instrument_stream",
+        SimpleNamespace(stream_multi_instruments=_raise_non_retryable),
+    )
     worker = StreamWorker(StrategySwitchboard(), InstrumentController())
 
     worker.start()
@@ -454,7 +459,11 @@ def test_stream_worker_treats_missing_required_attachments_as_non_retryable(monk
             "BANKNIFTY_IDX:ce_orb, NIFTY_IDX:ce_orb"
         )
 
-    monkeypatch.setattr(app_runtime, "stream_multi_instruments", _raise_missing_routes)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.runners.multi_instrument_stream",
+        SimpleNamespace(stream_multi_instruments=_raise_missing_routes),
+    )
     worker = StreamWorker(StrategySwitchboard(), InstrumentController())
 
     worker.start()
