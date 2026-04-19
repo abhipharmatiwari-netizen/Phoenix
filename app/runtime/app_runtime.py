@@ -637,11 +637,14 @@ class AppRuntime:
                 self._apply_startup_recovery_result(
                     order_router=order_router,
                     summary=recovery_summary,
-                    strict_mode=bool(
-                        getattr(
-                            flags,
-                            "order_lifecycle_strict_startup_recovery",
-                            False,
+                    strict_mode=(
+                        trade_mode == "LIVE"
+                        or bool(
+                            getattr(
+                                flags,
+                                "order_lifecycle_strict_startup_recovery",
+                                False,
+                            )
                         )
                     ),
                 )
@@ -810,7 +813,7 @@ class AppRuntime:
                     )
 
         # Mark position ownership records
-        position_ownership = getattr(runtime, "position_ownership", None)
+        position_ownership = getattr(runtime, "position_ownership_store", None)
         if position_ownership is not None:
             mark_all_fn = getattr(position_ownership, "mark_all_recovery_pending", None)
             if callable(mark_all_fn):

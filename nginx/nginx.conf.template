@@ -47,6 +47,10 @@ server {
     }
 
     location /metrics {
+        # Restrict to internal scrape path — require admin key or deny externally.
+        if ($http_x_admin_key != "${ADMIN_API_KEY}") {
+            return 403;
+        }
         proxy_pass http://backend;
         proxy_set_header Host $host;
     }
@@ -96,7 +100,7 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Admin-Key ${ADMIN_API_KEY};
+        # No static admin key injection — WebSocket auth uses per-connection tickets.
         proxy_read_timeout 86400;
     }
 

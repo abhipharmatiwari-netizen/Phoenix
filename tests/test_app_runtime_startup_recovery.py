@@ -56,7 +56,7 @@ class _FakeOrderRouter:
         self.summary = dict(summary or {})
 
 
-def _boot_config():
+def _boot_config(trade_mode: str = "PAPER"):
     return SimpleNamespace(
         runtime=SimpleNamespace(
             disable_stream_worker=True,
@@ -66,7 +66,7 @@ def _boot_config():
             leader_lease_renew_seconds=10,
             leader_lease_collection="leader_lease",
         ),
-        env={"TRADE_MODE": "PAPER"},
+        env={"TRADE_MODE": trade_mode},
         strategy_env={},
         to_log_dict=lambda: {},
     )
@@ -95,11 +95,11 @@ def _install_bq_stubs(monkeypatch):
     monkeypatch.setitem(sys.modules, "app.data.bq_persister", persister)
 
 
-def _patch_runtime_dependencies(monkeypatch, *, strict_mode: bool):
+def _patch_runtime_dependencies(monkeypatch, *, strict_mode: bool, trade_mode: str = "PAPER"):
     monkeypatch.setattr(
         app_runtime_module,
         "initialize_boot_config",
-        lambda force=True: _boot_config(),
+        lambda force=True: _boot_config(trade_mode=trade_mode),
     )
     monkeypatch.setattr(app_runtime_module, "check_startup_schema", lambda settings, mode: _schema_result())
     monkeypatch.setattr(app_runtime_module, "validate_runtime_startup_settings", lambda **kwargs: None)
@@ -134,6 +134,59 @@ async def test_app_runtime_marks_startup_recovery_degraded_in_strict_mode(monkey
     assert hub_runtime.hub.started is True
     assert hub_runtime.order_lifecycle.started is True
     assert hub_runtime.order_router.block_new_entries is True
+    assert runtime.startup_recovery_status()["status"] == "degraded"
+
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_mark_recovery_pending_calls_position_ownership_store(monkeypatch):
+    """Regression: position_ownership_store (not position_ownership) must be called."""
+    _patch_runtime_dependencies(monkeypatch, strict_mode=False)
+
+    called = []
+
+    class _FakeOwnershipStore:
+        def mark_all_recovery_pending(self) -> None:
+            called.append(True)
+
+    hub_runtime = SimpleNamespace(
+        hub=_FakeHub(),
+        order_lifecycle=_FakeOrderLifecycle(),
+        order_router=_FakeOrderRouter({"failed": 0, "unresolved_active": 0}),
+        position_ownership_store=_FakeOwnershipStore(),
+    )
+    runtime = AppRuntime(
+        settings_getter=lambda: _settings(),
+        hub_runtime_getter=lambda: hub_runtime,
+    )
+
+    await runtime.start()
+
+    assert called, "position_ownership_store.mark_all_recovery_pending() was never called"
+
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_live_trade_mode_forces_strict_mode_regardless_of_feature_flag(monkeypatch):
+    """Regression: TRADE_MODE=LIVE must force strict_mode=True even if feature flag is False."""
+    _patch_runtime_dependencies(monkeypatch, strict_mode=False, trade_mode="LIVE")
+    hub_runtime = SimpleNamespace(
+        hub=_FakeHub(),
+        order_lifecycle=_FakeOrderLifecycle(),
+        order_router=_FakeOrderRouter({"failed": 1, "unresolved_active": 0}),
+    )
+    runtime = AppRuntime(
+        settings_getter=lambda: _settings(),
+        hub_runtime_getter=lambda: hub_runtime,
+    )
+
+    await runtime.start()
+
+    assert hub_runtime.order_router.block_new_entries is True, (
+        "LIVE mode with failed outbox recovery must block entries (strict_mode forced True)"
+    )
     assert runtime.startup_recovery_status()["status"] == "degraded"
 
     await runtime.stop()

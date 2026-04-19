@@ -18,6 +18,7 @@ from app.strategies.naming import canonicalize_strategy_name
 logger = logging.getLogger(__name__)
 _LOCAL_APP_ENVS = {"local", "dev", "test"}
 _MOCK_SWEEP_STATE_ESCAPE_HATCH_ENVS = ("ALLOW_MOCK_SWEEP_STATE",)
+_LIVE_CAPITAL_CHECKS_DISABLED_OVERRIDE_ENV = "ALLOW_LIVE_CAPITAL_CHECKS_DISABLED"
 
 
 def _normalize_strategy_entries(entries: Any) -> list[Dict[str, Any]]:
@@ -427,6 +428,9 @@ def validate_runtime_startup_settings(
                 == "postgres"
                 else "firestore"
             )
+        allow_live_capital_checks_disabled = _truthy(
+            env.get(_LIVE_CAPITAL_CHECKS_DISABLED_OVERRIDE_ENV)
+        )
         live_summary = {
             "control_plane_backend": str(
                 getattr(settings, "control_plane_backend", "")
@@ -440,6 +444,7 @@ def validate_runtime_startup_settings(
             "enable_capital_checks": bool(
                 getattr(settings, "enable_capital_checks", False)
             ),
+            "allow_live_capital_checks_disabled": allow_live_capital_checks_disabled,
             "enable_risk_checks": bool(
                 getattr(settings, "enable_risk_checks", False)
             ),
@@ -510,8 +515,10 @@ def validate_runtime_startup_settings(
         }
         logger.info("LIVE startup safety summary: %s", live_summary)
 
+        if not bool(getattr(settings, "enable_capital_checks", False)):
+            errors.append("TRADE_MODE=LIVE requires ENABLE_CAPITAL_CHECKS=true")
+
         required_true_flags = {
-            "ENABLE_CAPITAL_CHECKS": getattr(settings, "enable_capital_checks", False),
             "ENABLE_RISK_CHECKS": getattr(settings, "enable_risk_checks", False),
             "RISK_ENABLE_DAILY_LOSS": getattr(settings, "risk_enable_daily_loss", False),
             "ENABLE_PROFIT_CHECKS": getattr(settings, "enable_profit_checks", False),

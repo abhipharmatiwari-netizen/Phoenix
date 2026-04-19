@@ -544,6 +544,37 @@ def test_runtime_settings_validator_accepts_live_safe_defaults():
         )
 
 
+def test_runtime_settings_validator_rejects_live_with_capital_checks_disabled():
+    with pytest.raises(
+        ValueError,
+        match="TRADE_MODE=LIVE requires ENABLE_CAPITAL_CHECKS=true",
+    ):
+        validate_runtime_startup_settings(
+            settings=_valid_runtime_settings(enable_capital_checks=False),
+            runtime_cfg=_valid_runtime_cfg(
+                app_env="production",
+                disable_stream_worker=False,
+            ),
+            env=_valid_live_env(),
+        )
+
+
+def test_runtime_settings_validator_rejects_live_capital_checks_disabled_even_with_override():
+    # ALLOW_LIVE_CAPITAL_CHECKS_DISABLED no longer bypasses the hard gate.
+    with pytest.raises(
+        ValueError,
+        match="TRADE_MODE=LIVE requires ENABLE_CAPITAL_CHECKS=true",
+    ):
+        validate_runtime_startup_settings(
+            settings=_valid_runtime_settings(enable_capital_checks=False),
+            runtime_cfg=_valid_runtime_cfg(
+                app_env="production",
+                disable_stream_worker=False,
+            ),
+            env=_valid_live_env(ALLOW_LIVE_CAPITAL_CHECKS_DISABLED="true"),
+        )
+
+
 def test_runtime_settings_validator_rejects_live_without_leader_lease():
     with pytest.raises(
         ValueError,

@@ -1120,6 +1120,14 @@ async def ready(deep: bool = Query(False)) -> dict:
     - number of tenants defined,
     - timestamp of last subscription reconcile.
     """
+    app_runtime = get_app_runtime()
+    if not app_runtime.ready:
+        from fastapi.responses import JSONResponse as _JSONResponse
+        return _JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "reason": "startup_recovery_in_progress"},
+        )
+
     settings = get_settings()
 
     if not settings.enable_multi_hub:

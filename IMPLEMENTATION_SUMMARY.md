@@ -34,15 +34,10 @@ Implemented the highest-priority remediation items from `phoenix_severity_ranked
 - Updated `README.md` to document the clean release artifact process.
 
 ## Validation performed
-- Import sanity: `import app.server` succeeds in the delivered workspace.
-- Targeted Python compile checks succeeded for the modified backend files.
-- Targeted regression tests passed:
-  - `tests/api/test_auth_routes.py`
-  - `tests/api/test_bff_proxy.py`
-  - `tests/dashboard/test_auth.py`
-  - `tests/dashboard/test_tenant_routes.py`
-  - `tests/api/test_positions_endpoint.py`
-- Result: **41 passed**.
+- Import sanity: `import app.server` succeeds.
+- Full test suite run (excluding 3 BigQuery tests with a known google-auth environment incompatibility unrelated to application code):
+  - **Result: 1599 passed, 2 skipped, 0 failed**
+  - 3 collection errors: `tests/core/test_bar_persister.py`, `tests/core/test_indicator_replay_backfill.py`, `tests/runners/test_multi_instrument_stream.py` — all fail at import due to `google.auth.exceptions.TransportError` missing in the installed google-auth version; not a code defect
 
 ## Key files changed
 - `app/api/auth_routes.py`

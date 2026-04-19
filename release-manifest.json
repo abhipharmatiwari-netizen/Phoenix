@@ -8,7 +8,6 @@
     "scripts"
   ],
   "allowed_files": [
-    ".docker-live.env",
     ".env.example",
     "ABOUTME.md",
     "ARCHITECTURE.md",

@@ -23,7 +23,6 @@ ALLOWED_DIRS = (
 )
 
 ALLOWED_FILES = (
-    ".docker-live.env",
     ".env.example",
     "ABOUTME.md",
     "ARCHITECTURE.md",

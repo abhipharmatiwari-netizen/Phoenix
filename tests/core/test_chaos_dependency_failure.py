@@ -245,6 +245,7 @@ class TestBrokerFailoverChaos:
         manager.register(BrokerFailoverPolicy(
             broker_id="angel",
             failover_mode=FailoverMode.PAUSE,
+            degrade_after_failures=2,
             fail_after_failures=3,
         ))
 
@@ -333,6 +334,9 @@ class TestAutonomyEnvelopeChaos:
         env = AutonomyEnvelope(
             strategy_id="test_strat",
             max_drawdown_pct=0.05,
+            # Disable time-window gate so test passes regardless of wall-clock time.
+            allowed_time_start="",
+            allowed_time_end="",
         )
         with pytest.raises(EnvelopeBreach, match="drawdown"):
             env.check_or_raise(drawdown_pct=0.06)
@@ -430,8 +434,9 @@ class TestMarketDataValidatorChaos:
 # ---------------------------------------------------------------------------
 
 class TestSessionStoreChaos:
-    def test_revoked_token_returns_none_on_parse(self):
+    def test_revoked_token_returns_none_on_parse(self, monkeypatch):
         """A token whose JTI is revoked must fail _parse_token."""
+        monkeypatch.setenv("DEMO_AUTH_TOKEN_SECRET", "test-secret-for-chaos-test-32chars!!")
         from app.core.session_store import revoke_token
         from app.api.auth_routes import _make_token, _parse_token
         from app.api.models import Role

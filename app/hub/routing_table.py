@@ -198,11 +198,18 @@ class HubRoutingTable:
             else:
                 self._routes_by_strategy = routes
             self._last_refresh_mono = time.monotonic()
+            resolved_count = len(self._routes_by_strategy)
 
         logger.info(
             "HubRoutingTable.refresh: loaded %d strategies with routes",
-            len(self._routes_by_strategy),
+            resolved_count,
         )
+
+        if trade_mode == "LIVE" and resolved_count == 0:
+            raise ValueError(
+                "TRADE_MODE=LIVE requires at least one valid hub route. "
+                "Set HUB_ROUTES_JSON with real broker-registered strategy-routing entries."
+            )
 
     def _refresh_worker(self) -> None:
         try:

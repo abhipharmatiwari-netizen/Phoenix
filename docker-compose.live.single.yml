@@ -14,7 +14,7 @@ x-db-env: &db-env
   CONTROL_PLANE_PG_DB: "${CONTROL_PLANE_PG_DB:?Set CONTROL_PLANE_PG_DB in the current PowerShell session}"
   CONTROL_PLANE_PG_USER: "${CONTROL_PLANE_PG_USER:?Set CONTROL_PLANE_PG_USER in the current PowerShell session}"
   CONTROL_PLANE_PG_PASSWORD: "${CONTROL_PLANE_PG_PASSWORD_HOST:?Set CONTROL_PLANE_PG_PASSWORD_HOST in the current PowerShell session}"
-  CONTROL_PLANE_PG_SSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-disable}"
+  CONTROL_PLANE_PG_SSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-require}"
   POSTGRES_FORCE_IPV4: "true"
   POSTGRES_CONNECT_TIMEOUT_SECONDS: "5"
   POSTGRES_SESSION_TIMEZONE: "Asia/Kolkata"
@@ -72,6 +72,7 @@ x-live-backend-env: &live-backend-env
   DISABLE_TRADING_WINDOW_FILTER: "false"
 
   ENABLE_CAPITAL_CHECKS: "true"
+  ALLOW_LIVE_CAPITAL_CHECKS_DISABLED: "false"
   CAPITAL_LIMITS_JSON: "{}"
   CAPITAL_FAIL_CLOSED_ON_MISSING_STATE: "true"
   CAPITAL_FAIL_CLOSED_ON_MISSING_NOTIONAL_PRICE: "true"
@@ -129,7 +130,6 @@ x-live-backend-env: &live-backend-env
   HUB_INSTANCE_NAME: "${HUB_INSTANCE_NAME:-phoenix-live-1}"
   HUB_DEFAULT_TENANT_ID: "${HUB_DEFAULT_TENANT_ID:-tenant-1}"
   HUB_DEFAULT_BROKER_ACCOUNT_ID: "${HUB_DEFAULT_BROKER_ACCOUNT_ID:-A1}"
-  # PRE-DEPLOY: verify interpolation with `docker compose -f docker-compose.live.single.yml config | grep HUB_ROUTES_JSON`
   HUB_ROUTES_JSON: '{"ema20_strategy":[{"tenant_id":"${HUB_DEFAULT_TENANT_ID:-tenant-1}","broker_account_id":"${HUB_DEFAULT_BROKER_ACCOUNT_ID:-A1}"}],"exclusive_nifty_ce_buy":[{"tenant_id":"${HUB_DEFAULT_TENANT_ID:-tenant-1}","broker_account_id":"${HUB_DEFAULT_BROKER_ACCOUNT_ID:-A1}"}],"put_momentum_scalper":[{"tenant_id":"${HUB_DEFAULT_TENANT_ID:-tenant-1}","broker_account_id":"${HUB_DEFAULT_BROKER_ACCOUNT_ID:-A1}"}]}'
 
   NIFTY_EMA20_LOTS: "${NIFTY_EMA20_LOTS:-1}"
@@ -179,7 +179,7 @@ x-db-client-env: &db-client-env
   PGDATABASE: "${CONTROL_PLANE_PG_DB:?Set CONTROL_PLANE_PG_DB in the current PowerShell session}"
   PGUSER: "${CONTROL_PLANE_PG_USER:?Set CONTROL_PLANE_PG_USER in the current PowerShell session}"
   PGPASSWORD: "${CONTROL_PLANE_PG_PASSWORD_HOST:?Set CONTROL_PLANE_PG_PASSWORD_HOST in the current PowerShell session}"
-  PGSSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-disable}"
+  PGSSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-require}"
   PGCONNECT_TIMEOUT: "5"
   PHX_MIGRATION_APP_NAME: "phoenix-live-compose"
 
