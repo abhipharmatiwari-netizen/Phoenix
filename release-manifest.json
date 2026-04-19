@@ -23,21 +23,21 @@
   ],
   "excluded_prefixes": [
     ".claude/",
+    ".docker-tmp/",
     ".github/",
     ".pytest_cache/",
     ".test_tmp/",
     ".venv/",
+    "docs/archive/",
     "docs/obsolete/",
     "frontend/node_modules/",
     "frontend/playwright-report/",
     "frontend/test-results/",
+    "google/",
     "logs/",
+    "psycopg/",
     "pytest-cache-files-",
     "release/",
     "tests/"
-  ],
-  "generated_at_utc": "2026-03-28T10:25:34.578867Z",
-  "git_dirty": false,
-  "git_head": "63009fc953dec75f6d379e947f3c5c93a2b8482d",
-  "included_file_count": 257
+  ]
 }

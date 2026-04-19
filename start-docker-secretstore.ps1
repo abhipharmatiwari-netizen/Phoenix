@@ -147,8 +147,13 @@ try {
     Require-Command -Name "Unlock-SecretStore" -HelpMessage "Unlock-SecretStore is unavailable after loading modules."
     Require-Command -Name "Get-Secret" -HelpMessage "Get-Secret is unavailable after loading modules."
 
-    $vaultPassword = Read-Host "Enter SecretStore password" -AsSecureString
-    Unlock-SecretStore -Password $vaultPassword
+    $storeConfig = Get-SecretStoreConfiguration -ErrorAction SilentlyContinue
+    if ($storeConfig -and $storeConfig.Authentication -ne "None") {
+        $vaultPassword = Read-Host "Enter SecretStore password" -AsSecureString
+        Unlock-SecretStore -Password $vaultPassword
+    } else {
+        Write-Host "SecretStore is configured without a password - skipping unlock."
+    }
 
     Export-RequiredSecretToEnv -SecretName "ADMIN_API_KEY" -EnvName "ADMIN_API_KEY_HOST"
     Export-RequiredSecretToEnv -SecretName "DEMO_AUTH_TOKEN_SECRET" -EnvName "DEMO_AUTH_TOKEN_SECRET_HOST"
@@ -161,7 +166,7 @@ try {
     Set-EnvFromSecretOrDefault -EnvName "CONTROL_PLANE_PG_PORT" -DefaultValue "5432"
     Set-EnvFromSecretOrDefault -EnvName "CONTROL_PLANE_PG_DB" -DefaultValue "phoenix"
     Set-EnvFromSecretOrDefault -EnvName "CONTROL_PLANE_PG_USER" -DefaultValue "phoenix_app"
-    Set-EnvFromSecretOrDefault -EnvName "CONTROL_PLANE_PG_SSLMODE" -DefaultValue "require"
+    Set-EnvFromSecretOrDefault -EnvName "CONTROL_PLANE_PG_SSLMODE" -DefaultValue "disable"
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_TENANT_ID" -DefaultValue "tenant-1"
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_BROKER_ACCOUNT_ID" -DefaultValue "A1"
 

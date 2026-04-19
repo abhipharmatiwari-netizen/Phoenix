@@ -3,8 +3,13 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $repoRoot
 
-$vaultPassword = Read-Host "Enter SecretStore password" -AsSecureString
-Unlock-SecretStore -Password $vaultPassword
+$storeConfig = Get-SecretStoreConfiguration -ErrorAction SilentlyContinue
+if ($storeConfig -and $storeConfig.Authentication -ne "None") {
+    $vaultPassword = Read-Host "Enter SecretStore password" -AsSecureString
+    Unlock-SecretStore -Password $vaultPassword
+} else {
+    Write-Host "SecretStore is configured without a password - skipping unlock."
+}
 
 # Local development / PAPER mode only.
 $env:ANGEL_API_KEY = Get-Secret -Name ANGEL_API_KEY -AsPlainText

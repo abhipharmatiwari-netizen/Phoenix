@@ -31,3 +31,14 @@ Thumbs.db
 *.env.runtime
 *.runtime.env
 .env.runtime
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Docker build cache and temporary artifacts
+.docker-tmp/
+
+# Release build artifacts (zip files are build outputs, not source)
+release/*.zip
