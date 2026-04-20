@@ -101,3 +101,51 @@ def test_live_refresh_succeeds_when_env_routes_provided(monkeypatch):
 
     with table._lock:
         assert len(table._routes_by_strategy) == 1
+
+
+def test_live_with_firestore_backend_logs_error(monkeypatch, caplog):
+    """TRADE_MODE=LIVE with CONTROL_PLANE_BACKEND!=postgres must log an ERROR."""
+    import logging
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    monkeypatch.setenv("CONTROL_PLANE_BACKEND", "firestore")
+    monkeypatch.setenv(
+        "HUB_ROUTES_JSON",
+        '{"ema20_strategy":[{"tenant_id":"T1","broker_account_id":"BA1"}]}',
+    )
+
+    import app.hub.routing_table as rt_module
+    monkeypatch.setattr(rt_module, "get_active_broker_accounts", _fake_accounts_empty)
+
+    table = HubRoutingTable()
+    with caplog.at_level(logging.ERROR, logger="app.hub.routing_table"):
+        table.refresh()
+
+    assert any(
+        "CONTROL_PLANE_BACKEND=postgres" in record.message
+        for record in caplog.records
+        if record.levelno == logging.ERROR
+    ), "Expected ERROR about CONTROL_PLANE_BACKEND=postgres requirement in LIVE mode"
+
+
+def test_live_with_postgres_backend_no_backend_warning(monkeypatch, caplog):
+    """TRADE_MODE=LIVE with CONTROL_PLANE_BACKEND=postgres must NOT log the backend mismatch ERROR."""
+    import logging
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    monkeypatch.setenv("CONTROL_PLANE_BACKEND", "postgres")
+    monkeypatch.setenv(
+        "HUB_ROUTES_JSON",
+        '{"ema20_strategy":[{"tenant_id":"T1","broker_account_id":"BA1"}]}',
+    )
+
+    import app.hub.routing_table as rt_module
+    monkeypatch.setattr(rt_module, "get_active_broker_accounts", _fake_accounts_empty)
+
+    table = HubRoutingTable()
+    with caplog.at_level(logging.ERROR, logger="app.hub.routing_table"):
+        table.refresh()
+
+    backend_mismatch_errors = [
+        r for r in caplog.records
+        if r.levelno == logging.ERROR and "undeclared Firestore" in r.message
+    ]
+    assert not backend_mismatch_errors, "Unexpected backend-mismatch ERROR with postgres backend"

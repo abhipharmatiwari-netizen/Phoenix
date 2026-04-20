@@ -1,6 +1,7 @@
 """
 In-memory routing table mapping strategies to tenant/broker targets.
-Refreshed from Firestore control-plane data.
+Refreshed from the control-plane backend (Postgres when CONTROL_PLANE_BACKEND=postgres,
+Firestore otherwise).  In production (TRADE_MODE=LIVE) the backend must be postgres.
 """
 
 from __future__ import annotations
@@ -112,7 +113,7 @@ class HubRoute:
 class HubRoutingTable:
     """
     Central routing table: strategy_id -> list of (tenant_id, broker_account_id)
-    built from Firestore control-plane data.
+    built from the control-plane backend (Postgres in LIVE, Firestore in legacy/dev).
 
     It is intentionally simple and in-memory; refresh() can be called at startup
     and periodically (if needed).
@@ -125,30 +126,47 @@ class HubRoutingTable:
     _last_refresh_mono: float = field(default=0.0, repr=False)
     _refresh_in_progress: bool = field(default=False, repr=False)
 
-    # Rebuild routes from Firestore strategy configs.
+    # Rebuild routes from the control-plane backend (Postgres in LIVE).
     def refresh(self) -> None:
         """
-        Rebuild the mapping from Firestore:
+        Rebuild the mapping from the control-plane backend:
           - Start from get_active_broker_accounts()
           - For each broker_account_id, fetch strategy configs
           - For every enabled config, map config.strategy_id to that account.
+        Backend is determined by CONTROL_PLANE_BACKEND (postgres|firestore).
+        TRADE_MODE=LIVE requires CONTROL_PLANE_BACKEND=postgres.
         """
         from app.tenants.models import StrategyConfigModel  # local import to avoid cycles
 
-        logger.info("HubRoutingTable.refresh: rebuilding routes from Firestore")
         trade_mode = str(os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper()
+        control_plane_backend = str(
+            os.getenv("CONTROL_PLANE_BACKEND", "firestore") or "firestore"
+        ).strip().lower()
+
+        if trade_mode == "LIVE" and control_plane_backend != "postgres":
+            logger.error(
+                "HubRoutingTable.refresh: TRADE_MODE=LIVE requires CONTROL_PLANE_BACKEND=postgres "
+                "but got CONTROL_PLANE_BACKEND=%s; routing reads from undeclared Firestore backend",
+                control_plane_backend,
+            )
+
+        logger.info(
+            "HubRoutingTable.refresh: rebuilding routes from control-plane backend=%s",
+            control_plane_backend,
+        )
         env_routes = _load_routes_from_env()
         try:
             accounts = get_active_broker_accounts()
         except Exception:
             if trade_mode == "LIVE":
                 logger.error(
-                    "HubRoutingTable.refresh: Firestore/control-plane unavailable in LIVE mode; "
-                    "HUB_ROUTES_JSON fallback is forbidden — raising startup failure"
+                    "HubRoutingTable.refresh: control-plane (backend=%s) unavailable in LIVE mode; "
+                    "HUB_ROUTES_JSON fallback is forbidden — raising startup failure",
+                    control_plane_backend,
                 )
                 raise
             logger.exception(
-                "HubRoutingTable.refresh: Firestore unavailable; using HUB_ROUTES_JSON fallback"
+                "HubRoutingTable.refresh: control-plane unavailable; using HUB_ROUTES_JSON fallback"
             )
             if env_routes is None:
                 env_routes = {}
@@ -207,8 +225,10 @@ class HubRoutingTable:
 
         if trade_mode == "LIVE" and resolved_count == 0:
             raise ValueError(
-                "TRADE_MODE=LIVE requires at least one valid hub route. "
-                "Set HUB_ROUTES_JSON with real broker-registered strategy-routing entries."
+                "TRADE_MODE=LIVE requires at least one valid hub route "
+                f"(control-plane backend={control_plane_backend}). "
+                "Ensure strategy_configs rows are enabled in the control-plane DB, "
+                "or set HUB_ROUTES_JSON as a fallback for dev/shadow runs."
             )
 
     def _refresh_worker(self) -> None:
