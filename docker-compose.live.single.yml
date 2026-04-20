@@ -14,7 +14,10 @@ x-db-env: &db-env
   CONTROL_PLANE_PG_DB: "${CONTROL_PLANE_PG_DB:?Set CONTROL_PLANE_PG_DB in the current PowerShell session}"
   CONTROL_PLANE_PG_USER: "${CONTROL_PLANE_PG_USER:?Set CONTROL_PLANE_PG_USER in the current PowerShell session}"
   CONTROL_PLANE_PG_PASSWORD: "${CONTROL_PLANE_PG_PASSWORD_HOST:?Set CONTROL_PLANE_PG_PASSWORD_HOST in the current PowerShell session}"
-  CONTROL_PLANE_PG_SSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-disable}"
+  # sslmode=require encrypts the connection without verifying the server cert.
+  # For host.docker.internal (same-host Postgres) this is safe and sufficient.
+  # Set CONTROL_PLANE_PG_SSLMODE=disable only if Postgres has SSL disabled.
+  CONTROL_PLANE_PG_SSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-require}"
   POSTGRES_FORCE_IPV4: "true"
   POSTGRES_CONNECT_TIMEOUT_SECONDS: "5"
   POSTGRES_SESSION_TIMEZONE: "Asia/Kolkata"
@@ -179,7 +182,7 @@ x-db-client-env: &db-client-env
   PGDATABASE: "${CONTROL_PLANE_PG_DB:?Set CONTROL_PLANE_PG_DB in the current PowerShell session}"
   PGUSER: "${CONTROL_PLANE_PG_USER:?Set CONTROL_PLANE_PG_USER in the current PowerShell session}"
   PGPASSWORD: "${CONTROL_PLANE_PG_PASSWORD_HOST:?Set CONTROL_PLANE_PG_PASSWORD_HOST in the current PowerShell session}"
-  PGSSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-disable}"
+  PGSSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-require}"
   PGCONNECT_TIMEOUT: "5"
   PHX_MIGRATION_APP_NAME: "phoenix-live-compose"
 

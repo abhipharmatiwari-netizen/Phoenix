@@ -492,6 +492,15 @@ class AppRuntime:
                 "LIVE mode startup validation forced on with schema_check_mode=%s",
                 effective_schema_mode,
             )
+            _pg_sslmode = str(
+                getattr(settings, "control_plane_pg_sslmode", None) or ""
+            ).strip().lower()
+            if _pg_sslmode == "disable":
+                logger.warning(
+                    "startup.ssl_warning: TRADE_MODE=LIVE but CONTROL_PLANE_PG_SSLMODE=disable; "
+                    "Postgres connection is unencrypted. Set CONTROL_PLANE_PG_SSLMODE=require "
+                    "to encrypt credentials and trade data in transit."
+                )
 
         schema_checked_at = datetime.now(timezone.utc).isoformat().replace(
             "+00:00",
