@@ -325,7 +325,12 @@ services:
     environment:
       <<: *live-backend-env
     volumes:
-      - ./logs:/app/logs
+      # PHOENIX_LOG_HOST_PATH controls where container logs land on the host.
+      # Default ./logs keeps backward compatibility for existing deployments.
+      # For production, override to a path OUTSIDE the repo to prevent test
+      # output from local pytest runs contaminating production log files.
+      # Example: export PHOENIX_LOG_HOST_PATH=/var/log/phoenix
+      - "${PHOENIX_LOG_HOST_PATH:-./logs}:/app/logs"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
       interval: 30s

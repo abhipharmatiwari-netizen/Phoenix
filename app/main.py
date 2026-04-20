@@ -94,8 +94,15 @@ def _configure_logging() -> None:
         root_logger.addHandler(stream_handler)
 
     # Add a rotating file handler so logs are persisted locally.
+    # APP_LOG_DIR overrides the default so test suites can redirect to an
+    # isolated directory (e.g. .test_tmp/logs) and not contaminate production
+    # log files that are bind-mounted from ./logs in the Docker compose stack.
     base_dir = Path(__file__).resolve().parents[1]
-    log_root = base_dir / "logs"
+    _app_log_dir_env = os.getenv("APP_LOG_DIR", "").strip()
+    if _app_log_dir_env:
+        log_root = Path(_app_log_dir_env).resolve()
+    else:
+        log_root = base_dir / "logs"
     log_root.mkdir(parents=True, exist_ok=True)
     tz_name = os.getenv("DEFAULT_TIME_ZONE", "Asia/Kolkata")
     try:

@@ -1,8 +1,11 @@
 # Runtime secrets — never commit
 .backend-live.env.runtime
 
-# Logs
+# Logs (production)
 logs/
+
+# Test-run scratch directory (redirected via APP_LOG_DIR in tests/conftest.py)
+.test_tmp/
 
 # Python
 __pycache__/

@@ -22,6 +22,10 @@ def _test_runtime_defaults(monkeypatch):
     monkeypatch.setenv("TRADE_MODE", "PAPER")
     monkeypatch.setenv("ORDER_SUBMISSION_OUTBOX_ENABLED", "false")
     monkeypatch.setenv("ORDER_SUBMISSION_OUTBOX_REQUIRED", "false")
+    # Redirect test log output to .test_tmp/logs so it never overlaps with
+    # the production log directory (logs/) that is bind-mounted in compose.
+    test_log_dir = str(ROOT / ".test_tmp" / "logs")
+    monkeypatch.setenv("APP_LOG_DIR", test_log_dir)
 
 
 @pytest.fixture
