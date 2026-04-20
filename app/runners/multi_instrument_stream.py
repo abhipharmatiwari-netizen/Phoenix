@@ -2435,31 +2435,9 @@ def stream_multi_instruments(
         seed_csv_path = os.getenv("INDICATOR_SEED_CSV_PATH") or csv_path
         seeded = 0
 
-        if seed_csv_path:
-            seeded_history_bars = _load_indicator_seed_bars_from_csv(
-                seed_csv_path,
-                allowed_labels=allowed_seed_labels,
-                allowed_timeframes=set(engine.timeframes),
-                max_bars_per_series=seed_bars,
-            )
-            seeded = (
-                engine.seed_from_closed_bars(seeded_history_bars)
-                if seeded_history_bars
-                else 0
-            )
-            if seeded:
-                seeded_history_source = "csv"
-                seeded_history_count = int(seeded)
-                logger.info(
-                    "Seeded indicator history: %d bars from CSV %s (max per series=%d)",
-                    seeded,
-                    seed_csv_path,
-                    seed_bars,
-                )
-            else:
-                logger.info("No indicator history seeded from %s", seed_csv_path)
-
-        if seeded == 0 and indicator_postgres_dsn:
+        # Postgres is the primary seed source when INDICATOR_POSTGRES_ENABLED=true.
+        # CSV is the fallback — used only when Postgres is unavailable or returns 0 bars.
+        if indicator_postgres_dsn:
             seeded_history_bars = _load_indicator_seed_bars_from_postgres(
                 indicator_postgres_dsn,
                 indicator_postgres_table,
@@ -2476,20 +2454,47 @@ def stream_multi_instruments(
                 seeded_history_source = "postgres"
                 seeded_history_count = int(seeded)
                 logger.info(
-                    "Seeded indicator history: %d bars from Postgres %s (max per series=%d)",
+                    "startup.indicator_seed_complete: source=postgres bars=%d table=%s max_per_series=%d",
                     seeded,
                     indicator_postgres_table,
                     seed_bars,
                 )
             else:
                 logger.info(
-                    "No indicator history seeded from Postgres table %s",
+                    "startup.indicator_seed: postgres table %s returned 0 bars; falling back to CSV",
                     indicator_postgres_table,
+                )
+
+        if seeded == 0 and seed_csv_path:
+            seeded_history_bars = _load_indicator_seed_bars_from_csv(
+                seed_csv_path,
+                allowed_labels=allowed_seed_labels,
+                allowed_timeframes=set(engine.timeframes),
+                max_bars_per_series=seed_bars,
+            )
+            seeded = (
+                engine.seed_from_closed_bars(seeded_history_bars)
+                if seeded_history_bars
+                else 0
+            )
+            if seeded:
+                seeded_history_source = "csv"
+                seeded_history_count = int(seeded)
+                logger.info(
+                    "startup.indicator_seed_complete: source=csv bars=%d path=%s max_per_series=%d",
+                    seeded,
+                    seed_csv_path,
+                    seed_bars,
+                )
+            else:
+                logger.info(
+                    "startup.indicator_seed: no bars seeded from CSV %s", seed_csv_path
                 )
 
         if seeded == 0 and not seed_csv_path and not indicator_postgres_dsn:
             logger.info(
-                "Indicator seed skipped: no INDICATOR_SEED_CSV_PATH/INDICATOR_CSV_PATH or INDICATOR_POSTGRES_DSN configured"
+                "startup.indicator_seed: skipped — no INDICATOR_SEED_CSV_PATH/INDICATOR_CSV_PATH "
+                "or INDICATOR_POSTGRES_DSN configured"
             )
     # Tell the tracker about any restored positions,
     # then extend the token_list so their tokens are always streamed.
