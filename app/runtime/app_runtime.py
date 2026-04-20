@@ -658,7 +658,12 @@ class AppRuntime:
         # Readiness latch: all recovery, reconciliation, and hub init are
         # complete.  Order acceptance is blocked until this is True.
         self._ready = True
-        logger.info("AppRuntime RUNTIME_READY — readiness latch set, order acceptance enabled.")
+        logger.info(
+            "startup.runtime_ready: readiness latch set — outbox evaluated, "
+            "reconciliation complete, order acceptance enabled. "
+            "recovery_status=%s",
+            self._startup_recovery_status.get("status"),
+        )
 
     @property
     def ready(self) -> bool:
@@ -796,8 +801,11 @@ class AppRuntime:
         when the underlying services have not yet implemented the marking API.
         """
         logger.info(
-            "Marking restored state as RECOVERY_PENDING before broker reconciliation"
+            "startup.recovery_pending_marking: marking restored state before broker reconciliation"
         )
+        lifecycle_marked = 0
+        ownership_marked = 0
+
         # Mark order lifecycle contexts
         order_lifecycle = getattr(runtime, "order_lifecycle", None)
         if order_lifecycle is not None:
@@ -806,7 +814,9 @@ class AppRuntime:
                 try:
                     result = mark_fn()
                     if hasattr(result, "__await__"):
-                        await result
+                        result = await result
+                    if isinstance(result, int):
+                        lifecycle_marked = result
                 except Exception as exc:
                     logger.warning(
                         "Failed to mark order lifecycle RECOVERY_PENDING: %s", exc
@@ -820,11 +830,19 @@ class AppRuntime:
                 try:
                     result = mark_all_fn()
                     if hasattr(result, "__await__"):
-                        await result
+                        result = await result
+                    if isinstance(result, int):
+                        ownership_marked = result
                 except Exception as exc:
                     logger.warning(
                         "Failed to mark position ownership RECOVERY_PENDING: %s", exc
                     )
+
+        logger.info(
+            "startup.recovery_pending_marked: lifecycle_contexts=%d ownership_records=%d",
+            lifecycle_marked,
+            ownership_marked,
+        )
 
     def _apply_startup_recovery_result(
         self,
@@ -862,7 +880,7 @@ class AppRuntime:
         }
         logger.log(
             logging.ERROR if degraded else logging.INFO,
-            "AppRuntime startup recovery status strict_mode=%s degraded=%s reason=%s summary=%s",
+            "startup.outbox_evaluated: strict_mode=%s degraded=%s reason=%s summary=%s",
             strict_mode,
             degraded,
             reason,
