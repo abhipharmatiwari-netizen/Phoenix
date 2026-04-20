@@ -712,15 +712,25 @@ class OrderLifecycleService:
                     return
                 except Exception:
                     pass
+            from_state = record.position_state
             logger.warning(
-                "OrderLifecycleService: forcing position-state transition ownership_key=%s current=%s target=%s reason=%s",
+                "OrderLifecycleService: illegal transition blocked "
+                "position_id=%s ownership_key=%s from_state=%s "
+                "attempted_target=%s reason=%s; escalating to DEGRADED",
+                record.position_id,
                 record.ownership_key,
-                record.position_state.value,
+                from_state.value,
                 target.value,
                 reason,
             )
-            record.position_state = target
-            record.state_reason = reason
+            try:
+                record.transition_to(
+                    PositionState.DEGRADED,
+                    f"illegal_transition_blocked:{from_state.value}_to_{target.value}:{reason}",
+                )
+            except Exception:
+                # Already DEGRADED or another terminal path — leave state as-is.
+                pass
 
     def _prime_position_state(
         self,

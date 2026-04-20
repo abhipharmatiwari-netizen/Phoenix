@@ -343,3 +343,73 @@ async def test_order_lifecycle_legacy_mode_ignores_terminal_broker_snapshot(monk
 
     assert inserted_rows == []
     assert pnl_spy.events == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #17: forced position_state mutation must never happen
+# ---------------------------------------------------------------------------
+
+def test_reconciling_to_exit_pending_escalates_to_degraded_not_forced():
+    """RECONCILING -> EXIT_PENDING is illegal; must escalate to DEGRADED, not bypass SM."""
+    from app.core.position_state import InternalPosition, PositionState
+    from app.orders.order_lifecycle import OrderLifecycleService
+
+    svc = OrderLifecycleService.__new__(OrderLifecycleService)
+    svc._position_ownership_store = None
+
+    pos = InternalPosition()
+    pos.position_state = PositionState.RECONCILING
+    pos.state_reason = "test"
+
+    svc._transition_position_state(pos, PositionState.EXIT_PENDING, reason="exit_submitted")
+
+    assert pos.position_state == PositionState.DEGRADED, (
+        f"Expected DEGRADED after illegal RECONCILING->EXIT_PENDING, got {pos.position_state.value}"
+    )
+    assert "EXIT_PENDING" in pos.state_reason
+
+
+def test_reconciling_to_opening_escalates_to_degraded_not_forced():
+    """RECONCILING -> OPENING is illegal; must escalate to DEGRADED."""
+    from app.core.position_state import InternalPosition, PositionState
+    from app.orders.order_lifecycle import OrderLifecycleService
+
+    svc = OrderLifecycleService.__new__(OrderLifecycleService)
+    svc._position_ownership_store = None
+
+    pos = InternalPosition()
+    pos.position_state = PositionState.RECONCILING
+    pos.state_reason = "test"
+
+    svc._transition_position_state(pos, PositionState.OPENING, reason="entry_awaiting_durable_fill")
+
+    assert pos.position_state == PositionState.DEGRADED, (
+        f"Expected DEGRADED after illegal RECONCILING->OPENING, got {pos.position_state.value}"
+    )
+
+
+def test_reconciling_illegal_targets_all_escalate_to_degraded():
+    """Every illegal target from RECONCILING must escalate to DEGRADED, never force-assign."""
+    from app.core.position_state import InternalPosition, PositionState, VALID_TRANSITIONS
+    from app.orders.order_lifecycle import OrderLifecycleService
+
+    svc = OrderLifecycleService.__new__(OrderLifecycleService)
+    svc._position_ownership_store = None
+
+    allowed_from_reconciling = VALID_TRANSITIONS[PositionState.RECONCILING]
+    illegal_targets = set(PositionState) - allowed_from_reconciling - {PositionState.RECONCILING}
+
+    for target in illegal_targets:
+        pos = InternalPosition()
+        pos.position_state = PositionState.RECONCILING
+
+        svc._transition_position_state(pos, target, reason="test")
+
+        assert pos.position_state != target, (
+            f"Direct mutation detected: RECONCILING -> {target.value} "
+            f"bypassed state machine (got {pos.position_state.value})"
+        )
+        assert pos.position_state == PositionState.DEGRADED, (
+            f"Expected DEGRADED after illegal RECONCILING->{target.value}, "
+            f"got {pos.position_state.value}"
+        )
