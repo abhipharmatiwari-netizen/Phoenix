@@ -378,6 +378,42 @@ Rules:
 - All automated entries and exits must traverse the strategy bridge and hub router.
 - `DISABLE_STREAM_WORKER=true` means operator/control-plane or reconciliation-first mode unless an approved replacement market-data plane exists.
 
+### 5.3 LIVE deployment hardening guards
+
+The following runtime guards were added to the bundled Compose manifest and startup validator as part of production hardening. They are enforced at startup and surface early in backend logs.
+
+| Guard | Env var / mechanism | Behavior |
+|---|---|---|
+| Stack-lock | `REQUIRE_LIVE_TRADE_MODE=true` in compose | Startup validator hard-fails if the container resolves `TRADE_MODE != LIVE`; prevents accidental SHADOW/PAPER deployment of the LIVE manifest |
+| Broker schema check | `BROKER_SCHEMA_CHECK_MODE=strict` in compose | Angel One API responses are validated against expected field shapes at every balance sync cycle; malformed responses are rejected at the integration boundary (see §5.3.1) |
+| Risk state isolation | `RISK_STATE_PATH=/app/state/risk_positions.json`; `/app/state` mounted as a separate volume | Risk restart-helper state is stored outside the log volume so it survives log rotation; legacy path (`app/config/risk_positions.json`) is auto-migrated on first start |
+| Selector staleness | IST-date comparison in `StrategySelector.select()` | Prior-day selection state is evicted at the first `on_bar` call after IST midnight; prevents stale regime/strategy state from carrying over between trading days |
+| Sync freshness gate | `/readyz` returns 503 when position or orders sync age exceeds `2 × POSITION_SYNC_INTERVAL_SECONDS` / `2 × ORDERS_SYNC_INTERVAL_SECONDS` | Downstream health checks and container restart policy can detect a broker-sync stall before it produces stale exposure decisions |
+| Unroutable strategy exclusion | `routed_strategy_ids()` cross-reference at stream startup | Strategies enabled in the strategy switch but absent from the routing table are logged as `strategy.unroutable` warnings and excluded from selector evaluation in LIVE+`AUTO_STRATEGY_SELECT_ENABLED`; their signals are silently dropped by the router |
+| SSL mode warning | Startup emits `startup.ssl_warning` when `CONTROL_PLANE_PG_SSLMODE=disable` in LIVE | Operators are alerted when the Postgres connection is unencrypted; for host-local Docker deployments where Postgres does not have SSL enabled, this warning is expected and does not block startup |
+| Reconnect telemetry | `stream_worker.reconnect_complete` / `stream_worker.reconnect_failed` log events in `ws_runner` | Reconnect attempts and final reconnect failures are emitted as structured log events so stream-plane reliability can be monitored from the log stream without custom instrumentation |
+
+#### 5.3.1 Angel One broker balance schema
+
+Angel One's RMS API returns component-level utilized-margin fields (`utilisedspan`, `utilisedoptionpremium`, `utilisedexposure`, `utiliseddebits`, `utilisedturnover`, `utilisedpayout`) rather than a single rolled-up `utilisedmargin` field. In strict mode (`BROKER_SCHEMA_CHECK_MODE=strict`), the balance parser:
+1. First tries primary rolled-up keys (`utilisedmargin`, `utilized`, `utilised`, `used`).
+2. If none are present, sums the component fields as the utilized margin.
+3. Logs a DEBUG if the component-sum path is used; does not log CRITICAL.
+
+This behavior is correct for Angel One's current API and must not be changed to a hard failure unless Angel One adds a rolled-up field.
+
+#### 5.3.2 Expected startup log warnings
+
+The following WARNING-level messages appear on every startup and are expected behavior, not incidents:
+
+| Message | Source | Why expected |
+|---|---|---|
+| `LIVE mode policy gates enforced hardened defaults for: {...}` | `app_runtime` | Confirms LIVE-mode flags were auto-promoted; no action needed |
+| `startup.ssl_warning: TRADE_MODE=LIVE but CONTROL_PLANE_PG_SSLMODE=disable` | `app_runtime` | Expected for host-local Docker deployments; set `CONTROL_PLANE_PG_SSLMODE=require` once Postgres SSL is enabled |
+| `illegal transition blocked ... from_state=RECONCILING attempted_target=EXIT_PENDING/OPENING; escalating to DEGRADED` | `order_lifecycle` | Stale position records from expired option contracts (prior-session data) are safely escalated to DEGRADED during startup reconciliation; not indicative of a live position problem |
+| `strategy.unroutable name=<strategy>` × N | `multi_instrument_stream` | Strategies enabled in the strategy switch but not in the routing table; correct behavior per §5.3 |
+| `strategy.unroutable_selector_excluded count=N` | `multi_instrument_stream` | Summary of unroutable strategies excluded from the selector; expected in LIVE+AUTO mode |
+
 ---
 
 ## 6. Stream Worker Initialization (Current Market-Data & Strategy Path)

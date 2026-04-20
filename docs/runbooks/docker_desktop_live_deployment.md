@@ -112,6 +112,7 @@ That helper implements the same bundled Docker/Desktop path.
 The single-file Compose manifest wires the required LIVE settings directly into the backend service definition. The backend container must receive, at minimum:
 
 - `TRADE_MODE=LIVE`
+- `REQUIRE_LIVE_TRADE_MODE=true` — startup validator hard-fails if `TRADE_MODE != LIVE`; prevents accidental SHADOW/PAPER deployment of this manifest
 - `ENABLE_MULTI_HUB=true`
 - `USE_HUB_ROUTER=true`
 - `DISABLE_STREAM_WORKER=false`
@@ -120,11 +121,13 @@ The single-file Compose manifest wires the required LIVE settings directly into 
 - `SWEEP_STATE_BACKEND=postgres`
 - `APP_RUNTIME_STARTUP_VALIDATE=true`
 - `SCHEMA_CHECK_MODE=strict`
+- `BROKER_SCHEMA_CHECK_MODE=strict` — Angel One API responses validated at every balance sync; malformed responses rejected at the integration boundary
 - `DASHBOARD_AUTH_DISABLED=false`
-- `DISABLE_CONTROL_TOWER_ROUTES=true`
+- `DISABLE_CONTROL_TOWER_ROUTES=false`
 - `ORDER_ROUTER_ENFORCE_IDEMPOTENCY=true`
 - `POSITION_OWNERSHIP_ENABLED=true`
 - `ENABLE_EOD_EXIT=true`
+- `RISK_STATE_PATH=/app/state/risk_positions.json` — risk restart-helper persisted to the `/app/state` volume, separate from the log volume
 
 ---
 
@@ -154,7 +157,7 @@ curl.exe http://localhost/health/summary
 This proves the backend container, not just the host shell, resolved the required automated LIVE tuple:
 
 ```powershell
-docker compose -f .\docker-compose.live.single.yml exec backend sh -lc "env | egrep '^(TRADE_MODE|ENABLE_MULTI_HUB|USE_HUB_ROUTER|DISABLE_STREAM_WORKER|BROKER_SECRET_BACKEND|CONTROL_PLANE_BACKEND|SWEEP_STATE_BACKEND|APP_RUNTIME_STARTUP_VALIDATE|SCHEMA_CHECK_MODE|DASHBOARD_AUTH_DISABLED|DISABLE_CONTROL_TOWER_ROUTES|ORDER_ROUTER_ENFORCE_IDEMPOTENCY|POSITION_OWNERSHIP_ENABLED|ENABLE_EOD_EXIT)='"
+docker compose -f .\docker-compose.live.single.yml exec backend sh -lc "env | egrep '^(TRADE_MODE|REQUIRE_LIVE_TRADE_MODE|ENABLE_MULTI_HUB|USE_HUB_ROUTER|DISABLE_STREAM_WORKER|BROKER_SECRET_BACKEND|CONTROL_PLANE_BACKEND|SWEEP_STATE_BACKEND|APP_RUNTIME_STARTUP_VALIDATE|SCHEMA_CHECK_MODE|BROKER_SCHEMA_CHECK_MODE|DASHBOARD_AUTH_DISABLED|DISABLE_CONTROL_TOWER_ROUTES|ORDER_ROUTER_ENFORCE_IDEMPOTENCY|POSITION_OWNERSHIP_ENABLED|ENABLE_EOD_EXIT|RISK_STATE_PATH)='"
 ```
 
 ### 4. Stream-worker startup evidence
@@ -186,6 +189,22 @@ python .\scripts\build_release_artifact.py --output .\release\phoenix-live-sourc
 ```
 
 That artifact intentionally excludes local clutter such as `logs/`, `__pycache__/`, `.pytest_cache/`, `.venv/`, test trees, and temp output roots. Keep the generated zip with the rendered manifest as release evidence.
+
+---
+
+## Expected startup log messages
+
+The following WARNING-level messages appear on every startup and are **expected behavior**, not incidents. Do not open an incident for these alone.
+
+| Message | Why expected |
+|---|---|
+| `LIVE mode policy gates enforced hardened defaults for: {...}` | Confirms LIVE-mode flags were auto-promoted; informational |
+| `startup.ssl_warning: TRADE_MODE=LIVE but CONTROL_PLANE_PG_SSLMODE=disable` | Expected for host-local Docker deployments where Postgres does not have SSL enabled; harmless when Postgres is on `host.docker.internal` with no external exposure |
+| `illegal transition blocked ... from_state=RECONCILING ... escalating to DEGRADED` | Stale position records from expired prior-session option contracts are safely escalated to DEGRADED; not a live position problem |
+| `strategy.unroutable name=<strategy>` × N | Strategies enabled in the strategy switch but absent from the routing table; correct behavior — their signals are dropped |
+| `strategy.unroutable_selector_excluded count=N` | Summary of unroutable strategies excluded from selector in LIVE+AUTO mode |
+
+The one message that is **NOT** expected after a clean startup is `BROKER_SCHEMA_VIOLATION` at CRITICAL level repeating on a timer. That indicates a persistent broker balance schema mismatch and requires investigation.
 
 ---
 

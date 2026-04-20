@@ -128,6 +128,19 @@ start-docker-secretstore.cmd      Convenience launcher for the PowerShell helper
 
 ---
 
+## Production hardening guards
+
+The following guards are wired directly into [`docker-compose.live.single.yml`](docker-compose.live.single.yml) and enforced at startup. They cannot be accidentally bypassed by the host shell environment.
+
+| Guard | Env var | What it enforces |
+|---|---|---|
+| Stack-lock | `REQUIRE_LIVE_TRADE_MODE=true` | Startup validator hard-fails if `TRADE_MODE != LIVE`; prevents SHADOW/PAPER deployment of the LIVE manifest |
+| Broker schema check | `BROKER_SCHEMA_CHECK_MODE=strict` | Angel One balance/order/position API responses validated at every sync cycle; malformed shapes rejected at the integration boundary |
+| Risk state isolation | `RISK_STATE_PATH=/app/state/risk_positions.json` | Risk restart-helper stored on the `/app/state` volume (separate from logs); survives log rotation |
+| Selector staleness | IST-date guard in `StrategySelector` | Prior-day selection state evicted on first bar after IST midnight; prevents regime/strategy state carrying over between trading days |
+| Sync freshness | `/readyz` sync-age gate | Returns 503 when position or orders sync age exceeds 2× the configured sync interval |
+| Unroutable exclusion | `routed_strategy_ids()` at stream startup | Strategies with no routing entry are excluded from selector evaluation and logged as `strategy.unroutable` |
+
 ## Capital risk configuration
 
 Production limits are pinned explicitly in [`docker-compose.live.single.yml`](docker-compose.live.single.yml):
