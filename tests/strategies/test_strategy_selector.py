@@ -422,3 +422,99 @@ def test_ng_fut_selector_behavior_unchanged():
     assert _simulate_is_strategy_selected(
         selector, cfg, "NG_FUT", "ema20_strategy"
     ) is True
+
+
+# ---------------------------------------------------------------------------
+# Issue #25: Stale selector state invalidation across IST trading days
+# ---------------------------------------------------------------------------
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _ist_ts(year: int, month: int, day: int, hour: int = 9, minute: int = 30) -> datetime:
+    return datetime(year, month, day, hour, minute, tzinfo=_IST).astimezone(timezone.utc)
+
+
+def test_stale_state_from_prior_day_is_invalidated_on_select():
+    """State with switched_at on a previous IST date is discarded on the next day's select()."""
+    cfg = StrategySelectorConfig.from_raw(
+        {"enabled": True, "max_active_per_underlying": 1, "min_hold_seconds": 0}
+    )
+    selector = StrategySelector(cfg)
+
+    # Seed state from April 19
+    selector.select(
+        underlying="NIFTY",
+        regime=Regime.TRENDING,
+        allowed_strategies=["ema20_strategy"],
+        now=_ist_ts(2026, 4, 19, 10, 0),
+    )
+    assert "NIFTY" in selector._state
+    assert selector._state["NIFTY"].regime == Regime.TRENDING
+
+    # April 20 call — state should be invalidated
+    decision = selector.select(
+        underlying="NIFTY",
+        regime=Regime.CHOPPY,
+        allowed_strategies=["put_momentum_scalper"],
+        now=_ist_ts(2026, 4, 20, 9, 30),
+    )
+
+    # Fresh selection based on new regime
+    assert decision.changed is True
+    assert len(selector._stale_invalidated) == 1
+    assert "NIFTY" in selector._stale_invalidated
+    assert selector._state["NIFTY"].regime == Regime.CHOPPY
+
+
+def test_same_day_state_is_not_invalidated():
+    """State from the same IST calendar day is retained normally."""
+    cfg = StrategySelectorConfig.from_raw(
+        {"enabled": True, "max_active_per_underlying": 1, "min_hold_seconds": 0}
+    )
+    selector = StrategySelector(cfg)
+
+    selector.select(
+        underlying="NIFTY",
+        regime=Regime.TRENDING,
+        allowed_strategies=["ema20_strategy"],
+        now=_ist_ts(2026, 4, 20, 9, 30),
+    )
+
+    # Later call on same day — state preserved, not invalidated
+    selector.select(
+        underlying="NIFTY",
+        regime=Regime.CHOPPY,
+        allowed_strategies=["put_momentum_scalper"],
+        now=_ist_ts(2026, 4, 20, 11, 0),
+    )
+
+    assert len(selector._stale_invalidated) == 0
+
+
+def test_staleness_summary_reflects_stale_entries_before_select():
+    """staleness_summary() reports stale entries that haven't been evicted yet."""
+    from datetime import date
+    cfg = StrategySelectorConfig.from_raw(
+        {"enabled": True, "max_active_per_underlying": 1, "min_hold_seconds": 0}
+    )
+    selector = StrategySelector(cfg)
+
+    # Directly plant a prior-day state entry
+    from app.strategies.adaptive.strategy_selector import _SelectionState, _IST, _ist_date
+    yesterday_ts = _ist_ts(2026, 4, 19, 10, 0)
+    from app.strategies.adaptive.regime import Regime as _Regime
+    selector._state["BANKNIFTY"] = _SelectionState(
+        selected=("ema20_strategy",),
+        regime=_Regime.TRENDING,
+        reason="mapping",
+        switched_at=yesterday_ts,
+        hold_until=None,
+        updated_at=yesterday_ts,
+    )
+
+    today = _ist_ts(2026, 4, 20, 9, 30)
+    summary = selector.staleness_summary(now=today)
+
+    assert "stale_count=1" in summary["status"]
+    assert "BANKNIFTY" in summary["stale_underlyings"]

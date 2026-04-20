@@ -141,6 +141,8 @@ class SmartWebSocketRunner:
         self._min_stable_seconds = 10
         self._subscription_lock = threading.RLock()
         self._pending_resubscribe: Optional[tuple] = None  # Queue for deferred resubscription
+        self._connect_count: int = 0
+        self._open_ts: float = 0.0
         self._last_error_message: Optional[str] = None
         self._last_error_log_ts: float = 0.0
         self._suppressed_error_logs: int = 0
@@ -245,11 +247,15 @@ class SmartWebSocketRunner:
 
     # Subscribe on open, handling batching and pending resubscribe.
     def _on_open(self, wsapp) -> None:
+        import time as _time
         if self._closed:
             logger.warning("WebSocket opened after close request; skipping subscribe.")
             return
         with self._subscription_lock:
             self.state.set_status("connected")
+            self._connect_count += 1
+            self._open_ts = _time.monotonic()
+            is_reconnect = self._connect_count > 1
             logger.info(
                 "WebSocket opened, subscribing to %s (mode=%s) with %d tokens...",
                 self.subscribe_name,
@@ -273,11 +279,21 @@ class SmartWebSocketRunner:
                     len(self.token_list)
                 )
 
-            logger.info(
-                "WebSocket subscription complete: %d tokens across %d batches",
-                len(self.token_list),
-                batch_count
-            )
+            elapsed_ms = round((_time.monotonic() - self._open_ts) * 1000)
+            if is_reconnect:
+                logger.info(
+                    "stream_worker.reconnect_complete attempt=%d subscribed_tokens=%d batches=%d elapsed_ms=%d",
+                    self._connect_count - 1,
+                    len(self.token_list),
+                    batch_count,
+                    elapsed_ms,
+                )
+            else:
+                logger.info(
+                    "WebSocket subscription complete: %d tokens across %d batches",
+                    len(self.token_list),
+                    batch_count
+                )
 
             # Retry any pending resubscription that was deferred
             if self._pending_resubscribe is not None:
@@ -369,6 +385,12 @@ class SmartWebSocketRunner:
                         "Will retry on next reconnection attempt.",
                         max_attempts,
                         exc
+                    )
+                    logger.warning(
+                        "stream_worker.reconnect_failed attempts=%d token_count=%d reason=%s",
+                        max_attempts,
+                        len(token_list) if token_list else 0,
+                        str(exc)[:200],
                     )
                     # Queue for retry instead of forcing reconnect
                     self._pending_resubscribe = (token_list, 0, max_attempts)

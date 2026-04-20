@@ -149,3 +149,34 @@ def test_live_with_postgres_backend_no_backend_warning(monkeypatch, caplog):
         if r.levelno == logging.ERROR and "undeclared Firestore" in r.message
     ]
     assert not backend_mismatch_errors, "Unexpected backend-mismatch ERROR with postgres backend"
+
+
+# ---------------------------------------------------------------------------
+# Issue #33: routed_strategy_ids
+# ---------------------------------------------------------------------------
+
+def test_routed_strategy_ids_returns_strategies_with_routes():
+    """routed_strategy_ids() returns only strategies with at least one HubRoute."""
+    import time
+    table = HubRoutingTable()
+    with table._lock:
+        table._routes_by_strategy = {
+            "ema20_strategy": [HubRoute(tenant_id="t1", broker_account_id="ba1")],
+            "put_momentum_scalper": [],  # empty — no routes
+        }
+        table._last_refresh_mono = time.monotonic()
+
+    routed = table.routed_strategy_ids()
+    assert "ema20_strategy" in routed
+    assert "put_momentum_scalper" not in routed
+
+
+def test_routed_strategy_ids_empty_when_no_routes():
+    """routed_strategy_ids() returns empty frozenset when table has no routes."""
+    import time
+    table = HubRoutingTable()
+    with table._lock:
+        table._routes_by_strategy = {}
+        table._last_refresh_mono = time.monotonic()
+
+    assert table.routed_strategy_ids() == frozenset()

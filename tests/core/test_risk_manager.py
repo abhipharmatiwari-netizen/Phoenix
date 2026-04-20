@@ -357,6 +357,63 @@ def test_reconcile_pending_closing_order_uses_fill_price_in_lots(risk_manager, m
     assert risk_manager.realized_pnl == pytest.approx(247.0)
 
 
+# ---------------------------------------------------------------------------
+# Issue #29: RISK_STATE_PATH consolidation and legacy migration
+# ---------------------------------------------------------------------------
+
+def test_risk_state_path_uses_risk_state_path_env(tmp_path, dummy_instrument_meta, monkeypatch):
+    """RISK_STATE_PATH env var must control where risk state is persisted."""
+    import importlib
+    mod = importlib.import_module("app.core.risk_manager")
+    RiskManager = mod.RiskManager
+
+    custom_path = tmp_path / "custom_state" / "risk.json"
+    monkeypatch.setenv("RISK_STATE_PATH", str(custom_path))
+
+    rm = RiskManager(
+        instrument_meta=dummy_instrument_meta,
+        order_client=SimpleNamespace(),
+    )
+    assert rm.state_path == custom_path.resolve()
+
+
+def test_risk_state_legacy_migration_moves_file(tmp_path, dummy_instrument_meta, monkeypatch):
+    """On startup, if legacy path exists and canonical path does not, the file is moved."""
+    import importlib
+    import json
+    from datetime import datetime, timezone, timedelta
+    mod = importlib.import_module("app.core.risk_manager")
+    RiskManager = mod.RiskManager
+
+    # Include kill_switch_date = today so daily reset does not zero out realized_pnl
+    IST = timezone(timedelta(hours=5, minutes=30))
+    today_ist = datetime.now(IST).date().isoformat()
+
+    legacy_dir = tmp_path / "app_config"
+    legacy_dir.mkdir()
+    legacy_file = legacy_dir / "risk_positions.json"
+    legacy_file.write_text(
+        json.dumps({"realized_pnl": 500.0, "kill_switch_date": today_ist}),
+        encoding="utf-8",
+    )
+
+    canonical_dir = tmp_path / "state"
+    canonical_path = canonical_dir / "risk_positions.json"
+
+    monkeypatch.setenv("RISK_STATE_PATH", str(canonical_path))
+    monkeypatch.setattr(mod, "_LEGACY_STATE_PATH", legacy_file)
+
+    rm = RiskManager(
+        instrument_meta=dummy_instrument_meta,
+        order_client=SimpleNamespace(),
+    )
+
+    # Migration must have moved the file and loaded the state
+    assert canonical_path.exists()
+    assert not legacy_file.exists()
+    assert rm.realized_pnl == pytest.approx(500.0)
+
+
 @pytest.mark.parametrize("side", ["BUY", "SELL"])
 def test_maintenance_block_rejects_new_entries_for_all_entry_sides(risk_manager, side):
     maintenance = MaintenanceManager()

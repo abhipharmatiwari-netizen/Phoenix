@@ -248,6 +248,13 @@ def load_stability_feature_flags(
         50,
         minimum=1,
     )
+    # Default is "off" for deployment stability: AngelOne broker API responses
+    # occasionally include undeclared fields or null positions for unknown instruments,
+    # and early strict-mode testing surfaced false-positive parse errors on otherwise
+    # valid balance and positions payloads. "warn" logs anomalies without blocking;
+    # "strict" raises BrokerSchemaError and blocks the sync cycle.
+    # LIVE deployments should set BROKER_SCHEMA_CHECK_MODE=strict (enforced via compose).
+    # A startup WARNING is emitted when TRADE_MODE=LIVE and this is not strict.
     broker_schema_check_mode = _choice(
         "BROKER_SCHEMA_CHECK_MODE",
         {"off", "warn", "strict"},

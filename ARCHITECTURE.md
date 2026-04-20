@@ -71,6 +71,23 @@ Phoenix runs in one of two mutually exclusive operating modes. Only one mode may
 | Sweep / EOD state | Postgres preferred and required for LIVE automation | dashboard, BigQuery | Must be idempotent, replay-safe, and durable across restarts |
 | Dashboard payloads | none | `DashboardBus` | Dashboard is always derived, never authoritative |
 | Control-plane credentials and secrets | Secret Manager or Postgres in LIVE | short-lived injected env only | Repo files and long-lived plaintext env are forbidden for LIVE |
+| Hub routing table | Postgres (`CONTROL_PLANE_BACKEND=postgres`) | in-memory cache refreshed from Postgres | Firestore was a prior implementation; current LIVE stack uses Postgres exclusively. If `CONTROL_PLANE_BACKEND=firestore`, Google ADC credentials (`GOOGLE_APPLICATION_CREDENTIALS`) are required — see compose comment |
+
+### Firestore dependency status
+
+Firestore is **not active** in the current LIVE stack (`docker-compose.live.single.yml`). All authoritative backends use Postgres:
+- Control plane / routing table: `CONTROL_PLANE_BACKEND=postgres`
+- Sweep / EOD state: `SWEEP_STATE_BACKEND=postgres`
+- Leader lease: `LEADER_LEASE_BACKEND=postgres`
+- Broker secrets: `BROKER_SECRET_BACKEND=postgres`
+- Runtime config: `RUNTIME_CONFIG_ENABLED=false`
+
+If any backend is ever switched to Firestore:
+1. Mount a GCP service-account JSON key into the container
+2. Set `GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json`
+3. Verify ADC access with `gcloud auth application-default print-access-token`
+4. Monitor Firestore quota via GCP Console → Firestore → Usage
+5. Fallback on Firestore outage: switch `CONTROL_PLANE_BACKEND=postgres` and redeploy
 
 ### Storage policy
 - **Authoritative stores** decide live behavior.

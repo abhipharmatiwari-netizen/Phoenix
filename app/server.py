@@ -685,6 +685,39 @@ def _latest_iso(values: list[Any]) -> str | None:
     return latest.isoformat().replace("+00:00", "Z")
 
 
+def _sync_freshness_check(
+    *,
+    last_ok_ts_iso: str | None,
+    interval_seconds: float,
+    label: str,
+) -> dict[str, Any]:
+    """Return a staleness report dict. `stale=True` when sync has never run or is overdue."""
+    multiplier = 2.0
+    threshold = interval_seconds * multiplier
+    if last_ok_ts_iso is None:
+        return {
+            f"{label}_last_ok_ts": None,
+            f"{label}_age_seconds": None,
+            f"{label}_stale": True,
+            f"{label}_threshold_seconds": threshold,
+        }
+    last_ts = _parse_iso_timestamp(last_ok_ts_iso)
+    if last_ts is None:
+        return {
+            f"{label}_last_ok_ts": last_ok_ts_iso,
+            f"{label}_age_seconds": None,
+            f"{label}_stale": True,
+            f"{label}_threshold_seconds": threshold,
+        }
+    age = (datetime.now(timezone.utc) - last_ts).total_seconds()
+    return {
+        f"{label}_last_ok_ts": last_ok_ts_iso,
+        f"{label}_age_seconds": round(age, 1),
+        f"{label}_stale": age > threshold,
+        f"{label}_threshold_seconds": threshold,
+    }
+
+
 def _validate_angel_postback_content_type(request: Request) -> None:
     content_type = str(request.headers.get("content-type") or "").strip().lower()
     if "application/json" in content_type:
@@ -1073,6 +1106,55 @@ async def readyz() -> JSONResponse:
                 payload["ready"] = False
                 payload["reason"] = "stream_watchdog_not_running"
                 return JSONResponse(status_code=503, content=payload)
+
+    # Sync freshness check — gates readiness on position and orders sync currency
+    try:
+        hub_runtime = get_hub_runtime()
+        hub = getattr(hub_runtime, "hub", None)
+        state_store = getattr(hub_runtime, "state_store", None)
+        runner_ids: list[str] = []
+        if hub is not None and callable(getattr(hub, "list_runner_ids", None)):
+            runner_ids = [str(v) for v in hub.list_runner_ids()]
+        if runner_ids and state_store is not None:
+            pos_interval = float(os.getenv("POSITION_SYNC_INTERVAL_SECONDS", "30"))
+            ord_interval = float(os.getenv("ORDERS_SYNC_INTERVAL_SECONDS", "90"))
+            pos_ts_values: list[str | None] = []
+            ord_ts_values: list[str | None] = []
+            for acct_id in runner_ids:
+                pos_st = state_store.get_positions_status(acct_id)
+                pos_ts_values.append(pos_st.get("last_ok_ts") if isinstance(pos_st, dict) else None)
+                ord_st = state_store.get_orders_status(acct_id)
+                ord_ts_values.append(ord_st.get("orders_last_ok_ts") if isinstance(ord_st, dict) else None)
+            oldest_pos_ts = min(
+                (t for t in pos_ts_values if t is not None),
+                default=None,
+            )
+            oldest_ord_ts = min(
+                (t for t in ord_ts_values if t is not None),
+                default=None,
+            )
+            pos_report = _sync_freshness_check(
+                last_ok_ts_iso=oldest_pos_ts,
+                interval_seconds=pos_interval,
+                label="position_sync",
+            )
+            ord_report = _sync_freshness_check(
+                last_ok_ts_iso=oldest_ord_ts,
+                interval_seconds=ord_interval,
+                label="orders_sync",
+            )
+            payload.update(pos_report)
+            payload.update(ord_report)
+            if pos_report["position_sync_stale"]:
+                payload["ready"] = False
+                payload["reason"] = "position_sync_stale"
+                return JSONResponse(status_code=503, content=payload)
+            if ord_report["orders_sync_stale"]:
+                payload["ready"] = False
+                payload["reason"] = "orders_sync_stale"
+                return JSONResponse(status_code=503, content=payload)
+    except Exception as exc:
+        logger.warning("readyz: sync freshness check failed: %s", exc)
 
     payload["ready"] = True
     return JSONResponse(status_code=200, content=payload)

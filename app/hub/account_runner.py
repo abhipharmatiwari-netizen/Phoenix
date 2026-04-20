@@ -493,6 +493,10 @@ class AccountRunner:
             self._last_orders = orders
             self._last_orders_sync_ts = time.monotonic()
             self._state_store.set_order_snapshot(self._broker_account_id, orders)
+            self._state_store.update_orders_ok_ts(
+                self._broker_account_id,
+                last_ok_ts=datetime.now(timezone.utc).isoformat(),
+            )
             active_orders = self._derive_active_orders(orders)
             self._state_store.set_orders(self._broker_account_id, active_orders)
             log_event(

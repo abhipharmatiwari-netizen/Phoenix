@@ -47,6 +47,7 @@ class AccountState:
     positions_error_reason: Optional[str] = None
     positions_blocked_ts: Optional[str] = None
     positions_retry_after_seconds: Optional[float] = None
+    orders_last_ok_ts: Optional[str] = None
     account_signal_valid: Optional[bool] = None
     strategy_signal_valid: Dict[str, bool] = field(default_factory=dict)
 
@@ -183,6 +184,20 @@ class StateStore:
                 "blocked_ts": state.positions_blocked_ts,
                 "retry_after_seconds": state.positions_retry_after_seconds,
             }
+
+    def get_orders_status(
+        self, account_id: BrokerAccountId
+    ) -> Dict[str, Optional[object]]:
+        lock, state = self._ensure_account(account_id)
+        with lock:
+            return {"orders_last_ok_ts": state.orders_last_ok_ts}
+
+    def update_orders_ok_ts(
+        self, account_id: BrokerAccountId, *, last_ok_ts: str
+    ) -> None:
+        lock, state = self._ensure_account(account_id)
+        with lock:
+            state.orders_last_ok_ts = last_ok_ts
 
     # Update metadata for position sync status.
     def update_positions_status(

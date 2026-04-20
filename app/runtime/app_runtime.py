@@ -216,11 +216,21 @@ class WorkerWatchdog:
                 continue
             try:
                 self._record_restart_attempt(now_mono)
+                last_tick_ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                status_getter = getattr(self._worker, "status_snapshot", None)
+                if callable(status_getter):
+                    try:
+                        _snap = status_getter()
+                        if isinstance(_snap, dict) and _snap.get("last_tick_ts"):
+                            last_tick_ts = str(_snap["last_tick_ts"])
+                    except Exception:
+                        pass
                 logger.warning(
-                    "Stream watchdog restarting worker (detected stopped stream). attempts=%d backoff_seconds=%.2f next_restart_in_seconds=%.2f",
+                    "stream_worker.watchdog_restart_detected attempts=%d backoff_seconds=%.2f "
+                    "last_tick_ts=%s",
                     self._restart_attempts,
                     self._current_backoff_seconds,
-                    self._current_backoff_seconds,
+                    last_tick_ts,
                 )
                 self._worker.start()
             except Exception as exc:  # pragma: no cover - safety net
@@ -500,6 +510,18 @@ class AppRuntime:
                     "startup.ssl_warning: TRADE_MODE=LIVE but CONTROL_PLANE_PG_SSLMODE=disable; "
                     "Postgres connection is unencrypted. Set CONTROL_PLANE_PG_SSLMODE=require "
                     "to encrypt credentials and trade data in transit."
+                )
+            import os as _os
+            _broker_schema_mode = str(
+                _os.getenv("BROKER_SCHEMA_CHECK_MODE", "") or ""
+            ).strip().lower()
+            if _broker_schema_mode != "strict":
+                logger.warning(
+                    "startup.broker_schema_check_warning: TRADE_MODE=LIVE but "
+                    "BROKER_SCHEMA_CHECK_MODE=%s (not strict); malformed AngelOne API "
+                    "responses will not be rejected at the integration boundary. "
+                    "Set BROKER_SCHEMA_CHECK_MODE=strict in production.",
+                    _broker_schema_mode or "off",
                 )
 
         schema_checked_at = datetime.now(timezone.utc).isoformat().replace(

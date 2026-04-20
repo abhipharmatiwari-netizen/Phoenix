@@ -407,6 +407,12 @@ def validate_runtime_startup_settings(
             )
 
     trade_mode = str(env.get("TRADE_MODE", "PAPER") or "PAPER").strip().upper()
+    require_live = str(env.get("REQUIRE_LIVE_TRADE_MODE", "") or "").strip().lower()
+    if require_live in {"1", "true", "yes", "on"} and trade_mode != "LIVE":
+        errors.append(
+            f"REQUIRE_LIVE_TRADE_MODE=true but TRADE_MODE={trade_mode}; "
+            "this compose stack requires TRADE_MODE=LIVE"
+        )
     if trade_mode == "LIVE":
         errors.extend(live_broker_network_identity_env_errors(env))
         if configured_mock_sweep_state_escape_hatches:

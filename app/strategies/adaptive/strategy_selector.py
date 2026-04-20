@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping, Optional, Sequence
 
 from app.strategies.validators import validate_strategy_list
 
 from .regime import Regime
+
+logger = logging.getLogger(__name__)
+
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _parse_bool(value: Any, *, default: bool = False) -> bool:
@@ -63,6 +68,10 @@ def _underlying_aliases(underlying: str) -> tuple[str, ...]:
             if base:
                 aliases.append(base)
     return tuple(dict.fromkeys(aliases))
+
+
+def _ist_date(dt: datetime) -> date:
+    return _to_utc(dt).astimezone(_IST).date()
 
 
 def _validated_strategy_names(
@@ -178,6 +187,7 @@ class StrategySelector:
     def __init__(self, config: StrategySelectorConfig) -> None:
         self.config = config
         self._state: dict[str, _SelectionState] = {}
+        self._stale_invalidated: list[str] = []
 
     def select(
         self,
@@ -200,6 +210,18 @@ class StrategySelector:
         )
 
         state = self._state.get(underlying_key)
+        if state is not None and _ist_date(state.switched_at) < _ist_date(now_utc):
+            logger.info(
+                "selector.stale_state_detected underlying=%s switched_at=%s today_ist=%s; "
+                "invalidating prior-day selection",
+                underlying_key,
+                state.switched_at.isoformat(),
+                _ist_date(now_utc).isoformat(),
+            )
+            del self._state[underlying_key]
+            self._stale_invalidated.append(underlying_key)
+            state = None
+
         if state is None:
             new_state = self._set_state(
                 underlying=underlying_key,
@@ -260,6 +282,21 @@ class StrategySelector:
                 "switched_at": state.switched_at.isoformat(),
             }
         return out
+
+    def staleness_summary(self, now: Optional[datetime] = None) -> dict[str, Any]:
+        """Return a staleness check summary for inclusion in the startup snapshot."""
+        now_utc = _to_utc(now)
+        today_ist = _ist_date(now_utc)
+        stale = [
+            k for k, v in self._state.items()
+            if _ist_date(v.switched_at) < today_ist
+        ]
+        if stale:
+            return {
+                "status": f"stale_count={len(stale)}",
+                "stale_underlyings": stale,
+            }
+        return {"status": "passed"}
 
     def _set_state(
         self,

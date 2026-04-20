@@ -650,6 +650,8 @@ def _build_strategy_runtime_startup_snapshot(
     selector_config: Any,
     selector_state: Mapping[str, Any],
     strict_intraday_state: Mapping[str, Any],
+    selector_staleness_check: Mapping[str, Any] | None = None,
+    unroutable_strategies: list[str] | None = None,
     indicator_plan_snapshot: Mapping[str, Any] | None = None,
     indicator_seed_summary: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
@@ -682,6 +684,8 @@ def _build_strategy_runtime_startup_snapshot(
         "selector_state": _redact_startup_snapshot_payload(
             dict(selector_state or {})
         ),
+        "selector_staleness_check": dict(selector_staleness_check or {"status": "passed"}),
+        "unroutable_strategies": sorted(unroutable_strategies or []),
         "strict_intraday": _redact_startup_snapshot_payload(
             dict(strict_intraday_state or {})
         ),
@@ -3050,10 +3054,20 @@ def stream_multi_instruments(
             sorted(selector_config.mapping.keys()),
         )
 
+    # Pre-initialized; filled by the unroutable check block after strategy switch is ready.
+    unroutable_strategies: list[str] = []
+
     def _strategy_candidates_for_underlying(underlying_label: str) -> list[str]:
         out: list[str] = []
         seen: set[str] = set()
         target = str(underlying_label or "").strip().upper()
+        _exclude = bool(
+            trade_mode == "LIVE"
+            and str(os.getenv("AUTO_STRATEGY_SELECT_ENABLED", "false") or "false")
+            .strip().lower() in {"1", "true", "yes", "on"}
+            and unroutable_strategies
+        )
+        _unroutable = frozenset(unroutable_strategies) if _exclude else frozenset()
         for row in strategies:
             row_underlying = str(row.get("underlying") or "").strip().upper()
             if row_underlying != target:
@@ -3067,6 +3081,8 @@ def stream_multi_instruments(
                 continue
             seen.add(name)
             if not instrument_controller.is_strategy_allowed(target, name):
+                continue
+            if _exclude and name in _unroutable:
                 continue
             out.append(name)
         return out
@@ -3230,6 +3246,34 @@ def stream_multi_instruments(
 
     instrument_policy_snapshot = instrument_controller.snapshot()
     strategy_switch_snapshot = strategy_switch.snapshot()
+
+    # --- Issue #33: detect unroutable strategies (fills the pre-initialized list) ---
+    try:
+        from app.hub.routing_table import get_global_routing_table
+        _rt = get_global_routing_table()
+        routed_ids = _rt.routed_strategy_ids()
+        _auto_select_enabled = str(
+            os.getenv("AUTO_STRATEGY_SELECT_ENABLED", "false") or "false"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        for _sname, _enabled in strategy_switch_snapshot.items():
+            if not _enabled:
+                continue
+            if _sname not in routed_ids:
+                unroutable_strategies.append(_sname)
+                logger.warning(
+                    "strategy.unroutable name=%s — enabled in strategy switch but has no routing entry; "
+                    "signals from this strategy will be dropped by the router",
+                    _sname,
+                )
+        if unroutable_strategies and trade_mode == "LIVE" and _auto_select_enabled:
+            logger.warning(
+                "strategy.unroutable_selector_excluded count=%d names=%s — "
+                "unroutable strategies excluded from selector evaluation (LIVE+AUTO_STRATEGY_SELECT_ENABLED)",
+                len(unroutable_strategies),
+                sorted(unroutable_strategies),
+            )
+    except Exception as _exc:
+        logger.warning("Unroutable strategy check failed: %s", _exc)
     strict_intraday_state = {
         "enabled": bool(strict_intraday_enabled),
         "target_strategies": sorted(strict_target_names),
@@ -3273,6 +3317,12 @@ def stream_multi_instruments(
             if strategy_selector is not None
             else {}
         ),
+        selector_staleness_check=(
+            strategy_selector.staleness_summary()
+            if strategy_selector is not None
+            else {"status": "no_selector"}
+        ),
+        unroutable_strategies=unroutable_strategies,
         strict_intraday_state=strict_intraday_state,
         indicator_plan_snapshot=indicator_plan_snapshot,
         indicator_seed_summary=indicator_seed_summary,

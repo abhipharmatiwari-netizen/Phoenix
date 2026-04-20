@@ -41,8 +41,16 @@ logger = logging.getLogger(__name__)
 APP_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = APP_DIR.parent
 CONFIG_DIR = APP_DIR / "config"
-LEGACY_STATE_PATH = CONFIG_DIR / "risk_positions.json"
-DEFAULT_STATE_PATH = REPO_ROOT / "logs" / "risk_positions.json"
+_LEGACY_STATE_PATH = CONFIG_DIR / "risk_positions.json"
+_DEFAULT_STATE_PATH = REPO_ROOT / "logs" / "risk_positions.json"
+
+
+def _resolve_risk_state_path(override: Optional[str] = None) -> Path:
+    """Return the canonical risk state path, driven by RISK_STATE_PATH env var."""
+    raw = override or os.getenv("RISK_STATE_PATH", "").strip()
+    if raw:
+        return Path(raw).resolve()
+    return _DEFAULT_STATE_PATH
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
@@ -89,7 +97,7 @@ class RiskManager:
         self.kill_switch_square_off_open_positions = (
             True if kill_switch_square_off_open_positions else False
         )
-        self.state_path = Path(state_path) if state_path else DEFAULT_STATE_PATH
+        self.state_path = _resolve_risk_state_path(state_path)
         self.trade_persister = trade_persister
         self.current_trade_mode = "PAPER"
 
@@ -150,6 +158,19 @@ class RiskManager:
         )
         self._last_account_loss_eval_mono = 0.0
         self._last_state_persist_mono = 0.0
+        self._maybe_migrate_legacy_state()
+        trade_mode = str(os.getenv("TRADE_MODE", "") or "").strip().upper()
+        if trade_mode == "LIVE":
+            try:
+                self.state_path.resolve().relative_to(APP_DIR)
+                logger.warning(
+                    "startup.risk_state_path_warning: RISK_STATE_PATH=%s resolves inside "
+                    "the app/ package directory — this file will not persist across "
+                    "container image rebuilds. Set RISK_STATE_PATH to a mounted volume path.",
+                    self.state_path,
+                )
+            except ValueError:
+                pass
         self._load_state()
         if self._reset_daily_if_new_day(datetime.now(timezone.utc)):
             self._persist_state()
@@ -822,15 +843,36 @@ class RiskManager:
             )
             return False
 
+    def _maybe_migrate_legacy_state(self) -> None:
+        """One-time migration: move legacy app/config/risk_positions.json to canonical path."""
+        if self.state_path == _LEGACY_STATE_PATH:
+            return
+        if self.state_path.exists():
+            return
+        if not _LEGACY_STATE_PATH.exists():
+            return
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            _LEGACY_STATE_PATH.rename(self.state_path)
+            logger.warning(
+                "startup.risk_state_migrated: moved legacy risk state from %s to %s",
+                _LEGACY_STATE_PATH,
+                self.state_path,
+            )
+        except Exception as exc:
+            logger.warning(
+                "startup.risk_state_migration_failed: could not move %s to %s: %s",
+                _LEGACY_STATE_PATH,
+                self.state_path,
+                exc,
+            )
+
     # Load persisted risk state from disk if available.
     def _load_state(self) -> None:
         candidate_path = self.state_path
         if not candidate_path.exists():
-            if candidate_path != LEGACY_STATE_PATH and LEGACY_STATE_PATH.exists():
-                candidate_path = LEGACY_STATE_PATH
-            else:
-                self.state_path.parent.mkdir(parents=True, exist_ok=True)
-                return
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            return
         if not candidate_path.exists():
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             return
@@ -848,8 +890,6 @@ class RiskManager:
                 return
         if data is None:
             return
-        if candidate_path != self.state_path:
-            logger.warning("Loaded risk state from legacy path: %s", candidate_path)
         with self._state_lock:
             self.realized_pnl = float(data.get("realized_pnl", 0.0))
             self.max_equity = float(data.get("max_equity", self.realized_pnl))

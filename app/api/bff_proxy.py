@@ -64,7 +64,7 @@ async def proxy_post(request: Request, path: str):
         except httpx.HTTPStatusError as e:
             return Response(content=e.response.text, status_code=e.response.status_code)
         except Exception as e:
-            logger.error(f"Error proxying request to {path}: {e}")
+            logger.error("Error proxying POST to %s: %s: %s", path, type(e).__name__, e)
             return Response(status_code=500, content="Internal server error")
 
 @router.get("/{path:path}")
@@ -81,5 +81,5 @@ async def proxy_get(request: Request, path: str):
         except httpx.HTTPStatusError as e:
             return Response(content=e.response.text, status_code=e.response.status_code)
         except Exception as e:
-            logger.error(f"Error proxying request to {path}: {e}")
+            logger.error("Error proxying GET to %s: %s: %s", path, type(e).__name__, e)
             return Response(status_code=500, content="Internal server error")

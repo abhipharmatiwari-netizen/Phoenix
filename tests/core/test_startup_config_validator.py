@@ -977,3 +977,32 @@ def test_runtime_settings_validator_accepts_live_with_ownership_persist_and_inst
         runtime_cfg=_valid_runtime_cfg(app_env="production"),
         env=_valid_live_env(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #28: REQUIRE_LIVE_TRADE_MODE guard
+# ---------------------------------------------------------------------------
+
+def test_require_live_trade_mode_rejects_shadow_when_flag_set():
+    """REQUIRE_LIVE_TRADE_MODE=true must cause startup failure when TRADE_MODE != LIVE."""
+    with pytest.raises(ValueError, match="REQUIRE_LIVE_TRADE_MODE=true"):
+        validate_runtime_startup_settings(
+            settings=_valid_runtime_settings(),
+            runtime_cfg=_valid_runtime_cfg(),
+            env={
+                **_valid_live_env(TRADE_MODE="SHADOW"),
+                "REQUIRE_LIVE_TRADE_MODE": "true",
+            },
+        )
+
+
+def test_require_live_trade_mode_passes_when_trade_mode_is_live():
+    """REQUIRE_LIVE_TRADE_MODE=true must not add errors when TRADE_MODE=LIVE."""
+    validate_runtime_startup_settings(
+        settings=_valid_runtime_settings(hub_instance_name="phoenix-live-1"),
+        runtime_cfg=_valid_runtime_cfg(app_env="production"),
+        env={
+            **_valid_live_env(),
+            "REQUIRE_LIVE_TRADE_MODE": "true",
+        },
+    )

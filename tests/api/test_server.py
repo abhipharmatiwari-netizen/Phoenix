@@ -1693,3 +1693,104 @@ def test_readyz_allows_disabled_live_stream_worker_path(monkeypatch):
     assert payload["ready"] is True
     assert payload["stream_worker_expected"] is False
     assert payload["stream_worker_running"] is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #27: /readyz sync freshness checks
+# ---------------------------------------------------------------------------
+
+def _make_readyz_stub_with_sync_ts(
+    *,
+    pos_last_ok_ts: str | None,
+    ord_last_ok_ts: str | None,
+    pos_interval: str = "30",
+    ord_interval: str = "90",
+    monkeypatch,
+    runtime,
+    settings=None,
+):
+    """Build hub/state_store stubs with controllable sync timestamps and monkeypatch server."""
+    state_store = StateStore()
+    state_store._ensure_account("ACC1")
+    if pos_last_ok_ts is not None:
+        state_store.update_positions_status(
+            "ACC1",
+            status="OK",
+            last_ok_ts=pos_last_ok_ts,
+            last_count=5,
+            error_reason=None,
+            blocked_ts=None,
+            retry_after_seconds=None,
+        )
+    if ord_last_ok_ts is not None:
+        state_store.update_orders_ok_ts("ACC1", last_ok_ts=ord_last_ok_ts)
+
+    hub_stub = SimpleNamespace(
+        runner_count=1,
+        running_runner_count=1,
+        failed_runner_count=0,
+        registered_runner_count=1,
+        list_runner_ids=lambda: ["ACC1"],
+    )
+    hub_runtime_stub = SimpleNamespace(hub=hub_stub, state_store=state_store)
+
+    monkeypatch.setenv("POSITION_SYNC_INTERVAL_SECONDS", pos_interval)
+    monkeypatch.setenv("ORDERS_SYNC_INTERVAL_SECONDS", ord_interval)
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: hub_runtime_stub)
+    if settings is None:
+        settings = SimpleNamespace(
+            enable_multi_hub=True,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        )
+    monkeypatch.setattr(server, "get_settings", lambda: settings)
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+
+
+def test_readyz_returns_503_when_position_sync_is_stale(monkeypatch):
+    """/readyz must return 503 when the most-recent position sync is older than 2x interval."""
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+    stale_ts = datetime(2000, 1, 1, tzinfo=timezone.utc).isoformat()
+    fresh_ts = datetime.now(timezone.utc).isoformat()
+
+    _make_readyz_stub_with_sync_ts(
+        pos_last_ok_ts=stale_ts,
+        ord_last_ok_ts=fresh_ts,
+        monkeypatch=monkeypatch,
+        runtime=runtime,
+    )
+    with TestClient(server.app) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 503
+    payload = resp.json()
+    assert payload["ready"] is False
+    assert payload["reason"] == "position_sync_stale"
+    assert "position_sync_age_seconds" in payload
+
+
+def test_readyz_returns_503_when_orders_sync_is_stale(monkeypatch):
+    """/readyz must return 503 when orders sync has never run or is overdue."""
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+    fresh_ts = datetime.now(timezone.utc).isoformat()
+
+    _make_readyz_stub_with_sync_ts(
+        pos_last_ok_ts=fresh_ts,
+        ord_last_ok_ts=None,  # never synced
+        monkeypatch=monkeypatch,
+        runtime=runtime,
+    )
+    with TestClient(server.app) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 503
+    payload = resp.json()
+    assert payload["ready"] is False
+    assert payload["reason"] == "orders_sync_stale"

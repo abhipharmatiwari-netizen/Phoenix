@@ -522,6 +522,26 @@ class AngelBrokerClient(BrokerClient):
             payload_snippet=_safe_snippet(data),
         )
 
+    # Angel One RMS API returns component-level utilised fields rather than a
+    # single rolled-up utilisedmargin.  Sum them to get total utilized margin.
+    _ANGEL_UTILISED_COMPONENT_KEYS: tuple[str, ...] = (
+        "utilisedspan",
+        "utilisedoptionpremium",
+        "utilisedexposure",
+        "utiliseddebits",
+        "utilisedturnover",
+        "utilisedpayout",
+    )
+
+    def _sum_angel_utilised_components(self, data: dict[str, Any]) -> Optional[float]:
+        """Return sum of Angel's component utilised fields if any are present, else None."""
+        if not any(k in data for k in self._ANGEL_UTILISED_COMPONENT_KEYS):
+            return None
+        return sum(
+            self._coerce_float(data.get(k)) or 0.0
+            for k in self._ANGEL_UTILISED_COMPONENT_KEYS
+        )
+
     def _parse_balance_values(
         self,
         data: dict[str, Any],
@@ -550,6 +570,7 @@ class AngelBrokerClient(BrokerClient):
                     or data.get("utilised")
                     or data.get("used")
                 )
+                or self._sum_angel_utilised_components(data)
                 or 0.0
             )
             return float(available), float(total), float(utilized)
@@ -564,11 +585,20 @@ class AngelBrokerClient(BrokerClient):
             ["net", "total", "totalcash"],
             field="balance.total",
         )
-        utilized = self._require_float(
-            data,
-            ["utilisedmargin", "utilized", "utilised", "used"],
-            field="balance.utilized",
-        )
+        # Try primary rolled-up key first; fall back to summing Angel's component fields.
+        primary_keys = ["utilisedmargin", "utilized", "utilised", "used"]
+        try:
+            utilized = self._require_float(data, primary_keys, field="balance.utilized")
+        except BrokerSchemaError:
+            component_total = self._sum_angel_utilised_components(data)
+            if component_total is None:
+                raise
+            logger.debug(
+                "balance.utilized: primary keys %s absent; computed from Angel component fields: %.2f",
+                primary_keys,
+                component_total,
+            )
+            utilized = component_total
         return available, total, utilized
 
     async def get_balance(self) -> Balance:

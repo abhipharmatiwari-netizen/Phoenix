@@ -274,6 +274,12 @@ class HubRoutingTable:
         # Normal TTL path: trigger background refresh and serve cached routes.
         self._request_background_refresh()
 
+    def routed_strategy_ids(self) -> frozenset[str]:
+        """Return the set of strategy IDs that have at least one routing entry."""
+        self.refresh_if_stale(_routing_refresh_min_seconds())
+        with self._lock:
+            return frozenset(str(sid) for sid, routes in self._routes_by_strategy.items() if routes)
+
     # Return routes for a given strategy id.
     def get_routes_for_strategy(self, strategy_id: StrategyId) -> List[HubRoute]:
         """

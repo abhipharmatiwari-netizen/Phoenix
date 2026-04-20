@@ -43,9 +43,18 @@ x-live-backend-env: &live-backend-env
   CONTROL_PLANE_BACKEND: "postgres"
   SWEEP_STATE_BACKEND: "postgres"
   BROKER_SECRET_BACKEND: "postgres"
+  # NOTE: Google Firestore is NOT used by this stack. All backends (control plane,
+  # sweep state, leader lease, broker secrets) are Postgres. GOOGLE_APPLICATION_CREDENTIALS
+  # is not required. If any backend is changed to "firestore", ADC credentials must be
+  # mounted and GOOGLE_APPLICATION_CREDENTIALS set before deployment.
+  # GOOGLE_APPLICATION_CREDENTIALS: "/run/secrets/gcp-sa.json"  # only if firestore backends
 
   APP_RUNTIME_STARTUP_VALIDATE: "true"
   SCHEMA_CHECK_MODE: "strict"
+  # BROKER_SCHEMA_CHECK_MODE controls runtime rejection of unexpected broker API response
+  # shapes. Default in code is "off" for stability; set to "strict" for LIVE deployments
+  # so malformed AngelOne responses are rejected at the integration boundary.
+  BROKER_SCHEMA_CHECK_MODE: "strict"
   RUNTIME_CONFIG_AUTO_ENABLE: "false"
   RUNTIME_CONFIG_ENABLED: "false"
 
@@ -72,6 +81,11 @@ x-live-backend-env: &live-backend-env
   AUTO_STRATEGY_MIN_HOLD_SECONDS: "${AUTO_STRATEGY_MIN_HOLD_SECONDS:-180}"
 
   TRADE_MODE: "LIVE"
+  # Guard: startup validator rejects any deployment where TRADE_MODE != LIVE when this is set.
+  REQUIRE_LIVE_TRADE_MODE: "true"
+  # Canonical risk state file path. Mounts to /app/state so it is distinct from
+  # the log volume and survives log rotation. Override via PHOENIX_STATE_HOST_PATH.
+  RISK_STATE_PATH: "/app/state/risk_positions.json"
   DISABLE_TRADING_WINDOW_FILTER: "false"
 
   ENABLE_CAPITAL_CHECKS: "true"
@@ -334,6 +348,10 @@ services:
       # output from local pytest runs contaminating production log files.
       # Example: export PHOENIX_LOG_HOST_PATH=/var/log/phoenix
       - "${PHOENIX_LOG_HOST_PATH:-./logs}:/app/logs"
+      # PHOENIX_STATE_HOST_PATH is the host path for the risk state file.
+      # Separate from the log volume so risk state is not lost if logs are rotated.
+      # Example: export PHOENIX_STATE_HOST_PATH=/var/lib/phoenix/state
+      - "${PHOENIX_STATE_HOST_PATH:-./state}:/app/state"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
       interval: 30s
