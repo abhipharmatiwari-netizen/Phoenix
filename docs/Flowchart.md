@@ -1,5 +1,10 @@
 # Phoenix v9 -- Complete Application Flow
 
+> **Backend note:** The bundled Docker/Desktop LIVE path uses Postgres for all durable backends
+> (leader lease, sweep state, control plane, PnL). Firestore references in this diagram apply
+> to the Cloud Run / GCP deployment path only. Both paths share the same application code;
+> the backend is selected by `LEADER_LEASE_BACKEND`, `CONTROL_PLANE_BACKEND`, etc.
+
 ## 1. System Boot & Initialization
 
 ```mermaid
@@ -24,7 +29,7 @@ flowchart TD
         STRICT_VALIDATE --> LEADER_CHECK
 
         LEADER_CHECK{Leader lease<br/>enabled?}
-        LEADER_CHECK -- Yes --> ACQUIRE_LEASE[LeaderLease.start<br/>Firestore transactional lease]
+        LEADER_CHECK -- Yes --> ACQUIRE_LEASE[LeaderLease.start<br/>Postgres or Firestore transactional lease]
         LEADER_CHECK -- No --> IS_LEADER[is_leader = True]
         ACQUIRE_LEASE --> LEASE_RESULT{Lease acquired?}
         LEASE_RESULT -- Yes --> IS_LEADER
@@ -437,7 +442,7 @@ flowchart TD
         LIFECYCLE_STOP --> HUB_STOP_ALL[hub.stop_all<br/>Stop all AccountRunners]
         HUB_STOP -- No --> LEASE_STOP
 
-        HUB_STOP_ALL --> LEASE_STOP[leader_lease.stop<br/>Release Firestore lease]
+        HUB_STOP_ALL --> LEASE_STOP[leader_lease.stop<br/>Release Postgres/Firestore lease]
     end
 
     LEASE_STOP --> UVICORN_EXIT([Process exits])
@@ -568,6 +573,6 @@ Process: python -m app.main
 │   └── Batch flush BigQuery inserts
 │
 └── Thread: leader-lease-renew (if enabled)
-    └── Firestore transactional lease renewal
+    └── Postgres or Firestore transactional lease renewal
         └── os._exit(2) on lease loss
 ```

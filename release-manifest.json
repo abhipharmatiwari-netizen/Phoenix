@@ -39,5 +39,20 @@
     "pytest-cache-files-",
     "release/",
     "tests/"
+  ],
+  "excluded_segments": [
+    "__pycache__",
+    ".pytest_cache",
+    ".test_tmp",
+    ".venv"
+  ],
+  "excluded_exact": [
+    ".backend-live.env.runtime"
+  ],
+  "excluded_suffixes": [
+    ".env.runtime",
+    ".runtime.env",
+    ".pyc",
+    ".pyo"
   ]
 }
