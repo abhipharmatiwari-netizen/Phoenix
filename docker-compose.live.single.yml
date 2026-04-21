@@ -14,10 +14,10 @@ x-db-env: &db-env
   CONTROL_PLANE_PG_DB: "${CONTROL_PLANE_PG_DB:?Set CONTROL_PLANE_PG_DB in the current PowerShell session}"
   CONTROL_PLANE_PG_USER: "${CONTROL_PLANE_PG_USER:?Set CONTROL_PLANE_PG_USER in the current PowerShell session}"
   CONTROL_PLANE_PG_PASSWORD: "${CONTROL_PLANE_PG_PASSWORD_HOST:?Set CONTROL_PLANE_PG_PASSWORD_HOST in the current PowerShell session}"
-  # sslmode=require encrypts the connection without verifying the server cert.
-  # For host.docker.internal (same-host Postgres) this is safe and sufficient.
-  # Set CONTROL_PLANE_PG_SSLMODE=disable only if Postgres has SSL disabled.
-  CONTROL_PLANE_PG_SSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-require}"
+  # sslmode=prefer: attempts SSL first; falls back to plaintext if the server
+  # does not support SSL.  Use sslmode=require once Postgres has SSL enabled.
+  # sslmode=disable is explicitly forbidden in LIVE (startup hard-fail).
+  CONTROL_PLANE_PG_SSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-prefer}"
   POSTGRES_FORCE_IPV4: "true"
   POSTGRES_CONNECT_TIMEOUT_SECONDS: "5"
   POSTGRES_SESSION_TIMEZONE: "Asia/Kolkata"

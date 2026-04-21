@@ -32,7 +32,7 @@ ng:
     strangle_pe_label: "NG_OTM_PE_???"
 
 nifty:
-  options_enabled: false   
+  options_enabled: true
   delta_enabled: false
   signal_timeframe: 300
   min_atr: 1.8
@@ -65,7 +65,7 @@ nifty:
     strangle_pe_label: null
 
 banknifty:
-  options_enabled: false
+  options_enabled: true
   delta_enabled: false
   signal_timeframe: 300
   min_atr: 2.0        # tuned for wider participation
@@ -825,13 +825,13 @@ strategy_selection:
       TRENDING: ["put_momentum_scalper", "exclusive_nifty_ce_buy"]
       NORMAL: ["ema20_strategy", "exclusive_nifty_ce_buy"]
       CHOPPY: ["ema20_strategy", "exclusive_nifty_ce_buy"]
-      HIGH_VOL: ["put_momentum_scalper", "exclusive_nifty_ce_buy"]
+      HIGH_VOL: ["ema20_strategy", "put_momentum_scalper", "exclusive_nifty_ce_buy"]
       NO_TRADE: ["exclusive_nifty_ce_buy"]
     BANKNIFTY_IDX:
       TRENDING: ["put_momentum_scalper"]
       NORMAL: ["ema20_strategy"]
       CHOPPY: ["ema20_strategy"]
-      HIGH_VOL: ["put_momentum_scalper"]
+      HIGH_VOL: ["ema20_strategy", "put_momentum_scalper"]
       NO_TRADE: []
     NG_FUT:
       TRENDING: ["ema20_strategy"]
