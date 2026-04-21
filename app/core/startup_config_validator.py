@@ -524,6 +524,15 @@ def validate_runtime_startup_settings(
         if not bool(getattr(settings, "enable_capital_checks", False)):
             errors.append("TRADE_MODE=LIVE requires ENABLE_CAPITAL_CHECKS=true")
 
+        capital_limits_raw = str(getattr(settings, "capital_limits_json", "") or "").strip()
+        if capital_limits_raw in ("", "{}", "null"):
+            logger.warning(
+                "startup.capital_limits_warning: TRADE_MODE=LIVE but CAPITAL_LIMITS_JSON is empty "
+                "or not set. Per-account notional/exposure overrides are inactive — global defaults "
+                "(max_notional_per_order=5L, max_gross_exposure=10L) apply to all accounts. "
+                "Set CAPITAL_LIMITS_JSON with per-account limits appropriate for the funded account size."
+            )
+
         required_true_flags = {
             "ENABLE_RISK_CHECKS": getattr(settings, "enable_risk_checks", False),
             "RISK_ENABLE_DAILY_LOSS": getattr(settings, "risk_enable_daily_loss", False),
@@ -649,13 +658,15 @@ def validate_runtime_startup_settings(
                 "TRADE_MODE=LIVE requires EOD_CANCEL_OPEN_ORDERS_ENABLED to be explicitly configured"
             )
 
-        # Gate 7: Kill-switch durability — circuit breaker state must be
-        # persisted to a durable (postgres) backend, not memory/file.
+        # Gate 7: Circuit-breaker durability — circuit breaker state must be
+        # persisted to a Postgres backend so it survives restarts.
+        # Note: this checks TradingCircuitBreaker (PostgresCircuitBreakerStateStore),
+        # NOT the KillSwitchManager which has its own persistence path (migration 007).
         cb_persist = bool(getattr(settings, "circuit_breaker_persist_state", False))
         if not cb_persist:
             errors.append(
                 "TRADE_MODE=LIVE requires CIRCUIT_BREAKER_PERSIST_STATE=true "
-                "so kill-switch state survives restarts (postgres-backed)"
+                "so circuit-breaker state survives restarts (postgres-backed)"
             )
 
         # Gate 8: Circuit-breaker scope isolation — HUB_INSTANCE_NAME must be

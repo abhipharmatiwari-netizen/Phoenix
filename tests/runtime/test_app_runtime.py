@@ -123,7 +123,7 @@ def _live_safe_settings(**overrides):
         "control_plane_pg_db": "phoenix",
         "control_plane_pg_user": "phoenix_app",
         "control_plane_pg_password": "secret",
-        "control_plane_pg_sslmode": "disable",
+        "control_plane_pg_sslmode": "require",
         "admin_api_key": "test-admin",
         "dashboard_hmac_auth_enabled": False,
         "dashboard_hmac_secret": None,

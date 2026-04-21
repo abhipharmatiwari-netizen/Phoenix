@@ -133,7 +133,7 @@ def _capture_snapshot() -> dict[str, Any]:
 
     # Kill-switch state
     try:
-        from app.risk.kill_switch import get_kill_switch_state  # type: ignore
+        from app.risk.kill_switch import get_kill_switch_state
         snapshot["kill_switch"] = get_kill_switch_state()
     except Exception:
         snapshot["kill_switch"] = "unknown"

@@ -1153,8 +1153,44 @@ async def readyz() -> JSONResponse:
                 payload["ready"] = False
                 payload["reason"] = "orders_sync_stale"
                 return JSONResponse(status_code=503, content=payload)
+    except (ImportError, AttributeError, RuntimeError) as exc:
+        # Hub not configured or not available — sync freshness check is not applicable.
+        logger.debug("readyz: sync freshness check skipped (hub unavailable): %s", exc)
     except Exception as exc:
-        logger.warning("readyz: sync freshness check failed: %s", exc)
+        logger.error("readyz: sync freshness check error", exc_info=True)
+        payload["ready"] = False
+        payload["reason"] = "sync_freshness_check_error"
+        payload["sync_freshness_error"] = str(exc)
+        return JSONResponse(status_code=503, content=payload)
+
+    if _readiness_trade_mode() == "LIVE":
+        try:
+            from app.runners.multi_instrument_stream import get_active_instrument_count
+            active_count = get_active_instrument_count()
+            payload["active_instrument_count"] = active_count
+            min_instruments = int(os.getenv("MIN_TRADEABLE_INSTRUMENTS", "1"))
+            if active_count < min_instruments:
+                payload["ready"] = False
+                payload["reason"] = "instrument_universe_degraded"
+                return JSONResponse(status_code=503, content=payload)
+        except ImportError:
+            pass
+        except Exception as exc:
+            logger.warning("readyz: instrument count check failed: %s", exc)
+
+        try:
+            from app.brokers.angel_client import get_balance_schema_violation_count
+            schema_violations = get_balance_schema_violation_count()
+            payload["balance_schema_violation_count"] = schema_violations
+            max_allowed = int(os.getenv("READYZ_MAX_BALANCE_SCHEMA_VIOLATIONS", "3"))
+            if schema_violations > max_allowed:
+                payload["ready"] = False
+                payload["reason"] = "balance_schema_violations_exceeded"
+                return JSONResponse(status_code=503, content=payload)
+        except ImportError:
+            pass
+        except Exception as exc:
+            logger.warning("readyz: balance schema check failed: %s", exc)
 
     payload["ready"] = True
     return JSONResponse(status_code=200, content=payload)

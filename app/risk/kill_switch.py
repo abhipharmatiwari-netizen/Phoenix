@@ -409,6 +409,101 @@ class KillSwitchManager:
             manager._records[manager._key(scope, row["scope_id"])] = record
         return manager
 
+    def save_state(self, conn) -> None:
+        """Upsert all kill switch records to the kill_switch_state Postgres table."""
+        rows = self.to_persistence_dict()
+        if not rows:
+            return
+        sql = """
+            INSERT INTO kill_switch_state
+                (id, scope, scope_id, state, tripped_at, tripped_by, trip_reason,
+                 cleared_at, cleared_by, clear_reason, clear_request_id, updated_at)
+            VALUES
+                (%(id)s, %(scope)s, %(scope_id)s, %(state)s, %(tripped_at)s,
+                 %(tripped_by)s, %(trip_reason)s, %(cleared_at)s, %(cleared_by)s,
+                 %(clear_reason)s, %(clear_request_id)s, %(updated_at)s)
+            ON CONFLICT (scope, scope_id) DO UPDATE SET
+                state = EXCLUDED.state,
+                tripped_at = EXCLUDED.tripped_at,
+                tripped_by = EXCLUDED.tripped_by,
+                trip_reason = EXCLUDED.trip_reason,
+                cleared_at = EXCLUDED.cleared_at,
+                cleared_by = EXCLUDED.cleared_by,
+                clear_reason = EXCLUDED.clear_reason,
+                clear_request_id = EXCLUDED.clear_request_id,
+                updated_at = EXCLUDED.updated_at
+        """
+        with conn.cursor() as cur:
+            for row in rows:
+                cur.execute(sql, row)
+
+    @classmethod
+    def load_state(
+        cls,
+        conn,
+        *,
+        audit_fn: Optional[Callable[..., Any]] = None,
+    ) -> KillSwitchManager:
+        """Restore manager state from the kill_switch_state Postgres table."""
+        sql = """
+            SELECT id, scope, scope_id, state, tripped_at, tripped_by, trip_reason,
+                   cleared_at, cleared_by, clear_reason, clear_request_id, updated_at
+            FROM kill_switch_state
+            WHERE state != 'INACTIVE'
+        """
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            col_names = [desc[0] for desc in cur.description]
+            rows = [dict(zip(col_names, row)) for row in (cur.fetchall() or [])]
+        manager = cls.from_persistence_dict(rows, audit_fn=audit_fn)
+        if rows:
+            logger.info(
+                "kill_switch.load_state: restored %d non-INACTIVE records from Postgres",
+                len(rows),
+            )
+        return manager
+
+
+def get_kill_switch_state() -> dict:
+    """Return a serializable snapshot of the current kill switch state.
+
+    Pulls from the hub runtime's KillSwitchManager if one is wired; falls back
+    to the legacy risk_manager flag so the incident snapshot always has data.
+    """
+    try:
+        from app.hub.runtime import get_hub_runtime
+        runtime = get_hub_runtime()
+        ksm = getattr(runtime, "kill_switch_manager", None)
+        if ksm is not None and hasattr(ksm, "to_persistence_dict"):
+            records = ksm.to_persistence_dict()
+            return {
+                "source": "kill_switch_manager",
+                "records": records,
+                "active_count": sum(
+                    1 for r in records if r.get("state") not in ("INACTIVE", "CLEARED")
+                ),
+            }
+    except Exception:
+        pass
+
+    try:
+        from app.hub.runtime import get_hub_runtime
+        runtime = get_hub_runtime()
+        hub = getattr(runtime, "hub", None)
+        if hub is not None:
+            for runner in getattr(hub, "_runners", {}).values():
+                rm = getattr(runner, "_risk_manager", None)
+                if rm is not None:
+                    return {
+                        "source": "risk_manager",
+                        "kill_switch_activated": bool(getattr(rm, "kill_switch_activated", False)),
+                        "kill_switch_date": str(getattr(rm, "kill_switch_date", None)),
+                    }
+    except Exception:
+        pass
+
+    return {"source": "unavailable"}
+
 
 __all__ = [
     "KillSwitchClearRequest",
@@ -417,4 +512,5 @@ __all__ = [
     "KillSwitchRecord",
     "KillSwitchScope",
     "KillSwitchState",
+    "get_kill_switch_state",
 ]

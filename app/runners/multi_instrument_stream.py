@@ -170,6 +170,14 @@ _daily_levels_state: dict[str, Any] = {"cache": None, "instruments": None}
 RUNTIME_EXIT_STRATEGY_ID = StrategyId("__runtime_exit__")
 
 
+def get_active_instrument_count() -> int:
+    """Return the number of instruments currently in the stream universe."""
+    instruments = _daily_levels_state.get("instruments")
+    if instruments is None:
+        return 0
+    return len(instruments)
+
+
 # Refresh the daily levels cache on demand.
 def refresh_daily_levels_cache() -> bool:
     cache = _daily_levels_state.get("cache")
@@ -3265,12 +3273,16 @@ def stream_multi_instruments(
                     "signals from this strategy will be dropped by the router",
                     _sname,
                 )
-        if unroutable_strategies and trade_mode == "LIVE" and _auto_select_enabled:
-            logger.warning(
+        if unroutable_strategies and trade_mode == "LIVE":
+            log_level = logging.ERROR if _auto_select_enabled else logging.WARNING
+            logger.log(
+                log_level,
                 "strategy.unroutable_selector_excluded count=%d names=%s — "
-                "unroutable strategies excluded from selector evaluation (LIVE+AUTO_STRATEGY_SELECT_ENABLED)",
+                "unroutable strategies %s from selector evaluation in LIVE mode; "
+                "add routing entries to HUB_ROUTES_JSON or remove from strategy_configs",
                 len(unroutable_strategies),
                 sorted(unroutable_strategies),
+                "excluded" if _auto_select_enabled else "present but not auto-excluded",
             )
     except Exception as _exc:
         logger.warning("Unroutable strategy check failed: %s", _exc)
@@ -4276,6 +4288,7 @@ def stream_multi_instruments(
 
     # Periodically refresh ATM labels and resubscribe tokens.
     def refresh_atm_loop():
+        nonlocal jwt_token
         while not refresh_stop.is_set():
             # Wait with a timeout so shutdown does not have to wait for a full interval
             if refresh_stop.wait(refresh_interval):
@@ -4367,7 +4380,26 @@ def stream_multi_instruments(
                     timeout=max(30.0, float(refresh_interval)),
                 )
             except Exception as exc:
-                logger.warning("ATM refresh failed: %s", exc)
+                err_str = str(exc)
+                is_auth_error = (
+                    "AG8001" in err_str
+                    or "invalid token" in err_str.lower()
+                    or "unauthorized" in err_str.lower()
+                    or "token expired" in err_str.lower()
+                )
+                if is_auth_error:
+                    logger.warning(
+                        "ATM refresh: JWT token appears expired (%s); re-logging in for fresh token",
+                        err_str[:120],
+                    )
+                    try:
+                        fresh = angel_login_and_get_tokens()
+                        jwt_token = fresh["jwtToken"]
+                        logger.info("ATM refresh: re-login successful; will retry on next cycle")
+                    except Exception as login_exc:
+                        logger.error("ATM refresh: re-login failed: %s", login_exc)
+                else:
+                    logger.warning("ATM refresh failed: %s", exc)
 
     # Periodically sync broker positions into the risk manager.
     def _lookup_recent_entry_submission(

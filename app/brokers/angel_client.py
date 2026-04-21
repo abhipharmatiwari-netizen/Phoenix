@@ -109,6 +109,16 @@ def _is_rate_limited_message(text: str) -> bool:
     return "exceeding access rate" in text.lower()
 
 
+# Module-level counter for balance schema violations across all broker clients.
+# Readyz can check this to detect persistent balance schema failures.
+_global_balance_schema_violation_count: int = 0
+
+
+def get_balance_schema_violation_count() -> int:
+    """Return the total number of CRITICAL balance schema violations since process start."""
+    return _global_balance_schema_violation_count
+
+
 def _is_blocked_exception(exc: Exception) -> bool:
     if isinstance(exc, AngelBlockedResponseError):
         return True
@@ -261,6 +271,7 @@ class AngelBrokerClient(BrokerClient):
         self._balance_fail_count = 0
         self._orders_fail_count = 0
         self._positions_fail_count = 0
+        self._balance_schema_violation_count = 0
 
         self._last_balance: Optional[Balance] = None
         self._last_orders: Optional[List[OrderStatus]] = None
@@ -711,6 +722,9 @@ class AngelBrokerClient(BrokerClient):
             )
         except BrokerSchemaError as schema_exc:
             self._balance_fail_count += 1
+            self._balance_schema_violation_count += 1
+            global _global_balance_schema_violation_count
+            _global_balance_schema_violation_count += 1
             delay = self._compute_fetch_cooldown(
                 kind=FetchFailureKind.OTHER,
                 fail_count=self._balance_fail_count,
@@ -1215,6 +1229,20 @@ class AngelBrokerClient(BrokerClient):
                 delay = float(result.retry_after_seconds or 0.0)
                 if delay > 0:
                     self._set_cooldown(channel="positions", seconds=delay)
+                if result.reason == "waf_rejected":
+                    log_event(
+                        logger,
+                        event_type="BROKER_WAF_BLOCK",
+                        message=(
+                            f"Broker positions endpoint blocked by WAF; "
+                            f"cooldown={delay:.0f}s snippet={result.raw_snippet or '-'}"
+                        ),
+                        tenant_id=self._tenant_id,
+                        broker_account_id=self._broker_account_id,
+                        level=logging.CRITICAL,
+                        endpoint="positions",
+                        cooldown_seconds=delay,
+                    )
                 self._last_positions_result = result
                 return result
 

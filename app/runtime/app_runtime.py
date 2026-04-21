@@ -506,10 +506,10 @@ class AppRuntime:
                 getattr(settings, "control_plane_pg_sslmode", None) or ""
             ).strip().lower()
             if _pg_sslmode == "disable":
-                logger.warning(
-                    "startup.ssl_warning: TRADE_MODE=LIVE but CONTROL_PLANE_PG_SSLMODE=disable; "
-                    "Postgres connection is unencrypted. Set CONTROL_PLANE_PG_SSLMODE=require "
-                    "to encrypt credentials and trade data in transit."
+                raise ValueError(
+                    "startup.ssl_error: TRADE_MODE=LIVE requires CONTROL_PLANE_PG_SSLMODE=require. "
+                    "Current value is 'disable' — Postgres credentials and trade data would transit "
+                    "unencrypted. Set CONTROL_PLANE_PG_SSLMODE=require in the deployment manifest."
                 )
             import os as _os
             _broker_schema_mode = str(

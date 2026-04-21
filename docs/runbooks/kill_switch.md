@@ -109,19 +109,28 @@ The legacy `RiskManager.kill_switch_activated` is reset on restart because it is
 
 ### Postgres-backed kill switch
 
+The `kill_switch_state` table is created by migration `007_kill_switch_state.sql`. Non-INACTIVE
+records survive restarts via `KillSwitchManager.load_state()`.
+
 If the kill switch state is persisted to Postgres and a restart does not clear it:
 
-1. Review the kill switch record in the database:
+1. Review active kill switch records in the database:
    ```sql
-   SELECT * FROM kill_switch_state WHERE state != 'INACTIVE' ORDER BY updated_at DESC;
+   SELECT id, scope, scope_id, state, tripped_at, trip_reason, updated_at
+   FROM kill_switch_state
+   WHERE state != 'INACTIVE'
+   ORDER BY updated_at DESC;
    ```
 2. Confirm the triggering condition is resolved.
 3. Verify no `RECONCILING` or `ORPHAN_REVIEW` positions exist for the affected scope.
 4. Update the record state to `CLEARED` only after validation:
    ```sql
    UPDATE kill_switch_state
-   SET state = 'CLEARED', cleared_by = 'operator', clear_reason = '<reason>', updated_at = NOW()
-   WHERE id = '<record_id>';
+   SET state     = 'CLEARED',
+       cleared_by = 'operator',
+       clear_reason = '<reason>',
+       updated_at = NOW()::TEXT
+   WHERE scope = '<scope>' AND scope_id = '<scope_id>';
    ```
 5. Restart the backend to reload state from Postgres.
 
@@ -141,6 +150,7 @@ If the kill switch state is persisted to Postgres and a restart does not clear i
 
 - No HTTP endpoint for `request_clear`, `confirm_clear`, or `rearm` operations is currently exposed. Operators must use the restart or direct DB approach above.
 - Kill switch state is not surfaced in the `/health` or `/health/summary` response directly.
+- `KillSwitchManager` is the new persistence-capable implementation; the legacy `RiskManager.kill_switch_activated` flag (in-memory + `risk_positions.json`) remains active in the current LIVE runtime. Migration to full `KillSwitchManager` wiring is future work.
 
 ---
 
