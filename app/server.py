@@ -1187,11 +1187,12 @@ async def readyz() -> JSONResponse:
                 rs = runtime.startup_recovery_status()
                 recovery_summary = rs.get("summary") or {}
             rehydrated = int((recovery_summary or {}).get("rehydrated", 0))
-            if rehydrated > 0 and not pos_authority:
+            unresolved_active = int((recovery_summary or {}).get("unresolved_active", 0))
+            if unresolved_active > 0 and not pos_authority:
                 payload["ready"] = False
                 payload["reason"] = "position_authority_not_restored"
                 payload["position_authority_detail"] = (
-                    f"Outbox recovery rehydrated {rehydrated} records but "
+                    f"Outbox recovery found {unresolved_active} unresolved active record(s) but "
                     f"internal_position_records were not loaded from Postgres. "
                     f"Ensure migration 009 has been applied and the "
                     f"startup.position_records_loaded log shows restored > 0."
