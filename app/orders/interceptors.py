@@ -295,23 +295,56 @@ class GlobalKillSwitchInterceptor:
             return None
         if ctx.is_exit_order:
             return None
-        if not _is_true_env("GLOBAL_KILL"):
-            return None
-        reason = "global_kill_switch_enabled"
-        log_event(
-            logger,
-            event_type="ORDER_REJECTED_GLOBAL_KILL",
-            message=reason,
-            level=logging.WARNING,
-            tenant_id=ctx.tenant_id,
-            broker_account_id=ctx.broker_account_id,
-            strategy_id=ctx.strategy_id,
-            correlation_id=ctx.correlation_id,
-            request_id=ctx.request_id,
-            instrument=ctx.order_req.symbol,
-            origin="global_kill_switch",
-        )
-        return _rejected_response(reason)
+
+        # Check env-var kill switch (legacy path — still supported).
+        if _is_true_env("GLOBAL_KILL"):
+            reason = "global_kill_switch_enabled"
+            log_event(
+                logger,
+                event_type="ORDER_REJECTED_GLOBAL_KILL",
+                message=reason,
+                level=logging.WARNING,
+                tenant_id=ctx.tenant_id,
+                broker_account_id=ctx.broker_account_id,
+                strategy_id=ctx.strategy_id,
+                correlation_id=ctx.correlation_id,
+                request_id=ctx.request_id,
+                instrument=ctx.order_req.symbol,
+                origin="global_kill_switch_env",
+            )
+            return _rejected_response(reason)
+
+        # Check durable KillSwitchManager (Architecture §12.1 — primary path in LIVE).
+        try:
+            from app.hub.runtime import get_hub_runtime
+            from app.risk.kill_switch import KillSwitchScope
+            ksm = getattr(get_hub_runtime(), "kill_switch_manager", None)
+            if ksm is not None:
+                tripped = ksm.is_tripped_for_scope(
+                    tenant_id=str(ctx.tenant_id or "") or None,
+                    account_id=str(ctx.broker_account_id or "") or None,
+                    strategy_id=str(ctx.strategy_id or "") or None,
+                )
+                if tripped:
+                    reason = "kill_switch_manager_tripped"
+                    log_event(
+                        logger,
+                        event_type="ORDER_REJECTED_KILL_SWITCH_MANAGER",
+                        message=reason,
+                        level=logging.WARNING,
+                        tenant_id=ctx.tenant_id,
+                        broker_account_id=ctx.broker_account_id,
+                        strategy_id=ctx.strategy_id,
+                        correlation_id=ctx.correlation_id,
+                        request_id=ctx.request_id,
+                        instrument=ctx.order_req.symbol,
+                        origin="kill_switch_manager",
+                    )
+                    return _rejected_response(reason)
+        except Exception:
+            pass  # KillSwitchManager unavailable — fail open (env-var path is the fallback)
+
+        return None
 
 
 class PositionOwnershipInterceptor:

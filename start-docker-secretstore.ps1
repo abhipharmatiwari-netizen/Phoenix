@@ -170,6 +170,35 @@ try {
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_TENANT_ID" -DefaultValue "tenant-1"
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_BROKER_ACCOUNT_ID" -DefaultValue "A1"
 
+    # Write secrets to temporary files for Docker secret mounts (Issue #56).
+    # Files are written to a per-session temp directory under $env:TEMP.
+    # Docker Compose reads them via the `secrets:` section in the compose file.
+    # This prevents secrets from appearing in `docker inspect` environment output.
+    $secretDir = Join-Path $env:TEMP "phx-secrets"
+    New-Item -ItemType Directory -Force -Path $secretDir | Out-Null
+    # Restrict directory to current user only (best-effort on Windows)
+    try {
+        $acl = Get-Acl $secretDir
+        $acl.SetAccessRuleProtection($true, $false)
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            [System.Security.Principal.WindowsIdentity]::GetCurrent().Name,
+            "FullControl", "Allow"
+        )
+        $acl.AddAccessRule($rule)
+        Set-Acl $secretDir $acl
+    } catch {
+        Write-Warning "Could not restrict secret dir permissions: $_"
+    }
+    $env:CONTROL_PLANE_PG_PASSWORD_HOST | Out-File -FilePath (Join-Path $secretDir "control_plane_pg_password") -Encoding utf8 -NoNewline
+    $env:ADMIN_API_KEY_HOST             | Out-File -FilePath (Join-Path $secretDir "admin_api_key")             -Encoding utf8 -NoNewline
+    $env:DEMO_AUTH_TOKEN_SECRET_HOST    | Out-File -FilePath (Join-Path $secretDir "demo_auth_token_secret")    -Encoding utf8 -NoNewline
+    # Export the directory path so docker-compose can resolve ${PHX_SECRET_DIR}
+    $env:PHX_SECRET_DIR = $secretDir
+    Write-Host ""
+    Write-Host "Docker secret files written to: $secretDir"
+    Write-Host "  (admin_api_key, demo_auth_token_secret, control_plane_pg_password)"
+    Write-Host "  These files are read by Docker Compose secrets — not baked into container env."
+
     Write-Host ""
     Write-Host "Loaded runtime values into the current PowerShell session:"
     foreach ($name in @(
@@ -186,7 +215,7 @@ try {
     }
 
     Write-Host ""
-    Write-Host "Loaded secrets into:"
+    Write-Host "Loaded secrets into session (also written to secret files):"
     Write-Host "  ADMIN_API_KEY_HOST"
     Write-Host "  DEMO_AUTH_TOKEN_SECRET_HOST"
     Write-Host "  CONTROL_PLANE_PG_PASSWORD_HOST"
@@ -197,6 +226,14 @@ try {
     Invoke-External -Description "Stopping existing LIVE stack" -Command @("docker", "compose", "-f", $composeFile, "down", "--remove-orphans")
     Invoke-External -Description "Starting LIVE stack" -Command @("docker", "compose", "-f", $composeFile, "up", "-d", "--build", "--force-recreate")
     Invoke-External -Description "Showing container status" -Command @("docker", "compose", "-f", $composeFile, "ps")
+
+    # Clean up secret files after stack is running — they're now in the container.
+    Write-Host ""
+    Write-Host "Cleaning up temporary secret files from host..."
+    Remove-Item -Path (Join-Path $secretDir "control_plane_pg_password") -ErrorAction SilentlyContinue
+    Remove-Item -Path (Join-Path $secretDir "admin_api_key") -ErrorAction SilentlyContinue
+    Remove-Item -Path (Join-Path $secretDir "demo_auth_token_secret") -ErrorAction SilentlyContinue
+    Write-Host "  Secret files removed from $secretDir"
 }
 catch {
     Write-Error $_

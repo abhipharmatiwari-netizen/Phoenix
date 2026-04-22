@@ -1166,6 +1166,41 @@ async def readyz() -> JSONResponse:
         return JSONResponse(status_code=503, content=payload)
 
     if _readiness_trade_mode() == "LIVE":
+        # §58 — Surface kill-switch state in readyz.
+        try:
+            from app.risk.kill_switch import get_kill_switch_state
+            ks_state = get_kill_switch_state()
+            payload["kill_switch_active_count"] = ks_state.get("active_count", 0)
+            payload["kill_switch_source"] = ks_state.get("source", "unavailable")
+        except Exception:
+            payload["kill_switch_active_count"] = -1
+
+    if _readiness_trade_mode() == "LIVE":
+        # §57 — Gate readiness on restored authoritative position state.
+        # If outbox recovery rehydrated records (prior positions existed) but the
+        # position-records load was NOT attempted or returned 0, report degraded.
+        try:
+            pos_authority = getattr(runtime, "_position_authority_restored", None)
+            payload["position_authority_restored"] = bool(pos_authority)
+            recovery_summary = {}
+            if callable(getattr(runtime, "startup_recovery_status", None)):
+                rs = runtime.startup_recovery_status()
+                recovery_summary = rs.get("summary") or {}
+            rehydrated = int((recovery_summary or {}).get("rehydrated", 0))
+            if rehydrated > 0 and not pos_authority:
+                payload["ready"] = False
+                payload["reason"] = "position_authority_not_restored"
+                payload["position_authority_detail"] = (
+                    f"Outbox recovery rehydrated {rehydrated} records but "
+                    f"internal_position_records were not loaded from Postgres. "
+                    f"Ensure migration 009 has been applied and the "
+                    f"startup.position_records_loaded log shows restored > 0."
+                )
+                return JSONResponse(status_code=503, content=payload)
+        except Exception as _pos_exc:
+            logger.warning("readyz: position authority check failed: %s", _pos_exc)
+
+    if _readiness_trade_mode() == "LIVE":
         try:
             from app.runners.multi_instrument_stream import get_active_instrument_count
             active_count = get_active_instrument_count()

@@ -173,6 +173,17 @@ class OrderLifecycleService:
         self._last_seen_updated_at_by_account: Dict[BrokerAccountId, str] = {}
         self._last_order_states: Dict[str, OrderLifecycleState] = {}
         self._position_records: Dict[str, InternalPosition] = {}
+        self._position_persist_interval_ticks = self._resolve_position_persist_interval()
+        self._position_persist_tick_counter = 0
+
+    @staticmethod
+    def _resolve_position_persist_interval() -> int:
+        """Every N poll ticks, flush position records to Postgres. Default: every 20 ticks (~60s)."""
+        raw = os.getenv("ORDER_LIFECYCLE_POSITION_PERSIST_INTERVAL_TICKS", "20")
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            return 20
 
     @staticmethod
     def _resolve_poll_seconds() -> float:
@@ -499,6 +510,169 @@ class OrderLifecycleService:
             )
         return marked
 
+    # ------------------------------------------------------------------
+    # Durable position state persistence (Architecture §3.3 + Issue #48)
+    # ------------------------------------------------------------------
+
+    def save_position_records(self, conn) -> int:
+        """Upsert all non-FLAT/NONE position records to Postgres.
+
+        Returns the number of rows written. Skips FLAT and NONE records because
+        they carry no actionable authority state worth restoring.
+        """
+        _SKIP_STATES = {"FLAT", "NONE"}
+        sql = """
+            INSERT INTO internal_position_records (
+                scope_key, position_id, tenant_id, account_id, strategy_id,
+                ownership_key, contract_key, side,
+                net_qty, filled_qty_open, filled_qty_close,
+                avg_open_price, avg_close_price,
+                realized_pnl, unrealized_pnl,
+                position_state, state_reason, opened_by_order_id,
+                last_evidence_at, last_reconciled_at,
+                updated_at
+            ) VALUES (
+                %(scope_key)s, %(position_id)s, %(tenant_id)s, %(account_id)s, %(strategy_id)s,
+                %(ownership_key)s, %(contract_key)s, %(side)s,
+                %(net_qty)s, %(filled_qty_open)s, %(filled_qty_close)s,
+                %(avg_open_price)s, %(avg_close_price)s,
+                %(realized_pnl)s, %(unrealized_pnl)s,
+                %(position_state)s, %(state_reason)s, %(opened_by_order_id)s,
+                %(last_evidence_at)s, %(last_reconciled_at)s,
+                NOW()
+            )
+            ON CONFLICT (scope_key) DO UPDATE SET
+                position_id        = EXCLUDED.position_id,
+                tenant_id          = EXCLUDED.tenant_id,
+                account_id         = EXCLUDED.account_id,
+                strategy_id        = EXCLUDED.strategy_id,
+                ownership_key      = EXCLUDED.ownership_key,
+                contract_key       = EXCLUDED.contract_key,
+                side               = EXCLUDED.side,
+                net_qty            = EXCLUDED.net_qty,
+                filled_qty_open    = EXCLUDED.filled_qty_open,
+                filled_qty_close   = EXCLUDED.filled_qty_close,
+                avg_open_price     = EXCLUDED.avg_open_price,
+                avg_close_price    = EXCLUDED.avg_close_price,
+                realized_pnl       = EXCLUDED.realized_pnl,
+                unrealized_pnl     = EXCLUDED.unrealized_pnl,
+                position_state     = EXCLUDED.position_state,
+                state_reason       = EXCLUDED.state_reason,
+                opened_by_order_id = EXCLUDED.opened_by_order_id,
+                last_evidence_at   = EXCLUDED.last_evidence_at,
+                last_reconciled_at = EXCLUDED.last_reconciled_at,
+                updated_at         = NOW()
+        """
+        written = 0
+        with conn.cursor() as cur:
+            for scope_key, rec in list(self._position_records.items()):
+                state_val = (
+                    rec.position_state.value
+                    if isinstance(rec.position_state, PositionState)
+                    else str(rec.position_state or "NONE")
+                )
+                if state_val in _SKIP_STATES:
+                    continue
+                cur.execute(sql, {
+                    "scope_key": scope_key,
+                    "position_id": str(rec.position_id or ""),
+                    "tenant_id": str(rec.tenant_id or ""),
+                    "account_id": str(rec.account_id or ""),
+                    "strategy_id": str(rec.strategy_id or ""),
+                    "ownership_key": str(rec.ownership_key or ""),
+                    "contract_key": str(rec.contract_key or ""),
+                    "side": str(rec.side or ""),
+                    "net_qty": float(rec.net_qty or 0.0),
+                    "filled_qty_open": float(rec.filled_qty_open or 0.0),
+                    "filled_qty_close": float(rec.filled_qty_close or 0.0),
+                    "avg_open_price": float(rec.avg_open_price or 0.0),
+                    "avg_close_price": float(rec.avg_close_price or 0.0),
+                    "realized_pnl": float(rec.realized_pnl or 0.0),
+                    "unrealized_pnl": float(rec.unrealized_pnl or 0.0),
+                    "position_state": state_val,
+                    "state_reason": str(rec.state_reason or ""),
+                    "opened_by_order_id": str(rec.opened_by_order_id or ""),
+                    "last_evidence_at": rec.last_evidence_at,
+                    "last_reconciled_at": rec.last_reconciled_at,
+                })
+                written += 1
+        logger.info("position_records.saved: wrote %d records to Postgres", written)
+        return written
+
+    def load_position_records(self, conn) -> int:
+        """Restore non-terminal position records from Postgres into _position_records.
+
+        Only loads records whose position_state is not FLAT or NONE (terminal /
+        empty states carry no authority). Existing in-memory records are NOT
+        overwritten — call before any outbox recovery processing.
+
+        Returns the number of rows loaded.
+        """
+        sql = """
+            SELECT scope_key, position_id, tenant_id, account_id, strategy_id,
+                   ownership_key, contract_key, side,
+                   net_qty, filled_qty_open, filled_qty_close,
+                   avg_open_price, avg_close_price,
+                   realized_pnl, unrealized_pnl,
+                   position_state, state_reason, opened_by_order_id,
+                   last_evidence_at, last_reconciled_at
+            FROM internal_position_records
+            WHERE position_state NOT IN ('FLAT', 'NONE')
+        """
+        loaded = 0
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            rows = cur.fetchall() or []
+            cols = [desc[0] for desc in cur.description]
+        for row in rows:
+            r = dict(zip(cols, row))
+            scope_key = str(r.get("scope_key") or "")
+            if not scope_key:
+                continue
+            if scope_key in self._position_records:
+                continue
+            try:
+                state = PositionState(str(r.get("position_state") or "NONE"))
+            except ValueError:
+                state = PositionState.RECONCILING
+            rec = InternalPosition(
+                position_id=str(r.get("position_id") or ""),
+                tenant_id=str(r.get("tenant_id") or ""),
+                account_id=str(r.get("account_id") or ""),
+                strategy_id=str(r.get("strategy_id") or ""),
+                ownership_key=str(r.get("ownership_key") or ""),
+                contract_key=str(r.get("contract_key") or ""),
+                side=str(r.get("side") or ""),
+                net_qty=float(r.get("net_qty") or 0.0),
+                filled_qty_open=float(r.get("filled_qty_open") or 0.0),
+                filled_qty_close=float(r.get("filled_qty_close") or 0.0),
+                avg_open_price=float(r.get("avg_open_price") or 0.0),
+                avg_close_price=float(r.get("avg_close_price") or 0.0),
+                realized_pnl=float(r.get("realized_pnl") or 0.0),
+                unrealized_pnl=float(r.get("unrealized_pnl") or 0.0),
+                position_state=state,
+                state_reason=str(r.get("state_reason") or ""),
+                opened_by_order_id=str(r.get("opened_by_order_id") or ""),
+                last_evidence_at=r.get("last_evidence_at"),
+                last_reconciled_at=r.get("last_reconciled_at"),
+            )
+            self._position_records[scope_key] = rec
+            loaded += 1
+        logger.info(
+            "position_records.loaded: restored %d non-terminal records from Postgres", loaded
+        )
+        return loaded
+
+    def _try_persist_position_records(self) -> None:
+        """Non-fatal periodic flush of position records to Postgres."""
+        try:
+            from app.data.postgres import connect_with_retry, get_control_plane_dsn
+            dsn = get_control_plane_dsn()
+            with connect_with_retry(dsn, autocommit=True) as conn:
+                self.save_position_records(conn)
+        except Exception:
+            logger.debug("position_records.periodic_persist failed (non-fatal)", exc_info=True)
+
     async def start(self) -> None:
         if self._task is not None and not self._task.done():
             return
@@ -528,6 +702,10 @@ class OrderLifecycleService:
                 raise
             except Exception:
                 logger.exception("OrderLifecycleService poll tick failed")
+            self._position_persist_tick_counter += 1
+            if self._position_persist_tick_counter >= self._position_persist_interval_ticks:
+                self._position_persist_tick_counter = 0
+                self._try_persist_position_records()
             await asyncio.sleep(self._poll_seconds)
 
     async def _tick_once(self) -> None:

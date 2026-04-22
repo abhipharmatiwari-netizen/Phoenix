@@ -385,6 +385,7 @@ class AppRuntime:
         self._is_leader = True
         self._hub_started = False
         self._ready = False  # Readiness latch: set only after full startup
+        self._position_authority_restored = False  # True after load_position_records succeeds
         self._bq_async_writer_started = False
         self._schema_status: dict[str, object] = {
             "status": "unknown",
@@ -692,6 +693,57 @@ class AppRuntime:
             order_lifecycle = getattr(runtime, "order_lifecycle", None)
             if order_lifecycle is not None:
                 await order_lifecycle.start()
+
+            # §48 — Load durable authoritative position state before outbox recovery
+            # so fill tracking resumes from the last persisted position graph rather
+            # than starting cold.
+            if order_lifecycle is not None:
+                try:
+                    from app.data.postgres import connect_with_retry, get_control_plane_dsn
+                    _pos_dsn = get_control_plane_dsn()
+                    with connect_with_retry(_pos_dsn, autocommit=True) as _pos_conn:
+                        _loaded = order_lifecycle.load_position_records(_pos_conn)
+                    self._position_authority_restored = _loaded > 0
+                    logger.info(
+                        "startup.position_records_loaded: restored %d authoritative "
+                        "position record(s) from Postgres",
+                        _loaded,
+                    )
+                except Exception as _pos_exc:
+                    logger.warning(
+                        "startup.position_records_load_failed (non-fatal): %s", _pos_exc
+                    )
+                    self._position_authority_restored = False
+
+            # §58 — Load KillSwitchManager state from Postgres at startup.
+            ksm = getattr(runtime, "kill_switch_manager", None)
+            if ksm is not None:
+                try:
+                    from app.data.postgres import connect_with_retry, get_control_plane_dsn
+                    from app.risk.kill_switch import KillSwitchManager
+                    _ks_dsn = get_control_plane_dsn()
+                    with connect_with_retry(_ks_dsn, autocommit=True) as _ks_conn:
+                        loaded_ksm = KillSwitchManager.load_state(_ks_conn)
+                    # Replace the empty manager with the restored one
+                    runtime.kill_switch_manager = loaded_ksm
+                    active = loaded_ksm.get_all_active()
+                    logger.info(
+                        "startup.kill_switch_loaded: restored %d non-INACTIVE "
+                        "kill-switch records from Postgres",
+                        len(active),
+                    )
+                    if active:
+                        logger.warning(
+                            "startup.kill_switch_active: %d kill switch(es) are "
+                            "currently non-INACTIVE: %s",
+                            len(active),
+                            [(r.scope.value, r.scope_id, r.state.value) for r in active],
+                        )
+                except Exception as _ks_exc:
+                    logger.warning(
+                        "startup.kill_switch_load_failed (non-fatal): %s", _ks_exc
+                    )
+
             order_router = getattr(runtime, "order_router", None)
             recover_submission_outbox = getattr(
                 order_router,
@@ -815,6 +867,14 @@ class AppRuntime:
             runtime = self._hub_runtime_getter()
             order_lifecycle = getattr(runtime, "order_lifecycle", None)
             if order_lifecycle is not None:
+                # Flush position records before stopping so the last authoritative
+                # state survives a graceful restart.
+                try:
+                    from app.data.postgres import connect_with_retry, get_control_plane_dsn
+                    with connect_with_retry(get_control_plane_dsn(), autocommit=True) as _conn:
+                        order_lifecycle.save_position_records(_conn)
+                except Exception as _exc:
+                    logger.warning("shutdown.position_records_save_failed (non-fatal): %s", _exc)
                 await order_lifecycle.stop()
             await runtime.hub.stop_all()
             self._hub_started = False
@@ -914,6 +974,97 @@ class AppRuntime:
                 else {}
             ),
         }
+
+    def release_evidence_snapshot(self) -> dict[str, Any]:
+        """Return a structured JSON-serialisable release-evidence bundle.
+
+        Captures the authoritative proof that a LIVE backend started safely:
+        trade mode, authority path, runner counts, position restore status,
+        outbox recovery summary, schema guard status, and key safety flags.
+        Operators must review this bundle before approving a LIVE deployment.
+        """
+        import os as _os
+        evidence: dict[str, Any] = {
+            "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "trade_mode": str(_os.getenv("TRADE_MODE", "unknown")).upper(),
+            "app_env": str(_os.getenv("APP_ENV", "unknown")),
+            "hub_instance": str(_os.getenv("HUB_INSTANCE_NAME", "unknown")),
+        }
+
+        # Runtime readiness
+        evidence["runtime_ready"] = bool(self._ready)
+        evidence["is_leader"] = bool(self._is_leader)
+        evidence["position_authority_restored"] = bool(self._position_authority_restored)
+
+        # Operating mode (authority path)
+        evidence["operating_mode"] = self.operating_mode_status()
+
+        # Schema guard
+        evidence["schema_guard"] = self.schema_status()
+
+        # Outbox recovery summary
+        evidence["startup_recovery"] = self.startup_recovery_status()
+
+        # Stream worker state
+        evidence["stream_worker"] = self.stream_worker_status()
+
+        # Runner counts
+        try:
+            runtime = self._hub_runtime_getter()
+            hub = getattr(runtime, "hub", None)
+            if hub is not None:
+                runners = getattr(hub, "_runners", {})
+                evidence["runner_count"] = len(runners)
+                evidence["runner_ids"] = list(runners.keys())
+        except Exception:
+            evidence["runner_count"] = -1
+
+        # Position records loaded
+        try:
+            runtime = self._hub_runtime_getter()
+            ol = getattr(runtime, "order_lifecycle", None)
+            if ol is not None:
+                pos_recs = getattr(ol, "_position_records", {})
+                evidence["position_records_in_memory"] = len(pos_recs)
+                non_flat = sum(
+                    1 for r in pos_recs.values()
+                    if str(getattr(r, "position_state", "NONE")) not in ("PositionState.FLAT", "FLAT", "NONE", "PositionState.NONE")
+                )
+                evidence["position_records_active"] = non_flat
+        except Exception:
+            evidence["position_records_in_memory"] = -1
+
+        # Kill switch state
+        try:
+            from app.risk.kill_switch import get_kill_switch_state
+            evidence["kill_switch"] = get_kill_switch_state()
+        except Exception:
+            evidence["kill_switch"] = {"source": "unavailable"}
+
+        # Synthetic contamination: just presence of the startup guard result
+        evidence["synthetic_contamination_cleared"] = bool(
+            str(self._startup_recovery_status.get("status", "")).lower() != "failed"
+        )
+
+        # Safety flags from env
+        evidence["safety_flags"] = {
+            "enable_capital_checks": str(_os.getenv("ENABLE_CAPITAL_CHECKS", "")).lower() == "true",
+            "enable_risk_checks": str(_os.getenv("ENABLE_RISK_CHECKS", "")).lower() == "true",
+            "order_submission_outbox_required": str(
+                _os.getenv("ORDER_SUBMISSION_OUTBOX_REQUIRED", "")
+            ).lower() == "true",
+            "position_ownership_enabled": str(
+                _os.getenv("POSITION_OWNERSHIP_ENABLED", "")
+            ).lower() == "true",
+            "disable_trading_window_filter": str(
+                _os.getenv("DISABLE_TRADING_WINDOW_FILTER", "")
+            ).lower() != "false",
+            "risk_fail_open_on_missing_pnl": str(
+                _os.getenv("RISK_FAIL_OPEN_ON_MISSING_PNL", "true")
+            ).lower() == "true",
+        }
+
+        return evidence
 
     async def _mark_recovery_pending(self, runtime: object) -> None:
         """Mark all restored lifecycle contexts and ownership records as

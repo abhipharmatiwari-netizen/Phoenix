@@ -24,11 +24,13 @@ _LIFECYCLE_TABLES = {"trade_processed_markers"}
 _KILL_SWITCH_TABLES = {"kill_switch_state"}
 _OUTBOX_TABLES = {"order_submission_outbox"}
 _OWNERSHIP_TABLES = {"position_ownership_ledger"}
+_POSITION_RECORD_TABLES = {"internal_position_records"}
 _REQUIRED_INDEXES = {
     "idx_broker_accounts_client_code",
     "idx_subscriptions_tenant_account_mode",
     "idx_users_email",
     "position_ownership_ledger_acct_idx",
+    "idx_internal_position_records_active",
 }
 
 
@@ -61,6 +63,7 @@ def _required_tables(settings: Settings) -> set[str]:
         tables.update(_KILL_SWITCH_TABLES)
         tables.update(_OUTBOX_TABLES)
         tables.update(_OWNERSHIP_TABLES)
+        tables.update(_POSITION_RECORD_TABLES)
     if str(getattr(settings, "sweep_state_backend", "") or "").strip().lower() == "postgres":
         tables.update(_SWEEP_TABLES)
     return tables

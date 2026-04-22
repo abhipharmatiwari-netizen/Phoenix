@@ -373,6 +373,11 @@ class HubRuntime:
             self.eod_state_manager,
         ) = _initialize_sweep_and_eod_state_managers(self.settings)
 
+        # Durable kill-switch state machine (Architecture §12.1)
+        # Loaded from Postgres at startup by AppRuntime; starts as empty in-memory.
+        from app.risk.kill_switch import KillSwitchManager
+        self.kill_switch_manager = KillSwitchManager()
+
         # Hub-level exit orchestrators
         self.hub_profit_sweep_engine = HubProfitSweepEngine(
             settings=self.settings,

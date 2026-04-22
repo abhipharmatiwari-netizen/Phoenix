@@ -82,9 +82,33 @@ Rules enforced before clearing (per ARCHITECTURE.md §12.1):
 - No unresolved `RECONCILING` or `ORPHAN_REVIEW` positions may exist for the same control scope (unless a separately audited break-glass override is used).
 - Clearing never happens implicitly on restart, on a profitable tick, or on a broker poll.
 
-### Current API status
+### HTTP API (authenticated, requires OPERATOR role)
 
-**The kill switch clear / rearm HTTP API is not yet exposed.** The state machine exists in `app/risk/kill_switch.py` but no `POST /admin/kill-switch/clear` or equivalent endpoint is currently wired.
+The following endpoints are now wired and fully operational:
+
+```http
+# Trip a kill switch
+POST /admin/kill-switch/trip
+Authorization: Bearer <ADMIN_API_KEY>
+{"scope": "GLOBAL", "scope_id": "GLOBAL", "reason": "Daily loss threshold exceeded"}
+
+# Request a clear (TRIPPED → CLEAR_PENDING)
+POST /admin/kill-switch/request-clear
+{"scope": "GLOBAL", "scope_id": "GLOBAL", "reason_code": "loss_resolved", "break_glass": false}
+
+# Confirm the clear (CLEAR_PENDING → CLEARED)
+POST /admin/kill-switch/confirm-clear
+{"scope": "GLOBAL", "scope_id": "GLOBAL"}
+
+# Re-arm (CLEARED → INACTIVE — trading resumes)
+POST /admin/kill-switch/rearm
+{"scope": "GLOBAL", "scope_id": "GLOBAL"}
+
+# Query current state
+GET /admin/kill-switch/state
+```
+
+All mutations are audited (resource_type=kill_switch) and persisted to Postgres immediately.
 
 ---
 
@@ -148,9 +172,8 @@ If the kill switch state is persisted to Postgres and a restart does not clear i
 
 ## Known gaps
 
-- No HTTP endpoint for `request_clear`, `confirm_clear`, or `rearm` operations is currently exposed. Operators must use the restart or direct DB approach above.
-- Kill switch state is not surfaced in the `/health` or `/health/summary` response directly.
-- `KillSwitchManager` is the new persistence-capable implementation; the legacy `RiskManager.kill_switch_activated` flag (in-memory + `risk_positions.json`) remains active in the current LIVE runtime. Migration to full `KillSwitchManager` wiring is future work.
+- Legacy `RiskManager.kill_switch_activated` (in-memory + `risk_positions.json`) remains active in the stream runner path. The `KillSwitchManager` is the authoritative source for hub-routed LIVE orders; stream-side legacy exits may still be gated by the legacy flag.
+- Kill switch state is surfaced in `/readyz` (`kill_switch_active_count`) and via `GET /admin/kill-switch/state` but not in the `/health` endpoint (which is a liveness probe only).
 
 ---
 

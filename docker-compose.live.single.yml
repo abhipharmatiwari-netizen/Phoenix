@@ -13,11 +13,10 @@ x-db-env: &db-env
   CONTROL_PLANE_PG_PORT: "${CONTROL_PLANE_PG_PORT:-5432}"
   CONTROL_PLANE_PG_DB: "${CONTROL_PLANE_PG_DB:?Set CONTROL_PLANE_PG_DB in the current PowerShell session}"
   CONTROL_PLANE_PG_USER: "${CONTROL_PLANE_PG_USER:?Set CONTROL_PLANE_PG_USER in the current PowerShell session}"
-  CONTROL_PLANE_PG_PASSWORD: "${CONTROL_PLANE_PG_PASSWORD_HOST:?Set CONTROL_PLANE_PG_PASSWORD_HOST in the current PowerShell session}"
-  # sslmode=prefer: attempts SSL first; falls back to plaintext if the server
-  # does not support SSL.  Use sslmode=require once Postgres has SSL enabled.
-  # sslmode=disable is explicitly forbidden in LIVE (startup hard-fail).
-  CONTROL_PLANE_PG_SSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-prefer}"
+  # CONTROL_PLANE_PG_PASSWORD is intentionally absent here.
+  # It is injected via Docker secret /run/secrets/control_plane_pg_password
+  # by docker-entrypoint.sh, preventing exposure in `docker inspect` output.
+  CONTROL_PLANE_PG_SSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-require}"
   POSTGRES_FORCE_IPV4: "true"
   POSTGRES_CONNECT_TIMEOUT_SECONDS: "5"
   POSTGRES_SESSION_TIMEZONE: "Asia/Kolkata"
@@ -58,8 +57,9 @@ x-live-backend-env: &live-backend-env
   RUNTIME_CONFIG_AUTO_ENABLE: "false"
   RUNTIME_CONFIG_ENABLED: "false"
 
-  ADMIN_API_KEY: "${ADMIN_API_KEY_HOST:?Set ADMIN_API_KEY_HOST in the current PowerShell session}"
-  DEMO_AUTH_TOKEN_SECRET: "${DEMO_AUTH_TOKEN_SECRET_HOST:?Set DEMO_AUTH_TOKEN_SECRET_HOST in the current PowerShell session}"
+  # ADMIN_API_KEY and DEMO_AUTH_TOKEN_SECRET are injected via Docker secrets
+  # (mounted at /run/secrets/admin_api_key and /run/secrets/demo_auth_token_secret)
+  # by docker-entrypoint.sh. They do NOT appear in `docker inspect` output.
   ENABLE_DEMO_AUTH: "false"
   DASHBOARD_AUTH_DISABLED: "false"
   DISABLE_CONTROL_TOWER_ROUTES: "false"
@@ -341,6 +341,12 @@ services:
       - "8080"
     environment:
       <<: *live-backend-env
+    # Sensitive secrets are mounted as files and loaded by docker-entrypoint.sh
+    # so they do NOT appear in `docker inspect phoenix-v9-backend` output.
+    secrets:
+      - admin_api_key
+      - demo_auth_token_secret
+      - control_plane_pg_password
     volumes:
       # PHOENIX_LOG_HOST_PATH controls where container logs land on the host.
       # Default ./logs keeps backward compatibility for existing deployments.
@@ -378,8 +384,10 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:80:80"
-    environment:
-      ADMIN_API_KEY: "${ADMIN_API_KEY_HOST:?Set ADMIN_API_KEY_HOST in the current PowerShell session}"
+    # ADMIN_API_KEY is loaded from /run/secrets/admin_api_key by the
+    # nginx entrypoint — not passed via environment to avoid docker inspect exposure.
+    secrets:
+      - admin_api_key
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/readyz >/dev/null 2>&1 || exit 1"]
       interval: 30s
@@ -391,3 +399,16 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
+# Docker secrets: files written by start-docker-secretstore.ps1 to
+# the path exported as PHX_SECRET_DIR env var (e.g. $env:TEMP\phx-secrets).
+# Mounting as secrets prevents values appearing in `docker inspect` output.
+# The migrator/db-preflight containers use PGPASSWORD via PowerShell session
+# as they are ephemeral one-shot containers.
+secrets:
+  admin_api_key:
+    file: "${PHX_SECRET_DIR}/admin_api_key"
+  demo_auth_token_secret:
+    file: "${PHX_SECRET_DIR}/demo_auth_token_secret"
+  control_plane_pg_password:
+    file: "${PHX_SECRET_DIR}/control_plane_pg_password"

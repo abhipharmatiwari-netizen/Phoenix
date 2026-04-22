@@ -37,6 +37,12 @@ WORKDIR /app
 # Copy application code (no .env, tests, docs — see .dockerignore)
 COPY app/ ./app/
 
+# Copy entrypoint that loads Docker secrets into env before the process starts.
+# Secrets mounted at /run/secrets/<name> become env var NAME (upper-cased).
+# This prevents secrets from appearing in `docker inspect` output.
+COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 # Create writable directories for non-root user
 RUN mkdir -p /app/logs && chown -R appuser:appuser /app/logs \
     && chown appuser:appuser /app/app/config
@@ -55,4 +61,5 @@ USER appuser
 ENV PORT=8080
 EXPOSE 8080
 
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["python", "-m", "app.main"]

@@ -3474,6 +3474,19 @@ def stream_multi_instruments(
 
         risk_manager.set_hub_exit_submitter(_submit_runtime_exit_via_hub)
     else:
+        # In hub-authoritative LIVE mode the direct broker fallback path is
+        # structurally forbidden (Issue #54 / Architecture §LIVE-exit-routing).
+        # HUB_ROUTE_RUNTIME_EXITS must be true and hub identity vars must be set.
+        if trade_mode == "LIVE" and _runtime_settings().use_hub_router:
+            raise P0RuleViolation(
+                54,
+                "LIVE hub-authoritative mode requires HUB_ROUTE_RUNTIME_EXITS=true "
+                "and valid HUB_DEFAULT_TENANT_ID / HUB_DEFAULT_BROKER_ACCOUNT_ID. "
+                f"Current: HUB_ROUTE_RUNTIME_EXITS={os.getenv('HUB_ROUTE_RUNTIME_EXITS', 'true')!r} "
+                f"tenant={runtime_exit_default_tenant!r} "
+                f"account={runtime_exit_default_broker!r}. "
+                "Direct broker fallback is structurally forbidden in this mode.",
+            )
         logger.info(
             "Runtime exit routing mode: direct broker fallback (HUB_ROUTE_RUNTIME_EXITS=%s, use_hub_router=%s)",
             str(os.getenv("HUB_ROUTE_RUNTIME_EXITS", "true")),

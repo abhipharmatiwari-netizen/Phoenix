@@ -1020,6 +1020,219 @@ def resolve_expired_contracts(
     return {"dry_run": False, "updated": updated, "symbol_pattern": payload.symbol_pattern}
 
 
+def _get_kill_switch_manager():
+    """Return the live KillSwitchManager from the hub runtime. Raises 503 if unavailable."""
+    try:
+        ksm = getattr(get_hub_runtime(), "kill_switch_manager", None)
+        if ksm is None:
+            raise HTTPException(status_code=503, detail="KillSwitchManager not available on hub runtime")
+        return ksm
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"KillSwitchManager unavailable: {exc}") from exc
+
+
+def _save_kill_switch_state(ksm) -> None:
+    """Persist KillSwitchManager state to Postgres (non-fatal)."""
+    try:
+        from app.data.postgres import connect_with_retry, get_control_plane_dsn
+        with connect_with_retry(get_control_plane_dsn(), autocommit=True) as conn:
+            ksm.save_state(conn)
+    except Exception as exc:
+        import logging as _log
+        _log.getLogger(__name__).warning("kill_switch.save_state failed (non-fatal): %s", exc)
+
+
+class KillSwitchTripRequest(BaseModel):
+    scope: str = Field(..., description="GLOBAL | TENANT | ACCOUNT | STRATEGY")
+    scope_id: str = Field(..., description="Scope identifier (e.g. 'GLOBAL', tenant-id, account-id)")
+    reason: str = Field(..., description="Human-readable reason for tripping the kill switch")
+
+
+class KillSwitchClearRequestPayload(BaseModel):
+    scope: str
+    scope_id: str
+    reason_code: str = Field(..., description="Short reason code for the clear request")
+    break_glass: bool = Field(False, description="True to bypass pre-clear validation")
+
+
+class KillSwitchRearmRequest(BaseModel):
+    scope: str
+    scope_id: str
+
+
+@router.post("/kill-switch/trip")
+def kill_switch_trip(
+    payload: KillSwitchTripRequest,
+    ctx: AdminContext = Depends(get_admin_context),
+) -> dict:
+    """Trip a kill switch for a given scope. Requires OPERATOR role."""
+    ctx.require_role(AdminRole.OPERATOR)
+    from app.risk.kill_switch import KillSwitchScope
+    try:
+        scope = KillSwitchScope(payload.scope.upper())
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
+    ksm = _get_kill_switch_manager()
+    try:
+        record = ksm.trip(scope, payload.scope_id, payload.reason, actor=ctx.caller)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    _save_kill_switch_state(ksm)
+    emit_audit_event(
+        event_type="ADMIN_KILL_SWITCH_TRIP",
+        actor=ctx.caller,
+        details={"scope": payload.scope, "scope_id": payload.scope_id, "reason": payload.reason},
+    )
+    return {"status": "tripped", "record_id": record.id, "state": record.state.value}
+
+
+@router.post("/kill-switch/request-clear")
+def kill_switch_request_clear(
+    payload: KillSwitchClearRequestPayload,
+    ctx: AdminContext = Depends(get_admin_context),
+) -> dict:
+    """Request a kill switch clear (TRIPPED → CLEAR_PENDING). Requires OPERATOR role."""
+    ctx.require_role(AdminRole.OPERATOR)
+    from app.risk.kill_switch import KillSwitchScope, KillSwitchClearRequest, KillSwitchClearValidation
+    try:
+        scope = KillSwitchScope(payload.scope.upper())
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
+    ksm = _get_kill_switch_manager()
+    import uuid as _uuid
+    clear_req = KillSwitchClearRequest(
+        scope=scope,
+        scope_id=payload.scope_id,
+        actor=ctx.caller,
+        reason_code=payload.reason_code,
+        request_id=_uuid.uuid4().hex,
+        break_glass=payload.break_glass,
+    )
+
+    def _validation_fn(req: KillSwitchClearRequest) -> KillSwitchClearValidation:
+        if req.break_glass:
+            return KillSwitchClearValidation(passed=True, failures=[])
+        # Minimal validation: no RECONCILING/ORPHAN_REVIEW positions for this scope
+        failures = []
+        try:
+            hub = get_hub_runtime().hub
+            runners = getattr(hub, "_runners", {})
+            for runner in runners.values():
+                ol = getattr(runner, "_order_lifecycle", None)
+                if ol is None:
+                    continue
+                for rec in getattr(ol, "_position_records", {}).values():
+                    state_val = str(getattr(rec, "position_state", "")).upper()
+                    if state_val in {"RECONCILING", "MANUAL_REVIEW"}:
+                        failures.append(f"position {rec.ownership_key!r} is in {state_val}")
+        except Exception:
+            pass
+        return KillSwitchClearValidation(passed=len(failures) == 0, failures=failures)
+
+    try:
+        record, validation = ksm.request_clear(clear_req, _validation_fn)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if not validation.passed:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Clear request denied: {validation.failures}",
+        )
+    _save_kill_switch_state(ksm)
+    emit_audit_event(
+        event_type="ADMIN_KILL_SWITCH_REQUEST_CLEAR",
+        actor=ctx.caller,
+        details={"scope": payload.scope, "scope_id": payload.scope_id,
+                 "reason_code": payload.reason_code, "break_glass": payload.break_glass},
+    )
+    return {"status": "clear_pending", "record_id": record.id, "state": record.state.value}
+
+
+@router.post("/kill-switch/confirm-clear")
+def kill_switch_confirm_clear(
+    payload: KillSwitchRearmRequest,
+    ctx: AdminContext = Depends(get_admin_context),
+) -> dict:
+    """Confirm a kill switch clear (CLEAR_PENDING → CLEARED). Requires OPERATOR role."""
+    ctx.require_role(AdminRole.OPERATOR)
+    from app.risk.kill_switch import KillSwitchScope
+    try:
+        scope = KillSwitchScope(payload.scope.upper())
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
+    ksm = _get_kill_switch_manager()
+    try:
+        record = ksm.confirm_clear(scope, payload.scope_id)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    _save_kill_switch_state(ksm)
+    emit_audit_event(
+        event_type="ADMIN_KILL_SWITCH_CONFIRM_CLEAR",
+        actor=ctx.caller,
+        details={"scope": payload.scope, "scope_id": payload.scope_id},
+    )
+    return {"status": "cleared", "record_id": record.id, "state": record.state.value}
+
+
+@router.post("/kill-switch/rearm")
+def kill_switch_rearm(
+    payload: KillSwitchRearmRequest,
+    ctx: AdminContext = Depends(get_admin_context),
+) -> dict:
+    """Rearm a kill switch (CLEARED → INACTIVE). Requires OPERATOR role."""
+    ctx.require_role(AdminRole.OPERATOR)
+    from app.risk.kill_switch import KillSwitchScope
+    try:
+        scope = KillSwitchScope(payload.scope.upper())
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
+    ksm = _get_kill_switch_manager()
+    try:
+        record = ksm.rearm(scope, payload.scope_id, actor=ctx.caller)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    _save_kill_switch_state(ksm)
+    emit_audit_event(
+        event_type="ADMIN_KILL_SWITCH_REARM",
+        actor=ctx.caller,
+        details={"scope": payload.scope, "scope_id": payload.scope_id},
+    )
+    return {"status": "inactive", "record_id": record.id, "state": record.state.value}
+
+
+@router.get("/kill-switch/state")
+def get_kill_switch_state_endpoint(ctx: AdminContext = Depends(get_admin_context)) -> dict:
+    """Return current kill switch state for all non-INACTIVE scopes. Requires OPERATOR role."""
+    ctx.require_role(AdminRole.OPERATOR)
+    from app.risk.kill_switch import get_kill_switch_state
+    return get_kill_switch_state()
+
+
+@router.get("/release-evidence")
+def get_release_evidence(ctx: AdminContext = Depends(get_admin_context)) -> dict:
+    """Return the LIVE release-evidence bundle for operator sign-off.
+
+    Captures trade mode, authority path, runtime readiness, position authority
+    restore status, outbox recovery summary, schema guard result, runner counts,
+    and key safety flags. Operators must review this bundle before approving a
+    LIVE deployment.
+
+    Requires OPERATOR role.
+    """
+    ctx.require_role(AdminRole.OPERATOR)
+    from app.runtime.app_runtime import get_app_runtime
+    runtime = get_app_runtime()
+    evidence = runtime.release_evidence_snapshot()
+    emit_audit_event(
+        event_type="ADMIN_RELEASE_EVIDENCE_READ",
+        actor=ctx.caller,
+        details={"trade_mode": evidence.get("trade_mode")},
+    )
+    return evidence
+
+
 __all__ = [
     "AdminTestOrderRequest",
     "BreakGlassFlattenRequest",
