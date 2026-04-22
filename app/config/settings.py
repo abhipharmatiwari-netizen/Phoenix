@@ -321,6 +321,16 @@ class Settings(BaseSettings):
         False,
         validation_alias="CAPITAL_FAIL_CLOSED_ON_MISSING_NOTIONAL_PRICE",
     )
+    capital_limits_json: str = Field(
+        default="",
+        validation_alias="CAPITAL_LIMITS_JSON",
+        description="JSON object mapping tenant:account keys to per-account capital limit dicts.",
+    )
+    allow_live_capital_limits_default_only: bool = Field(
+        default=False,
+        validation_alias="ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY",
+        description="If true, allow LIVE startup with empty CAPITAL_LIMITS_JSON (audited exception).",
+    )
     enable_risk_checks: bool = Field(True, validation_alias="ENABLE_RISK_CHECKS")
     risk_enable_daily_loss: bool = Field(False, validation_alias="RISK_ENABLE_DAILY_LOSS")
     risk_max_daily_loss: Optional[float] = Field(
