@@ -94,7 +94,7 @@ x-live-backend-env: &live-backend-env
 
   ENABLE_CAPITAL_CHECKS: "true"
   ALLOW_LIVE_CAPITAL_CHECKS_DISABLED: "false"
-  CAPITAL_LIMITS_JSON: "{}"
+  CAPITAL_LIMITS_JSON: '${CAPITAL_LIMITS_JSON:?Set CAPITAL_LIMITS_JSON in the current PowerShell session or use start-docker-secretstore.ps1 to derive an account-specific default}'
   CAPITAL_FAIL_CLOSED_ON_MISSING_STATE: "true"
   CAPITAL_FAIL_CLOSED_ON_MISSING_NOTIONAL_PRICE: "true"
   CAPITAL_MARGIN_SHORT_OPTION_PER_LOT: "200000"
