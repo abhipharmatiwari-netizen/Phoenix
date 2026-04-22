@@ -90,8 +90,25 @@ def is_revoked(jti: str) -> bool:
         return jti in _REVOKED_JTIS
 
 
+def _try_postgres_revoke_all_for_user(user_id: str) -> int:
+    """Delete all active refresh tokens for a user from Postgres. Returns rows deleted."""
+    try:
+        from app.data.postgres import connect_with_retry, get_control_plane_dsn
+        dsn = get_control_plane_dsn()
+        with connect_with_retry(dsn, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM refresh_tokens WHERE user_id = %s AND used = FALSE",
+                    (user_id,),
+                )
+                return cur.rowcount or 0
+    except Exception:
+        logger.debug("Postgres refresh token revoke-all unavailable", exc_info=True)
+        return 0
+
+
 def revoke_all_for_user(user_id: str) -> int:
-    """Revoke all refresh tokens for a user (forced logout). Returns count revoked."""
+    """Revoke all refresh tokens for a user (forced logout). Durable across restart."""
     revoked = 0
     with _REFRESH_LOCK:
         to_remove = [
@@ -101,8 +118,13 @@ def revoke_all_for_user(user_id: str) -> int:
         for tok in to_remove:
             del _REFRESH_TOKENS[tok]
             revoked += 1
-    logger.info("Revoked %d refresh tokens for user_id=%s", revoked, user_id)
-    return revoked
+    pg_revoked = _try_postgres_revoke_all_for_user(user_id)
+    total = max(revoked, pg_revoked)
+    logger.info(
+        "Revoked refresh tokens for user_id=%s in_memory=%d postgres=%d",
+        user_id, revoked, pg_revoked,
+    )
+    return total
 
 
 # ---------------------------------------------------------------------------

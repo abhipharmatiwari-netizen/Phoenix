@@ -502,16 +502,51 @@ class AppRuntime:
                 "LIVE mode startup validation forced on with schema_check_mode=%s",
                 effective_schema_mode,
             )
+            import os as _os
+            import pathlib as _pathlib
+            _repo_root = _pathlib.Path(__file__).resolve().parents[2]
+            _runtime_artifacts = [
+                str(p.relative_to(_repo_root))
+                for p in _repo_root.iterdir()
+                if p.is_file() and (
+                    p.suffix in (".runtime",)
+                    or p.name.endswith(".env.runtime")
+                    or p.name.endswith(".runtime.env")
+                )
+            ]
+            if _runtime_artifacts:
+                raise ValueError(
+                    f"startup.env_runtime_artifact_error: TRADE_MODE=LIVE but repo-root secret "
+                    f"artifacts were found: {_runtime_artifacts}. These files blur the approved "
+                    f"secret boundary. Remove them and inject secrets only from approved transient "
+                    f"sources (SecretStore, Secret Manager, or process environment)."
+                )
+            _placeholder_checks = {
+                "CONTROL_PLANE_PG_PASSWORD": getattr(settings, "control_plane_pg_password", None),
+                "ADMIN_API_KEY": _os.getenv("ADMIN_API_KEY", ""),
+                "DEMO_AUTH_TOKEN_SECRET": _os.getenv("DEMO_AUTH_TOKEN_SECRET", ""),
+            }
+            _placeholder_markers = ("CHANGE_ME", "CHANGEME", "TODO", "REPLACE_ME", "PLACEHOLDER")
+            _bad_placeholders = [
+                name for name, val in _placeholder_checks.items()
+                if val and any(m in str(val).upper() for m in _placeholder_markers)
+            ]
+            if _bad_placeholders:
+                raise ValueError(
+                    f"startup.placeholder_secret_error: TRADE_MODE=LIVE but placeholder/template "
+                    f"values detected in secrets: {_bad_placeholders}. This indicates a legacy "
+                    f"reference env file (e.g. .docker-live.env) was used as-is. Inject real "
+                    f"secrets from SecretStore or Secret Manager before deploying to LIVE."
+                )
             _pg_sslmode = str(
                 getattr(settings, "control_plane_pg_sslmode", None) or ""
             ).strip().lower()
-            if _pg_sslmode == "disable":
+            if _pg_sslmode != "require":
                 raise ValueError(
-                    "startup.ssl_error: TRADE_MODE=LIVE requires CONTROL_PLANE_PG_SSLMODE=require. "
-                    "Current value is 'disable' — Postgres credentials and trade data would transit "
-                    "unencrypted. Set CONTROL_PLANE_PG_SSLMODE=require in the deployment manifest."
+                    f"startup.ssl_error: TRADE_MODE=LIVE requires CONTROL_PLANE_PG_SSLMODE=require. "
+                    f"Current value is {_pg_sslmode!r} — only 'require' enforces encrypted Postgres "
+                    f"transport. Set CONTROL_PLANE_PG_SSLMODE=require in the deployment manifest."
                 )
-            import os as _os
             _broker_schema_mode = str(
                 _os.getenv("BROKER_SCHEMA_CHECK_MODE", "") or ""
             ).strip().lower()
@@ -663,6 +698,62 @@ class AppRuntime:
                 "recover_submission_outbox",
                 None,
             )
+            if trade_mode == "LIVE":
+                try:
+                    from app.data.postgres import connect_with_retry, get_control_plane_dsn
+                    _SYNTHETIC_MARKERS = (
+                        "B123", "B124", "OID-ONCE", "OID-PARALLEL",
+                        "TEST-", "FAKE-", "MOCK-", "FIXTURE",
+                        "NIFTY17FEB2625750CE",
+                    )
+                    _dsn = get_control_plane_dsn()
+                    with connect_with_retry(_dsn, autocommit=True) as _conn:
+                        with _conn.cursor() as _cur:
+                            _cur.execute(
+                                """
+                                SELECT hub_order_id, broker_order_id
+                                FROM order_submission_outbox
+                                LIMIT 500
+                                """
+                            )
+                            _rows = _cur.fetchall()
+                    _contaminated = [
+                        f"{r[0]}|{r[1]}"
+                        for r in (_rows or [])
+                        if any(
+                            m in str(r[0] or "") or m in str(r[1] or "")
+                            for m in _SYNTHETIC_MARKERS
+                        )
+                    ]
+                    if _contaminated:
+                        raise ValueError(
+                            f"startup.synthetic_contamination_error: TRADE_MODE=LIVE but "
+                            f"{len(_contaminated)} outbox record(s) contain known synthetic/test "
+                            f"identifiers: {_contaminated[:5]}. The control-plane DB appears to "
+                            f"contain unit-test fixtures. Sanitize the DB before starting LIVE."
+                        )
+                except ValueError:
+                    raise
+                except Exception as _exc:
+                    logger.warning("startup.synthetic_contamination_check failed (non-fatal): %s", _exc)
+
+                try:
+                    from app.orders.order_outbox import force_terminal_outbox_by_symbol_pattern
+                    import datetime as _dt
+                    _cutoff_month = (_dt.date.today() - _dt.timedelta(days=45)).strftime("%b%y").upper()
+                    _cleaned = force_terminal_outbox_by_symbol_pattern(
+                        symbol_pattern=f"%{_cutoff_month}%",
+                        min_age_days=45,
+                    )
+                    if _cleaned:
+                        logger.info(
+                            "startup.expired_contract_cleanup: force-terminated %d non-terminal "
+                            "outbox records for contracts expiring on or before %s.",
+                            _cleaned, _cutoff_month,
+                        )
+                except Exception as _exc:
+                    logger.warning("startup.expired_contract_cleanup failed (non-fatal): %s", _exc)
+
             if callable(recover_submission_outbox):
                 recovery_summary = await recover_submission_outbox()
                 self._apply_startup_recovery_result(

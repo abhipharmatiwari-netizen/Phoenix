@@ -958,6 +958,42 @@ class PostgresOrderSubmissionOutbox:
         return [self._row_to_record(row) for row in rows]
 
 
+def force_terminal_outbox_by_symbol_pattern(
+    *,
+    symbol_pattern: str,
+    terminal_status: str = OUTBOX_STATUS_TERMINAL_NON_FILL,
+    recovery_action: str = "admin_expired_contract_cleanup",
+    min_age_days: int = 7,
+) -> int:
+    """Force non-terminal outbox records whose symbol matches *symbol_pattern* to a terminal state.
+
+    Intended for operational cleanup of expired-contract outbox records that can never
+    be filled or reconciled. Returns the count of rows updated.
+    """
+    from app.data.postgres import connect_with_retry, get_control_plane_dsn
+    table = "order_submission_outbox"
+    dsn = get_control_plane_dsn()
+    age_days = max(1, int(min_age_days))
+    sql = f"""
+        UPDATE {table}
+        SET status = %(terminal_status)s,
+            recovery_action = %(recovery_action)s,
+            updated_at = NOW()
+        WHERE status = ANY(%(active_statuses)s)
+          AND order_request_json->>'symbol' ILIKE %(pattern)s
+          AND created_at < NOW() - INTERVAL '{age_days} days'
+    """
+    with connect_with_retry(dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, {
+                "terminal_status": terminal_status,
+                "recovery_action": recovery_action,
+                "active_statuses": list(_ACTIVE_OUTBOX_STATUSES),
+                "pattern": symbol_pattern,
+            })
+            return cur.rowcount or 0
+
+
 def build_order_submission_outbox() -> OrderSubmissionOutbox:
     settings = get_settings()
     persist_enabled = not (

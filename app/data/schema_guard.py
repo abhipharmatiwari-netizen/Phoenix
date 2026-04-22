@@ -22,10 +22,13 @@ _CONTROL_PLANE_TABLES = {
 _SWEEP_TABLES = {"sweep_states", "eod_states"}
 _LIFECYCLE_TABLES = {"trade_processed_markers"}
 _KILL_SWITCH_TABLES = {"kill_switch_state"}
+_OUTBOX_TABLES = {"order_submission_outbox"}
+_OWNERSHIP_TABLES = {"position_ownership_ledger"}
 _REQUIRED_INDEXES = {
     "idx_broker_accounts_client_code",
     "idx_subscriptions_tenant_account_mode",
     "idx_users_email",
+    "position_ownership_ledger_acct_idx",
 }
 
 
@@ -56,6 +59,8 @@ def _required_tables(settings: Settings) -> set[str]:
         if _order_lifecycle_markers_enabled():
             tables.update(_LIFECYCLE_TABLES)
         tables.update(_KILL_SWITCH_TABLES)
+        tables.update(_OUTBOX_TABLES)
+        tables.update(_OWNERSHIP_TABLES)
     if str(getattr(settings, "sweep_state_backend", "") or "").strip().lower() == "postgres":
         tables.update(_SWEEP_TABLES)
     return tables

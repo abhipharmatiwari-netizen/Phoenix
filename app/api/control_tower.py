@@ -118,7 +118,8 @@ def _eligible_accounts_for_tenant(tenant_id: TenantId) -> List[BrokerAccountMode
 
 # Return the tenant-by-strategy enablement matrix.
 @router.get("/matrix", response_model=ControlTowerMatrixResponse)
-def get_control_tower_matrix() -> ControlTowerMatrixResponse:
+def get_control_tower_matrix(ctx: AdminContext = Depends(get_admin_context)) -> ControlTowerMatrixResponse:
+    ctx.require_role(AdminRole.OPERATOR)
     tenants: List[TenantModel] = get_all_tenants()
     strategies = _discover_strategy_columns()
 

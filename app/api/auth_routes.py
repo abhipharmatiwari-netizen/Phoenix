@@ -381,7 +381,12 @@ async def require_admin_user(
 
 @router.post("/register", response_model=SignupResponse)
 async def register(request: SignupRequest) -> SignupResponse:
-    """Register a new user."""
+    """Register a new user. Disabled in production/LIVE — use the admin invite flow."""
+    if _app_env() in ("production", "live"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Self-registration is disabled in LIVE. Contact an administrator.",
+        )
     existing = _get_user_by_email(request.email)
     if existing:
         raise HTTPException(

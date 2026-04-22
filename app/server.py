@@ -286,6 +286,8 @@ async def close_active_dashboard_sockets() -> None:
 # Manage app startup/shutdown via a single runtime orchestrator.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.core.session_store import _load_revoked_from_postgres
+    _load_revoked_from_postgres()
     runtime = get_app_runtime()
     await runtime.start()
     try:

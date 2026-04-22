@@ -526,12 +526,22 @@ def validate_runtime_startup_settings(
 
         capital_limits_raw = str(getattr(settings, "capital_limits_json", "") or "").strip()
         if capital_limits_raw in ("", "{}", "null"):
-            logger.warning(
-                "startup.capital_limits_warning: TRADE_MODE=LIVE but CAPITAL_LIMITS_JSON is empty "
-                "or not set. Per-account notional/exposure overrides are inactive — global defaults "
-                "(max_notional_per_order=5L, max_gross_exposure=10L) apply to all accounts. "
-                "Set CAPITAL_LIMITS_JSON with per-account limits appropriate for the funded account size."
-            )
+            _capital_override = str(
+                getattr(settings, "allow_live_capital_limits_default_only", "") or ""
+            ).strip().lower()
+            if _capital_override in ("1", "true", "yes"):
+                logger.warning(
+                    "startup.capital_limits_override: TRADE_MODE=LIVE with empty CAPITAL_LIMITS_JSON "
+                    "but ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true — global defaults apply. "
+                    "This override must be time-bounded and audited."
+                )
+            else:
+                errors.append(
+                    "TRADE_MODE=LIVE requires CAPITAL_LIMITS_JSON to contain per-account limits. "
+                    "An empty value means only generic global defaults are active, which is not "
+                    "acceptable for funded LIVE accounts. Set CAPITAL_LIMITS_JSON or set "
+                    "ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true for an explicit audited exception."
+                )
 
         required_true_flags = {
             "ENABLE_RISK_CHECKS": getattr(settings, "enable_risk_checks", False),

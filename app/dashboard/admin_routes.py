@@ -961,6 +961,65 @@ def resolve_orphan_review(
     return result
 
 
+class ResolveExpiredContractsRequest(BaseModel):
+    symbol_pattern: str = Field(..., description="ILIKE pattern, e.g. '%MAR26%' or 'NIFTY%FEB26%'")
+    min_age_days: int = Field(default=7, ge=1, description="Only records older than this many days")
+    dry_run: bool = Field(default=True, description="Set false to actually update rows")
+
+
+@router.post("/resolve-expired-contracts")
+def resolve_expired_contracts(
+    request: Request,
+    payload: ResolveExpiredContractsRequest,
+    ctx: AdminContext = Depends(get_admin_context),
+):
+    """Force non-terminal outbox records for expired contracts to TERMINAL_NON_FILL.
+
+    Use this to clean up DEGRADED/deferred outbox records for option contracts that
+    expired in a prior month and can never be filled or reconciled.
+    """
+    ctx.require_role(AdminRole.ADMIN)
+    check_rate_limit(request)
+
+    if payload.dry_run:
+        from app.data.postgres import connect_with_retry, get_control_plane_dsn
+        from app.orders.order_outbox import _ACTIVE_OUTBOX_STATUSES
+        table = "order_submission_outbox"
+        age_days = max(1, int(payload.min_age_days))
+        sql = f"""
+            SELECT COUNT(*) FROM {table}
+            WHERE status = ANY(%(active_statuses)s)
+              AND order_request_json->>'symbol' ILIKE %(pattern)s
+              AND created_at < NOW() - INTERVAL '{age_days} days'
+        """
+        dsn = get_control_plane_dsn()
+        with connect_with_retry(dsn, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, {
+                    "active_statuses": list(_ACTIVE_OUTBOX_STATUSES),
+                    "pattern": payload.symbol_pattern,
+                })
+                row = cur.fetchone()
+        count = int(row[0]) if row else 0
+        return {"dry_run": True, "would_update": count, "symbol_pattern": payload.symbol_pattern}
+
+    from app.orders.order_outbox import force_terminal_outbox_by_symbol_pattern
+    updated = force_terminal_outbox_by_symbol_pattern(
+        symbol_pattern=payload.symbol_pattern,
+        min_age_days=payload.min_age_days,
+    )
+    emit_audit_event(
+        event_type="ADMIN_RESOLVE_EXPIRED_CONTRACTS",
+        actor=ctx.caller,
+        details={
+            "symbol_pattern": payload.symbol_pattern,
+            "min_age_days": payload.min_age_days,
+            "rows_updated": updated,
+        },
+    )
+    return {"dry_run": False, "updated": updated, "symbol_pattern": payload.symbol_pattern}
+
+
 __all__ = [
     "AdminTestOrderRequest",
     "BreakGlassFlattenRequest",

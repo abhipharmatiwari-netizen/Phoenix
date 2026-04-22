@@ -258,52 +258,32 @@ class PostgresPositionOwnershipBackend:
         self._dsn = dsn
         self._table = _safe_identifier(table_name, "position_ownership_ledger")
         self._persist_pending_locks = bool(persist_pending_locks)
-        self._ensure_schema()
+        self._assert_schema_exists()
 
     def _conn(self):
         return connect_with_retry(self._dsn, autocommit=False)
 
-    def _ensure_schema(self) -> None:
-        sql = f"""
-            CREATE TABLE IF NOT EXISTS {self._table} (
-                tenant_id TEXT NOT NULL,
-                broker_account_id TEXT NOT NULL,
-                underlying TEXT NOT NULL,
-                expiry TEXT NOT NULL,
-                strike TEXT NOT NULL,
-                option_right TEXT NOT NULL,
-                product_type TEXT NOT NULL,
-                strategy_id TEXT NOT NULL,
-                authority_path TEXT NOT NULL DEFAULT 'hub',
-                net_qty BIGINT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (
-                    tenant_id,
-                    broker_account_id,
-                    underlying,
-                    expiry,
-                    strike,
-                    option_right,
-                    product_type,
-                    strategy_id
-                )
-            )
-        """
-        idx_sql = f"""
-            CREATE INDEX IF NOT EXISTS {self._table}_acct_idx
-                ON {self._table} (tenant_id, broker_account_id)
-        """
-        authority_sql = f"""
-            ALTER TABLE {self._table}
-            ADD COLUMN IF NOT EXISTS authority_path TEXT NOT NULL DEFAULT 'hub'
-        """
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                cur.execute(authority_sql)
-                cur.execute(idx_sql)
-            conn.commit()
+    def _assert_schema_exists(self) -> None:
+        """Assert the ownership table was created by migration 008. Never create it here."""
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_name = %s LIMIT 1",
+                        (self._table,),
+                    )
+                    if not cur.fetchone():
+                        raise RuntimeError(
+                            f"position_ownership: table '{self._table}' does not exist. "
+                            f"Run migrations/008_position_ownership_ledger.sql before starting LIVE."
+                        )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(
+                f"position_ownership: could not verify table '{self._table}': {exc}"
+            ) from exc
 
     def load_account_entries(
         self,
