@@ -774,6 +774,10 @@ class AppRuntime:
                                 """
                                 SELECT hub_order_id, broker_order_id
                                 FROM order_submission_outbox
+                                WHERE status NOT IN (
+                                    'TERMINAL_FILL', 'TERMINAL_NON_FILL',
+                                    'TERMINAL_ERROR', 'CANCELLED', 'EXPIRED'
+                                )
                                 LIMIT 500
                                 """
                             )
