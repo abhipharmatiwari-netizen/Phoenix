@@ -170,6 +170,36 @@ try {
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_TENANT_ID" -DefaultValue "tenant-1"
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_BROKER_ACCOUNT_ID" -DefaultValue "A1"
 
+    $capitalLimitsJson = [Environment]::GetEnvironmentVariable("CAPITAL_LIMITS_JSON", "Process")
+    if ([string]::IsNullOrWhiteSpace($capitalLimitsJson)) {
+        try {
+            $capitalLimitsJson = Get-Secret -Name "CAPITAL_LIMITS_JSON" -AsPlainText -ErrorAction Stop
+        }
+        catch {
+            $capitalLimitsJson = ""
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($capitalLimitsJson)) {
+        $tenantId = [Environment]::GetEnvironmentVariable("HUB_DEFAULT_TENANT_ID", "Process")
+        $brokerAccountId = [Environment]::GetEnvironmentVariable("HUB_DEFAULT_BROKER_ACCOUNT_ID", "Process")
+        $capitalLimitsPayload = @{
+            "$($tenantId):$($brokerAccountId)" = @{
+                max_notional_per_order = 500000
+                max_gross_exposure = 1000000
+            }
+        }
+        $capitalLimitsJson = $capitalLimitsPayload | ConvertTo-Json -Compress
+        Write-Host ""
+        Write-Host "Derived CAPITAL_LIMITS_JSON for $($tenantId):$($brokerAccountId) using the bundled 5L/10L baseline."
+        Write-Host "Override by setting the CAPITAL_LIMITS_JSON env var or SecretStore secret before launch."
+    }
+    else {
+        Write-Host ""
+        Write-Host "Loaded CAPITAL_LIMITS_JSON from the current PowerShell session or SecretStore."
+    }
+    Set-Item -Path "Env:CAPITAL_LIMITS_JSON" -Value $capitalLimitsJson
+
     # Write secrets to temporary files for Docker secret mounts (Issue #56).
     # Files are written to a per-session temp directory under $env:TEMP.
     # Docker Compose reads them via the `secrets:` section in the compose file.
@@ -207,6 +237,7 @@ try {
         "CONTROL_PLANE_PG_DB",
         "CONTROL_PLANE_PG_USER",
         "CONTROL_PLANE_PG_SSLMODE",
+        "CAPITAL_LIMITS_JSON",
         "HUB_DEFAULT_TENANT_ID",
         "HUB_DEFAULT_BROKER_ACCOUNT_ID"
     )) {
