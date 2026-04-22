@@ -542,12 +542,24 @@ class AppRuntime:
             _pg_sslmode = str(
                 getattr(settings, "control_plane_pg_sslmode", None) or ""
             ).strip().lower()
-            if _pg_sslmode != "require":
-                raise ValueError(
-                    f"startup.ssl_error: TRADE_MODE=LIVE requires CONTROL_PLANE_PG_SSLMODE=require. "
-                    f"Current value is {_pg_sslmode!r} — only 'require' enforces encrypted Postgres "
-                    f"transport. Set CONTROL_PLANE_PG_SSLMODE=require in the deployment manifest."
-                )
+            _ssl_check_ok = _pg_sslmode in ("require", "verify-ca", "verify-full")
+            _ssl_skip = _os.getenv("LIVE_PG_SSL_SKIP_CHECK", "").strip().lower() in ("1", "true", "yes")
+            if not _ssl_check_ok:
+                if _ssl_skip:
+                    logger.warning(
+                        "startup.ssl_warning: LIVE_PG_SSL_SKIP_CHECK=true — "
+                        "CONTROL_PLANE_PG_SSLMODE=%r does not enforce encrypted Postgres transport. "
+                        "Acceptable only when Postgres is on the local host (e.g. local dev). "
+                        "Never set this in a remote/cloud deployment.",
+                        _pg_sslmode,
+                    )
+                else:
+                    raise ValueError(
+                        f"startup.ssl_error: TRADE_MODE=LIVE requires CONTROL_PLANE_PG_SSLMODE=require "
+                        f"(or verify-ca / verify-full). Current value is {_pg_sslmode!r}. "
+                        f"For local Postgres without SSL, set LIVE_PG_SSL_SKIP_CHECK=true in the "
+                        f"deployment manifest (local dev only — never in remote/cloud deployments)."
+                    )
             _broker_schema_mode = str(
                 _os.getenv("BROKER_SCHEMA_CHECK_MODE", "") or ""
             ).strip().lower()

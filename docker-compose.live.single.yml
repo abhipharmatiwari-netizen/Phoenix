@@ -54,6 +54,10 @@ x-live-backend-env: &live-backend-env
   # shapes. Default in code is "off" for stability; set to "strict" for LIVE deployments
   # so malformed AngelOne responses are rejected at the integration boundary.
   BROKER_SCHEMA_CHECK_MODE: "strict"
+  # Local Postgres does not have SSL configured. LIVE_PG_SSL_SKIP_CHECK bypasses
+  # the startup SSL enforcement check so the backend starts against a local instance.
+  # Remove this line (or set to false) when deploying against a remote Postgres with SSL.
+  LIVE_PG_SSL_SKIP_CHECK: "${LIVE_PG_SSL_SKIP_CHECK:-true}"
   RUNTIME_CONFIG_AUTO_ENABLE: "false"
   RUNTIME_CONFIG_ENABLED: "false"
 
