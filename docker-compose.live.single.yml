@@ -16,7 +16,7 @@ x-db-env: &db-env
   # CONTROL_PLANE_PG_PASSWORD is intentionally absent here.
   # It is injected via Docker secret /run/secrets/control_plane_pg_password
   # by docker-entrypoint.sh, preventing exposure in `docker inspect` output.
-  CONTROL_PLANE_PG_SSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-require}"
+  CONTROL_PLANE_PG_SSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-prefer}"
   POSTGRES_FORCE_IPV4: "true"
   POSTGRES_CONNECT_TIMEOUT_SECONDS: "5"
   POSTGRES_SESSION_TIMEZONE: "Asia/Kolkata"
@@ -196,7 +196,7 @@ x-db-client-env: &db-client-env
   PGDATABASE: "${CONTROL_PLANE_PG_DB:?Set CONTROL_PLANE_PG_DB in the current PowerShell session}"
   PGUSER: "${CONTROL_PLANE_PG_USER:?Set CONTROL_PLANE_PG_USER in the current PowerShell session}"
   PGPASSWORD: "${CONTROL_PLANE_PG_PASSWORD_HOST:?Set CONTROL_PLANE_PG_PASSWORD_HOST in the current PowerShell session}"
-  PGSSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-require}"
+  PGSSLMODE: "${CONTROL_PLANE_PG_SSLMODE:-prefer}"
   PGCONNECT_TIMEOUT: "5"
   PHX_MIGRATION_APP_NAME: "phoenix-live-compose"
 
