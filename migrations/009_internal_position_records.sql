@@ -1,5 +1,5 @@
 -- Migration 009: Durable authoritative internal position records
--- Architecture §3.3 — persists OrderLifecycleService._position_records so
+-- Architecture s.3.3 - persists OrderLifecycleService._position_records so
 -- a restart can restore authoritative position state before broker reconciliation.
 
 CREATE TABLE IF NOT EXISTS internal_position_records (
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS internal_position_records (
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Partial index covering only non-terminal records — the common query path.
+-- Partial index covering only non-terminal records - the common query path.
 CREATE INDEX IF NOT EXISTS idx_internal_position_records_active
     ON internal_position_records (position_state)
     WHERE position_state NOT IN ('FLAT', 'NONE');

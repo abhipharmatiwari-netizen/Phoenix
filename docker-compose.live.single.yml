@@ -385,7 +385,7 @@ services:
     ports:
       - "127.0.0.1:80:80"
     # ADMIN_API_KEY is loaded from /run/secrets/admin_api_key by the
-    # nginx entrypoint — not passed via environment to avoid docker inspect exposure.
+    # nginx entrypoint - not passed via environment to avoid docker inspect exposure.
     secrets:
       - admin_api_key
     healthcheck:

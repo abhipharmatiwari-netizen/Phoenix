@@ -90,7 +90,7 @@ underlyings:
     enabled: true
 
   # Data-only feed for volatility circuit breaker (RISK-5.4).
-  # Not tradeable — subscribes to India VIX tick for real-time volatility monitoring.
+  # Not tradeable - subscribes to India VIX tick for real-time volatility monitoring.
   - name: INDIAVIX
     type: DATA
     index_token: 99926017

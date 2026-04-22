@@ -271,7 +271,7 @@ strategies:
     params:
       ema_period: 20
       timeframe_seconds: 300
-      min_atr: 25.0                  # optimized: was 45.0 — too restrictive (6/19 days)
+      min_atr: 25.0                  # optimized: was 45.0 - too restrictive (6/19 days)
       require_rsi_falling: true
       use_adx_filter: false
       adx_period: 14
@@ -361,7 +361,7 @@ strategies:
     params:
       ema_period: 20
       timeframe_seconds: 300
-      require_rsi_falling: false    # optimized: was true — improves PF 1.05->1.08
+      require_rsi_falling: false    # optimized: was true - improves PF 1.05->1.08
       use_adx_filter: false
       adx_period: 14
       min_adx: 18.0
@@ -524,7 +524,7 @@ strategies:
       - "NG_FUT"
     params:
       ema_period: 8
-      min_atr: 1.2                          # optimized: was 0.9 — PF 1.74->2.55, win% 71->86%
+      min_atr: 1.2                          # optimized: was 0.9 - PF 1.74->2.55, win% 71->86%
       require_rsi_falling: false
       timeframe_seconds: 300
       signal_timeframe: 300
@@ -676,15 +676,15 @@ strategies:
       timeframe_seconds_15m: 900
       min_atr_ratio: 0.0008
       trend_ema_tolerance_ratio: 0.0015
-      rsi_min: 20                       # optimized: was 25 — widen oversold floor
-      rsi_max: 45                       # optimized: was 40 — widen for moderate-weakness entries
+      rsi_min: 20                       # optimized: was 25 - widen oversold floor
+      rsi_max: 45                       # optimized: was 40 - widen for moderate-weakness entries
       option_sl_pct: 0.25
       partial_tp_r: 1.0
       final_tp_r: 1.5
-      rsi_falling_bars_required: 1      # optimized: was 2 — single declining bar sufficient
-      lookback_breakdown_bars: 8        # optimized: was 10 — shorter lookback, more signals
+      rsi_falling_bars_required: 1      # optimized: was 2 - single declining bar sufficient
+      lookback_breakdown_bars: 8        # optimized: was 10 - shorter lookback, more signals
       volume_mult: 1.4
-      max_bars_in_trade: 8             # optimized: was 6 — let profitable trades run longer
+      max_bars_in_trade: 8             # optimized: was 6 - let profitable trades run longer
       strike_mode: "ATM"
       lots_per_trade: 1
       morning_start: "09:20"

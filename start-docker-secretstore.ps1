@@ -197,7 +197,7 @@ try {
     Write-Host ""
     Write-Host "Docker secret files written to: $secretDir"
     Write-Host "  (admin_api_key, demo_auth_token_secret, control_plane_pg_password)"
-    Write-Host "  These files are read by Docker Compose secrets — not baked into container env."
+    Write-Host "  These files are read by Docker Compose secrets - not baked into container env."
 
     Write-Host ""
     Write-Host "Loaded runtime values into the current PowerShell session:"
@@ -227,7 +227,7 @@ try {
     Invoke-External -Description "Starting LIVE stack" -Command @("docker", "compose", "-f", $composeFile, "up", "-d", "--build", "--force-recreate")
     Invoke-External -Description "Showing container status" -Command @("docker", "compose", "-f", $composeFile, "ps")
 
-    # Clean up secret files after stack is running — they're now in the container.
+    # Clean up secret files after stack is running - they are now in the container.
     Write-Host ""
     Write-Host "Cleaning up temporary secret files from host..."
     Remove-Item -Path (Join-Path $secretDir "control_plane_pg_password") -ErrorAction SilentlyContinue

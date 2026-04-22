@@ -1,7 +1,7 @@
 #!/bin/sh
 # Load Docker secrets into environment variables before the main process starts.
 # Each file under /run/secrets/ becomes an env var named after the file
-# (upper-cased, hyphens → underscores).  Values are never written to
+# (upper-cased, hyphens -> underscores).  Values are never written to
 # docker inspect output because this script runs inside the container.
 set -e
 
