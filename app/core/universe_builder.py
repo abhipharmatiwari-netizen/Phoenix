@@ -788,6 +788,14 @@ def build_instrument_universe(
             else:
                 logger.warning(f"❌ [UNIVERSE] Unsupported type {typ} for {name}, skipping")
         except Exception as e:
+            err_str = str(e)
+            if (
+                "AG8001" in err_str
+                or "invalid token" in err_str.lower()
+                or "token expired" in err_str.lower()
+                or "unauthorized" in err_str.lower()
+            ):
+                raise  # propagate auth errors so the caller can re-login
             logger.error(f"❌ [UNIVERSE] Error building {name}: {e}", exc_info=True)
 
     logger.info(f"📊 [UNIVERSE] Total instruments built: {len(instruments)}")
