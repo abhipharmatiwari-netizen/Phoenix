@@ -29,7 +29,7 @@ from app.core.startup_config_validator import (
     validate_startup_config,
 )
 from app.core.strategy_switch import StrategySwitchboard
-from app.data.postgres import get_control_plane_dsn
+from app.data.postgres import connect_with_retry, get_control_plane_dsn
 from app.data.schema_guard import check_startup_schema
 from app.hub.runtime import get_hub_runtime
 from app.strategies.naming import all_canonical_strategy_names
@@ -711,7 +711,6 @@ class AppRuntime:
             # than starting cold.
             if order_lifecycle is not None:
                 try:
-                    from app.data.postgres import connect_with_retry, get_control_plane_dsn
                     _pos_dsn = get_control_plane_dsn()
                     with connect_with_retry(_pos_dsn, autocommit=True) as _pos_conn:
                         _loaded = order_lifecycle.load_position_records(_pos_conn)
@@ -731,7 +730,6 @@ class AppRuntime:
             ksm = getattr(runtime, "kill_switch_manager", None)
             if ksm is not None:
                 try:
-                    from app.data.postgres import connect_with_retry, get_control_plane_dsn
                     from app.risk.kill_switch import KillSwitchManager
                     _ks_dsn = get_control_plane_dsn()
                     with connect_with_retry(_ks_dsn, autocommit=True) as _ks_conn:
@@ -764,7 +762,6 @@ class AppRuntime:
             )
             if trade_mode == "LIVE":
                 try:
-                    from app.data.postgres import connect_with_retry, get_control_plane_dsn
                     _SYNTHETIC_MARKERS = (
                         "B123", "B124", "OID-ONCE", "OID-PARALLEL",
                         "TEST-", "FAKE-", "MOCK-", "FIXTURE",
@@ -882,7 +879,6 @@ class AppRuntime:
                 # Flush position records before stopping so the last authoritative
                 # state survives a graceful restart.
                 try:
-                    from app.data.postgres import connect_with_retry, get_control_plane_dsn
                     with connect_with_retry(get_control_plane_dsn(), autocommit=True) as _conn:
                         order_lifecycle.save_position_records(_conn)
                 except Exception as _exc:
