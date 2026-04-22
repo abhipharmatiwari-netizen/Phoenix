@@ -4,7 +4,7 @@
 -- CLEAR_PENDING kill switch survives process restarts.  Without this table,
 -- kill switch state is lost on every container restart.
 --
--- ARCHITECTURE s.2: kill switch listed as "authoritative runtime risk state +
+-- ARCHITECTURE §2: kill switch listed as "authoritative runtime risk state +
 -- persisted snapshot".  This migration makes the persisted snapshot real.
 
 CREATE TABLE IF NOT EXISTS kill_switch_state (
