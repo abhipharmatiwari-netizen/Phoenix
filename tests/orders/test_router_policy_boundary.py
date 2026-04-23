@@ -1083,3 +1083,88 @@ async def test_router_position_ownership_rejected_submission_releases_pending_lo
         assert runner.place_order.call_count == 2
     finally:
         dashboard_bus.set_instrument_meta(original_meta)
+
+
+# ---------------------------------------------------------------------------
+# Issue #68: lifecycle persistence mandatory after broker submit in LIVE
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_live_lifecycle_register_failure_blocks_and_raises(monkeypatch):
+    """Regression #68: In LIVE mode, a lifecycle registration failure after broker submit
+    must block further order flow and re-raise rather than falling back to trade/PnL recording.
+    """
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    original_meta = dict(getattr(dashboard_bus, "_instrument_meta", {}))
+    try:
+        runner = MagicMock()
+        runner.is_running = True
+        runner.place_order = AsyncMock(
+            return_value=OrderResponse(
+                broker_order_id="OID-LIVE-1",
+                status="FILLED",
+                message="ok",
+                filled_quantity=1,
+                average_price=100.0,
+            )
+        )
+
+        hub = MagicMock()
+        hub.get_runner.return_value = runner
+
+        state_store = MagicMock()
+        state_store.get_balance.return_value = None
+        state_store.get_positions.return_value = []
+
+        capital_engine = MagicMock()
+        capital_engine.can_afford_order.return_value = (True, "capital_ok")
+        capital_engine.suggest_order_quantity.return_value = (1, "ok")
+
+        risk_engine = MagicMock()
+        risk_engine.check_order_allowed.return_value = (True, "risk_ok")
+
+        class _BrokenLifecycle:
+            def register_submission(self, **_kwargs):
+                raise RuntimeError("lifecycle DB unavailable")
+
+        dashboard_bus.set_instrument_meta({
+            "NIFTY17FEB2625750CE": {"lot_size": 1, "label": "NIFTY_ATM_CE"}
+        })
+
+        from app.orders.order_outbox import InMemoryOrderSubmissionOutbox
+
+        router = OrderRouter(
+            hub=hub,
+            capital_engine=capital_engine,
+            risk_engine=risk_engine,
+            profit_engine=None,
+            state_store=state_store,
+            order_lifecycle=_BrokenLifecycle(),
+            submission_outbox=InMemoryOrderSubmissionOutbox(),
+        )
+        assert router._is_live_mode is True, "Router must detect LIVE mode from env"
+
+        with pytest.raises(RuntimeError, match="lifecycle DB unavailable"):
+            await router.submit_order(
+                tenant_id=TenantId("tenant-1"),
+                broker_account_id=BrokerAccountId("account-1"),
+                strategy_id=StrategyId("ema20-strategy"),
+                order_req=OrderRequest(
+                    symbol="NIFTY17FEB2625750CE",
+                    symbol_token="12345",
+                    quantity=1,
+                    side=OrderSide.BUY,
+                    order_type=OrderType.MARKET,
+                    product_type=ProductType.INTRADAY,
+                    time_in_force=TimeInForce.DAY,
+                    purpose=OrderPurpose.ENTRY,
+                ),
+            )
+
+        # After lifecycle failure, new order entries must be blocked.
+        assert router._startup_recovery_block_new_entries is True, (
+            "Router must block new entries after lifecycle persist failure in LIVE"
+        )
+    finally:
+        monkeypatch.delenv("TRADE_MODE", raising=False)
+        dashboard_bus.set_instrument_meta(original_meta)

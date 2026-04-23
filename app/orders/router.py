@@ -439,6 +439,9 @@ class OrderRouter:
         self._last_recovery_summary: dict[str, Any] = {}
         self._startup_recovery_block_new_entries = False
         self._startup_recovery_reason: Optional[str] = None
+        self._is_live_mode: bool = (
+            str(os.getenv("TRADE_MODE", "PAPER")).strip().upper() == "LIVE"
+        )
 
     @staticmethod
     def _pending_idempotency_response() -> OrderResponse:
@@ -1363,6 +1366,16 @@ class OrderRouter:
                     hub_order_id,
                     broker_order_id,
                 )
+                if self._is_live_mode:
+                    # §68: In LIVE, a broker submit that succeeds but cannot be
+                    # persisted to the lifecycle store leaves an untracked real order.
+                    # Block further order flow and raise to surface the failure.
+                    self.set_startup_recovery_gate(
+                        block_new_entries=True,
+                        reason="lifecycle_persist_failed_after_broker_submit",
+                        summary={"hub_order_id": hub_order_id, "broker_order_id": broker_order_id},
+                    )
+                    raise
                 self._record_trade_and_pnl(
                     hub_order_id=hub_order_id,
                     tenant_id=tenant_id,
