@@ -29,7 +29,7 @@ Phase 1:
 
 from __future__ import annotations
 
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Optional, Any
 import logging
 import os
@@ -38,7 +38,7 @@ from zoneinfo import ZoneInfo
 from app.core.identifiers import BrokerAccountId, StrategyId, TenantId
 from app.core.clock import IClock, SystemClock
 from app.config.settings import get_settings
-from app.pnl.types import PnLSnapshot, PnLSnapshotKey, TradeEvent
+from app.pnl.types import PnLSnapshot, PnLSnapshotKey, TradeEvent, TradeOpenEvent, TradeCloseEvent
 from app.data.bq_persister import insert_daily_pnl_snapshot
 from app.pnl.state_store import (
     InMemoryPnLStateStore,
@@ -110,6 +110,11 @@ class PnLEngine:
             snap.session_date = today
             snap.freshness_updated_at = now
             snap.freshness_source = "day_reset"
+            # Reset control PnL fields on new trading day
+            snap.control_realized_pnl = 0.0
+            snap.control_open_pnl = 0.0
+            snap.control_open_premium = 0.0
+            snap.control_open_qty = 0
 
     # Get or create a snapshot for a tenant/account/strategy.
     def _get_or_create_snapshot(
@@ -610,6 +615,77 @@ class PnLEngine:
         )
 
 
+    # ── Control PnL methods: track short-option legs separate from cash ledger ──
+
+    def on_open_position(self, event: "TradeOpenEvent") -> None:
+        """Record opening short-option leg for control PnL. Does NOT touch realized_pnl."""
+        snap = self._get_or_create_snapshot(event.tenant_id, event.broker_account_id, event.strategy_id)
+        self._reset_if_new_day(snap, event.trade_time or datetime.now(timezone.utc))
+        snap.control_open_premium += float(event.entry_price) * int(event.qty) * int(event.lot_size or 1)
+        snap.control_open_qty += int(event.qty)
+        snap.freshness_source = "open_position"
+        self._state_store.upsert_snapshot(snap)
+
+    def on_close_position(self, event: "TradeCloseEvent") -> None:
+        """Record economic close. Computes control_realized_pnl. Does NOT touch realized_pnl."""
+        snap = self._get_or_create_snapshot(event.tenant_id, event.broker_account_id, event.strategy_id)
+        self._reset_if_new_day(snap, event.trade_time or datetime.now(timezone.utc))
+        if snap.control_open_qty <= 0:
+            logger.warning("on_close_position: no tracked open position for %s/%s/%s",
+                           event.tenant_id, event.broker_account_id, event.strategy_id)
+            return
+        qty = min(int(event.qty), snap.control_open_qty)
+        avg_entry = snap.control_open_premium / snap.control_open_qty
+        lot_size = int(event.lot_size or 1)
+        snap.control_realized_pnl += (avg_entry - float(event.exit_price)) * qty * lot_size
+        snap.control_open_premium = max(0.0, snap.control_open_premium - avg_entry * qty * lot_size)
+        snap.control_open_qty = max(0, snap.control_open_qty - qty)
+        snap.freshness_source = "close_position"
+        self._state_store.upsert_snapshot(snap)
+
+    def update_control_open_pnl(
+        self,
+        tenant_id: Any,
+        broker_account_id: Any,
+        strategy_id: Any,
+        current_ltp: float,
+        as_of: Optional[datetime] = None,
+    ) -> None:
+        """Refresh control_open_pnl from current LTP for open short positions."""
+        snap = self._get_or_create_snapshot(tenant_id, broker_account_id, strategy_id)
+        now = as_of or datetime.now(timezone.utc)
+        self._reset_if_new_day(snap, now)
+        if snap.control_open_qty <= 0:
+            snap.control_open_pnl = 0.0
+        else:
+            avg_entry = snap.control_open_premium / snap.control_open_qty
+            snap.control_open_pnl = (avg_entry - float(current_ltp)) * snap.control_open_qty
+        self._state_store.upsert_snapshot(snap)
+
+    def get_control_total_pnl(
+        self,
+        tenant_id: Any,
+        broker_account_id: Any,
+        strategy_id: Any = None,
+    ) -> Optional[float]:
+        """Return control_realized_pnl + control_open_pnl.
+
+        Returns None if no control data exists (fallback signal).
+        """
+        snaps = self._list_scoped_snapshots(tenant_id, broker_account_id, strategy_id)
+        if not snaps:
+            return None
+        has_control = any(
+            (s.control_open_qty or 0) > 0 or (s.control_realized_pnl or 0.0) != 0.0
+            for s in snaps
+        )
+        if not has_control:
+            return None
+        return float(sum(
+            (s.control_realized_pnl or 0.0) + (s.control_open_pnl or 0.0)
+            for s in snaps
+        ))
+
     # ── Per-instrument-class stale thresholds (H4 / Architecture §12) ──
 
     @staticmethod
@@ -640,4 +716,4 @@ class PnLEngine:
         return float(os.environ.get("PNL_FRESHNESS_THRESHOLD_SECONDS", "300"))
 
 
-__all__ = ["PnLEngine"]
+__all__ = ["PnLEngine", "TradeOpenEvent", "TradeCloseEvent"]
