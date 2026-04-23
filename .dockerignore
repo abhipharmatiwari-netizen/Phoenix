@@ -1,0 +1,52 @@
+# Runtime secret files — must never enter build context.
+# These files are also checked at LIVE startup (app_runtime.py) and
+# excluded from promotion bundles (release-manifest.json).
+*.env.runtime
+*.runtime.env
+.backend-live.env.runtime
+
+# Operator-only / legacy reference env files.
+# The approved LIVE secret path is start-docker-secretstore.ps1.
+# .docker-live.env intentionally has TRADE_MODE=SHADOW to prevent
+# accidental live use, but it must not enter the build context either.
+.docker-live.env
+
+# Local state, logs, and volatile data.
+logs/
+state/
+*.log
+*.csv
+
+# Python artefacts.
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.test_tmp/
+
+# Development dependencies and tooling.
+.venv/
+node_modules/
+frontend/node_modules/
+frontend/playwright-report/
+frontend/test-results/
+
+# Version control and CI metadata.
+.git/
+.github/
+.claude/
+
+# Release staging and archive directories.
+release/
+docs/archive/
+docs/obsolete/
+
+# Test suite — excluded from image (see release-manifest.json).
+tests/
+pytest-cache-files-*
+
+# Google service-account credentials (secrets injected at runtime).
+google/
+*.json.secret
+gcp-sa.json
