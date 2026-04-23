@@ -190,9 +190,26 @@ try {
             }
         }
         $capitalLimitsJson = $capitalLimitsPayload | ConvertTo-Json -Compress
-        Write-Host ""
-        Write-Host "Derived CAPITAL_LIMITS_JSON for $($tenantId):$($brokerAccountId) using the bundled 5L/10L baseline."
-        Write-Host "Override by setting the CAPITAL_LIMITS_JSON env var or SecretStore secret before launch."
+
+        $tradeModeEnv = [Environment]::GetEnvironmentVariable("TRADE_MODE", "Process")
+        if ($tradeModeEnv -eq "LIVE") {
+            Write-Host ""
+            Write-Warning "TRADE_MODE=LIVE but CAPITAL_LIMITS_JSON is not configured."
+            Write-Warning "Using bundled 5L/10L generic baseline for $($tenantId):$($brokerAccountId)."
+            Write-Warning "Generic defaults are NOT audited per-account limits."
+            Write-Warning "Set CAPITAL_LIMITS_JSON in PowerShell SecretStore or as an env var before"
+            Write-Warning "deploying to a funded LIVE account. Generic baseline is acceptable ONLY"
+            Write-Warning "for dry-run / LIVE-connect / staging with zero real capital at risk."
+            Write-Host ""
+            Write-Host "Setting ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true so startup validator"
+            Write-Host "records this as an explicit audited exception rather than silently passing."
+            Set-Item -Path "Env:ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY" -Value "true"
+        }
+        else {
+            Write-Host ""
+            Write-Host "Derived CAPITAL_LIMITS_JSON for $($tenantId):$($brokerAccountId) using the bundled 5L/10L baseline."
+            Write-Host "Override by setting the CAPITAL_LIMITS_JSON env var or SecretStore secret before launch."
+        }
     }
     else {
         Write-Host ""
