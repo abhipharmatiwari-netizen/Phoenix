@@ -4458,8 +4458,16 @@ def stream_multi_instruments(
                         risk_manager._reconcile_pending_orders()  # type: ignore[attr-defined]
                 except Exception:
                     pass
+                # The primary notification path is the position_flat_registry singleton,
+                # which strategies subscribe to directly at init time and is immune to
+                # routing_table API changes. The legacy routing-table callback below is
+                # kept for backward compatibility with any future strategies that do not
+                # subscribe to the registry.
                 def _make_pos_sync_flat_callback():
                     def _cb(label: str, reason: str) -> None:
+                        # position_flat_registry.notify() is already called from
+                        # position_sync.py directly; this legacy path catches any
+                        # strategy that subscribed to routing_table but not registry.
                         try:
                             from app.hub.runtime import get_hub_runtime
                             rt = get_hub_runtime()
@@ -4469,13 +4477,17 @@ def stream_multi_instruments(
                             if rt_table is None:
                                 return
                             for _strategy in getattr(rt_table, "get_all_active_strategies", lambda: [])():
+                                # Skip strategies already covered by registry
+                                from app.core.position_flat_registry import position_flat_registry as _reg
+                                if _strategy in _reg._subscribers:
+                                    continue
                                 _fn = getattr(_strategy, "on_position_flat_by_sync", None)
                                 if callable(_fn):
                                     try:
                                         _fn(label=label, reason=reason)
                                     except Exception as _e:
                                         logger.warning(
-                                            "strategy.on_position_flat_by_sync failed: %s", _e
+                                            "strategy.on_position_flat_by_sync (legacy) failed: %s", _e
                                         )
                         except Exception as _outer:
                             logger.warning("_pos_sync_flat_callback error: %s", _outer)

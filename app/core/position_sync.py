@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from app.config.settings import get_settings
 from app.core.anti_pattern_guards import assert_not_single_poll_mutation
 from app.core.dashboard_bus import dashboard_bus
+from app.core.position_flat_registry import position_flat_registry
 from app.core.degraded_scope_manager import degraded_scope_manager, DegradedReason
 from app.core.lot_size import lot_size_for_symbol_optional
 from app.core.logging_utils import log_event
@@ -1147,16 +1148,22 @@ def sync_positions_with_broker(
                 result.closed += 1
                 result.position_state = PositionState.FLAT_PENDING_CONFIRMATION.value
                 _clear_scope_evidence(account_key, str(label))
-                # Notify registered strategies of authoritative flat (STRONG evidence)
+                # Notify registered strategies of authoritative flat (STRONG evidence).
+                # Two paths fire in sequence:
+                # 1. Legacy strategy_flat_callback kwarg (routing-table based, kept for compat).
+                # 2. position_flat_registry singleton (direct subscription, robust).
                 _evidence = result.evidence_class or PositionSyncEvidenceClass.STRONG.value
-                if callable(strategy_flat_callback) and _evidence == PositionSyncEvidenceClass.STRONG.value:
-                    try:
-                        strategy_flat_callback(label=str(label), reason="pos_sync_strong_flat")
-                    except Exception as _cb_exc:
-                        logger.warning(
-                            "[POS_SYNC] strategy_flat_callback failed label=%s: %s",
-                            label, _cb_exc,
-                        )
+                if _evidence == PositionSyncEvidenceClass.STRONG.value:
+                    if callable(strategy_flat_callback):
+                        try:
+                            strategy_flat_callback(label=str(label), reason="pos_sync_strong_flat")
+                        except Exception as _cb_exc:
+                            logger.warning(
+                                "[POS_SYNC] strategy_flat_callback failed label=%s: %s",
+                                label, _cb_exc,
+                            )
+                    # Registry path: always fires, even if callback is None or routing table changes.
+                    position_flat_registry.notify(label=str(label), reason="pos_sync_strong_flat")
             except Exception as exc:
                 logger.warning("[POS_SYNC] Failed to close stale position %s: %s", label, exc)
                 result.errors.append(str(exc))
