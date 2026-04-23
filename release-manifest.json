@@ -1,4 +1,14 @@
 {
+  "evidence_requirements": {
+    "description": "Minimum evidence required for LIVE promotion approval. All items must be satisfied and attached to the promotion record before go-live sign-off.",
+    "required": [
+      "release_evidence_snapshot: GET /admin/release-evidence (requires ADMIN_API_KEY) — must show runtime_ready=true, position_authority_restored, schema_guard.status=ok, startup_recovery.status=ok, and no synthetic_contamination.",
+      "test_run_summary: pytest exit-code 0 with no newly-introduced failures. Attach output or CI artefact link.",
+      "commit_hash: The exact git commit SHA deployed, traceable to the build artefact.",
+      "operator_checklist: Confirm CAPITAL_LIMITS_JSON contains funded-account-specific limits (not helper-derived generic defaults), TRADE_MODE=LIVE, secrets injected via SecretStore / Secret Manager, and LIVE_PG_SSL_SKIP_CHECK removed for remote Postgres."
+    ],
+    "note": "Tests are excluded from the promotion bundle (see excluded_prefixes). Validation evidence must be attached as a separate companion artefact or CI record."
+  },
   "allowed_dirs": [
     "app",
     "docs",

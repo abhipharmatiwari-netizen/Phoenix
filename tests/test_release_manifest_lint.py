@@ -57,3 +57,16 @@ def test_build_script_excludes_forbidden_file(forbidden: str):
         f"{forbidden!r} must not appear in scripts/build_release_artifact.py ALLOWED_FILES — "
         "it contains SHADOW-mode settings and template placeholder secrets"
     )
+
+
+def test_release_manifest_has_evidence_requirements():
+    """Regression #70: release-manifest.json must define promotion evidence requirements."""
+    data = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    assert "evidence_requirements" in data, (
+        "release-manifest.json must contain an 'evidence_requirements' section documenting "
+        "the minimum evidence required for LIVE promotion approval."
+    )
+    reqs = data["evidence_requirements"]
+    assert isinstance(reqs.get("required"), list) and len(reqs["required"]) >= 1, (
+        "evidence_requirements.required must be a non-empty list of evidence items."
+    )
