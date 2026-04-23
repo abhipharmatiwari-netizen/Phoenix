@@ -48,7 +48,7 @@ from app.orders.trade_processed_store import (
     build_processed_trade_store,
 )
 from app.pnl.pnl_engine import PnLEngine
-from app.pnl.types import TradeEvent
+from app.pnl.types import TradeEvent, TradeOpenEvent, TradeCloseEvent
 
 logger = logging.getLogger(__name__)
 
@@ -1654,6 +1654,42 @@ class OrderLifecycleService:
             except Exception:
                 logger.exception(
                     "OrderLifecycleService: PnL update failed for broker_order_id=%s",
+                    broker_order_id,
+                )
+            # Wire control PnL: on_open_position for SELL-ENTRY, on_close_position for BUY-EXIT.
+            # purpose is stored on ctx; side alone is used as safe fallback.
+            _purpose = str(ctx.purpose or "").strip().upper()
+            _side = str(ctx.side or "").strip().upper()
+            try:
+                if _side == "SELL" and _purpose in ("ENTRY", ""):
+                    self._pnl_engine.on_open_position(
+                        TradeOpenEvent(
+                            tenant_id=ctx.tenant_id,
+                            broker_account_id=ctx.broker_account_id,
+                            strategy_id=ctx.strategy_id,
+                            symbol=ctx.symbol,
+                            qty=filled_qty,
+                            entry_price=price,
+                            lot_size=1,  # filled_qty already reflects broker units
+                            trade_time=trade_time,
+                        )
+                    )
+                elif _side == "BUY" and _purpose in ("EXIT", "ADJUST", ""):
+                    self._pnl_engine.on_close_position(
+                        TradeCloseEvent(
+                            tenant_id=ctx.tenant_id,
+                            broker_account_id=ctx.broker_account_id,
+                            strategy_id=ctx.strategy_id,
+                            symbol=ctx.symbol,
+                            qty=filled_qty,
+                            exit_price=price,
+                            lot_size=1,
+                            trade_time=trade_time,
+                        )
+                    )
+            except Exception:
+                logger.exception(
+                    "OrderLifecycleService: control PnL update failed for broker_order_id=%s",
                     broker_order_id,
                 )
 
