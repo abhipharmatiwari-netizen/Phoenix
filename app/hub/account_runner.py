@@ -472,6 +472,22 @@ class AccountRunner:
                 float(current_exposure) + gross_exposure,
             )
 
+            # Refresh control_open_pnl for short positions on every broker sync.
+            # qty < 0 means the broker reports a short leg; mark is the LTP or avg fallback.
+            # For long or flat positions control_open_qty is 0, so this is a harmless no-op.
+            if qty < 0:
+                _update_fn = getattr(self._pnl_engine, "update_control_open_pnl", None)
+                if callable(_update_fn):
+                    try:
+                        _update_fn(
+                            tenant_id=self._tenant_id,
+                            broker_account_id=self._broker_account_id,
+                            strategy_id=owner_strategy_id,
+                            current_ltp=mark,
+                        )
+                    except Exception:
+                        pass  # non-critical; control PnL update is best-effort
+
         self._pnl_engine.sync_account_mark_to_market(
             tenant_id=self._tenant_id,
             broker_account_id=self._broker_account_id,
