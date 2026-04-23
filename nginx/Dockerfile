@@ -13,14 +13,19 @@ RUN npm run build
 FROM nginx:alpine
 COPY --from=build /app/build /usr/share/nginx/html
 COPY nginx/nginx.conf.template /tmp/nginx.conf.template
-RUN printf '#!/bin/sh\n\
-# Load ADMIN_API_KEY from Docker secret file (preferred) to avoid exposure in\n\
-# docker inspect environment output.\n\
-if [ -f /run/secrets/admin_api_key ]; then\n\
-    ADMIN_API_KEY=$(cat /run/secrets/admin_api_key)\n\
-    export ADMIN_API_KEY\n\
-fi\n\
-envsubst "$$ADMIN_API_KEY" < /tmp/nginx.conf.template > /etc/nginx/conf.d/default.conf\n' \
-    > /docker-entrypoint.d/90-envsubst-admin-key.sh && \
+RUN { \
+    echo '#!/bin/sh'; \
+    echo '# Load ADMIN_API_KEY from Docker secret file (preferred) to avoid exposure in'; \
+    echo '# docker inspect environment output.'; \
+    echo 'if [ -f /run/secrets/admin_api_key ]; then'; \
+    echo '    ADMIN_API_KEY=$(cat /run/secrets/admin_api_key)'; \
+    echo '    export ADMIN_API_KEY'; \
+    echo 'fi'; \
+    echo 'if [ -z "${ADMIN_API_KEY:-}" ]; then'; \
+    echo '    echo "ADMIN_API_KEY is required for nginx admin route protection" >&2'; \
+    echo '    exit 1'; \
+    echo 'fi'; \
+    echo 'envsubst '\''${ADMIN_API_KEY}'\'' < /tmp/nginx.conf.template > /etc/nginx/conf.d/default.conf'; \
+    } > /docker-entrypoint.d/90-envsubst-admin-key.sh && \
     chmod +x /docker-entrypoint.d/90-envsubst-admin-key.sh
 EXPOSE 80

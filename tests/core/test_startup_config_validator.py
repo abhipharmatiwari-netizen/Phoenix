@@ -28,6 +28,8 @@ def _valid_runtime_settings(**overrides):
         "eod_exit_retry_cutoff_time": "15:30",
         "hub_subscription_poll_interval": 60.0,
         "enable_capital_checks": True,
+        "capital_limits_json": '{"tenant-1:A1":{"max_notional_per_order":500000,"max_gross_exposure":1000000}}',
+        "allow_live_capital_limits_default_only": False,
         "capital_fail_closed_on_missing_state": True,
         "capital_fail_closed_on_missing_notional_price": True,
         "enable_risk_checks": True,

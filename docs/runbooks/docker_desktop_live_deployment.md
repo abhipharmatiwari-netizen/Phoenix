@@ -81,29 +81,33 @@ The bundled example command sets these explicitly if you do not override them:
 - `CONTROL_PLANE_PG_PORT=5432`
 - `CONTROL_PLANE_PG_DB=phoenix`
 - `CONTROL_PLANE_PG_USER=phoenix_app`
-- `CONTROL_PLANE_PG_SSLMODE=disable`
+- `CONTROL_PLANE_PG_SSLMODE=prefer`
+- `CAPITAL_LIMITS_JSON={"tenant-1:A1": {"max_notional_per_order": 500000, "max_gross_exposure": 1000000}}`
 - `HUB_DEFAULT_TENANT_ID=tenant-1`
 - `HUB_DEFAULT_BROKER_ACCOUNT_ID=A1`
 
 ---
 
-## Example one-line deployment command
+## Deployment command
 
-Run this from the repo root in PowerShell **only if you are using the bundled host-session helper as a transport step for already-approved runtime values**. Windows SecretStore here is an operator convenience, not the authoritative LIVE secret source:
-
-```powershell
-$pw=Read-Host "Enter SecretStore password" -AsSecureString; Unlock-SecretStore -Password $pw; $env:ADMIN_API_KEY_HOST=Get-Secret -Name ADMIN_API_KEY -AsPlainText; $env:DEMO_AUTH_TOKEN_SECRET_HOST=Get-Secret -Name DEMO_AUTH_TOKEN_SECRET -AsPlainText; $env:CONTROL_PLANE_PG_PASSWORD_HOST=Get-Secret -Name CONTROL_PLANE_PG_PASSWORD -AsPlainText; $env:CLIENT_LOCAL_IP=Get-Secret -Name CLIENT_LOCAL_IP -AsPlainText; $env:CLIENT_PUBLIC_IP=Get-Secret -Name CLIENT_PUBLIC_IP -AsPlainText; $env:MAC_ADDRESS=Get-Secret -Name MAC_ADDRESS -AsPlainText; $env:CONTROL_PLANE_PG_HOST="host.docker.internal"; $env:CONTROL_PLANE_PG_PORT="5432"; $env:CONTROL_PLANE_PG_DB="phoenix"; $env:CONTROL_PLANE_PG_USER="phoenix_app"; $env:CONTROL_PLANE_PG_SSLMODE="disable"; $env:HUB_DEFAULT_TENANT_ID="tenant-1"; $env:HUB_DEFAULT_BROKER_ACCOUNT_ID="A1"; docker compose -f .\docker-compose.live.single.yml down --remove-orphans; docker compose -f .\docker-compose.live.single.yml up -d --build --force-recreate; docker compose -f .\docker-compose.live.single.yml ps
-```
-
-### Equivalent helper script
-
-You can also use:
+Run this from the repo root in PowerShell. Windows SecretStore here is an
+operator convenience, not the authoritative LIVE secret source:
 
 ```powershell
 .\start-docker-secretstore.ps1
 ```
 
-That helper implements the same bundled Docker/Desktop path.
+The helper implements the bundled Docker/Desktop path and derives an
+account-specific `CAPITAL_LIMITS_JSON` baseline if no override is present.
+It writes Docker Compose secret files under `$env:TEMP\phx-secrets` and
+intentionally keeps them there while the stack is running; Compose local secrets
+are bind mounts, so deleting those files breaks container restarts. Remove that
+directory only after `docker compose down`.
+
+Do not use raw `docker compose up` directly unless the current PowerShell
+session has already exported all required non-secret env vars and
+`PHX_SECRET_DIR` points at existing `admin_api_key`, `demo_auth_token_secret`,
+and `control_plane_pg_password` files.
 
 ---
 
@@ -194,15 +198,18 @@ That artifact intentionally excludes local clutter such as `logs/`, `__pycache__
 
 ## Expected startup log messages
 
-The following WARNING-level messages appear on every startup and are **expected behavior**, not incidents. Do not open an incident for these alone.
+The following WARNING-level messages can appear on a clean host-local Docker/Desktop startup and are **expected behavior**, not incidents. Do not open an incident for these alone.
 
 | Message | Why expected |
 |---|---|
 | `LIVE mode policy gates enforced hardened defaults for: {...}` | Confirms LIVE-mode flags were auto-promoted; informational |
-| `startup.ssl_warning: TRADE_MODE=LIVE but CONTROL_PLANE_PG_SSLMODE=disable` | Expected for host-local Docker deployments where Postgres does not have SSL enabled; harmless when Postgres is on `host.docker.internal` with no external exposure |
+| `startup.ssl_warning: LIVE_PG_SSL_SKIP_CHECK=true` | Expected only for host-local Docker deployments where Postgres does not have SSL enabled; harmless when Postgres is on `host.docker.internal` with no external exposure |
 | `illegal transition blocked ... from_state=RECONCILING ... escalating to DEGRADED` | Stale position records from expired prior-session option contracts are safely escalated to DEGRADED; not a live position problem |
-| `strategy.unroutable name=<strategy>` × N | Strategies enabled in the strategy switch but absent from the routing table; correct behavior — their signals are dropped |
-| `strategy.unroutable_selector_excluded count=N` | Summary of unroutable strategies excluded from selector in LIVE+AUTO mode |
+
+Messages containing `strategy.unroutable` or `strategy.unroutable_selector_excluded`
+are **not expected** after a clean bundled LIVE startup. They mean a strategy is
+attached in runtime but has no hub route, and the route/config drift must be fixed
+before using the strategy with real money.
 
 The one message that is **NOT** expected after a clean startup is `BROKER_SCHEMA_VIOLATION` at CRITICAL level repeating on a timer. That indicates a persistent broker balance schema mismatch and requires investigation.
 

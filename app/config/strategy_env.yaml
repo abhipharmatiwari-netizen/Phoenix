@@ -250,13 +250,13 @@ vol_thresholds:
 
 strategies:
   - name: delta_strangle
-    enabled: true
+    enabled: false
     instruments: ["NIFTY_IDX", "BANKNIFTY_IDX"]
     params:
       sl_pct: 0.30
       tp_pct: 0.30
   - name: option_strategy
-    enabled: true
+    enabled: false
     instruments:
       - "NIFTY_IDX"
       - "BANKNIFTY_IDX"
@@ -558,7 +558,7 @@ strategies:
           chop_adx_max: 18
         profiles: {}
   - name: "ce_pdh_rb"
-    enabled: true
+    enabled: false
     instruments:
       - "NIFTY_IDX"
       - "BANKNIFTY_IDX"
@@ -704,7 +704,7 @@ strategies:
           chop_adx_max: 18
         profiles: {}
   - name: "put_reversion_writer"
-    enabled: true
+    enabled: false
     instruments:
       - "NIFTY_IDX"
       - "BANKNIFTY_IDX"
@@ -730,7 +730,7 @@ strategies:
       afternoon_entry_start: "13:30"
       afternoon_entry_end: "14:15"
   - name: "put_buy"
-    enabled: true
+    enabled: false
     instruments:
       - "NIFTY_IDX"
       - "BANKNIFTY_IDX"
@@ -746,7 +746,7 @@ strategies:
       expiry_mode: "NEAREST"
       use_volume_filter: false
   - name: "nifty_weekly_credit_spreads"
-    enabled: true
+    enabled: false
     instruments:
       - "NIFTY_IDX"
     params:

@@ -139,7 +139,7 @@ The following guards are wired directly into [`docker-compose.live.single.yml`](
 | Risk state isolation | `RISK_STATE_PATH=/app/state/risk_positions.json` | Risk restart-helper stored on the `/app/state` volume (separate from logs); survives log rotation |
 | Selector staleness | IST-date guard in `StrategySelector` | Prior-day selection state evicted on first bar after IST midnight; prevents regime/strategy state carrying over between trading days |
 | Sync freshness | `/readyz` sync-age gate | Returns 503 when position or orders sync age exceeds 2× the configured sync interval |
-| Unroutable exclusion | `routed_strategy_ids()` at stream startup | Strategies with no routing entry are excluded from selector evaluation and logged as `strategy.unroutable` |
+| Unroutable exclusion | Runtime route validation at stream startup | Attached strategies with no routing entry are dropped before dispatch; a clean Docker/Desktop LIVE start should not emit `strategy.unroutable` |
 
 ## Capital risk configuration
 
@@ -151,10 +151,10 @@ Production limits are pinned explicitly in [`docker-compose.live.single.yml`](do
 | `CAPITAL_MARGIN_SHORT_OPTION_PER_LOT` | 2,00,000 | Per-lot margin floor for short CE/PE SELL orders |
 | `CAPITAL_MARGIN_FUTURES_PER_LOT` | 2,00,000 | Per-lot margin floor for futures orders |
 | `CAPITAL_MARGIN_FUTURES_RATE` | 0.12 | Fraction of futures notional used as margin estimate |
-| `CAPITAL_LIMITS_JSON` | `{}` | Per-account notional/exposure overrides (empty = use defaults) |
+| `CAPITAL_LIMITS_JSON` | required per account | Per-account notional/exposure limits; `TRADE_MODE=LIVE` rejects empty `{}` unless an explicit audited exception is set |
 
-`max_notional_per_order` defaults to 5L per order and `max_gross_exposure` to 10L.
-Both can be overridden per-account via `CAPITAL_LIMITS_JSON` without a redeploy.
+The Docker/Desktop helper derives a `tenant_id:broker_account_id` entry at the 5L/10L baseline when no operator override is supplied.
+Set `CAPITAL_LIMITS_JSON` explicitly for funded accounts before LIVE use.
 See the [capital limits runbook](docs/runbooks/capital_limits_configuration.md) for the full override format.
 
 > `CAPITAL_MARGIN_CHECK_MODE=off` is auto-upgraded to `enforce` whenever `TRADE_MODE=LIVE`

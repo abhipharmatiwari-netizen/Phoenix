@@ -258,13 +258,12 @@ try {
     Invoke-External -Description "Starting LIVE stack" -Command @("docker", "compose", "-f", $composeFile, "up", "-d", "--build", "--force-recreate")
     Invoke-External -Description "Showing container status" -Command @("docker", "compose", "-f", $composeFile, "ps")
 
-    # Clean up secret files after stack is running - they are now in the container.
+    # Docker Compose local secrets are bind-mounted files, not Swarm-managed copies.
+    # Keep them for the lifetime of the stack so container restarts can still
+    # read /run/secrets/*. Remove them only after `docker compose down`.
     Write-Host ""
-    Write-Host "Cleaning up temporary secret files from host..."
-    Remove-Item -Path (Join-Path $secretDir "control_plane_pg_password") -ErrorAction SilentlyContinue
-    Remove-Item -Path (Join-Path $secretDir "admin_api_key") -ErrorAction SilentlyContinue
-    Remove-Item -Path (Join-Path $secretDir "demo_auth_token_secret") -ErrorAction SilentlyContinue
-    Write-Host "  Secret files removed from $secretDir"
+    Write-Host "Secret files retained for container restart safety: $secretDir"
+    Write-Host "  Remove this directory only after stopping the stack with docker compose down."
 }
 catch {
     Write-Error $_

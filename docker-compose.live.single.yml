@@ -404,8 +404,9 @@ services:
         max-size: "10m"
         max-file: "5"
 
-# Docker secrets: files written by start-docker-secretstore.ps1 to
-# the path exported as PHX_SECRET_DIR env var (e.g. $env:TEMP\phx-secrets).
+# Docker secrets: files written and retained by start-docker-secretstore.ps1
+# at PHX_SECRET_DIR (e.g. $env:TEMP\phx-secrets). Compose local secrets are
+# bind-mounted files, so they must exist for the lifetime of the stack.
 # Mounting as secrets prevents values appearing in `docker inspect` output.
 # The migrator/db-preflight containers use PGPASSWORD via PowerShell session
 # as they are ephemeral one-shot containers.

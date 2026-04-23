@@ -6,9 +6,9 @@ environment variable without touching code.
 
 ---
 
-## Hardcoded defaults (production baseline)
+## Baseline limits
 
-| Setting | Default | Compose override |
+| Setting | Baseline | Compose override |
 |---|---|---|
 | `max_notional_per_order` | 5,00,000 (5L) | via `CAPITAL_LIMITS_JSON` |
 | `max_gross_exposure` | 10,00,000 (10L) | via `CAPITAL_LIMITS_JSON` |
@@ -94,20 +94,26 @@ Futures required margin = `max(notional × rate, lots × per_lot)`.
 
 ## How to update in production
 
-Set `CAPITAL_LIMITS_JSON` in the PowerShell session before running
+For funded LIVE accounts, prefer a specific `tenant_id:broker_account_id` key. Set
+`CAPITAL_LIMITS_JSON` in the PowerShell session before running
 `start-docker-secretstore.cmd`, or store it as a SecretStore secret named
 `CAPITAL_LIMITS_JSON` so the launch script picks it up automatically:
 
 ```powershell
-$env:CAPITAL_LIMITS_JSON = '{"default": {"max_notional_per_order": 500000}}'
+$env:CAPITAL_LIMITS_JSON = '{"tenant-1:A1": {"max_notional_per_order": 500000, "max_gross_exposure": 1000000}}'
 ```
 
 Or via SecretStore:
 ```powershell
-Set-Secret -Name "CAPITAL_LIMITS_JSON" -Secret '{"default": {"max_notional_per_order": 500000}}'
+Set-Secret -Name "CAPITAL_LIMITS_JSON" -Secret '{"tenant-1:A1": {"max_notional_per_order": 500000, "max_gross_exposure": 1000000}}'
 ```
 
-The compose file will then substitute the value at container start time.
+The compose file requires this value at container start time. The bundled
+`start-docker-secretstore.ps1` helper derives a `tenant_id:broker_account_id`
+entry at the 5L/10L baseline if neither the current session nor SecretStore
+provides one. Empty `{}` is rejected in `TRADE_MODE=LIVE` unless
+`ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true` is deliberately set as an audited
+exception.
 
 ---
 

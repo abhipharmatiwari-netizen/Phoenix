@@ -3255,7 +3255,7 @@ def stream_multi_instruments(
     instrument_policy_snapshot = instrument_controller.snapshot()
     strategy_switch_snapshot = strategy_switch.snapshot()
 
-    # --- Issue #33: detect unroutable strategies (fills the pre-initialized list) ---
+    # --- Issue #33: detect attached strategies that still lack hub routes. ---
     try:
         from app.hub.routing_table import get_global_routing_table
         _rt = get_global_routing_table()
@@ -3263,13 +3263,20 @@ def stream_multi_instruments(
         _auto_select_enabled = str(
             os.getenv("AUTO_STRATEGY_SELECT_ENABLED", "false") or "false"
         ).strip().lower() in {"1", "true", "yes", "on"}
-        for _sname, _enabled in strategy_switch_snapshot.items():
-            if not _enabled:
-                continue
+        _attached_strategy_names = {
+            canonicalize_strategy_name(
+                str(row.get("name") or ""),
+                source="stream.unroutable_check.attached",
+                warn_alias=False,
+            )
+            for row in strategies
+            if str(row.get("name") or "").strip()
+        }
+        for _sname in sorted(name for name in _attached_strategy_names if name):
             if _sname not in routed_ids:
                 unroutable_strategies.append(_sname)
                 logger.warning(
-                    "strategy.unroutable name=%s — enabled in strategy switch but has no routing entry; "
+                    "strategy.unroutable name=%s - attached at runtime but has no routing entry; "
                     "signals from this strategy will be dropped by the router",
                     _sname,
                 )
@@ -3277,9 +3284,9 @@ def stream_multi_instruments(
             log_level = logging.ERROR if _auto_select_enabled else logging.WARNING
             logger.log(
                 log_level,
-                "strategy.unroutable_selector_excluded count=%d names=%s — "
+                "strategy.unroutable_selector_excluded count=%d names=%s - "
                 "unroutable strategies %s from selector evaluation in LIVE mode; "
-                "add routing entries to HUB_ROUTES_JSON or remove from strategy_configs",
+                "add routing entries to strategy_configs/HUB_ROUTES_JSON or disable the runtime attachment",
                 len(unroutable_strategies),
                 sorted(unroutable_strategies),
                 "excluded" if _auto_select_enabled else "present but not auto-excluded",
