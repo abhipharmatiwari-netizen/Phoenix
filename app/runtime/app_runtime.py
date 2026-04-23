@@ -696,19 +696,17 @@ class AppRuntime:
                         exc,
                     )
                 raise
+            # Architecture startup contract (§11.1 / §64):
+            # restore authoritative state → mark RECOVERY_PENDING
+            # → broker reconciliation → replay evaluation.
             await runtime.hub.initialize()
-            await runtime.hub.start_all()
-            wait_for_runner_startup = getattr(runtime.hub, "wait_for_runner_startup", None)
-            if callable(wait_for_runner_startup):
-                await wait_for_runner_startup()
-            await self._mark_recovery_pending(runtime)
+
+            # Step 1: Start order lifecycle service before any broker I/O.
             order_lifecycle = getattr(runtime, "order_lifecycle", None)
             if order_lifecycle is not None:
                 await order_lifecycle.start()
 
-            # §48 — Load durable authoritative position state before outbox recovery
-            # so fill tracking resumes from the last persisted position graph rather
-            # than starting cold.
+            # Step 2: Restore persisted authoritative position state (§48).
             if order_lifecycle is not None:
                 try:
                     _pos_dsn = get_control_plane_dsn()
@@ -721,12 +719,18 @@ class AppRuntime:
                         _loaded,
                     )
                 except Exception as _pos_exc:
+                    if trade_mode == "LIVE":
+                        logger.error(
+                            "startup.position_records_load_failed: TRADE_MODE=LIVE requires "
+                            "durable position-state restore — aborting startup: %s", _pos_exc
+                        )
+                        raise
                     logger.warning(
                         "startup.position_records_load_failed (non-fatal): %s", _pos_exc
                     )
                     self._position_authority_restored = False
 
-            # §58 — Load KillSwitchManager state from Postgres at startup.
+            # Step 3: Restore kill-switch durable state (§58). Fail-stop in LIVE.
             ksm = getattr(runtime, "kill_switch_manager", None)
             if ksm is not None:
                 try:
@@ -734,7 +738,6 @@ class AppRuntime:
                     _ks_dsn = get_control_plane_dsn()
                     with connect_with_retry(_ks_dsn, autocommit=True) as _ks_conn:
                         loaded_ksm = KillSwitchManager.load_state(_ks_conn)
-                    # Replace the empty manager with the restored one
                     runtime.kill_switch_manager = loaded_ksm
                     active = loaded_ksm.get_all_active()
                     logger.info(
@@ -750,9 +753,24 @@ class AppRuntime:
                             [(r.scope.value, r.scope_id, r.state.value) for r in active],
                         )
                 except Exception as _ks_exc:
+                    if trade_mode == "LIVE":
+                        logger.error(
+                            "startup.kill_switch_load_failed: TRADE_MODE=LIVE requires "
+                            "durable kill-switch restore — aborting startup: %s", _ks_exc
+                        )
+                        raise
                     logger.warning(
                         "startup.kill_switch_load_failed (non-fatal): %s", _ks_exc
                     )
+
+            # Step 4: Mark all restored records RECOVERY_PENDING before broker sync.
+            await self._mark_recovery_pending(runtime)
+
+            # Step 5: Start runners — initial broker sync (reconciliation) happens here.
+            await runtime.hub.start_all()
+            wait_for_runner_startup = getattr(runtime.hub, "wait_for_runner_startup", None)
+            if callable(wait_for_runner_startup):
+                await wait_for_runner_startup()
 
             order_router = getattr(runtime, "order_router", None)
             recover_submission_outbox = getattr(

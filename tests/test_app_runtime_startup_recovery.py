@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import sys
+from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -214,3 +216,187 @@ async def test_app_runtime_keeps_startup_recovery_ok_when_strict_mode_off(monkey
     assert runtime.startup_recovery_status()["status"] == "ok"
 
     await runtime.stop()
+
+
+# ---------------------------------------------------------------------------
+# Startup ordering tests (Issues #64 / #67)
+# ---------------------------------------------------------------------------
+
+class _OrderTrackingHub(_FakeHub):
+    """Records the order in which start_all() is called."""
+    def __init__(self, call_log: list) -> None:
+        super().__init__()
+        self._call_log = call_log
+
+    async def start_all(self) -> None:
+        self._call_log.append("hub.start_all")
+        self.started = True
+
+
+class _OrderTrackingLifecycle(_FakeOrderLifecycle):
+    """Records calls to load_position_records."""
+    def __init__(self, call_log: list) -> None:
+        super().__init__()
+        self._call_log = call_log
+
+    def load_position_records(self, conn) -> int:
+        self._call_log.append("lifecycle.load_position_records")
+        return 0
+
+
+def _fake_connect_ctx(call_log=None):
+    """Context manager that returns a dummy connection."""
+    @contextmanager
+    def _ctx(dsn, autocommit=False):
+        yield MagicMock()
+    return _ctx
+
+
+def _patch_db(monkeypatch):
+    monkeypatch.setattr(app_runtime_module, "get_control_plane_dsn", lambda *a, **kw: "dsn://test")
+    monkeypatch.setattr(app_runtime_module, "connect_with_retry", _fake_connect_ctx())
+
+
+@pytest.mark.asyncio
+async def test_startup_restore_happens_before_hub_start_all(monkeypatch):
+    """Regression #64: position restore must complete before hub.start_all()."""
+    _patch_runtime_dependencies(monkeypatch, strict_mode=False)
+    _patch_db(monkeypatch)
+
+    call_log: list[str] = []
+    hub_runtime = SimpleNamespace(
+        hub=_OrderTrackingHub(call_log),
+        order_lifecycle=_OrderTrackingLifecycle(call_log),
+        order_router=_FakeOrderRouter({"failed": 0, "unresolved_active": 0}),
+    )
+    runtime = AppRuntime(
+        settings_getter=lambda: _settings(),
+        hub_runtime_getter=lambda: hub_runtime,
+    )
+
+    await runtime.start()
+
+    assert "lifecycle.load_position_records" in call_log, "load_position_records not called"
+    assert "hub.start_all" in call_log, "hub.start_all not called"
+    pos_idx = call_log.index("lifecycle.load_position_records")
+    hub_idx = call_log.index("hub.start_all")
+    assert pos_idx < hub_idx, (
+        f"load_position_records (idx={pos_idx}) must happen before hub.start_all "
+        f"(idx={hub_idx}). Actual log: {call_log}"
+    )
+
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_mark_recovery_pending_before_hub_start_all(monkeypatch):
+    """Regression #64: mark_all_recovery_pending must be called before hub.start_all()."""
+    _patch_runtime_dependencies(monkeypatch, strict_mode=False)
+    _patch_db(monkeypatch)
+
+    call_log: list[str] = []
+
+    class _TrackingOwnershipStore:
+        def mark_all_recovery_pending(self) -> int:
+            call_log.append("ownership.mark_all_recovery_pending")
+            return 0
+
+    hub_runtime = SimpleNamespace(
+        hub=_OrderTrackingHub(call_log),
+        order_lifecycle=_OrderTrackingLifecycle(call_log),
+        order_router=_FakeOrderRouter({"failed": 0, "unresolved_active": 0}),
+        position_ownership_store=_TrackingOwnershipStore(),
+    )
+    runtime = AppRuntime(
+        settings_getter=lambda: _settings(),
+        hub_runtime_getter=lambda: hub_runtime,
+    )
+
+    await runtime.start()
+
+    assert "ownership.mark_all_recovery_pending" in call_log
+    mark_idx = call_log.index("ownership.mark_all_recovery_pending")
+    hub_idx = call_log.index("hub.start_all")
+    assert mark_idx < hub_idx, (
+        f"mark_all_recovery_pending (idx={mark_idx}) must happen before hub.start_all "
+        f"(idx={hub_idx}). Actual log: {call_log}"
+    )
+
+    await runtime.stop()
+
+
+def _settings_live():
+    return SimpleNamespace(
+        app_runtime_startup_validate=False,
+        schema_check_mode="warn",
+        enable_multi_hub=True,
+        order_lifecycle_persist_markers_required=False,
+        control_plane_pg_sslmode="require",
+        control_plane_pg_password=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_load_failure_is_fatal_in_live(monkeypatch):
+    """Regression #67: kill-switch restore failure must abort startup in LIVE."""
+    _patch_runtime_dependencies(monkeypatch, strict_mode=False, trade_mode="LIVE")
+    _patch_db(monkeypatch)
+
+    # Patch out the env.runtime artifact check and LIVE placeholder checks.
+    import pathlib
+    monkeypatch.setattr(pathlib.Path, "iterdir", lambda self: iter([]))
+    monkeypatch.setenv("ADMIN_API_KEY", "real-key")
+    monkeypatch.setenv("DEMO_AUTH_TOKEN_SECRET", "real-secret")
+
+    class _BrokenKillSwitchManager:
+        @staticmethod
+        def load_state(conn):
+            raise RuntimeError("DB unavailable: kill switch table missing")
+
+    fake_ks_module = ModuleType("app.risk.kill_switch")
+    fake_ks_module.KillSwitchManager = _BrokenKillSwitchManager
+    monkeypatch.setitem(sys.modules, "app.risk.kill_switch", fake_ks_module)
+
+    _call_log: list[str] = []
+    hub_runtime = SimpleNamespace(
+        hub=_FakeHub(),
+        order_lifecycle=_OrderTrackingLifecycle(_call_log),  # has load_position_records
+        order_router=_FakeOrderRouter({"failed": 0, "unresolved_active": 0}),
+        kill_switch_manager=object(),  # non-None triggers the load path
+    )
+    runtime = AppRuntime(
+        settings_getter=lambda: _settings_live(),
+        hub_runtime_getter=lambda: hub_runtime,
+    )
+
+    with pytest.raises(RuntimeError, match="DB unavailable"):
+        await runtime.start()
+
+
+@pytest.mark.asyncio
+async def test_position_restore_failure_is_fatal_in_live(monkeypatch):
+    """Regression #67: position records restore failure must abort startup in LIVE."""
+    _patch_runtime_dependencies(monkeypatch, strict_mode=False, trade_mode="LIVE")
+    _patch_db(monkeypatch)
+
+    import pathlib
+    monkeypatch.setattr(pathlib.Path, "iterdir", lambda self: iter([]))
+    monkeypatch.setenv("ADMIN_API_KEY", "real-key")
+    monkeypatch.setenv("DEMO_AUTH_TOKEN_SECRET", "real-secret")
+
+    class _BrokenLifecycle(_FakeOrderLifecycle):
+        def load_position_records(self, conn) -> int:
+            raise RuntimeError("position_records table missing")
+
+    hub_runtime = SimpleNamespace(
+        hub=_FakeHub(),
+        order_lifecycle=_BrokenLifecycle(),
+        order_router=_FakeOrderRouter({"failed": 0, "unresolved_active": 0}),
+    )
+    runtime = AppRuntime(
+        settings_getter=lambda: _settings_live(),
+        hub_runtime_getter=lambda: hub_runtime,
+    )
+
+    with pytest.raises(RuntimeError, match="position_records table missing"):
+        await runtime.start()
