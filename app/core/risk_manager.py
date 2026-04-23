@@ -1032,6 +1032,22 @@ class RiskManager:
             lot_size = float(entry.get("lot_size") or meta.get("lot_size") or 1.0)
             last_price = dashboard_bus.get_last_price(label)
             if last_price is None:
+                # Try instrument symbol/token lookup as fallback
+                tradingsymbol = entry.get("tradingsymbol") or entry.get("symbol")
+                symboltoken = entry.get("symboltoken") or entry.get("symbol_token")
+                if tradingsymbol or symboltoken:
+                    _fn = getattr(dashboard_bus, "get_last_price_for_instrument", None)
+                    if callable(_fn):
+                        last_price = _fn(symbol=tradingsymbol, token=symboltoken)
+            if last_price is None:
+                last_price = float(entry.get("avg_price", 0.0) or 0.0)
+                if last_price > 0:
+                    logger.warning(
+                        "[RISK] kill_switch_mark_stale: label=%s using broker avg_price=%s "
+                        "— stream mark unavailable. Drawdown may be inaccurate.",
+                        label, last_price,
+                    )
+            if last_price is None:
                 last_price = entry_price
             side_mult = 1.0 if side == "BUY" else -1.0
             unrealized_total += (
