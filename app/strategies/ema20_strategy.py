@@ -10,6 +10,7 @@ from datetime import datetime, time as dt_time, timedelta, timezone
 from typing import Any, Callable, Dict, Optional
 
 from app.strategies.base import BaseStrategy
+from app.core.position_flat_registry import position_flat_registry
 from app.core.signal_metrics import get_labeled_metrics
 from app.core.underlyings import canonical_underlying_key, underlying_lookup_candidates
 from app.config.boot_config import StrategyValueResolver
@@ -392,6 +393,9 @@ class Ema20Strategy(BaseStrategy):
                 ),
             )
         self._restore_position_from_risk_manager()
+        # Register with the direct subscription registry so POS_SYNC can clear
+        # managed state without relying on routing_table.
+        position_flat_registry.subscribe(self)
 
     # Decide hub routing kwargs for order placement.
     def _routing_kwargs(self) -> Dict[str, Any]:
@@ -795,14 +799,8 @@ class Ema20Strategy(BaseStrategy):
         self.last_price[label] = ltp
         self.sync_position_from_risk_manager(source="tick")
         if self._managed_positions and self._is_after_square_off():
-            if not self._has_authoritative_open_position():
-                logger.info(
-                    "[%s] EMA20 EOD square-off (tick) suppressed: risk_manager shows flat | labels=%s",
-                    getattr(self, "env_prefix", "?"),
-                    sorted(self._managed_positions.keys()),
-                )
-                self._managed_positions.clear()
-                return
+            # force_exit_all(EOD) performs per-position authoritative checks internally;
+            # it skips already-flat labels and only places orders for genuinely open ones.
             self.force_exit_all(reason="EOD", submit_orders=True)
             return
         if label == self.underlying_label and self.ce_label is None:
@@ -838,15 +836,9 @@ class Ema20Strategy(BaseStrategy):
                 timeframe_seconds=timeframe_seconds,
             )
             if self._managed_positions:
-                if not self._has_authoritative_open_position():
-                    logger.info(
-                        "[%s] EMA20 EOD square-off (bar) suppressed: risk_manager shows flat | labels=%s",
-                        getattr(self, "env_prefix", "?"),
-                        sorted(self._managed_positions.keys()),
-                    )
-                    self._managed_positions.clear()
-                else:
-                    self.force_exit_all(reason="EOD", submit_orders=True)
+                # force_exit_all(EOD) checks each position individually;
+                # flat ones are cleared, open ones get close orders.
+                self.force_exit_all(reason="EOD", submit_orders=True)
             return
 
         self._refresh_effective_params(candle=candle, indicators=indicators)
@@ -2059,12 +2051,60 @@ class Ema20Strategy(BaseStrategy):
         if not self._managed_positions:
             return
         if submit_orders:
-            for pos in list(self._managed_positions.values()):
-                self._exit_position(reason=reason, position=pos)
+            # For EOD exits, check each position individually against the authoritative
+            # source. Only place a close order for positions that are genuinely open;
+            # silently clear any that risk_manager already considers flat.
+            if reason == "EOD":
+                open_labels, flat_labels = self._partition_managed_by_authority()
+                for label in flat_labels:
+                    logger.info(
+                        "[%s] EMA20 EOD: skipping already-flat label=%s (risk_manager shows flat)",
+                        getattr(self, "env_prefix", "?"), label,
+                    )
+                    self._managed_positions.pop(label, None)
+                if not open_labels:
+                    # Nothing genuinely open — sync state and return
+                    self._sync_primary_position()
+                    self._reset_exit_retry_state()
+                    return
+                for label in open_labels:
+                    pos = self._managed_positions.get(label)
+                    if pos is not None:
+                        self._exit_position(reason=reason, position=pos)
+            else:
+                for pos in list(self._managed_positions.values()):
+                    self._exit_position(reason=reason, position=pos)
         else:
             self._managed_positions.clear()
             self._sync_primary_position()
             self._reset_exit_retry_state()
+
+    def _partition_managed_by_authority(self) -> tuple[list[str], list[str]]:
+        """Split managed labels into (open, flat) based on risk_manager.open_positions.
+
+        Returns (open_labels, flat_labels). Positions whose status cannot be
+        determined are placed in open_labels (fail-open: close is risk-reducing).
+        """
+        rm = getattr(self, "risk_manager", None)
+        if rm is None:
+            # No risk_manager — cannot determine; treat all as open
+            return list(self._managed_positions.keys()), []
+        open_pos = getattr(rm, "open_positions", None)
+        if open_pos is None:
+            return list(self._managed_positions.keys()), []
+        open_labels: list[str] = []
+        flat_labels: list[str] = []
+        for label in list(self._managed_positions.keys()):
+            entry = open_pos.get(label)
+            if entry and int((entry or {}).get("qty", 0) or 0) > 0:
+                open_labels.append(label)
+            elif label not in open_pos:
+                # Label completely absent from risk_manager → authoritative flat
+                flat_labels.append(label)
+            else:
+                # Entry present but qty == 0 → flat
+                flat_labels.append(label)
+        return open_labels, flat_labels
 
     def on_position_flat_by_sync(self, *, label: str, reason: str) -> None:
         """POS_SYNC confirmed flat with STRONG evidence. Clear without placing orders."""
