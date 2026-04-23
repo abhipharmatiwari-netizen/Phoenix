@@ -487,6 +487,16 @@ class Settings(BaseSettings):
         validation_alias="PROFIT_MAX_SWEEPS_PER_DAY",
         description="Maximum sweeps per day in MULTIPLE strategy.",
     )
+    profit_simple_target_mode: str = Field(
+        default="absolute",
+        validation_alias="PROFIT_SIMPLE_TARGET_MODE",
+        description="Target mode for SIMPLE sweep: 'absolute' or 'premium_pct'.",
+    )
+    profit_simple_target_premium_pct: float = Field(
+        default=0.5,
+        validation_alias="PROFIT_SIMPLE_TARGET_PREMIUM_PCT",
+        description="When mode=premium_pct, exit target fraction of collected open premium.",
+    )
 
     bigquery_trades_table: str = Field(
         default="trades",
@@ -526,6 +536,8 @@ class Settings(BaseSettings):
             "profit_multiple_target",
             "profit_sweep_cooldown_minutes",
             "profit_max_sweeps_per_day",
+            "profit_simple_target_mode",
+            "profit_simple_target_premium_pct",
         }
         profit_sweep_explicit = any(
             field in self.model_fields_set for field in configured_profit_sweep_fields
@@ -537,6 +549,14 @@ class Settings(BaseSettings):
                 f"got '{self.profit_sweep_strategy}'"
             )
 
+        # Validate profit_simple_target_mode
+        _target_mode = str(getattr(self, "profit_simple_target_mode", "absolute") or "absolute").lower()
+        if _target_mode not in {"absolute", "premium_pct"}:
+            raise ValueError(
+                f"profit_simple_target_mode must be 'absolute' or 'premium_pct', "
+                f"got '{_target_mode}'"
+            )
+
         validate_simple_strategy = (
             profit_sweep_explicit and self.profit_sweep_strategy == "SIMPLE"
         )
@@ -546,11 +566,13 @@ class Settings(BaseSettings):
 
         # Validate SIMPLE strategy only when sweep controls were explicitly configured.
         if validate_simple_strategy:
-            if self.profit_daily_target is None or self.profit_daily_target <= 0:
-                raise ValueError(
-                    f"SIMPLE strategy requires profit_daily_target > 0, "
-                    f"got {self.profit_daily_target}"
-                )
+            _tmode = str(getattr(self, "profit_simple_target_mode", "absolute") or "absolute").lower()
+            if _tmode != "premium_pct":
+                if self.profit_daily_target is None or self.profit_daily_target <= 0:
+                    raise ValueError(
+                        f"SIMPLE strategy requires profit_daily_target > 0 when mode=absolute, "
+                        f"got {self.profit_daily_target}"
+                    )
 
         # Validate MULTIPLE strategy only when sweep controls were explicitly configured.
         if validate_multiple_strategy:
