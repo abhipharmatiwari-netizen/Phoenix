@@ -19,3 +19,7 @@ class BaseStrategy(Protocol):
         candle: Any,
         indicators: Dict[str, Any],
     ) -> None: ...
+
+    def on_position_flat_by_sync(self, *, label: str, reason: str) -> None:
+        """Called by POS_SYNC when STRONG-evidence flat confirmed. No-op default."""
+        ...

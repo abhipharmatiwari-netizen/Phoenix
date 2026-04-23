@@ -565,6 +565,7 @@ def sync_positions_with_broker(
     ltp_lookup: Optional[Dict[str, float]] = None,
     broker_account_id: Optional[str] = None,
     entry_submission_lookup: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
+    strategy_flat_callback: Optional[Callable[..., None]] = None,
 ) -> PositionSyncResult:
     """
     Fetch live positions from broker and reconcile with risk_manager.open_positions.
@@ -1146,6 +1147,16 @@ def sync_positions_with_broker(
                 result.closed += 1
                 result.position_state = PositionState.FLAT_PENDING_CONFIRMATION.value
                 _clear_scope_evidence(account_key, str(label))
+                # Notify registered strategies of authoritative flat (STRONG evidence)
+                _evidence = result.evidence_class or PositionSyncEvidenceClass.STRONG.value
+                if callable(strategy_flat_callback) and _evidence == PositionSyncEvidenceClass.STRONG.value:
+                    try:
+                        strategy_flat_callback(label=str(label), reason="pos_sync_strong_flat")
+                    except Exception as _cb_exc:
+                        logger.warning(
+                            "[POS_SYNC] strategy_flat_callback failed label=%s: %s",
+                            label, _cb_exc,
+                        )
             except Exception as exc:
                 logger.warning("[POS_SYNC] Failed to close stale position %s: %s", label, exc)
                 result.errors.append(str(exc))

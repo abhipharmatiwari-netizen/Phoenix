@@ -795,6 +795,14 @@ class Ema20Strategy(BaseStrategy):
         self.last_price[label] = ltp
         self.sync_position_from_risk_manager(source="tick")
         if self._managed_positions and self._is_after_square_off():
+            if not self._has_authoritative_open_position():
+                logger.info(
+                    "[%s] EMA20 EOD square-off (tick) suppressed: risk_manager shows flat | labels=%s",
+                    getattr(self, "env_prefix", "?"),
+                    sorted(self._managed_positions.keys()),
+                )
+                self._managed_positions.clear()
+                return
             self.force_exit_all(reason="EOD", submit_orders=True)
             return
         if label == self.underlying_label and self.ce_label is None:
@@ -830,7 +838,15 @@ class Ema20Strategy(BaseStrategy):
                 timeframe_seconds=timeframe_seconds,
             )
             if self._managed_positions:
-                self.force_exit_all(reason="EOD", submit_orders=True)
+                if not self._has_authoritative_open_position():
+                    logger.info(
+                        "[%s] EMA20 EOD square-off (bar) suppressed: risk_manager shows flat | labels=%s",
+                        getattr(self, "env_prefix", "?"),
+                        sorted(self._managed_positions.keys()),
+                    )
+                    self._managed_positions.clear()
+                else:
+                    self.force_exit_all(reason="EOD", submit_orders=True)
             return
 
         self._refresh_effective_params(candle=candle, indicators=indicators)
@@ -2049,6 +2065,58 @@ class Ema20Strategy(BaseStrategy):
             self._managed_positions.clear()
             self._sync_primary_position()
             self._reset_exit_retry_state()
+
+    def on_position_flat_by_sync(self, *, label: str, reason: str) -> None:
+        """POS_SYNC confirmed flat with STRONG evidence. Clear without placing orders."""
+        cleared = False
+        if hasattr(self, "_managed_positions") and label in self._managed_positions:
+            logger.info(
+                "[%s] EMA20 clearing managed position via POS_SYNC flat | label=%s reason=%s",
+                getattr(self, "env_prefix", "?"), label, reason,
+            )
+            self._managed_positions.pop(label, None)
+            cleared = True
+        # Also clear primary position if it matches this label
+        pos = getattr(self, "position", None)
+        if pos is not None:
+            pos_label = getattr(pos, "option_label", None) or getattr(pos, "label", None)
+            if pos_label == label:
+                logger.info(
+                    "[%s] EMA20 clearing primary position via POS_SYNC flat | label=%s reason=%s",
+                    getattr(self, "env_prefix", "?"), label, reason,
+                )
+                self.position = None
+                cleared = True
+        if cleared:
+            # Reset any exit retry state
+            _reset = getattr(self, "_reset_exit_retry_state", None)
+            if callable(_reset):
+                _reset()
+            _sync = getattr(self, "sync_position_from_risk_manager", None)
+            if callable(_sync):
+                try:
+                    _sync(source="pos_sync_flat")
+                except Exception:
+                    pass
+
+    def _has_authoritative_open_position(self) -> bool:
+        """Returns True if risk_manager confirms position still open."""
+        rm = getattr(self, "risk_manager", None)
+        if rm is not None:
+            open_pos = getattr(rm, "open_positions", {}) or {}
+            managed = getattr(self, "_managed_positions", {})
+            for label in list(managed.keys()):
+                entry = open_pos.get(label)
+                if entry:
+                    qty = int((entry or {}).get("qty", 0) or 0)
+                    if qty > 0:
+                        return True
+            # risk_manager is present and has open_positions dict — trust it
+            if open_pos is not None and managed:
+                if not any(lbl in open_pos for lbl in managed):
+                    return False
+        # Fallback: if we can't determine → fail-open (assume open)
+        return True
 
 
 # State for an open EMA20 option position.

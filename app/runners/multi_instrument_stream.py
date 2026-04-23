@@ -4458,6 +4458,29 @@ def stream_multi_instruments(
                         risk_manager._reconcile_pending_orders()  # type: ignore[attr-defined]
                 except Exception:
                     pass
+                def _make_pos_sync_flat_callback():
+                    def _cb(label: str, reason: str) -> None:
+                        try:
+                            from app.hub.runtime import get_hub_runtime
+                            rt = get_hub_runtime()
+                            if rt is None:
+                                return
+                            rt_table = getattr(rt, "routing_table", None)
+                            if rt_table is None:
+                                return
+                            for _strategy in getattr(rt_table, "get_all_active_strategies", lambda: [])():
+                                _fn = getattr(_strategy, "on_position_flat_by_sync", None)
+                                if callable(_fn):
+                                    try:
+                                        _fn(label=label, reason=reason)
+                                    except Exception as _e:
+                                        logger.warning(
+                                            "strategy.on_position_flat_by_sync failed: %s", _e
+                                        )
+                        except Exception as _outer:
+                            logger.warning("_pos_sync_flat_callback error: %s", _outer)
+                    return _cb
+
                 res = sync_positions_with_broker(
                     order_client=order_client,
                     risk_manager=risk_manager,
@@ -4465,6 +4488,7 @@ def stream_multi_instruments(
                     ltp_lookup=last_prices,
                     broker_account_id=position_sync_broker_account_id,
                     entry_submission_lookup=_lookup_recent_entry_submission,
+                    strategy_flat_callback=_make_pos_sync_flat_callback(),
                 )
                 try:
                     risk_manager.evaluate_account_loss(

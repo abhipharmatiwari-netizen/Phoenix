@@ -1378,6 +1378,35 @@ class PositionOwnershipStore:
             record = self._ownership_records.get(scoped)
             return copy.deepcopy(record) if record is not None else None
 
+    def get_net_quantity(
+        self,
+        *,
+        tenant_id: TenantId,
+        broker_account_id: BrokerAccountId,
+        contract_key: Optional[ContractKey],
+    ) -> int:
+        """Return the net owned quantity for a contract across all strategies.
+
+        Returns 0 if the contract is not tracked.  Positive means net long;
+        negative means net short.  This is a read-only helper used for
+        duplicate-order guards (e.g. EOD square-off).
+        """
+        if contract_key is None:
+            return 0
+        with self._lock:
+            self._ensure_account_loaded(
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+            )
+            entry = self._entries.get(
+                self._scope_key(tenant_id, broker_account_id, contract_key)
+            )
+            if entry is None:
+                return 0
+            net = sum(int(v or 0) for v in entry.net_by_strategy.values())
+            net += int(entry.unknown_net_qty or 0)
+            return net
+
     def observe_fill_progress(
         self,
         *,
