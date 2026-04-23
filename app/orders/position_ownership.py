@@ -154,6 +154,7 @@ class _OwnershipEntry:
     net_by_strategy: dict[str, int] = field(default_factory=dict)
     unknown_net_qty: int = 0
     authority_path: str = ""
+    zero_broker_poll_count: int = 0  # consecutive zero-position polls; >= 2 required to delete
 
 
 class OwnershipAuthorityViolation(RuntimeError):
@@ -946,11 +947,11 @@ class PositionOwnershipStore:
         marked = 0
         with self._lock:
             for key, record in self._ownership_records.items():
-                if record.owner_state in (
+                if record.state in (
                     OwnershipState.OWNED,
                     OwnershipState.PENDING_LOCK,
                 ):
-                    record.owner_state = OwnershipState.RECONCILING
+                    record.state = OwnershipState.RECONCILING
                     marked += 1
         if marked:
             logger.info(
@@ -2055,11 +2056,34 @@ class PositionOwnershipStore:
                 if broker_net == 0:
                     self._cleanup_entry(entry)
                     if entry.pending_by_strategy:
+                        # Always retain entries that have pending submission locks.
+                        entry.zero_broker_poll_count = 0
                         self._sync_ownership_record_from_entry(
                             scoped_key=scoped,
                             entry=entry,
                             reason="reconcile_pending_lock_retained",
                             authority_path=authority_path,
+                        )
+                        continue
+                    # §69: Require corroboration — at least 2 consecutive zero-position
+                    # broker polls — before destructive cleanup. A single false-empty
+                    # snapshot (API glitch, rate-limit stale data) must not delete
+                    # ownership or authoritative position state.
+                    # Also protect records in RECONCILING state (marked during startup
+                    # recovery) until broker evidence confirms the flat position.
+                    ownership_rec = self._ownership_records.get(scoped)
+                    in_reconciling = (
+                        ownership_rec is not None
+                        and getattr(ownership_rec, "state", None) == OwnershipState.RECONCILING
+                    )
+                    entry.zero_broker_poll_count = int(entry.zero_broker_poll_count or 0) + 1
+                    if entry.zero_broker_poll_count < 2 or in_reconciling:
+                        logger.info(
+                            "PositionOwnershipStore reconcile: zero-position evidence for "
+                            "%s count=%d/%s — deferring cleanup (corroboration required)",
+                            contract_storage_key,
+                            entry.zero_broker_poll_count,
+                            "2 (RECONCILING — needs extra poll)" if in_reconciling else "2",
                         )
                         continue
                     if not self._entry_empty(entry):
@@ -2078,6 +2102,8 @@ class PositionOwnershipStore:
                     )
                     continue
 
+                # Non-zero broker net: reset the corroboration counter.
+                entry.zero_broker_poll_count = 0
                 known_net = int(sum(int(v) for v in entry.net_by_strategy.values()))
                 unknown_net = int(entry.unknown_net_qty or 0)
                 if unknown_net == broker_net:

@@ -422,6 +422,11 @@ def test_position_ownership_reconcile_converts_mismatch_to_unknown_and_allows_ex
 
 
 def test_position_ownership_reconcile_removes_stale_internal_contract_when_broker_flat():
+    """Regression #69: destructive cleanup requires 2 consecutive zero-position polls.
+
+    A single empty snapshot must NOT delete ownership state (corroboration guard).
+    The second consecutive zero-poll is what triggers the removal.
+    """
     backend = _MemoryPersistenceBackend()
     contract_key = _contract_key()
     store = PositionOwnershipStore(backend=backend)
@@ -442,12 +447,30 @@ def test_position_ownership_reconcile_removes_stale_internal_contract_when_broke
         signed_qty=-75,
     )
 
-    result = store.reconcile_broker_positions(
+    # First zero-position poll: must be deferred (count=1 < 2).
+    result1 = store.reconcile_broker_positions(
         tenant_id="t1",
         broker_account_id="a1",
         positions=[],
     )
-    assert result.removed_stale == 1
+    assert result1.removed_stale == 0, (
+        "Single zero-poll must not delete ownership state (corroboration required)"
+    )
+    assert store.get_owner(
+        tenant_id="t1",
+        broker_account_id="a1",
+        contract_key=contract_key,
+    ) is not None, "Ownership must be preserved after first zero-poll"
+
+    # Second consecutive zero-position poll: now count=2 >= 2, deletion proceeds.
+    result2 = store.reconcile_broker_positions(
+        tenant_id="t1",
+        broker_account_id="a1",
+        positions=[],
+    )
+    assert result2.removed_stale == 1, (
+        "Second consecutive zero-poll must remove stale ownership entry"
+    )
     assert (
         store.get_owner(
             tenant_id="t1",
@@ -569,3 +592,56 @@ def test_position_ownership_state_machine_tracks_pending_owned_and_releasing():
     )
     assert releasing_record is not None
     assert releasing_record.state == OwnershipState.RELEASING
+
+
+def test_single_zero_poll_does_not_delete_with_reconciling_state():
+    """Regression #69: RECONCILING ownership records must be protected even with 2 zero polls.
+
+    A record in RECONCILING state (set during startup recovery marking) needs
+    additional corroboration before destructive cleanup is allowed.
+    """
+    from app.orders.position_ownership import OwnershipState
+
+    backend = _MemoryPersistenceBackend()
+    contract_key = _contract_key()
+    store = PositionOwnershipStore(backend=backend)
+
+    store.try_acquire(
+        tenant_id="t1",
+        broker_account_id="a1",
+        contract_key=contract_key,
+        strategy_id="s1",
+        is_exit_order=False,
+        unknown_mode="block_entries",
+    )
+    store.apply_fill(
+        tenant_id="t1",
+        broker_account_id="a1",
+        contract_key=contract_key,
+        strategy_id="s1",
+        signed_qty=-50,
+    )
+
+    # Simulate startup recovery: mark ownership records as RECONCILING.
+    store.mark_all_recovery_pending()
+
+    # Confirm the record is now in RECONCILING state.
+    rec = store.get_ownership_record(
+        tenant_id="t1",
+        broker_account_id="a1",
+        contract_key=contract_key,
+    )
+    assert rec is not None
+    assert rec.state == OwnershipState.RECONCILING
+
+    # Even after 2 zero-polls, RECONCILING records must not be destroyed.
+    result1 = store.reconcile_broker_positions(
+        tenant_id="t1", broker_account_id="a1", positions=[]
+    )
+    result2 = store.reconcile_broker_positions(
+        tenant_id="t1", broker_account_id="a1", positions=[]
+    )
+    assert result1.removed_stale == 0
+    assert result2.removed_stale == 0, (
+        "RECONCILING record must not be cleaned up even after 2 consecutive zero polls"
+    )
