@@ -58,8 +58,9 @@ def _fake_accounts_one(monkeypatch):
 
 
 def test_live_refresh_raises_when_routes_empty(monkeypatch):
-    """TRADE_MODE=LIVE must hard-fail refresh() when routing table resolves to zero routes."""
+    """TRADE_MODE=LIVE must hard-fail refresh() when Postgres returns zero routes."""
     monkeypatch.setenv("TRADE_MODE", "LIVE")
+    monkeypatch.setenv("CONTROL_PLANE_BACKEND", "postgres")
     monkeypatch.delenv("HUB_ROUTES_JSON", raising=False)
 
     import app.hub.routing_table as rt_module
@@ -85,51 +86,12 @@ def test_paper_refresh_does_not_raise_when_routes_empty(monkeypatch):
         assert table._routes_by_strategy == {}
 
 
-def test_live_refresh_succeeds_when_env_routes_provided(monkeypatch):
-    """TRADE_MODE=LIVE must succeed when HUB_ROUTES_JSON provides valid routes."""
-    monkeypatch.setenv("TRADE_MODE", "LIVE")
-    monkeypatch.setenv(
-        "HUB_ROUTES_JSON",
-        '{"ema20_strategy":[{"tenant_id":"T1","broker_account_id":"BA1"}]}',
-    )
+def test_live_refresh_raises_when_env_routes_present_and_db_empty(monkeypatch):
+    """TRADE_MODE=LIVE must raise when DB returns 0 routes and HUB_ROUTES_JSON is set.
 
-    import app.hub.routing_table as rt_module
-    monkeypatch.setattr(rt_module, "get_active_broker_accounts", _fake_accounts_empty)
-
-    table = HubRoutingTable()
-    table.refresh()  # must not raise — env fallback supplies the route
-
-    with table._lock:
-        assert len(table._routes_by_strategy) == 1
-
-
-def test_live_with_firestore_backend_logs_error(monkeypatch, caplog):
-    """TRADE_MODE=LIVE with CONTROL_PLANE_BACKEND!=postgres must log an ERROR."""
-    import logging
-    monkeypatch.setenv("TRADE_MODE", "LIVE")
-    monkeypatch.setenv("CONTROL_PLANE_BACKEND", "firestore")
-    monkeypatch.setenv(
-        "HUB_ROUTES_JSON",
-        '{"ema20_strategy":[{"tenant_id":"T1","broker_account_id":"BA1"}]}',
-    )
-
-    import app.hub.routing_table as rt_module
-    monkeypatch.setattr(rt_module, "get_active_broker_accounts", _fake_accounts_empty)
-
-    table = HubRoutingTable()
-    with caplog.at_level(logging.ERROR, logger="app.hub.routing_table"):
-        table.refresh()
-
-    assert any(
-        "CONTROL_PLANE_BACKEND=postgres" in record.message
-        for record in caplog.records
-        if record.levelno == logging.ERROR
-    ), "Expected ERROR about CONTROL_PLANE_BACKEND=postgres requirement in LIVE mode"
-
-
-def test_live_with_postgres_backend_no_backend_warning(monkeypatch, caplog):
-    """TRADE_MODE=LIVE with CONTROL_PLANE_BACKEND=postgres must NOT log the backend mismatch ERROR."""
-    import logging
+    Env-defined routing is forbidden in LIVE — Postgres is the sole authority.
+    Attempting an env fallback in LIVE is now a startup-fatal error.
+    """
     monkeypatch.setenv("TRADE_MODE", "LIVE")
     monkeypatch.setenv("CONTROL_PLANE_BACKEND", "postgres")
     monkeypatch.setenv(
@@ -141,14 +103,52 @@ def test_live_with_postgres_backend_no_backend_warning(monkeypatch, caplog):
     monkeypatch.setattr(rt_module, "get_active_broker_accounts", _fake_accounts_empty)
 
     table = HubRoutingTable()
-    with caplog.at_level(logging.ERROR, logger="app.hub.routing_table"):
+    with pytest.raises(ValueError, match="Env-defined routing is forbidden in LIVE"):
         table.refresh()
 
-    backend_mismatch_errors = [
-        r for r in caplog.records
-        if r.levelno == logging.ERROR and "undeclared Firestore" in r.message
-    ]
-    assert not backend_mismatch_errors, "Unexpected backend-mismatch ERROR with postgres backend"
+
+def test_live_with_firestore_backend_raises(monkeypatch):
+    """TRADE_MODE=LIVE with CONTROL_PLANE_BACKEND!=postgres must raise (not just log)."""
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    monkeypatch.setenv("CONTROL_PLANE_BACKEND", "firestore")
+    monkeypatch.delenv("HUB_ROUTES_JSON", raising=False)
+
+    import app.hub.routing_table as rt_module
+    monkeypatch.setattr(rt_module, "get_active_broker_accounts", _fake_accounts_empty)
+
+    table = HubRoutingTable()
+    with pytest.raises(ValueError, match="CONTROL_PLANE_BACKEND=postgres"):
+        table.refresh()
+
+
+def test_live_with_postgres_backend_and_db_routes_succeeds(monkeypatch):
+    """TRADE_MODE=LIVE with postgres backend and real DB routes must not raise."""
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    monkeypatch.setenv("CONTROL_PLANE_BACKEND", "postgres")
+    monkeypatch.delenv("HUB_ROUTES_JSON", raising=False)
+
+    from app.tenants.models import StrategyConfigModel
+
+    account = SimpleNamespace(broker_account_id="BA1", tenant_id="T1")
+    cfg = StrategyConfigModel(
+        strategy_config_id="cfg-1",
+        strategy_id="ema20_strategy",
+        broker_account_id="BA1",
+        tenant_id="T1",
+        enabled=True,
+    )
+
+    import app.hub.routing_table as rt_module
+    monkeypatch.setattr(rt_module, "get_active_broker_accounts", lambda: [account])
+    monkeypatch.setattr(rt_module, "get_strategy_configs_for_account", lambda bid: [cfg])
+
+    table = HubRoutingTable()
+    table.refresh()  # must not raise
+
+    with table._lock:
+        assert len(table._routes_by_strategy) == 1
 
 
 # ---------------------------------------------------------------------------

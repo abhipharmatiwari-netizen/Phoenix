@@ -144,10 +144,10 @@ class HubRoutingTable:
         ).strip().lower()
 
         if trade_mode == "LIVE" and control_plane_backend != "postgres":
-            logger.error(
-                "HubRoutingTable.refresh: TRADE_MODE=LIVE requires CONTROL_PLANE_BACKEND=postgres "
-                "but got CONTROL_PLANE_BACKEND=%s; routing reads from undeclared Firestore backend",
-                control_plane_backend,
+            raise ValueError(
+                f"HubRoutingTable.refresh: TRADE_MODE=LIVE requires CONTROL_PLANE_BACKEND=postgres "
+                f"but got CONTROL_PLANE_BACKEND={control_plane_backend!r}. "
+                f"Postgres is the only authoritative routing backend in LIVE."
             )
 
         logger.info(
@@ -209,6 +209,13 @@ class HubRoutingTable:
 
         with self._lock:
             if not routes and env_routes is not None:
+                if trade_mode == "LIVE":
+                    raise ValueError(
+                        "HubRoutingTable.refresh: TRADE_MODE=LIVE but control-plane returned "
+                        "zero routes and HUB_ROUTES_JSON env fallback is present. "
+                        "Env-defined routing is forbidden in LIVE — ensure strategy_configs rows "
+                        "are enabled in the Postgres control-plane DB before starting."
+                    )
                 logger.warning(
                     "HubRoutingTable.refresh: no Firestore routes; using HUB_ROUTES_JSON fallback"
                 )

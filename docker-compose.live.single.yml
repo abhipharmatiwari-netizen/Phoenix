@@ -151,7 +151,11 @@ x-live-backend-env: &live-backend-env
   HUB_INSTANCE_NAME: "${HUB_INSTANCE_NAME:-phoenix-live-1}"
   HUB_DEFAULT_TENANT_ID: "${HUB_DEFAULT_TENANT_ID:-tenant-1}"
   HUB_DEFAULT_BROKER_ACCOUNT_ID: "${HUB_DEFAULT_BROKER_ACCOUNT_ID:-A1}"
-  HUB_ROUTES_JSON: '{"ema20_strategy":[{"tenant_id":"${HUB_DEFAULT_TENANT_ID:-tenant-1}","broker_account_id":"${HUB_DEFAULT_BROKER_ACCOUNT_ID:-A1}"}],"exclusive_nifty_ce_buy":[{"tenant_id":"${HUB_DEFAULT_TENANT_ID:-tenant-1}","broker_account_id":"${HUB_DEFAULT_BROKER_ACCOUNT_ID:-A1}"}],"put_momentum_scalper":[{"tenant_id":"${HUB_DEFAULT_TENANT_ID:-tenant-1}","broker_account_id":"${HUB_DEFAULT_BROKER_ACCOUNT_ID:-A1}"}]}'
+  # HUB_ROUTES_JSON is intentionally absent from this LIVE manifest.
+  # TRADE_MODE=LIVE requires Postgres-exclusive routing authority; env-defined
+  # routing is forbidden and will cause a fatal startup error if HUB_ROUTES_JSON
+  # is set here. Routes must be configured as enabled strategy_configs rows in
+  # the Postgres control-plane DB before deployment.
 
   NIFTY_EMA20_LOTS: "${NIFTY_EMA20_LOTS:-1}"
   BANKNIFTY_EMA20_LOTS: "${BANKNIFTY_EMA20_LOTS:-1}"
