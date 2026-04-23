@@ -719,31 +719,69 @@ class ProfitSweepEngine:
             )
             return
         
-        daily_target = getattr(self.settings, "profit_daily_target", None)
-        if daily_target is None or daily_target <= 0:
-            log_event(
-                logger,
-                event_type="PROFIT_SWEEP_SIMPLE_INVALID",
-                message="SIMPLE strategy requires valid profit_daily_target",
-                level=logging.WARNING,
-            )
-            return
-        
+        _base_daily_target = getattr(self.settings, "profit_daily_target", None)
+        _target_mode = str(getattr(self.settings, "profit_simple_target_mode", "absolute") or "absolute").lower()
+
+        if _target_mode == "absolute":
+            if _base_daily_target is None or _base_daily_target <= 0:
+                log_event(
+                    logger,
+                    event_type="PROFIT_SWEEP_SIMPLE_INVALID",
+                    message="SIMPLE strategy requires valid profit_daily_target when mode=absolute",
+                    level=logging.WARNING,
+                )
+                return
+
         for runner in runners:
             if runner is None or not getattr(runner, "is_running", False):
                 continue
-            
+
             tenant_id = runner.tenant_id
             broker_account_id = runner.broker_account_id
             is_paper = str(runner.runtime_mode).upper() == "PAPER"
             strategy_id = StrategyId("profit_sweep_simple")
-            
-            if is_paper and getattr(self.settings, "profit_daily_target_paper", None):
-                daily_target = getattr(self.settings, "profit_daily_target_paper")
 
-            total_pnl = self.pnl_engine.get_current_total_pnl(
+            # Compute effective daily_target for this runner
+            if _target_mode == "premium_pct":
+                _premium_pct = float(getattr(self.settings, "profit_simple_target_premium_pct", 0.5))
+                _open_premium = 0.0
+                try:
+                    _account_snaps = self.pnl_engine._state_store.list_account_snapshots(
+                        tenant_id=tenant_id, broker_account_id=broker_account_id
+                    ) if hasattr(self.pnl_engine, "_state_store") else []
+                    _open_premium = float(sum(
+                        getattr(s, "control_open_premium", 0.0) or 0.0
+                        for s in _account_snaps
+                    ))
+                except Exception:
+                    _open_premium = 0.0
+                if _open_premium <= 0.0:
+                    log_event(
+                        logger,
+                        event_type="PROFIT_SWEEP_SIMPLE_PREMIUM_SKIP",
+                        message="SIMPLE premium_pct: no open premium data; skipping tick",
+                        level=logging.DEBUG,
+                        tenant_id=tenant_id,
+                        broker_account_id=broker_account_id,
+                    )
+                    continue
+                daily_target = _open_premium * _premium_pct
+            else:
+                daily_target = _base_daily_target
+                if is_paper and getattr(self.settings, "profit_daily_target_paper", None):
+                    daily_target = getattr(self.settings, "profit_daily_target_paper")
+
+            _control_pnl = self.pnl_engine.get_control_total_pnl(
                 tenant_id=tenant_id,
                 broker_account_id=broker_account_id,
+            )
+            total_pnl = (
+                _control_pnl
+                if _control_pnl is not None
+                else self.pnl_engine.get_current_total_pnl(
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                )
             )
             if total_pnl is None:
                 continue
@@ -955,12 +993,20 @@ class ProfitSweepEngine:
                 )
                 continue
             
-            # Get current realized PnL
-            total_pnl = self.pnl_engine.get_current_total_pnl(
+            # Get current PnL — prefer control PnL (excludes entry premium distortion)
+            _control_pnl = self.pnl_engine.get_control_total_pnl(
                 tenant_id=tenant_id,
                 broker_account_id=broker_account_id,
             )
-            
+            total_pnl = (
+                _control_pnl
+                if _control_pnl is not None
+                else self.pnl_engine.get_current_total_pnl(
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                )
+            )
+
             if total_pnl is None or total_pnl < multiple_target:
                 continue
             

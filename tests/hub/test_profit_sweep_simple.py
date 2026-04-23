@@ -42,6 +42,8 @@ def mock_pnl_engine():
     """Create mock PnL engine."""
     engine = MagicMock()
     engine.get_current_total_pnl = MagicMock(return_value=2000)
+    # Return None so sweep falls back to cash PnL (no control data in these tests)
+    engine.get_control_total_pnl = MagicMock(return_value=None)
     return engine
 
 
