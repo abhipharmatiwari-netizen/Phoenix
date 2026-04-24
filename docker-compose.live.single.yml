@@ -141,6 +141,7 @@ x-live-backend-env: &live-backend-env
 
   INDICATOR_CSV_ENABLED: "true"
   INDICATOR_CSV_PATH: "/app/logs/indicator_bars.csv"
+  EXECUTED_TOKENS_STATE_PATH: "/app/logs/executed_tokens_state.json"
   INDICATOR_POSTGRES_ENABLED: "true"
   INDICATOR_POSTGRES_TABLE: "indicator_bars"
   INDICATOR_POSTGRES_RETENTION_MONTHS: "3"

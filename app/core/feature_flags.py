@@ -302,9 +302,12 @@ def load_stability_feature_flags(
         _get("EXECUTED_TOKENS_PERSIST_ENABLED"),
         False,
     )
+    # §82: Use an absolute default so the executed-token state file resolves
+    # correctly regardless of CWD.  Relative paths silently break deduplication
+    # if the process working directory differs from /app at runtime.
     executed_tokens_state_path = str(
-        _get("EXECUTED_TOKENS_STATE_PATH") or "logs/executed_tokens_state.json"
-    ).strip() or "logs/executed_tokens_state.json"
+        _get("EXECUTED_TOKENS_STATE_PATH") or "/app/logs/executed_tokens_state.json"
+    ).strip() or "/app/logs/executed_tokens_state.json"
     executed_tokens_state_flush_interval_s = _float(
         "EXECUTED_TOKENS_STATE_FLUSH_INTERVAL_S",
         10.0,
