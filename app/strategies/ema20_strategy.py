@@ -506,6 +506,34 @@ class Ema20Strategy(BaseStrategy):
                 continue
             existing = self._managed_positions.get(label)
             if existing is not None:
+                # §91: If the restored entry_price differs from the in-memory
+                # one and the fill price hasn't been confirmed yet, treat the
+                # synced entry_price as the actual broker fill and re-anchor
+                # SL/TP/trail before copying other state fields.
+                if (
+                    not existing.fill_price_confirmed
+                    and restored_position.entry_price > 0
+                    and abs(restored_position.entry_price - existing.entry_price)
+                    > 0.001
+                ):
+                    sc = existing.strategy_context or {}
+                    sl_pct = float(sc.get("sl_pct") or self.sl_pct)
+                    tp_pct = float(sc.get("tp_pct") or self.tp_pct)
+                    existing.adjust_for_fill_price(
+                        fill_price=restored_position.entry_price,
+                        sl_pct=sl_pct,
+                        tp_pct=tp_pct,
+                    )
+                    if existing.fill_price_confirmed:
+                        logger.info(
+                            "[%s] EMA20 SL/TP adjusted to fill price | label=%s "
+                            "fill=%.3f sl=%.3f tp=%.3f",
+                            self.env_prefix,
+                            label,
+                            existing.entry_price,
+                            existing.sl_price,
+                            existing.tp_price,
+                        )
                 restored_position.best_price = min(
                     float(existing.best_price),
                     float(restored_position.best_price),
@@ -517,6 +545,7 @@ class Ema20Strategy(BaseStrategy):
                 )
                 restored_position.tp_price = float(existing.tp_price)
                 restored_position.entry_time = existing.entry_time
+                restored_position.fill_price_confirmed = existing.fill_price_confirmed
                 if existing.strategy_context:
                     restored_position.strategy_context = dict(existing.strategy_context)
             elif source != "entry":
@@ -2200,6 +2229,27 @@ class Ema20Position:
     trail_active: bool
     entry_time: datetime
     strategy_context: Dict[str, Any] = field(default_factory=dict)
+    fill_price_confirmed: bool = False  # §91: True once broker fill price applied
+
+    def adjust_for_fill_price(
+        self,
+        fill_price: float,
+        sl_pct: float,
+        tp_pct: float,
+    ) -> None:
+        """Re-anchor SL, TP, and trail from the confirmed broker fill price.
+
+        Called when the ORDER_LIFECYCLE_TERMINAL_FILL event delivers the actual
+        average price, overriding the pre-fill tick price used at signal time.
+        No-op if fill_price_confirmed is already True or fill_price <= 0.
+        """
+        if self.fill_price_confirmed or fill_price <= 0:
+            return
+        self.entry_price = fill_price
+        self.sl_price = fill_price * (1.0 + sl_pct)
+        self.tp_price = fill_price * (1.0 - tp_pct)
+        self.best_price = fill_price
+        self.fill_price_confirmed = True
 
 
 @dataclass
