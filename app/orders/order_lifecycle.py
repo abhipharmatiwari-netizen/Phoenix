@@ -954,6 +954,25 @@ class OrderLifecycleService:
             except Exception:
                 # Already DEGRADED or another terminal path — leave state as-is.
                 pass
+            # §85: Notify DegradedScopeManager so the scope count is
+            # observable from dashboards and alert rules.
+            try:
+                from app.core.degraded_scope_manager import (
+                    DegradedReason,
+                    degraded_scope_manager,
+                )
+                degraded_scope_manager.enter_degraded(
+                    scope_key=str(record.ownership_key or record.position_id),
+                    reason=DegradedReason.LIFECYCLE_STUCK,
+                    metadata={
+                        "position_id": str(record.position_id),
+                        "from_state": from_state.value,
+                        "attempted_target": target.value,
+                        "trigger_reason": reason,
+                    },
+                )
+            except Exception:
+                pass
 
     def _prime_position_state(
         self,

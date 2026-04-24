@@ -1230,6 +1230,14 @@ async def readyz() -> JSONResponse:
         except Exception as exc:
             logger.warning("readyz: balance schema check failed: %s", exc)
 
+    # §85: Surface degraded scope count in readyz so health checks and
+    # dashboards can see active DEGRADED states without a separate query.
+    try:
+        from app.core.degraded_scope_manager import degraded_scope_manager
+        payload["degraded_scope_count"] = len(degraded_scope_manager.active_scopes())
+    except Exception:
+        pass
+
     payload["ready"] = True
     return JSONResponse(status_code=200, content=payload)
 
