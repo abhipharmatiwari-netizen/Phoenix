@@ -89,7 +89,6 @@ class CapitalEngine:
         # keyed by (tenant_id, broker_account_id)
         self._configs: Dict[Tuple[TenantId, BrokerAccountId], CapitalConfig] = {}
         self._loaded_overrides: set[Tuple[TenantId, BrokerAccountId]] = set()
-        self._firestore_cache: Dict[BrokerAccountId, Optional[Dict[str, Any]]] = {}
 
     # Get or create capital config for an account, applying overrides once.
     def get_config(
@@ -107,18 +106,17 @@ class CapitalEngine:
             self._loaded_overrides.add(key)
         return cfg
 
-    # Apply Firestore and env-based limit overrides.
+    # Apply env-based limit overrides.
     def _apply_overrides(
         self,
         cfg: CapitalConfig,
         tenant_id: TenantId,
         broker_account_id: BrokerAccountId,
     ) -> None:
-        # Firestore overrides (account-level) first, then env overrides.
-        firestore_limits = self._load_firestore_limits(broker_account_id)
-        if firestore_limits:
-            self._apply_limits_dict(cfg, firestore_limits)
-
+        # §84: Firestore override path removed — Firestore is not active in the
+        # current LIVE stack (ARCHITECTURE §2).  Capital limits are sourced from
+        # CAPITAL_LIMITS_JSON (env) only.  If Firestore-backed limits are needed
+        # in the future, gate them explicitly on CAPITAL_LIMITS_BACKEND=firestore.
         env_limits = _lookup_env_limits(tenant_id, broker_account_id)
         if env_limits:
             self._apply_limits_dict(cfg, env_limits)
@@ -142,36 +140,11 @@ class CapitalEngine:
                 if val is not None:
                     cfg.max_gross_exposure = val
 
-    # Load account-level limits from Firestore metadata.
     def _load_firestore_limits(
         self, broker_account_id: BrokerAccountId
     ) -> Optional[Dict[str, Any]]:
-        cached = self._firestore_cache.get(broker_account_id)
-        if cached is not None:
-            return cached
-        try:
-            from app.tenants.firestore_client import get_broker_account
-        except Exception:
-            self._firestore_cache[broker_account_id] = None
-            return None
-        try:
-            account = get_broker_account(broker_account_id)
-        except Exception:
-            logger.debug(
-                "CapitalEngine: Firestore lookup failed for broker_account_id=%s",
-                broker_account_id,
-            )
-            self._firestore_cache[broker_account_id] = None
-            return None
-        if not account or not isinstance(account.meta, dict):
-            self._firestore_cache[broker_account_id] = None
-            return None
-        limits = account.meta.get("capital_limits")
-        if not isinstance(limits, dict):
-            self._firestore_cache[broker_account_id] = None
-            return None
-        self._firestore_cache[broker_account_id] = limits
-        return limits
+        """Stub — Firestore is not active in the current LIVE stack (§84 / ARCHITECTURE §2)."""
+        return None
 
     # Suggest an adjusted quantity that respects max_notional_per_order.
     def suggest_order_quantity(
