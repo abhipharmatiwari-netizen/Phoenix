@@ -16,9 +16,11 @@ class SignalSummarySnapshot:
     window_signals_checked: int
     window_signals_fired: int
     window_orders_submitted: int
+    window_orders_blocked: int
     total_signals_checked: int
     total_signals_fired: int
     total_orders_submitted: int
+    total_orders_blocked: int
 
 
 @dataclass(frozen=True)
@@ -29,7 +31,7 @@ class LabeledMetricPoint:
 
 
 class SignalSummaryMetrics:
-    """Tracks strategy checks, fired signals, and submitted orders."""
+    """Tracks strategy checks, fired signals, submitted orders, and blocked orders."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -39,9 +41,11 @@ class SignalSummaryMetrics:
         self._window_signals_checked = 0
         self._window_signals_fired = 0
         self._window_orders_submitted = 0
+        self._window_orders_blocked = 0
         self._total_signals_checked = 0
         self._total_signals_fired = 0
         self._total_orders_submitted = 0
+        self._total_orders_blocked = 0
 
     def mark_signal_checked(self, count: int = 1) -> None:
         if count <= 0:
@@ -64,6 +68,13 @@ class SignalSummaryMetrics:
             self._window_orders_submitted += count
             self._total_orders_submitted += count
 
+    def mark_order_blocked(self, count: int = 1) -> None:
+        if count <= 0:
+            return
+        with self._lock:
+            self._window_orders_blocked += count
+            self._total_orders_blocked += count
+
     def snapshot(self) -> SignalSummarySnapshot:
         now = time.monotonic()
         with self._lock:
@@ -73,9 +84,11 @@ class SignalSummaryMetrics:
                 window_signals_checked=self._window_signals_checked,
                 window_signals_fired=self._window_signals_fired,
                 window_orders_submitted=self._window_orders_submitted,
+                window_orders_blocked=self._window_orders_blocked,
                 total_signals_checked=self._total_signals_checked,
                 total_signals_fired=self._total_signals_fired,
                 total_orders_submitted=self._total_orders_submitted,
+                total_orders_blocked=self._total_orders_blocked,
             )
 
     def maybe_log_summary(
@@ -102,25 +115,32 @@ class SignalSummaryMetrics:
                 window_signals_checked=self._window_signals_checked,
                 window_signals_fired=self._window_signals_fired,
                 window_orders_submitted=self._window_orders_submitted,
+                window_orders_blocked=self._window_orders_blocked,
                 total_signals_checked=self._total_signals_checked,
                 total_signals_fired=self._total_signals_fired,
                 total_orders_submitted=self._total_orders_submitted,
+                total_orders_blocked=self._total_orders_blocked,
             )
             self._window_signals_checked = 0
             self._window_signals_fired = 0
             self._window_orders_submitted = 0
+            self._window_orders_blocked = 0
             self._last_emit_mono = now
 
         logger.info(
-            "[SIGNAL_SUMMARY] window=%.1fs checked=%d fired=%d orders_submitted=%d "
-            "totals_checked=%d totals_fired=%d totals_orders_submitted=%d uptime=%.1fs",
+            "[SIGNAL_SUMMARY] window=%.1fs checked=%d fired=%d "
+            "orders_submitted=%d orders_blocked=%d "
+            "totals_checked=%d totals_fired=%d "
+            "totals_orders_submitted=%d totals_orders_blocked=%d uptime=%.1fs",
             snapshot.window_seconds,
             snapshot.window_signals_checked,
             snapshot.window_signals_fired,
             snapshot.window_orders_submitted,
+            snapshot.window_orders_blocked,
             snapshot.total_signals_checked,
             snapshot.total_signals_fired,
             snapshot.total_orders_submitted,
+            snapshot.total_orders_blocked,
             snapshot.uptime_seconds,
         )
         return snapshot
@@ -133,9 +153,11 @@ class SignalSummaryMetrics:
             self._window_signals_checked = 0
             self._window_signals_fired = 0
             self._window_orders_submitted = 0
+            self._window_orders_blocked = 0
             self._total_signals_checked = 0
             self._total_signals_fired = 0
             self._total_orders_submitted = 0
+            self._total_orders_blocked = 0
 
 
 class LabeledMetricsRegistry:

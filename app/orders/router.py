@@ -1190,6 +1190,29 @@ class OrderRouter:
                     strategy_id=strategy_id,
                     policy_ctx=policy_ctx,
                 )
+                # §80: Emit a unified signal.blocked event so operators can
+                # identify which gate suppressed the order without scanning
+                # individual ORDER_REJECTED_BY_* events.
+                _gate_name = type(policy).__name__
+                log_event(
+                    logger,
+                    event_type="signal.blocked",
+                    message="signal blocked at pre-order gate",
+                    level=logging.WARNING,
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    strategy_id=strategy_id,
+                    correlation_id=correlation_id,
+                    request_id=request_id,
+                    instrument=order_req.symbol,
+                    gate=_gate_name,
+                    reason=str(getattr(rejected, "message", "") or ""),
+                )
+                try:
+                    from app.core.signal_metrics import get_signal_summary_metrics
+                    get_signal_summary_metrics().mark_order_blocked()
+                except Exception:
+                    pass
                 return _finalize_response(rejected)
         order_req_exec = policy_ctx.order_req
 
