@@ -204,6 +204,38 @@ class FirestoreProcessedTradeStore:
             raise
 
 
+def purge_old_processed_markers(*, retain_days: int = 180) -> int:
+    """Delete processed-trade markers older than *retain_days*.
+
+    Markers older than the deduplication window can never be replayed — no
+    fill event arrives that far after the original order.  Removing old markers
+    prevents unbounded growth of trade_processed_markers.
+
+    Returns the number of rows deleted.
+    """
+    age_days = max(1, int(retain_days))
+    sql = f"""
+        DELETE FROM trade_processed_markers
+        WHERE processed_at < NOW() - INTERVAL '{age_days} days'
+    """
+    try:
+        settings = get_settings()
+        dsn = get_control_plane_dsn(settings)
+        with connect_with_retry(dsn, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                deleted = cur.rowcount or 0
+        if deleted:
+            logger.info(
+                "retention.markers_purge: deleted=%d processed markers older than %d days",
+                deleted, age_days,
+            )
+        return deleted
+    except Exception:
+        logger.debug("Postgres markers retention purge unavailable", exc_info=True)
+        return 0
+
+
 def build_processed_trade_store() -> ProcessedTradeStore:
     # Build durable store from configured control-plane backend.
     settings = get_settings()

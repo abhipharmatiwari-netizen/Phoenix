@@ -1001,6 +1001,38 @@ def force_terminal_outbox_by_symbol_pattern(
             return cur.rowcount or 0
 
 
+def purge_old_terminal_outbox_records(*, retain_days: int = 90) -> int:
+    """Delete terminal outbox records older than *retain_days* from Postgres.
+
+    Only removes records in definitively-terminal states (TERMINAL_FILL,
+    TERMINAL_NON_FILL, TERMINAL_ERROR, CANCELLED, EXPIRED).  Active and
+    intermediate records are never touched.
+
+    Returns the number of rows deleted.
+    """
+    from app.data.postgres import connect_with_retry, get_control_plane_dsn
+    age_days = max(1, int(retain_days))
+    sql = f"""
+        DELETE FROM order_submission_outbox
+        WHERE status IN (
+                'TERMINAL_FILL', 'TERMINAL_NON_FILL',
+                'TERMINAL_ERROR', 'CANCELLED', 'EXPIRED'
+              )
+          AND created_at < NOW() - INTERVAL '{age_days} days'
+    """
+    dsn = get_control_plane_dsn()
+    with connect_with_retry(dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            deleted = cur.rowcount or 0
+    if deleted:
+        logger.info(
+            "retention.outbox_purge: deleted=%d terminal records older than %d days",
+            deleted, age_days,
+        )
+    return deleted
+
+
 def build_order_submission_outbox() -> OrderSubmissionOutbox:
     settings = get_settings()
     persist_enabled = not (

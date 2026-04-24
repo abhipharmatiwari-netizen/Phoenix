@@ -895,6 +895,31 @@ class AppRuntime:
                 except Exception as _exc:
                     logger.warning("startup.expired_position_cleanup failed (non-fatal): %s", _exc)
 
+                # Data-retention purges: remove old terminal/flat records so
+                # tables don't grow unboundedly over months of trading.
+                import os as _os_ret
+                _outbox_retain  = int(_os_ret.getenv("OUTBOX_RETENTION_DAYS",  "90"))
+                _pos_retain     = int(_os_ret.getenv("POSITION_RETENTION_DAYS", "90"))
+                _markers_retain = int(_os_ret.getenv("MARKERS_RETENTION_DAYS", "180"))
+
+                try:
+                    from app.orders.order_outbox import purge_old_terminal_outbox_records
+                    purge_old_terminal_outbox_records(retain_days=_outbox_retain)
+                except Exception as _exc:
+                    logger.warning("retention.outbox_purge failed (non-fatal): %s", _exc)
+
+                try:
+                    from app.orders.order_lifecycle import OrderLifecycleService
+                    OrderLifecycleService.purge_old_flat_position_records(retain_days=_pos_retain)
+                except Exception as _exc:
+                    logger.warning("retention.position_purge failed (non-fatal): %s", _exc)
+
+                try:
+                    from app.orders.trade_processed_store import purge_old_processed_markers
+                    purge_old_processed_markers(retain_days=_markers_retain)
+                except Exception as _exc:
+                    logger.warning("retention.markers_purge failed (non-fatal): %s", _exc)
+
             if callable(recover_submission_outbox):
                 recovery_summary = await recover_submission_outbox()
                 self._apply_startup_recovery_result(

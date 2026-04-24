@@ -708,6 +708,35 @@ class OrderLifecycleService:
                 })
                 return cur.rowcount or 0
 
+    @staticmethod
+    def purge_old_flat_position_records(*, retain_days: int = 90) -> int:
+        """Delete FLAT and NONE position records older than *retain_days*.
+
+        These records carry no live authority once they reach a terminal state.
+        Removing them prevents unbounded growth of internal_position_records.
+
+        Returns the number of rows deleted.
+        """
+        from app.data.postgres import connect_with_retry, get_control_plane_dsn
+        age_days = max(1, int(retain_days))
+        sql = f"""
+            DELETE FROM internal_position_records
+            WHERE position_state IN ('FLAT', 'NONE')
+              AND COALESCE(last_reconciled_at, last_evidence_at)
+                  < NOW() - INTERVAL '{age_days} days'
+        """
+        dsn = get_control_plane_dsn()
+        with connect_with_retry(dsn, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                deleted = cur.rowcount or 0
+        if deleted:
+            logger.info(
+                "retention.position_purge: deleted=%d FLAT/NONE records older than %d days",
+                deleted, age_days,
+            )
+        return deleted
+
     def _try_persist_position_records(self) -> None:
         """Non-fatal periodic flush of position records to Postgres."""
         try:

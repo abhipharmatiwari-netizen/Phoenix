@@ -146,6 +146,12 @@ x-live-backend-env: &live-backend-env
   INDICATOR_POSTGRES_TABLE: "indicator_bars"
   INDICATOR_POSTGRES_RETENTION_MONTHS: "3"
   INDICATOR_POSTGRES_RETENTION_PRUNE_INTERVAL_SECONDS: "900"
+
+  # Retention policy for operational tables — rows older than these thresholds
+  # are purged once per startup in the LIVE cleanup block (non-fatal).
+  OUTBOX_RETENTION_DAYS: "90"      # terminal outbox records (TERMINAL_FILL etc.)
+  POSITION_RETENTION_DAYS: "90"    # FLAT/NONE position records
+  MARKERS_RETENTION_DAYS: "180"    # trade_processed_markers (dedup window)
   INDICATOR_SEED_BARS: "300"
   ORDER_CSV_ENABLED: "true"
   TRADE_CSV_ENABLED: "true"
