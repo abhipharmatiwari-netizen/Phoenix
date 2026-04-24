@@ -288,6 +288,12 @@ try {
     Write-Host ""
     Write-Host "Secret files retained for container restart safety: $secretDir"
     Write-Host "  Remove this directory only after stopping the stack with docker compose down."
+    Write-Host ""
+    Write-Host "=== MANDATORY: Capture release evidence before approving this deployment ===" -ForegroundColor Yellow
+    Write-Host "  Wait for the backend health check to pass, then run:" -ForegroundColor Yellow
+    Write-Host "    .\scripts\capture_release_evidence.ps1" -ForegroundColor Cyan
+    Write-Host "  Attach the output JSON to the deployment record / PR." -ForegroundColor Yellow
+    Write-Host "  See docs/runbooks/release_evidence.md for pass criteria." -ForegroundColor Yellow
 }
 catch {
     Write-Error $_
