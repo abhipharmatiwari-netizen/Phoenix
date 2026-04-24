@@ -466,6 +466,36 @@ class Hub:
                         mode,
                     )
             else:
+                # §104: Detect runtime mode changes on existing runners.
+                # A runner created in PAPER mode must not silently continue
+                # when the control plane promotes the account to LIVE, or vice
+                # versa — the broker client and risk profile would be wrong.
+                existing_mode = getattr(runner, "_runtime_mode", None) or getattr(
+                    runner, "runtime_mode", None
+                )
+                if existing_mode is not None and str(existing_mode).upper() != mode.upper():
+                    logger.error(
+                        "[RECONCILE] runtime_mode_mismatch: runner %s@%s was created "
+                        "in mode=%s but control-plane now says mode=%s. "
+                        "Stopping stale runner — it will be recreated on next reconcile.",
+                        broker_account_id,
+                        tenant.tenant_id,
+                        existing_mode,
+                        mode,
+                    )
+                    try:
+                        await runner.stop()
+                    except Exception as _stop_exc:
+                        logger.warning(
+                            "[RECONCILE] Failed to stop stale mode runner %s: %s",
+                            broker_account_id,
+                            _stop_exc,
+                        )
+                    # Remove so next reconcile recreates with correct mode.
+                    self._account_runners.pop(broker_account_id, None)
+                    # Do NOT proceed to start — the next reconcile iteration
+                    # will re-enter the runner-is-None branch and create fresh.
+                    continue
                 if self._reconcile_verbose:
                     logger.info(
                         "[RECONCILE] ℹ️ Runner EXISTS: %s@%s (%s mode, running=%s)",
@@ -474,7 +504,6 @@ class Hub:
                         mode,
                         runner.is_running,
                     )
-            # TODO: later we can handle runtime_mode changes (PAPER<->LIVE).
 
             if self._running and not runner.is_running:
                 await self._start_runner(broker_account_id, runner)
