@@ -200,16 +200,41 @@ try {
 
         $tradeModeEnv = [Environment]::GetEnvironmentVariable("TRADE_MODE", "Process")
         if ($tradeModeEnv -eq "LIVE") {
+            # §98: Generic capital limits in LIVE require explicit operator sign-off.
+            # We cannot silently proceed — the operator must confirm they understand
+            # the account is either unfunded or has been explicitly risk-reviewed.
             Write-Host ""
-            Write-Warning "TRADE_MODE=LIVE but CAPITAL_LIMITS_JSON is not configured."
-            Write-Warning "Using bundled 5L/10L generic baseline for $($tenantId):$($brokerAccountId)."
-            Write-Warning "Generic defaults are NOT audited per-account limits."
-            Write-Warning "Set CAPITAL_LIMITS_JSON in PowerShell SecretStore or as an env var before"
-            Write-Warning "deploying to a funded LIVE account. Generic baseline is acceptable ONLY"
-            Write-Warning "for dry-run / LIVE-connect / staging with zero real capital at risk."
+            Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
+            Write-Host "  CAPITAL_LIMITS_JSON is not set for TRADE_MODE=LIVE     " -ForegroundColor Red
+            Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
             Write-Host ""
-            Write-Host "Setting ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true so startup validator"
-            Write-Host "records this as an explicit audited exception rather than silently passing."
+            Write-Host "  Generic 5L notional / 10L exposure baseline will be used for:" -ForegroundColor Yellow
+            Write-Host "    Account: $($tenantId):$($brokerAccountId)" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "  Generic limits are NOT audited per-account risk limits." -ForegroundColor Yellow
+            Write-Host "  They are acceptable ONLY when:" -ForegroundColor Yellow
+            Write-Host "    - The account has zero real capital at risk, OR" -ForegroundColor Yellow
+            Write-Host "    - An operator has reviewed and approved the defaults for this account." -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "  To set account-specific limits, add CAPITAL_LIMITS_JSON to your" -ForegroundColor Cyan
+            Write-Host "  PowerShell SecretStore or set it as an env var before running this script." -ForegroundColor Cyan
+            Write-Host ""
+
+            # Check for non-interactive / CI override
+            $skipConfirm = [Environment]::GetEnvironmentVariable("ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY", "Process")
+            if ($skipConfirm -eq "true") {
+                Write-Host "  ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true found — skipping interactive prompt." -ForegroundColor Yellow
+                Write-Host "  This is an audited exception; document justification in your deployment record." -ForegroundColor Yellow
+            }
+            else {
+                $confirm = Read-Host "  Type YES to acknowledge and continue with generic limits"
+                if ($confirm -ne "YES") {
+                    Write-Error "Deployment cancelled. Set CAPITAL_LIMITS_JSON before deploying to a funded LIVE account."
+                    exit 1
+                }
+            }
+            Write-Host ""
+            Write-Host "Setting ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true (explicit operator acknowledgement)."
             Set-Item -Path "Env:ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY" -Value "true"
         }
         else {
