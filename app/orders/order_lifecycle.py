@@ -671,15 +671,17 @@ class OrderLifecycleService:
         terminal_state: str = "FLAT",
         state_reason: str = "startup_expired_contract_cleanup",
     ) -> int:
-        """Force non-terminal position records whose contract_key matches *symbol_pattern*
-        to *terminal_state* (default FLAT) directly in Postgres.
+        """Force non-terminal position records older than *min_age_days* to *terminal_state*.
 
         Intended for startup cleanup of expired-contract position records that produce
         DEGRADED cascades on every restart (Architecture §73 / issue #73).
 
-        The pattern is matched against the contract_key column (ILIKE).
-        Only records older than *min_age_days* are touched to avoid hitting
-        records that are still within a normal settlement window.
+        NOTE: *symbol_pattern* is accepted for API compatibility but is NOT applied to
+        internal_position_records.  The contract_key column stores dates in ISO format
+        ('YYYY-MM-DD') whereas the outbox stores broker symbols ('NATURALGAS24MAR26CE').
+        For position records the age guard alone is the correct safety criterion: any
+        non-terminal position record older than *min_age_days* is definitionally an
+        expired contract for Indian equity/commodity options (max tenor ≤ 3 months).
 
         Returns the count of rows updated.
         """
@@ -692,7 +694,6 @@ class OrderLifecycleService:
                 state_reason   = %(state_reason)s,
                 last_reconciled_at = NOW()
             WHERE position_state NOT IN ('FLAT', 'NONE')
-              AND contract_key ILIKE %(pattern)s
               AND (
                   last_evidence_at  < NOW() - INTERVAL '{age_days} days'
                   OR last_reconciled_at < NOW() - INTERVAL '{age_days} days'
@@ -704,7 +705,6 @@ class OrderLifecycleService:
                 cur.execute(sql, {
                     "terminal_state": terminal_state,
                     "state_reason": state_reason,
-                    "pattern": symbol_pattern,
                 })
                 return cur.rowcount or 0
 
