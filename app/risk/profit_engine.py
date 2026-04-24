@@ -73,11 +73,34 @@ class ProfitEngine:
         if target is None or target <= 0:
             return ProfitDecision(allowed=True, reason="profit_target_not_configured")
 
-        total_pnl = self._pnl_engine.get_current_total_pnl(
-            tenant_id=tenant_id,
-            broker_account_id=broker_account_id,
-        )
-        total_pnl = float(total_pnl or 0.0)
+        # §86: Prefer control_total_pnl (economic P&L: entry_premium − exit_cost)
+        # over get_current_total_pnl (cash ledger) for the profit lock gate.
+        # The cash ledger books the full short-option premium received on entry
+        # immediately, making total_pnl spike to entry_price×qty on the first fill
+        # and prematurely arming the profit lock.  Control PnL only accumulates
+        # at economic close, giving the correct signal for whether the strategy
+        # has actually captured profit.  Falls back to cash ledger when no
+        # control data exists (non-short-option strategies, or before first fill).
+        _control_pnl = None
+        if hasattr(self._pnl_engine, "get_control_total_pnl"):
+            try:
+                _control_pnl = self._pnl_engine.get_control_total_pnl(
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                )
+            except Exception:
+                _control_pnl = None
+
+        if _control_pnl is not None:
+            total_pnl = float(_control_pnl)
+        else:
+            total_pnl = float(
+                self._pnl_engine.get_current_total_pnl(
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                )
+                or 0.0
+            )
 
         signal_valid = None
         if self._state_store is not None:
@@ -112,7 +135,23 @@ class ProfitEngine:
             lock_active = total_pnl >= target
 
         if lock_active:
-            reason = f"daily profit target reached: total_pnl={total_pnl:.2f} >= target={target:.2f}"
+            # §87: Distinguish between "lock just triggered" vs "lock is active
+            # from a historical peak" so the reason string is factually correct.
+            lock_floor_val = lock_floor if lock_floor is not None else target
+            peak_val = getattr(lock_decision, "peak_total_pnl", None) if (
+                self._profit_lock_manager is not None
+                and getattr(settings, "profit_lock_enabled", True)
+            ) else None
+            if peak_val is not None and total_pnl < float(target):
+                # Lock is active from a historical peak, not the current value.
+                reason = (
+                    f"profit_lock_active: peak_pnl={peak_val:.2f} lock_floor={lock_floor_val:.2f} "
+                    f"current={total_pnl:.2f} target={target:.2f}"
+                )
+            else:
+                reason = (
+                    f"daily profit target reached: total_pnl={total_pnl:.2f} >= target={target:.2f}"
+                )
             if settings.profit_block_new_orders_on_target:
                 decision = ProfitDecision(allowed=False, reason=reason)
             else:
@@ -123,6 +162,10 @@ class ProfitEngine:
             reason = f"profit_target_not_reached: total_pnl={total_pnl:.2f}, target={target:.2f}"
             decision = ProfitDecision(allowed=True, reason=reason)
 
+        _peak_for_log = getattr(lock_decision, "peak_total_pnl", None) if (
+            self._profit_lock_manager is not None
+            and getattr(settings, "profit_lock_enabled", True)
+        ) else None
         log_event(
             logger,
             event_type="PROFIT_CHECK",
@@ -135,6 +178,7 @@ class ProfitEngine:
             profit_daily_target=float(target or 0.0),
             lock_active=bool(lock_active),
             lock_floor=lock_floor,
+            peak_total_pnl=_peak_for_log,
             allowed=bool(decision.allowed),
             reason=decision.reason,
         )
