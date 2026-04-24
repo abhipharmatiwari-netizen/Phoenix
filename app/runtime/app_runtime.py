@@ -787,7 +787,7 @@ class AppRuntime:
                     )
 
             # Step 4: Mark all restored records RECOVERY_PENDING before broker sync.
-            await self._mark_recovery_pending(runtime)
+            await self._mark_recovery_pending(runtime, trade_mode=trade_mode)
 
             # Step 5: Start runners — initial broker sync (reconciliation) happens here.
             await runtime.hub.start_all()
@@ -1192,18 +1192,23 @@ class AppRuntime:
 
         return evidence
 
-    async def _mark_recovery_pending(self, runtime: object) -> None:
+    async def _mark_recovery_pending(
+        self, runtime: object, *, trade_mode: str = "PAPER"
+    ) -> None:
         """Mark all restored lifecycle contexts and ownership records as
         RECOVERY_PENDING before broker reconciliation (Architecture §11.1).
 
-        Uses getattr with None fallback so the method is backward-compatible
-        when the underlying services have not yet implemented the marking API.
+        §100: In LIVE mode, failures to mark recovery-pending are fatal
+        because they mean the broker reconciliation phase runs against an
+        unfenced state graph — positions or ownership records that should
+        be gated as RECOVERY_PENDING are silently treated as authoritative.
         """
         logger.info(
             "startup.recovery_pending_marking: marking restored state before broker reconciliation"
         )
         lifecycle_marked = 0
         ownership_marked = 0
+        _live = trade_mode == "LIVE"
 
         # Mark order lifecycle contexts
         order_lifecycle = getattr(runtime, "order_lifecycle", None)
@@ -1217,6 +1222,15 @@ class AppRuntime:
                     if isinstance(result, int):
                         lifecycle_marked = result
                 except Exception as exc:
+                    if _live:
+                        logger.error(
+                            "startup.recovery_pending_mark_failed: LIVE startup cannot proceed — "
+                            "order lifecycle RECOVERY_PENDING marking failed: %s", exc
+                        )
+                        raise RuntimeError(
+                            f"LIVE startup aborted: failed to mark order lifecycle "
+                            f"RECOVERY_PENDING before broker reconciliation: {exc}"
+                        ) from exc
                     logger.warning(
                         "Failed to mark order lifecycle RECOVERY_PENDING: %s", exc
                     )
@@ -1233,6 +1247,15 @@ class AppRuntime:
                     if isinstance(result, int):
                         ownership_marked = result
                 except Exception as exc:
+                    if _live:
+                        logger.error(
+                            "startup.recovery_pending_mark_failed: LIVE startup cannot proceed — "
+                            "position ownership RECOVERY_PENDING marking failed: %s", exc
+                        )
+                        raise RuntimeError(
+                            f"LIVE startup aborted: failed to mark position ownership "
+                            f"RECOVERY_PENDING before broker reconciliation: {exc}"
+                        ) from exc
                     logger.warning(
                         "Failed to mark position ownership RECOVERY_PENDING: %s", exc
                     )
