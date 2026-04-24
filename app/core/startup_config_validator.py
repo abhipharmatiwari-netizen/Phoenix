@@ -659,6 +659,38 @@ def validate_runtime_startup_settings(
             errors.append("TRADE_MODE=LIVE requires RISK_MAX_DAILY_LOSS > 0")
         if not _positive_float(getattr(settings, "profit_daily_target", None), minimum=0.0):
             errors.append("TRADE_MODE=LIVE requires PROFIT_DAILY_TARGET > 0")
+        else:
+            # §89: Calibration advisory — warn if PROFIT_DAILY_TARGET is below the
+            # realistic single-lot TP ceiling for configured NIFTY/NG instruments.
+            # For short options the TP ceiling ≈ entry_price × tp_pct × lot_size.
+            # This does not block startup; it surfaces a misconfiguration that causes
+            # the profit lock to fire prematurely on the first fill.
+            try:
+                _daily_target = float(getattr(settings, "profit_daily_target", 0) or 0)
+                _tp_pct = float(getattr(settings, "default_profit_target_pct", 0.3) or 0.3)
+                _calibration_checks = [
+                    # (underlying, lot_size, floor_entry_price)
+                    ("NIFTY",    65,   50.0),   # NIFTY ATM CE near expiry can be ~50-250+
+                    ("BANKNIFTY", 30, 100.0),
+                    ("NG",        1, 5000.0),   # NG option price in ₹ per lot (1 bbl basis)
+                ]
+                for _ul, _lot, _floor_px in _calibration_checks:
+                    _ceil = _floor_px * _tp_pct * _lot
+                    if _daily_target < _ceil:
+                        logger.warning(
+                            "startup.profit_target_calibration_check: PROFIT_DAILY_TARGET=%.0f "
+                            "is below the single-lot TP ceiling for %s (%.0f × tp_pct %.0f%% × lot %d = %.0f). "
+                            "At typical ATM premiums the profit lock may fire on the first fill. "
+                            "Consider raising PROFIT_DAILY_TARGET or lowering tp_pct.",
+                            _daily_target,
+                            _ul,
+                            _floor_px,
+                            _tp_pct * 100,
+                            _lot,
+                            _ceil,
+                        )
+            except Exception:
+                pass
 
         # Gate 6: EOD policy per-strategy validation
         if not eod_exit_time:
