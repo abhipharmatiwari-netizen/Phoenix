@@ -1280,6 +1280,19 @@ async def readyz() -> JSONResponse:
             )
             return JSONResponse(status_code=503, content=payload)
 
+    # §99: Surface Postgres transport security state in readyz for operator visibility.
+    try:
+        import os as _server_os
+        _pg_sslmode = str(_server_os.getenv("CONTROL_PLANE_PG_SSLMODE", "prefer") or "prefer").lower()
+        _ssl_skip = str(_server_os.getenv("LIVE_PG_SSL_SKIP_CHECK", "false") or "false").lower() in ("1", "true", "yes")
+        payload["postgres_transport"] = {
+            "sslmode": _pg_sslmode,
+            "ssl_enforced": _pg_sslmode in ("require", "verify-ca", "verify-full"),
+            "live_pg_ssl_skip_check": _ssl_skip,
+        }
+    except Exception:
+        pass
+
     payload["ready"] = True
     return JSONResponse(status_code=200, content=payload)
 

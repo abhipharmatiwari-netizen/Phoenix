@@ -1159,6 +1159,19 @@ class AppRuntime:
             str(self._startup_recovery_status.get("status", "")).lower() != "failed"
         )
 
+        # Postgres transport security (§99)
+        _pg_sslmode = str(_os.getenv("CONTROL_PLANE_PG_SSLMODE", "prefer") or "prefer").lower()
+        _ssl_skip = str(_os.getenv("LIVE_PG_SSL_SKIP_CHECK", "false") or "false").lower() in ("1", "true", "yes")
+        evidence["postgres_transport"] = {
+            "sslmode": _pg_sslmode,
+            "ssl_enforced": _pg_sslmode in ("require", "verify-ca", "verify-full"),
+            "live_pg_ssl_skip_check": _ssl_skip,
+            "transport_note": (
+                "local-only-bypass-approved" if _ssl_skip else
+                ("encrypted" if _pg_sslmode in ("require", "verify-ca", "verify-full") else "prefer-may-be-plaintext")
+            ),
+        }
+
         # Safety flags from env
         evidence["safety_flags"] = {
             "enable_capital_checks": str(_os.getenv("ENABLE_CAPITAL_CHECKS", "")).lower() == "true",
