@@ -928,11 +928,23 @@ class OrderLifecycleService:
                 self._order_key(ctx.broker_account_id, ctx.broker_order_id)
             ] = target
             return
+        _valid_transition = True
         try:
             validate_order_transition(current, target)
         except Exception:
-            logger.warning(
-                "OrderLifecycleService: forcing order-state transition broker_order_id=%s current=%s target=%s source=%s reason=%s",
+            _valid_transition = False
+            # §101: In LIVE mode log at ERROR level — an invalid order-state
+            # transition indicates a state machine bug that must not be silently
+            # ignored.  The transition is still forced so that reconciliation
+            # can converge (stopping mid-flight is worse), but the ERROR log
+            # makes it visible for operator investigation.
+            _live = str(os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper() == "LIVE"
+            _level = logging.ERROR if _live else logging.WARNING
+            logger.log(
+                _level,
+                "OrderLifecycleService: invalid order-state transition "
+                "broker_order_id=%s current=%s target=%s source=%s reason=%s — "
+                "forcing transition; investigate state machine logic",
                 ctx.broker_order_id,
                 current.value,
                 target.value,
