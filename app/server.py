@@ -1230,13 +1230,44 @@ async def readyz() -> JSONResponse:
         except Exception as exc:
             logger.warning("readyz: balance schema check failed: %s", exc)
 
-    # §85: Surface degraded scope count in readyz so health checks and
-    # dashboards can see active DEGRADED states without a separate query.
+    # §85/§92: Surface degraded scope count and block readiness in LIVE when
+    # active DEGRADED/RECONCILING/ORPHAN scopes require operator attention.
+    _degraded_count = 0
     try:
         from app.core.degraded_scope_manager import degraded_scope_manager
-        payload["degraded_scope_count"] = len(degraded_scope_manager.active_scopes())
+        _degraded_count = len(degraded_scope_manager.active_scopes())
+        payload["degraded_scope_count"] = _degraded_count
+    except Exception:
+        payload["degraded_scope_count"] = -1
+
+    # §92: Also surface DEGRADED and RECONCILING position counts from
+    # OrderLifecycleService in-memory records.
+    _reconciling_count = 0
+    _degraded_positions = 0
+    try:
+        _hub_rt = get_hub_runtime()
+        _olc = getattr(_hub_rt, "order_lifecycle", None)
+        if _olc is not None and hasattr(_olc, "count_positions_by_state"):
+            _pos_by_state = _olc.count_positions_by_state()
+            _degraded_positions = _pos_by_state.get("DEGRADED", 0)
+            _reconciling_count = _pos_by_state.get("RECONCILING", 0)
+            payload["position_state_counts"] = _pos_by_state
     except Exception:
         pass
+
+    # §92: In LIVE mode block readiness when any position is in a state that
+    # requires operator attention.  A DEGRADED or RECONCILING position means
+    # evidence is ambiguous — new orders on the same scope could be unsafe.
+    if _readiness_trade_mode() == "LIVE":
+        _blocking_states = _degraded_count + _degraded_positions + _reconciling_count
+        if _blocking_states > 0:
+            payload["ready"] = False
+            payload["reason"] = (
+                f"position_authority_degraded: degraded_scopes={_degraded_count} "
+                f"degraded_positions={_degraded_positions} "
+                f"reconciling_positions={_reconciling_count}"
+            )
+            return JSONResponse(status_code=503, content=payload)
 
     payload["ready"] = True
     return JSONResponse(status_code=200, content=payload)

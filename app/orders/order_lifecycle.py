@@ -737,6 +737,25 @@ class OrderLifecycleService:
             )
         return deleted
 
+    def count_positions_by_state(self) -> dict[str, int]:
+        """Return a count of in-memory position records keyed by position_state.
+
+        Used by /readyz to surface DEGRADED and RECONCILING counts so health
+        checks can block readiness when positions need operator attention.
+        Snapshot is taken under the recent-entry lock for consistency.
+        """
+        counts: dict[str, int] = {}
+        with self._recent_entry_lock:
+            records_snapshot = list(self._position_records.values())
+        for rec in records_snapshot:
+            state_val = (
+                rec.position_state.value
+                if hasattr(rec.position_state, "value")
+                else str(rec.position_state)
+            )
+            counts[state_val] = counts.get(state_val, 0) + 1
+        return counts
+
     def _try_persist_position_records(self) -> None:
         """Non-fatal periodic flush of position records to Postgres."""
         try:
