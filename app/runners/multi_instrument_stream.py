@@ -2771,8 +2771,12 @@ def stream_multi_instruments(
             )
 
     if _runtime_settings().use_hub_router:
+        # §78: In LIVE mode, unroutable (enabled but not routed) strategies must
+        # abort stream startup rather than silently discard signals.
+        # HUB_ROUTE_VALIDATION_FAIL_FAST can override this in either direction.
+        _live_fail_fast_default = (trade_mode == "LIVE")
         fail_fast_on_missing_routes = _is_true_env(
-            "HUB_ROUTE_VALIDATION_FAIL_FAST", default=False
+            "HUB_ROUTE_VALIDATION_FAIL_FAST", default=_live_fail_fast_default
         )
         try:
             from app.hub.runtime import get_hub_runtime
