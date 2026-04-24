@@ -189,7 +189,8 @@ def _seed_runtime_pnl_snapshots(
 
         account_loader = get_active_broker_accounts
 
-    seeded = 0
+    seeded = 0      # new snapshots created (first start of day for this account)
+    restored = 0    # existing same-day snapshots retained with persisted realized_pnl
     account_pairs: set[tuple[str, str]] = set()
     accounts_loaded = True
     try:
@@ -221,6 +222,8 @@ def _seed_runtime_pnl_snapshots(
             broker_account_id=BrokerAccountId(broker_raw),
         ):
             seeded += 1
+        else:
+            restored += 1
 
     fallback_tenant = str(getattr(settings, "hub_default_tenant_id", "") or "").strip()
     fallback_broker = str(getattr(settings, "hub_default_broker_account_id", "") or "").strip()
@@ -233,12 +236,15 @@ def _seed_runtime_pnl_snapshots(
             ):
                 seeded += 1
                 account_pairs.add(fallback_key)
+            else:
+                restored += 1
+                account_pairs.add(fallback_key)
 
     # Determine bootstrap outcome status
     if not accounts_loaded:
         status = "failed"
         error_detail = "active accounts unavailable"
-    elif len(account_pairs) == 0 and seeded == 0:
+    elif len(account_pairs) == 0 and seeded == 0 and restored == 0:
         status = "partial"
         error_detail = "no accounts discovered"
     else:
@@ -251,10 +257,15 @@ def _seed_runtime_pnl_snapshots(
         account_pairs_count=len(account_pairs),
         error=error_detail,
     )
+    # §75: seeded=N means new snapshots (first start of today).
+    # restored=N means existing same-day snapshots were found in the state
+    # store with their persisted realized_pnl intact — PnL IS carried forward
+    # across intra-day restarts when PostgresPnLStateStore is active.
     logger.info(
-        "PnL snapshot bootstrap %s: seeded=%d account_pairs=%d%s",
+        "PnL snapshot bootstrap %s: seeded=%d restored=%d account_pairs=%d%s",
         result.status,
         result.seeded,
+        restored,
         result.account_pairs_count,
         f" error={result.error}" if result.error else "",
     )

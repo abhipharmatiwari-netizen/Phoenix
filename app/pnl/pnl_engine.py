@@ -145,6 +145,13 @@ class PnLEngine:
         broker_account_id: BrokerAccountId,
         strategy_id: Optional[StrategyId] = None,
     ) -> bool:
+        """Ensure a bootstrap snapshot exists for the account.
+
+        Returns True if a NEW snapshot was created (seeded), False if an
+        existing snapshot was found and retained.  When the state store is
+        Postgres-backed, an existing same-day snapshot carries its persisted
+        realized_pnl forward — no data is lost on restart (§75).
+        """
         seed_strategy_id = strategy_id or ACCOUNT_BOOTSTRAP_STRATEGY_ID
         now = self._clock.now_utc()
         existing = self._state_store.get_snapshot(
@@ -177,6 +184,23 @@ class PnLEngine:
         )
         self._state_store.upsert_snapshot(snapshot)
         return True
+
+    def get_session_realized_pnl(
+        self,
+        *,
+        tenant_id: TenantId,
+        broker_account_id: BrokerAccountId,
+    ) -> float:
+        """Return the total realized PnL for the current IST session.
+
+        Reads directly from the state store so that Postgres-backed stores
+        return the persisted value even immediately after a restart (§75).
+        """
+        snaps = self._state_store.list_account_snapshots(
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+        )
+        return float(sum(s.realized_pnl or 0.0 for s in snaps))
 
     # Persist a snapshot to BigQuery for reporting.
     def _persist_snapshot(self, snap: PnLSnapshot) -> None:
