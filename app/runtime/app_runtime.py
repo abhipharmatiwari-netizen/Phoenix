@@ -706,6 +706,27 @@ class AppRuntime:
             if order_lifecycle is not None:
                 await order_lifecycle.start()
 
+            # Step 1b: LIVE-only pre-load cleanup — terminate expired-contract
+            # position records BEFORE load_position_records() so they are never
+            # loaded into the in-memory graph.  This must run before Step 2 to
+            # prevent the RECONCILING→DEGRADED cascade during outbox recovery.
+            if trade_mode == "LIVE" and order_lifecycle is not None:
+                try:
+                    from app.orders.order_lifecycle import OrderLifecycleService
+                    import datetime as _dt_pre
+                    _pre_cleaned = OrderLifecycleService.force_terminal_positions_by_symbol_pattern(
+                        symbol_pattern="",  # not used for position records (age-only)
+                        min_age_days=45,
+                    )
+                    if _pre_cleaned:
+                        logger.info(
+                            "startup.expired_position_cleanup: force-terminated %d non-terminal "
+                            "position records older than 45 days before position load.",
+                            _pre_cleaned,
+                        )
+                except Exception as _pre_exc:
+                    logger.warning("startup.expired_position_cleanup (pre-load) failed: %s", _pre_exc)
+
             # Step 2: Restore persisted authoritative position state (§48).
             if order_lifecycle is not None:
                 try:
