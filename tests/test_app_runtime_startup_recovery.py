@@ -115,6 +115,18 @@ def _patch_runtime_dependencies(monkeypatch, *, strict_mode: bool, trade_mode: s
     )
     monkeypatch.setattr(app_runtime_module, "log_stability_feature_flags", lambda flags, log=None: None)
     _install_bq_stubs(monkeypatch)
+    if trade_mode == "LIVE":
+        # Prevent the repo-root .runtime artifact check from finding real files
+        # (e.g. .backend-live.env.runtime) that exist in the local workspace.
+        # The guard is tested separately; here we only want to test LIVE strict-mode logic.
+        import pathlib
+        monkeypatch.setattr(pathlib.Path, "iterdir", lambda self: iter([]))
+        # Allow SSL skip and supply non-placeholder secrets so the inline LIVE
+        # guards (SSL check, placeholder check) don't fire before we reach the
+        # code under test.
+        monkeypatch.setenv("LIVE_PG_SSL_SKIP_CHECK", "true")
+        monkeypatch.setenv("ADMIN_API_KEY", "live-test-key-injected-by-test")
+        monkeypatch.setenv("DEMO_AUTH_TOKEN_SECRET", "live-test-secret-injected-by-test")
 
 
 @pytest.mark.asyncio
@@ -174,13 +186,16 @@ async def test_mark_recovery_pending_calls_position_ownership_store(monkeypatch)
 async def test_live_trade_mode_forces_strict_mode_regardless_of_feature_flag(monkeypatch):
     """Regression: TRADE_MODE=LIVE must force strict_mode=True even if feature flag is False."""
     _patch_runtime_dependencies(monkeypatch, strict_mode=False, trade_mode="LIVE")
+    # LIVE path calls load_position_records + kill_switch restore via DB.
+    _patch_db(monkeypatch)
+    call_log: list[str] = []
     hub_runtime = SimpleNamespace(
         hub=_FakeHub(),
-        order_lifecycle=_FakeOrderLifecycle(),
+        order_lifecycle=_OrderTrackingLifecycle(call_log),
         order_router=_FakeOrderRouter({"failed": 1, "unresolved_active": 0}),
     )
     runtime = AppRuntime(
-        settings_getter=lambda: _settings(),
+        settings_getter=lambda: _settings_live(),
         hub_runtime_getter=lambda: hub_runtime,
     )
 
