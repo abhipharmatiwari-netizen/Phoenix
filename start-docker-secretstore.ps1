@@ -201,7 +201,7 @@ try {
         $tradeModeEnv = [Environment]::GetEnvironmentVariable("TRADE_MODE", "Process")
         if ($tradeModeEnv -eq "LIVE") {
             # §98: Generic capital limits in LIVE require explicit operator sign-off.
-            # We cannot silently proceed — the operator must confirm they understand
+            # We cannot silently proceed - the operator must confirm they understand
             # the account is either unfunded or has been explicitly risk-reviewed.
             Write-Host ""
             Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
@@ -223,7 +223,7 @@ try {
             # Check for non-interactive / CI override
             $skipConfirm = [Environment]::GetEnvironmentVariable("ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY", "Process")
             if ($skipConfirm -eq "true") {
-                Write-Host "  ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true found — skipping interactive prompt." -ForegroundColor Yellow
+                Write-Host "  ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true found - skipping interactive prompt." -ForegroundColor Yellow
                 Write-Host "  This is an audited exception; document justification in your deployment record." -ForegroundColor Yellow
             }
             else {
