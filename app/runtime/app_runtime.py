@@ -716,7 +716,7 @@ class AppRuntime:
                     import datetime as _dt_pre
                     _pre_cleaned = OrderLifecycleService.force_terminal_positions_by_symbol_pattern(
                         symbol_pattern="",  # not used for position records (age-only)
-                        min_age_days=7,
+                        min_age_days=7,  # weekly expiry — 7 days is sufficient
                     )
                     if _pre_cleaned:
                         logger.info(
@@ -724,6 +724,8 @@ class AppRuntime:
                             "position records older than 7 days before position load.",
                             _pre_cleaned,
                         )
+                    else:
+                        logger.info("startup.expired_position_cleanup: no expired position records found (clean DB).")
                 except Exception as _pre_exc:
                     logger.warning("startup.expired_position_cleanup (pre-load) failed: %s", _pre_exc)
 
@@ -851,12 +853,15 @@ class AppRuntime:
                 try:
                     from app.orders.order_outbox import force_terminal_outbox_by_symbol_pattern
                     import datetime as _dt
-                    # Use 7 days: Indian weekly options expire every Thursday,
-                    # so any contract older than 1 week is definitionally expired.
-                    # The symbol pattern (e.g. %MAR26%) limits cleanup to prior-
-                    # month contracts only, preventing false positives on current
-                    # month near-expiry records.
-                    _cutoff_month = (_dt.date.today() - _dt.timedelta(days=7)).strftime("%b%y").upper()
+                    # Compute the PREVIOUS calendar month label (e.g. "MAR26" when
+                    # running in April).  The day-subtraction approach is wrong here:
+                    # today - 7d on April 24 gives April 17 → "APR26", not "MAR26".
+                    # Instead, go to the first day of the current month then back 1 day
+                    # to land reliably in the previous month.
+                    _today = _dt.date.today()
+                    _first_of_month = _today.replace(day=1)
+                    _last_prev_month = _first_of_month - _dt.timedelta(days=1)
+                    _cutoff_month = _last_prev_month.strftime("%b%y").upper()
                     _cleaned = force_terminal_outbox_by_symbol_pattern(
                         symbol_pattern=f"%{_cutoff_month}%",
                         min_age_days=7,
