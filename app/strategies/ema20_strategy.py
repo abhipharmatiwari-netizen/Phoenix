@@ -753,6 +753,12 @@ class Ema20Strategy(BaseStrategy):
             "trail_trigger_pct",
             self.trail_trigger_pct,
         )
+        # §90: Minimum absolute trail buffer — prevents the percentage buffer
+        # from shrinking to noise-level amounts on low-price OTM options.
+        trail_min_abs_buffer = self._live_param_float("trail_min_abs_buffer", 0.0)
+        # §90: Cooldown between trail SL tightenings — prevents rapid cascade
+        # tightening from a burst of ticks in a fast market.
+        trail_update_cooldown_s = self._live_param_float("trail_update_cooldown_seconds", 0.0)
         if trail_buffer_pct > 0:
             if ltp < pos.best_price:
                 pos.best_price = ltp
@@ -766,17 +772,34 @@ class Ema20Strategy(BaseStrategy):
                 if move_pct >= trigger_pct:
                     pos.trail_active = True
             if pos.trail_active:
-                new_trail_sl = pos.best_price * (1.0 + trail_buffer_pct)
+                # Percentage-based trail SL
+                new_trail_sl_pct = pos.best_price * (1.0 + trail_buffer_pct)
+                # Absolute minimum buffer: best_price + min_abs_buffer
+                new_trail_sl_abs = (
+                    pos.best_price + float(trail_min_abs_buffer)
+                    if trail_min_abs_buffer > 0
+                    else new_trail_sl_pct
+                )
+                # Use whichever gives more protection (higher SL)
+                new_trail_sl = max(new_trail_sl_pct, new_trail_sl_abs)
                 if new_trail_sl < pos.sl_price:
-                    logger.info(
-                        "[%s] EMA20 trail SL update | label=%s old=%.3f new=%.3f best=%.3f",
-                        self.env_prefix,
-                        pos.option_label,
-                        pos.sl_price,
-                        new_trail_sl,
-                        pos.best_price,
-                    )
-                    pos.sl_price = new_trail_sl
+                    # Respect cooldown between tightenings
+                    now_mono = time.monotonic()
+                    last_tighten = getattr(pos, "_last_trail_tighten_at", 0.0)
+                    if (
+                        trail_update_cooldown_s <= 0
+                        or (now_mono - last_tighten) >= trail_update_cooldown_s
+                    ):
+                        logger.info(
+                            "[%s] EMA20 trail SL update | label=%s old=%.3f new=%.3f best=%.3f",
+                            self.env_prefix,
+                            pos.option_label,
+                            pos.sl_price,
+                            new_trail_sl,
+                            pos.best_price,
+                        )
+                        pos.sl_price = new_trail_sl
+                        object.__setattr__(pos, "_last_trail_tighten_at", now_mono) if hasattr(pos, "__dataclass_fields__") else setattr(pos, "_last_trail_tighten_at", now_mono)
                 if ltp >= pos.sl_price:
                     self._exit_position(reason="TRAIL", price=ltp, position=pos)
                     return
