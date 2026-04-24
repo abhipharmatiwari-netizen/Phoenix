@@ -716,12 +716,12 @@ class AppRuntime:
                     import datetime as _dt_pre
                     _pre_cleaned = OrderLifecycleService.force_terminal_positions_by_symbol_pattern(
                         symbol_pattern="",  # not used for position records (age-only)
-                        min_age_days=45,
+                        min_age_days=7,
                     )
                     if _pre_cleaned:
                         logger.info(
                             "startup.expired_position_cleanup: force-terminated %d non-terminal "
-                            "position records older than 45 days before position load.",
+                            "position records older than 7 days before position load.",
                             _pre_cleaned,
                         )
                 except Exception as _pre_exc:
@@ -851,10 +851,15 @@ class AppRuntime:
                 try:
                     from app.orders.order_outbox import force_terminal_outbox_by_symbol_pattern
                     import datetime as _dt
-                    _cutoff_month = (_dt.date.today() - _dt.timedelta(days=45)).strftime("%b%y").upper()
+                    # Use 7 days: Indian weekly options expire every Thursday,
+                    # so any contract older than 1 week is definitionally expired.
+                    # The symbol pattern (e.g. %MAR26%) limits cleanup to prior-
+                    # month contracts only, preventing false positives on current
+                    # month near-expiry records.
+                    _cutoff_month = (_dt.date.today() - _dt.timedelta(days=7)).strftime("%b%y").upper()
                     _cleaned = force_terminal_outbox_by_symbol_pattern(
                         symbol_pattern=f"%{_cutoff_month}%",
-                        min_age_days=45,
+                        min_age_days=7,
                     )
                     if _cleaned:
                         logger.info(
