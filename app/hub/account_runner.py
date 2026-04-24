@@ -441,6 +441,8 @@ class AccountRunner:
         account_gross_exposure = 0.0
         per_strategy_marks: dict[StrategyId, tuple[float, float]] = {}
         get_owner = getattr(self._position_ownership_store, "get_owner", None)
+        _live_mode = str(os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper() == "LIVE"
+        _synthetic_mark_count = 0
 
         for pos in positions or []:
             qty = int(getattr(pos, "quantity", 0) or 0)
@@ -449,7 +451,29 @@ class AccountRunner:
             symbol = str(getattr(pos, "symbol", "") or "").strip()
             avg_price = float(getattr(pos, "avg_price", 0.0) or 0.0)
             ltp = dashboard_bus.get_last_price(symbol) if symbol else None
-            mark = float(ltp if ltp is not None else avg_price)
+
+            # §94: In LIVE mode, do NOT use avg_price as a synthetic mark.
+            # Using avg_price when ltp is None produces unrealized_pnl=0 which
+            # makes a losing position appear flat and misleads risk/PnL decisions.
+            # Skip the PnL contribution for positions without a live mark; use
+            # avg_price only for gross_exposure (conservative capital accounting).
+            if ltp is None:
+                _synthetic_mark_count += 1
+                if _live_mode:
+                    logger.warning(
+                        "mark.unavailable: no live LTP for symbol=%s qty=%d "
+                        "broker_account=%s — skipping unrealized PnL contribution "
+                        "for this position in LIVE mode",
+                        symbol, qty, self._broker_account_id,
+                    )
+                    gross_exposure = abs(avg_price * qty)
+                    account_gross_exposure += gross_exposure
+                    continue  # skip PnL — we cannot compute it correctly
+                # Non-LIVE: retain legacy avg_price fallback behaviour.
+                mark = avg_price
+            else:
+                mark = float(ltp)
+
             gross_exposure = abs(mark * qty)
             unrealized_pnl = (mark - avg_price) * qty
 
@@ -500,6 +524,9 @@ class AccountRunner:
                     except Exception:
                         pass  # non-critical; control PnL update is best-effort
 
+        _sync_source = (
+            "broker_sync_stale_mark" if _synthetic_mark_count > 0 else "broker_sync"
+        )
         self._pnl_engine.sync_account_mark_to_market(
             tenant_id=self._tenant_id,
             broker_account_id=self._broker_account_id,
@@ -507,7 +534,7 @@ class AccountRunner:
             account_gross_exposure=account_gross_exposure,
             per_strategy_marks=per_strategy_marks,
             as_of=datetime.now(timezone.utc),
-            source="broker_sync",
+            source=_sync_source,
         )
 
     # Sync orders into state store.
