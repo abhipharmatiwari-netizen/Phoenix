@@ -974,12 +974,20 @@ def force_terminal_outbox_by_symbol_pattern(
     table = "order_submission_outbox"
     dsn = get_control_plane_dsn()
     age_days = max(1, int(min_age_days))
+    # Use the same non-terminal exclusion as recover_submission_outbox() rather
+    # than _ACTIVE_OUTBOX_STATUSES, because records that went through multiple
+    # recovery cycles may have status DEFERRED, FAILED, REJECTED, or other
+    # intermediate values that are not in _ACTIVE_OUTBOX_STATUSES but are still
+    # scanned by recovery and produce DEGRADED cascades.
     sql = f"""
         UPDATE {table}
         SET status = %(terminal_status)s,
             recovery_action = %(recovery_action)s,
             updated_at = NOW()
-        WHERE status = ANY(%(active_statuses)s)
+        WHERE status NOT IN (
+                'TERMINAL_FILL', 'TERMINAL_NON_FILL',
+                'TERMINAL_ERROR', 'CANCELLED', 'EXPIRED'
+              )
           AND order_request_json->>'symbol' ILIKE %(pattern)s
           AND created_at < NOW() - INTERVAL '{age_days} days'
     """
@@ -988,7 +996,6 @@ def force_terminal_outbox_by_symbol_pattern(
             cur.execute(sql, {
                 "terminal_status": terminal_status,
                 "recovery_action": recovery_action,
-                "active_statuses": list(_ACTIVE_OUTBOX_STATUSES),
                 "pattern": symbol_pattern,
             })
             return cur.rowcount or 0
