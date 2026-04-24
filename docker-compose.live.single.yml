@@ -55,9 +55,11 @@ x-live-backend-env: &live-backend-env
   # so malformed AngelOne responses are rejected at the integration boundary.
   BROKER_SCHEMA_CHECK_MODE: "strict"
   # Local Postgres does not have SSL configured. LIVE_PG_SSL_SKIP_CHECK bypasses
-  # the startup SSL enforcement check so the backend starts against a local instance.
-  # Remove this line (or set to false) when deploying against a remote Postgres with SSL.
-  LIVE_PG_SSL_SKIP_CHECK: "${LIVE_PG_SSL_SKIP_CHECK:-true}"
+  # LIVE_PG_SSL_SKIP_CHECK=true bypasses the SSL enforcement check for local Docker
+  # deployments where Postgres does not have SSL configured.  The default is now false
+  # (enforces SSL).  Set LIVE_PG_SSL_SKIP_CHECK=true in your PowerShell session ONLY
+  # when running against a host-local Postgres without SSL — never for remote/cloud deployments.
+  LIVE_PG_SSL_SKIP_CHECK: "${LIVE_PG_SSL_SKIP_CHECK:-false}"
   RUNTIME_CONFIG_AUTO_ENABLE: "false"
   RUNTIME_CONFIG_ENABLED: "false"
 

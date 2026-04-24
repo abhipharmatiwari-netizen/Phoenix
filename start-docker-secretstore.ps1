@@ -167,6 +167,13 @@ try {
     Set-EnvFromSecretOrDefault -EnvName "CONTROL_PLANE_PG_DB" -DefaultValue "phoenix"
     Set-EnvFromSecretOrDefault -EnvName "CONTROL_PLANE_PG_USER" -DefaultValue "phoenix_app"
     Set-EnvFromSecretOrDefault -EnvName "CONTROL_PLANE_PG_SSLMODE" -DefaultValue "prefer"
+    # LIVE_PG_SSL_SKIP_CHECK must be set to "true" for local Docker deployments where
+    # the host Postgres does not have SSL configured.  The compose default is now "false"
+    # (requires SSL); local operators must set this explicitly.
+    if (-not [Environment]::GetEnvironmentVariable("LIVE_PG_SSL_SKIP_CHECK", "Process")) {
+        $env:LIVE_PG_SSL_SKIP_CHECK = "true"
+        Write-Host "  [local-deploy] LIVE_PG_SSL_SKIP_CHECK=true (local Postgres without SSL)" -ForegroundColor Yellow
+    }
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_TENANT_ID" -DefaultValue "tenant-1"
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_BROKER_ACCOUNT_ID" -DefaultValue "A1"
 
