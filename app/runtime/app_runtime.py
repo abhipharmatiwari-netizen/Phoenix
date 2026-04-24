@@ -784,6 +784,11 @@ class AppRuntime:
                         "B123", "B124", "OID-ONCE", "OID-PARALLEL",
                         "TEST-", "FAKE-", "MOCK-", "FIXTURE",
                         "NIFTY17FEB2625750CE",
+                        # §74: __runtime_exit__ is the synthetic fallback strategy_id
+                        # used when a hub runtime exit cannot resolve the real owning
+                        # strategy.  Its presence in active outbox records indicates
+                        # OwnershipKey contamination that must be investigated before LIVE.
+                        "__runtime_exit__",
                     )
                     _dsn = get_control_plane_dsn()
                     with connect_with_retry(_dsn, autocommit=True) as _conn:

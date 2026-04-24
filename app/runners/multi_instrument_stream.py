@@ -3433,11 +3433,29 @@ def stream_multi_instruments(
                 if strategy_name_raw
                 else ""
             )
-            strategy_id = (
+            resolved_id = (
                 strategy_id_by_name.get(strategy_name_key)
                 or strategy_id_by_name.get(strategy_name_raw)
-                or RUNTIME_EXIT_STRATEGY_ID
             )
+            # §74: In LIVE hub-authoritative mode the synthetic __runtime_exit__
+            # fallback is forbidden — it breaks OwnershipKey canonicalization and
+            # the exit audit trail.  Refuse the exit rather than poison the DB
+            # with an unattributable ownership record.
+            if resolved_id is None:
+                if str(trade_mode or "").upper() == "LIVE":
+                    logger.error(
+                        "runtime_exit.strategy_unresolvable: LIVE mode requires a real "
+                        "strategy_id for hub exits but strategy_name=%r is not in the "
+                        "strategy registry. Exit for label=%s REFUSED to prevent "
+                        "__runtime_exit__ contamination in OwnershipKeys. "
+                        "Ensure the caller provides the owning strategy name.",
+                        strategy_name_raw or None,
+                        label,
+                    )
+                    return False
+                # Non-LIVE (SHADOW, PAPER): allow synthetic fallback for testing.
+                resolved_id = RUNTIME_EXIT_STRATEGY_ID
+            strategy_id = resolved_id
             submit_tag = str(tag or reason or "RUNTIME_EXIT").strip()
             order_req = OrderRequest(
                 symbol=str(tradingsymbol or label or "").strip() or str(label),
