@@ -663,6 +663,51 @@ class OrderLifecycleService:
         )
         return loaded
 
+    @staticmethod
+    def force_terminal_positions_by_symbol_pattern(
+        *,
+        symbol_pattern: str,
+        min_age_days: int = 45,
+        terminal_state: str = "FLAT",
+        state_reason: str = "startup_expired_contract_cleanup",
+    ) -> int:
+        """Force non-terminal position records whose contract_key matches *symbol_pattern*
+        to *terminal_state* (default FLAT) directly in Postgres.
+
+        Intended for startup cleanup of expired-contract position records that produce
+        DEGRADED cascades on every restart (Architecture §73 / issue #73).
+
+        The pattern is matched against the contract_key column (ILIKE).
+        Only records older than *min_age_days* are touched to avoid hitting
+        records that are still within a normal settlement window.
+
+        Returns the count of rows updated.
+        """
+        from app.data.postgres import connect_with_retry, get_control_plane_dsn
+        dsn = get_control_plane_dsn()
+        age_days = max(1, int(min_age_days))
+        sql = f"""
+            UPDATE internal_position_records
+            SET position_state = %(terminal_state)s,
+                state_reason   = %(state_reason)s,
+                last_reconciled_at = NOW()
+            WHERE position_state NOT IN ('FLAT', 'NONE')
+              AND contract_key ILIKE %(pattern)s
+              AND (
+                  last_evidence_at  < NOW() - INTERVAL '{age_days} days'
+                  OR last_reconciled_at < NOW() - INTERVAL '{age_days} days'
+                  OR (last_evidence_at IS NULL AND last_reconciled_at IS NULL)
+              )
+        """
+        with connect_with_retry(dsn, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, {
+                    "terminal_state": terminal_state,
+                    "state_reason": state_reason,
+                    "pattern": symbol_pattern,
+                })
+                return cur.rowcount or 0
+
     def _try_persist_position_records(self) -> None:
         """Non-fatal periodic flush of position records to Postgres."""
         try:

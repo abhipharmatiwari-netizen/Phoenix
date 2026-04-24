@@ -837,6 +837,26 @@ class AppRuntime:
                 except Exception as _exc:
                     logger.warning("startup.expired_contract_cleanup failed (non-fatal): %s", _exc)
 
+                # §73: Also terminate expired-contract position records in
+                # internal_position_records so they don't produce DEGRADED
+                # cascades during outbox recovery on every restart.
+                try:
+                    from app.orders.order_lifecycle import OrderLifecycleService
+                    import datetime as _dt2
+                    _pos_cutoff = (_dt2.date.today() - _dt2.timedelta(days=45)).strftime("%b%y").upper()
+                    _pos_cleaned = OrderLifecycleService.force_terminal_positions_by_symbol_pattern(
+                        symbol_pattern=f"%{_pos_cutoff}%",
+                        min_age_days=45,
+                    )
+                    if _pos_cleaned:
+                        logger.info(
+                            "startup.expired_position_cleanup: force-terminated %d non-terminal "
+                            "position records for contracts expiring on or before %s.",
+                            _pos_cleaned, _pos_cutoff,
+                        )
+                except Exception as _exc:
+                    logger.warning("startup.expired_position_cleanup failed (non-fatal): %s", _exc)
+
             if callable(recover_submission_outbox):
                 recovery_summary = await recover_submission_outbox()
                 self._apply_startup_recovery_result(
