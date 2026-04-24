@@ -50,6 +50,18 @@ def create_broker_client(
         secrets = resolve_angel_secrets(account)
         return AngelBrokerClient(account=account, secrets=secrets)
 
+    # §95: In LIVE mode an unknown broker_type must hard-fail rather than fall
+    # back to simulation.  A SimulatedBrokerClient in LIVE would silently accept
+    # all orders without routing them to any real broker, creating undetectable
+    # position divergence between the internal state and the broker.
+    if mode == "LIVE":
+        raise ValueError(
+            f"LIVE broker factory error: unknown broker_type={account.broker_type!r} "
+            f"for broker_account_id={account.broker_account_id}. "
+            f"LIVE mode cannot fall back to SimulatedBrokerClient — configure a "
+            f"supported broker_type (e.g. 'angel') or use SHADOW mode for testing."
+        )
+
     logger.warning(
         "Using SimulatedBrokerClient for broker_account_id=%s broker_type=%s mode=%s",
         account.broker_account_id,
