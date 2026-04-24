@@ -780,16 +780,18 @@ class AppRuntime:
             )
             if trade_mode == "LIVE":
                 try:
+                    # Markers checked against BOTH hub_order_id and broker_order_id.
+                    # These are test-fixture strings that never appear in real orders.
                     _SYNTHETIC_MARKERS = (
                         "B123", "B124", "OID-ONCE", "OID-PARALLEL",
                         "TEST-", "FAKE-", "MOCK-", "FIXTURE",
                         "NIFTY17FEB2625750CE",
-                        # §74: __runtime_exit__ is the synthetic fallback strategy_id
-                        # used when a hub runtime exit cannot resolve the real owning
-                        # strategy.  Its presence in active outbox records indicates
-                        # OwnershipKey contamination that must be investigated before LIVE.
-                        "__runtime_exit__",
                     )
+                    # §74: __runtime_exit__ appears in hub_order_id of REAL historical
+                    # orders (March 2026 safety exits) where the strategy was unresolvable.
+                    # It must only be flagged when it appears in broker_order_id, because
+                    # real Angel broker IDs are numeric and never contain this string.
+                    _BROKER_ONLY_MARKERS = ("__runtime_exit__",)
                     _dsn = get_control_plane_dsn()
                     with connect_with_retry(_dsn, autocommit=True) as _conn:
                         with _conn.cursor() as _cur:
@@ -808,9 +810,9 @@ class AppRuntime:
                     _contaminated = [
                         f"{r[0]}|{r[1]}"
                         for r in (_rows or [])
-                        if any(
-                            m in str(r[0] or "") or m in str(r[1] or "")
-                            for m in _SYNTHETIC_MARKERS
+                        if (
+                            any(m in str(r[0] or "") or m in str(r[1] or "") for m in _SYNTHETIC_MARKERS)
+                            or any(m in str(r[1] or "") for m in _BROKER_ONLY_MARKERS)
                         )
                     ]
                     if _contaminated:
