@@ -227,11 +227,13 @@ class ProfitLockManager:
 
         # Try loading from backend if not in memory.
         if state is None:
-            state = self._backend.load_state(str(tenant_id), str(broker_account_id))
-            if state is not None:
-                self._states[key] = state
+            loaded = self._backend.load_state(str(tenant_id), str(broker_account_id))
+            if loaded is not None:
+                self._states[key] = loaded
+                state = loaded
 
         if state is None or state.last_reset_date != today:
+            source = "fresh_reset" if state is None else "day_boundary_reset"
             state = ProfitLockState(
                 tenant_id=str(tenant_id),
                 broker_account_id=str(broker_account_id),
@@ -239,6 +241,14 @@ class ProfitLockManager:
             )
             self._states[key] = state
             self._persist(state)
+            logger.info(
+                "profit_lock.state_loaded: tenant=%s account=%s target_reached=False "
+                "peak_total_pnl=0.0 last_reset_date=%s source=%s",
+                str(tenant_id),
+                str(broker_account_id),
+                today,
+                source,
+            )
         return state
 
     # Evaluate profit lock status and whether an exit is required.
@@ -253,6 +263,7 @@ class ProfitLockManager:
         signal_valid: Optional[bool],
         require_signal: bool,
         exit_cooldown_seconds: float,
+        contamination_multiplier: float = 3.0,
     ) -> ProfitLockDecision:
         state = self._get_state(tenant_id, broker_account_id)
         now = datetime.now(self._tz)
@@ -271,6 +282,32 @@ class ProfitLockManager:
                 signal_valid=signal_valid,
                 target=target,
             )
+
+        # §88: Plausibility guard — if persisted peak_total_pnl is implausibly
+        # large relative to the daily target (e.g., caused by a prior SELL-fill
+        # cash-ledger spike before issue #86 was fixed), reset the lock state.
+        # This prevents stale contaminated state from blocking entries all day
+        # after a mid-day restart with a fresh process.
+        if (
+            state.target_reached
+            and target is not None
+            and float(target) > 0
+            and state.peak_total_pnl > float(target) * float(contamination_multiplier)
+        ):
+            logger.warning(
+                "profit_lock.state_contaminated: tenant=%s account=%s peak_total_pnl=%.2f "
+                "exceeds plausible daily max=%.2f (target=%.2f x %.1f); resetting lock state. "
+                "This can occur when a prior SELL-fill booked the full option premium as PnL.",
+                str(tenant_id),
+                str(broker_account_id),
+                state.peak_total_pnl,
+                float(target) * float(contamination_multiplier),
+                float(target),
+                float(contamination_multiplier),
+            )
+            state.target_reached = False
+            state.peak_total_pnl = 0.0
+            self._persist(state)
 
         if not state.target_reached and total_val >= float(target):
             state.target_reached = True
