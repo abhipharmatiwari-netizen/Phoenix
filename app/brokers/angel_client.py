@@ -16,6 +16,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta, time as dt_time
 from enum import Enum
 from typing import Any, List, Optional
 
@@ -261,6 +262,7 @@ class AngelBrokerClient(BrokerClient):
         self._broker_account_id: BrokerAccountId = account.broker_account_id
         self._tenant_id: TenantId = account.tenant_id
         self._login_lock = asyncio.Lock()
+        self._logged_in_at: Optional[datetime] = None  # UTC timestamp of last successful login
 
         # Fetch storm protection (per-account). These guards prevent
         # "timeout -> relogin -> timeout -> ..." loops and reduce WAF/rate-limit pressure.
@@ -334,6 +336,7 @@ class AngelBrokerClient(BrokerClient):
                 client_public_ip=self._secrets.client_public_ip,
                 mac_address=self._secrets.mac_address,
             )
+            self._logged_in_at = datetime.now(timezone.utc)
             log_event(
                 logger,
                 event_type="LOGIN_SUCCESS",
@@ -347,6 +350,69 @@ class AngelBrokerClient(BrokerClient):
                 self._account.broker_account_id,
                 self._secrets.client_code,
             )
+
+    def is_token_near_expiry(
+        self,
+        *,
+        margin_minutes: int = 10,
+        expiry_ist_hour: int = 0,
+        expiry_ist_minute: int = 0,
+        tz_offset_hours: int = 5,
+        tz_offset_minutes: int = 30,
+    ) -> bool:
+        """Return True if the Angel auth token will expire within *margin_minutes*.
+
+        Angel One JWT tokens expire at midnight IST (00:00 IST = 18:30 UTC previous day).
+        This helper checks whether we are within *margin_minutes* of that boundary so
+        the AccountRunner can trigger a proactive re-login before the auth error window.
+        """
+        if self._logged_in_at is None:
+            return False
+        now_utc = datetime.now(timezone.utc)
+        ist_offset = timedelta(hours=tz_offset_hours, minutes=tz_offset_minutes)
+        now_ist = now_utc + ist_offset
+        # Next midnight IST from now
+        today_ist = now_ist.date()
+        midnight_ist = datetime(
+            today_ist.year, today_ist.month, today_ist.day,
+            expiry_ist_hour, expiry_ist_minute, 0,
+            tzinfo=timezone.utc,
+        ) - ist_offset
+        if midnight_ist <= now_utc:
+            midnight_ist += timedelta(days=1)
+        seconds_to_expiry = (midnight_ist - now_utc).total_seconds()
+        return 0 < seconds_to_expiry <= margin_minutes * 60
+
+    async def proactive_relogin_if_near_expiry(self, *, margin_minutes: int = 10) -> bool:
+        """Re-login proactively if the token is within *margin_minutes* of expiry.
+
+        Returns True if a re-login was performed, False otherwise.
+        This prevents the midnight position-sync degradation window caused by
+        reacting to auth errors after the token has already expired (§79).
+        """
+        if not self.is_token_near_expiry(margin_minutes=margin_minutes):
+            return False
+        logger.info(
+            "broker.proactive_relogin: token for broker_account_id=%s is within %dm of "
+            "midnight IST expiry — refreshing before the auth error window",
+            self._broker_account_id,
+            margin_minutes,
+        )
+        try:
+            await self._login(force=True)
+            logger.info(
+                "broker.proactive_relogin_success: broker_account_id=%s token refreshed",
+                self._broker_account_id,
+            )
+            return True
+        except Exception as exc:
+            logger.error(
+                "broker.proactive_relogin_failed: broker_account_id=%s error=%s — "
+                "will rely on reactive relogin when auth errors occur",
+                self._broker_account_id,
+                exc,
+            )
+            return False
 
 
 
