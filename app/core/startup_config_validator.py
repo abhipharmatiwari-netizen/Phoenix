@@ -519,13 +519,15 @@ def validate_runtime_startup_settings(
                 getattr(runtime_cfg, "enable_demo_auth", False)
             ),
         }
+        capital_limits_raw = str(getattr(settings, "capital_limits_json", "") or "").strip()
+        _capital_limits_present = capital_limits_raw not in ("", "{}", "null")
+        live_summary["capital_limits_json_present"] = _capital_limits_present
         logger.info("LIVE startup safety summary: %s", live_summary)
 
         if not bool(getattr(settings, "enable_capital_checks", False)):
             errors.append("TRADE_MODE=LIVE requires ENABLE_CAPITAL_CHECKS=true")
 
-        capital_limits_raw = str(getattr(settings, "capital_limits_json", "") or "").strip()
-        if capital_limits_raw in ("", "{}", "null"):
+        if not _capital_limits_present:
             _capital_override = str(
                 getattr(settings, "allow_live_capital_limits_default_only", "") or ""
             ).strip().lower()
