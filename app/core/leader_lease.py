@@ -62,6 +62,10 @@ class LeaderLease:
     # Attempt to acquire the lease and start the renew loop.
     async def start(self) -> bool:
         if not self.enabled:
+            logger.info(
+                "leader_lease.disabled: lease=%s — running as sole writer without fencing",
+                self._lease_id,
+            )
             return True
         acquired = await asyncio.to_thread(self._try_acquire_sync)
         if acquired:
@@ -71,6 +75,20 @@ class LeaderLease:
             self._last_renewed_at = now
             self._task = asyncio.create_task(
                 self._renew_loop(), name=f"leader-lease-{self._lease_id}"
+            )
+            logger.info(
+                "leader_lease.acquired: lease=%s owner=%s ttl_seconds=%d renew_seconds=%d",
+                self._lease_id,
+                self._owner_id,
+                int(self._ttl),
+                int(self._renew),
+            )
+        else:
+            logger.info(
+                "leader_lease.standby: lease=%s owner=%s — another writer holds the lease; "
+                "this instance will not accept live order flow",
+                self._lease_id,
+                self._owner_id,
             )
         return acquired
 
@@ -276,6 +294,11 @@ class LeaderLease:
                 ok = await asyncio.to_thread(self._renew_sync)
                 if ok:
                     self._last_renewed_at = datetime.now(timezone.utc)
+                    logger.debug(
+                        "leader_lease.renewal_success: lease=%s next_renewal_in_seconds=%d",
+                        self._lease_id,
+                        int(self._renew),
+                    )
                     continue
                 if not ok:
                     self._renew_failures += 1
@@ -289,13 +312,24 @@ class LeaderLease:
                         )
                     except Exception:
                         logger.debug("LeaderLease metrics update skipped", exc_info=True)
-                    logger.error("Leader lease lost for %s", self._lease_id)
+                    logger.critical(
+                        "leader_lease.lost: lease=%s owner=%s failures=%d — "
+                        "fencing this writer to prevent dual-authority split-brain",
+                        self._lease_id,
+                        self._owner_id,
+                        self._renew_failures,
+                    )
                     self._owned = False
                     if os.getenv("LEADER_LEASE_EXIT_ON_LOSS", "true").lower() in {
                         "1",
                         "true",
                         "yes",
                     }:
+                        logger.critical(
+                            "leader_lease.fencing_exit: lease=%s — calling os._exit(2) "
+                            "to guarantee fencing; restart will reconcile before accepting orders",
+                            self._lease_id,
+                        )
                         os._exit(2)
                     break
         except asyncio.CancelledError:

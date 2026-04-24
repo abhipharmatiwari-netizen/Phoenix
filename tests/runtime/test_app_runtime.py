@@ -150,6 +150,12 @@ def _set_live_safe_env(monkeypatch) -> None:
     monkeypatch.setenv("ORDER_SUBMISSION_OUTBOX_ENABLED", "true")
     monkeypatch.setenv("ORDER_SUBMISSION_OUTBOX_REQUIRED", "true")
     monkeypatch.setenv("ORDER_SUBMISSION_OUTBOX_BACKEND", "postgres")
+    # Suppress LIVE inline guards that block tests unrelated to the guards themselves.
+    monkeypatch.setenv("LIVE_PG_SSL_SKIP_CHECK", "true")
+    monkeypatch.setenv("ADMIN_API_KEY", "test-key-injected-by-live-safe-env")
+    monkeypatch.setenv("DEMO_AUTH_TOKEN_SECRET", "test-secret-injected-by-live-safe-env")
+    import pathlib
+    monkeypatch.setattr(pathlib.Path, "iterdir", lambda self: iter([]))
 
 
 @pytest.fixture(autouse=True)
