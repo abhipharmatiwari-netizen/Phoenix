@@ -345,10 +345,11 @@ class AngelBrokerClient(BrokerClient):
                 broker_account_id=self._broker_account_id,
                 level=logging.INFO,
             )
+            # §103: Do not log client_code — it is a broker account identifier
+            # that should not appear in log files or aggregated log streams.
             logger.info(
-                "AngelBrokerClient login successful for broker_account_id=%s client_code=%s",
+                "AngelBrokerClient login successful for broker_account_id=%s",
                 self._account.broker_account_id,
-                self._secrets.client_code,
             )
 
     def is_token_near_expiry(
