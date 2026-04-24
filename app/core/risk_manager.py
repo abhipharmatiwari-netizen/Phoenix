@@ -2539,6 +2539,43 @@ class RiskManager:
         self._reconcile_pending_orders()
 
         if self.current_trade_mode.upper() == "LIVE":
+            # §102: In LIVE hub-authoritative mode, direct broker order placement
+            # through RiskManager is forbidden for automated entries.  All entry
+            # and exit signals must pass through the hub/router/lifecycle path.
+            # If the hub exit submitter is set, this indicates hub mode is active;
+            # block legacy direct entries.  Closing (exit) orders are still
+            # allowed through this path as break-glass or reconciliation exits.
+            with self._state_lock:
+                _existing_for_guard = (
+                    dict(self.open_positions.get(label, {}))
+                    if label in self.open_positions
+                    else None
+                )
+            _is_closing_entry = bool(
+                _existing_for_guard
+                and _existing_for_guard.get("side", "").upper() != side
+            )
+            if (
+                self._hub_exit_submitter is not None
+                and not _is_closing_entry
+            ):
+                logger.error(
+                    "risk_manager.legacy_entry_blocked: LIVE hub-authoritative mode active "
+                    "but RiskManager.place_order() called for automated entry "
+                    "label=%s side=%s qty=%d strategy=%s. "
+                    "Use place_order_via_bridge / hub router instead.",
+                    label, side, qty, strategy_name,
+                )
+                return self._make_decision(
+                    allowed=False,
+                    reason="legacy_direct_entry_blocked_in_live_hub_mode",
+                    label=label,
+                    side=side,
+                    qty=qty,
+                    strategy_name=strategy_name,
+                    template_name=template_name,
+                )
+
             pending = self._pending_order_for_label(label)
             if pending:
                 return self._make_decision(
