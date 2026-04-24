@@ -609,10 +609,27 @@ def sync_positions_with_broker(
         result.used_cached_snapshot = True
         result.cached_snapshot_age_seconds = cached_age_seconds
         raw = {"data": cached_positions}
+        _cache_age_f = float(cached_age_seconds or 0.0)
         logger.warning(
             "[POS_SYNC] Failed to fetch broker positions (%s); using cached snapshot age=%.1fs",
             reason,
-            float(cached_age_seconds or 0.0),
+            _cache_age_f,
+        )
+        # §83: Emit structured events for operator alerting.
+        if blocked:
+            logger.warning(
+                "pos_sync.api_blocked: reason=%s cache_age_seconds=%.1f "
+                "evidence_class=MEDIUM — broker positions endpoint returned a "
+                "non-JSON/blocked response; falling back to cached snapshot",
+                reason,
+                _cache_age_f,
+            )
+        logger.warning(
+            "pos_sync.cache_fallback: reason=%s cache_age_seconds=%.1f "
+            "evidence_class=MEDIUM backoff_seconds=%s",
+            reason,
+            _cache_age_f,
+            f"{result.retry_after_seconds:.1f}" if result.retry_after_seconds else "none",
         )
         result.update_reconciliation_state(
             state=PositionSyncReconciliationState.RECONCILING,
