@@ -341,8 +341,29 @@ class GlobalKillSwitchInterceptor:
                         origin="kill_switch_manager",
                     )
                     return _rejected_response(reason)
-        except Exception:
-            pass  # KillSwitchManager unavailable — fail open (env-var path is the fallback)
+        except Exception as _ks_exc:
+            # §93: In LIVE mode fail CLOSED when durable kill-switch state is
+            # unavailable — a missing KillSwitchManager means we cannot prove
+            # the kill switch is inactive.  In non-LIVE modes, fail open so the
+            # env-var path remains the fallback without disrupting PAPER/SHADOW.
+            _live = str(os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper() == "LIVE"
+            if _live:
+                reason = "kill_switch_manager_unavailable"
+                log_event(
+                    logger,
+                    event_type="ORDER_REJECTED_KILL_SWITCH_UNAVAILABLE",
+                    message="Durable kill-switch state unavailable in LIVE — failing closed",
+                    level=logging.ERROR,
+                    tenant_id=ctx.tenant_id,
+                    broker_account_id=ctx.broker_account_id,
+                    strategy_id=ctx.strategy_id,
+                    correlation_id=ctx.correlation_id,
+                    request_id=ctx.request_id,
+                    instrument=ctx.order_req.symbol,
+                    origin="kill_switch_manager",
+                    error=str(_ks_exc),
+                )
+                return _rejected_response(reason)
 
         return None
 

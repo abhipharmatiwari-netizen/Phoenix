@@ -1166,14 +1166,25 @@ async def readyz() -> JSONResponse:
         return JSONResponse(status_code=503, content=payload)
 
     if _readiness_trade_mode() == "LIVE":
-        # §58 — Surface kill-switch state in readyz.
+        # §58/§93 — Surface kill-switch state in readyz; block readiness when
+        # the durable kill-switch state is active or cannot be verified.
         try:
             from app.risk.kill_switch import get_kill_switch_state
             ks_state = get_kill_switch_state()
-            payload["kill_switch_active_count"] = ks_state.get("active_count", 0)
+            _ks_active = ks_state.get("active_count", 0)
+            payload["kill_switch_active_count"] = _ks_active
             payload["kill_switch_source"] = ks_state.get("source", "unavailable")
-        except Exception:
+            if _ks_active > 0:
+                payload["ready"] = False
+                payload["reason"] = f"kill_switch_active: {_ks_active} non-INACTIVE kill switch(es)"
+                return JSONResponse(status_code=503, content=payload)
+        except Exception as _ks_exc:
+            # §93: Cannot verify durable kill-switch state — fail closed.
             payload["kill_switch_active_count"] = -1
+            payload["kill_switch_source"] = "unavailable"
+            payload["ready"] = False
+            payload["reason"] = f"kill_switch_unavailable: {_ks_exc}"
+            return JSONResponse(status_code=503, content=payload)
 
     if _readiness_trade_mode() == "LIVE":
         # §57 — Gate readiness on restored authoritative position state.
