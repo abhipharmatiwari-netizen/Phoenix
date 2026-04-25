@@ -568,6 +568,30 @@ class AppRuntime:
                         "Never set this in a remote or cloud deployment.",
                         _pg_sslmode,
                     )
+                    # §127 / Issue #6: Emit a durable audit event so that every LIVE
+                    # deployment with plaintext Postgres transport has an auditable record.
+                    # This makes it visible in audit_events.jsonl that the operator
+                    # consciously accepted unencrypted transport for a local deployment.
+                    try:
+                        from app.core.audit_log import emit_audit_event
+                        emit_audit_event(
+                            actor="startup",
+                            action="live_pg_ssl_skip_check_active",
+                            resource_type="postgres_transport",
+                            resource_id="control_plane",
+                            after={
+                                "sslmode": _pg_sslmode,
+                                "live_pg_ssl_skip_check": True,
+                                "is_cloud": False,
+                                "note": (
+                                    "Plaintext Postgres transport accepted for local Docker "
+                                    "Desktop deployment. This must NEVER be set for cloud or "
+                                    "network-attached deployments."
+                                ),
+                            },
+                        )
+                    except Exception as _audit_exc:
+                        logger.warning("startup: failed to emit ssl_skip audit event: %s", _audit_exc)
                 else:
                     raise ValueError(
                         f"startup.ssl_error: TRADE_MODE=LIVE requires CONTROL_PLANE_PG_SSLMODE=require "
