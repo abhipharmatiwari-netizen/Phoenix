@@ -764,6 +764,21 @@ def validate_runtime_startup_settings(
                 "TRADE_MODE=LIVE requires DASHBOARD_AUTH_DISABLED=false"
             )
 
+        # §126 / Issue #5: ANGEL_POSTBACK_TOKEN required when LIVE forces direct_broker mode.
+        # In LIVE, ANGEL_POSTBACK_AUTH_MODE is forced to direct_broker by the feature-flag
+        # policy gate.  direct_broker auth requires ANGEL_POSTBACK_TOKEN; without it every
+        # Angel broker postback returns HTTP 401, lifecycle misses fill/cancel push events,
+        # and order convergence relies on polling only.
+        _angel_postback_token = str(getattr(settings, "angel_postback_token", None) or "").strip()
+        if not _angel_postback_token:
+            errors.append(
+                "TRADE_MODE=LIVE requires ANGEL_POSTBACK_TOKEN to be set. "
+                "LIVE mode forces ANGEL_POSTBACK_AUTH_MODE=direct_broker; without a token "
+                "all Angel broker postbacks return HTTP 401 and order lifecycle misses "
+                "push-based fill/cancel events. "
+                "Set ANGEL_POSTBACK_TOKEN via Docker secret (add to start-docker-secretstore.ps1)."
+            )
+
     if errors:
         details = "\n".join(f"- {e}" for e in errors)
         raise ValueError(f"Startup runtime setting validation failed:\n{details}")

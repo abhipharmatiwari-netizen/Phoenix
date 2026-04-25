@@ -367,6 +367,10 @@ services:
       - admin_api_key
       - demo_auth_token_secret
       - control_plane_pg_password
+      # §126: Required for Angel broker postback authentication.
+      # LIVE mode forces ANGEL_POSTBACK_AUTH_MODE=direct_broker; without this
+      # token all Angel postbacks return HTTP 401 and lifecycle misses fill events.
+      - angel_postback_token
     volumes:
       # PHOENIX_LOG_HOST_PATH controls where container logs land on the host.
       # Default ./logs keeps backward compatibility for existing deployments.
@@ -433,3 +437,5 @@ secrets:
     file: "${PHX_SECRET_DIR}/demo_auth_token_secret"
   control_plane_pg_password:
     file: "${PHX_SECRET_DIR}/control_plane_pg_password"
+  angel_postback_token:
+    file: "${PHX_SECRET_DIR}/angel_postback_token"
