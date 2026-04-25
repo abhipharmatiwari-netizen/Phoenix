@@ -658,6 +658,21 @@ def validate_runtime_startup_settings(
             errors.append(
                 "TRADE_MODE=LIVE requires BROKER_SECRET_BACKEND to resolve to secret_manager or postgres"
             )
+        # §119: Redis is not authoritative for PnL in LIVE. It is acceptable as a
+        # read-through cache but must not be the sole PnL state store because it lacks
+        # the transactional guarantees, point-in-time recovery, and fail-stop startup
+        # behaviour required by ARCHITECTURE §2 storage policy.
+        _pnl_state_backend = str(
+            env.get("PNL_STATE_BACKEND", getattr(settings, "control_plane_backend", ""))
+            or ""
+        ).strip().lower()
+        if _pnl_state_backend in {"redis", "cache"}:
+            errors.append(
+                "TRADE_MODE=LIVE rejects PNL_STATE_BACKEND=redis. Redis is not authoritative "
+                "for PnL in LIVE (no transactional guarantees, no point-in-time recovery). "
+                "Set PNL_STATE_BACKEND=postgres for LIVE deployments."
+            )
+
         demo_auth_requested = bool(getattr(runtime_cfg, "demo_auth_requested", False))
         demo_auth_enabled = bool(getattr(runtime_cfg, "enable_demo_auth", False))
         if demo_auth_requested or demo_auth_enabled or _truthy(env.get("ENABLE_DEMO_AUTH")):

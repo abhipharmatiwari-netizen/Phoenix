@@ -241,3 +241,11 @@ def test_capital_engine_off_mode_keeps_legacy_short_option_behavior(monkeypatch)
 
     assert allowed is True
     assert reason == "capital_ok"
+
+
+def test_load_firestore_limits_raises_not_implemented():
+    """#118: _load_firestore_limits must raise NotImplementedError, not return None."""
+    from app.risk.capital_engine import CapitalEngine
+    engine = CapitalEngine()
+    with pytest.raises(NotImplementedError, match="Firestore capital limits backend is not implemented"):
+        engine._load_firestore_limits("A1")

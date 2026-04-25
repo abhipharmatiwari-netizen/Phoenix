@@ -151,3 +151,12 @@ Record all of the following:
 9. corrective actions, if any
 
 A restore drill is complete only when Phoenix has restarted on the restored data, re-established the required LIVE runtime, and passed the post-restore validation checks.
+
+---
+
+## Evidence file
+
+After each drill, copy `docs/release-evidence/restore_drill_TEMPLATE.md` to
+`docs/release-evidence/restore_drill_YYYYMMDD.md`, fill in all fields, and commit the
+file. The completed evidence file is a required pass criterion for LIVE deployment approval
+(see `docs/release-evidence/README.md`).

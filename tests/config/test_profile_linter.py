@@ -315,3 +315,58 @@ def test_linter_rejects_break_glass_in_committed_profile(tmp_path):
         "LIVE_RUNTIME_OVERRIDE_BREAK_GLASS_UNTIL must be unset in committed env profiles"
         in errors
     )
+
+
+def test_linter_rejects_redis_pnl_backend_in_live(tmp_path):
+    """#119: TRADE_MODE=LIVE must reject PNL_STATE_BACKEND=redis."""
+    profile_path = tmp_path / "redis-pnl-live.env"
+    profile_path.write_text(
+        "APP_ENV=production\n"
+        "TRADE_MODE=LIVE\n"
+        "PNL_STATE_BACKEND=redis\n"
+        "ADMIN_API_KEY=test-admin\n"
+        "CONTROL_PLANE_BACKEND=postgres\n"
+        "SWEEP_STATE_BACKEND=postgres\n"
+        "BROKER_SECRET_BACKEND=postgres\n"
+        "ENABLE_CAPITAL_CHECKS=true\n"
+        "ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true\n"
+        "ENABLE_RISK_CHECKS=true\n"
+        "RISK_ENABLE_DAILY_LOSS=true\n"
+        "RISK_MAX_DAILY_LOSS=2000\n"
+        "ENABLE_PROFIT_CHECKS=true\n"
+        "PROFIT_ENABLE_DAILY_TARGET=true\n"
+        "PROFIT_DAILY_TARGET=2000\n",
+        encoding="utf-8",
+    )
+
+    errors = lint_env_profile(profile_path)
+    assert any("PNL_STATE_BACKEND=redis" in e for e in errors), (
+        f"Expected Redis PnL rejection but got: {errors}"
+    )
+
+
+def test_linter_accepts_postgres_pnl_backend_in_live(tmp_path):
+    """#119: PNL_STATE_BACKEND=postgres must not produce an error in LIVE."""
+    profile_path = tmp_path / "postgres-pnl-live.env"
+    profile_path.write_text(
+        "APP_ENV=production\n"
+        "TRADE_MODE=LIVE\n"
+        "PNL_STATE_BACKEND=postgres\n"
+        "ADMIN_API_KEY=test-admin\n"
+        "CONTROL_PLANE_BACKEND=postgres\n"
+        "SWEEP_STATE_BACKEND=postgres\n"
+        "BROKER_SECRET_BACKEND=postgres\n"
+        "ENABLE_CAPITAL_CHECKS=true\n"
+        "ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true\n"
+        "ENABLE_RISK_CHECKS=true\n"
+        "RISK_ENABLE_DAILY_LOSS=true\n"
+        "RISK_MAX_DAILY_LOSS=2000\n"
+        "ENABLE_PROFIT_CHECKS=true\n"
+        "PROFIT_ENABLE_DAILY_TARGET=true\n"
+        "PROFIT_DAILY_TARGET=2000\n",
+        encoding="utf-8",
+    )
+
+    errors = lint_env_profile(profile_path)
+    redis_errors = [e for e in errors if "PNL_STATE_BACKEND" in e]
+    assert redis_errors == [], f"Unexpected PnL backend errors: {redis_errors}"

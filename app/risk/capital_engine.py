@@ -143,8 +143,21 @@ class CapitalEngine:
     def _load_firestore_limits(
         self, broker_account_id: BrokerAccountId
     ) -> Optional[Dict[str, Any]]:
-        """Stub — Firestore is not active in the current LIVE stack (§84 / ARCHITECTURE §2)."""
-        return None
+        """Firestore capital limits backend — not implemented (#118 / ARCHITECTURE §2).
+
+        Raises NotImplementedError to prevent silent misconfiguration: if this path
+        is ever reached it means a Firestore capital backend was configured, which
+        has no implementation and would silently apply no limits.
+
+        To use capital limits, set CAPITAL_LIMITS_JSON or configure
+        CAPITAL_LIMITS_BACKEND=postgres.
+        """
+        raise NotImplementedError(
+            "Firestore capital limits backend is not implemented in the current LIVE stack "
+            "(ARCHITECTURE §2). Firestore is not active; capital limits must come from "
+            "CAPITAL_LIMITS_JSON or a Postgres-backed backend. "
+            "Set CAPITAL_LIMITS_BACKEND=postgres or configure limits via CAPITAL_LIMITS_JSON."
+        )
 
     # Suggest an adjusted quantity that respects max_notional_per_order.
     def suggest_order_quantity(
