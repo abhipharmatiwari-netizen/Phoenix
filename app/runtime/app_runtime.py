@@ -611,6 +611,42 @@ class AppRuntime:
                     _broker_schema_mode or "off",
                 )
 
+            # §133 / Issue #12: Warn when RISK_STATE_PATH or EXECUTED_TOKENS_STATE_PATH
+            # resolves to a path inside the repo root.  This means pytest runs on the
+            # same machine may overwrite production state files between LIVE sessions.
+            # The default compose binds ./state and ./logs (inside the repo).
+            # Operators should set PHOENIX_STATE_HOST_PATH and PHOENIX_LOG_HOST_PATH
+            # to paths outside the repo for production deployments.
+            try:
+                _risk_state = _pathlib.Path(
+                    _os.getenv("RISK_STATE_PATH", "./state/risk_positions.json")
+                ).resolve()
+                _token_state = _pathlib.Path(
+                    _os.getenv(
+                        "EXECUTED_TOKENS_STATE_PATH",
+                        "/app/logs/executed_tokens_state.json",
+                    )
+                ).resolve()
+                for _state_label, _state_path in (
+                    ("RISK_STATE_PATH", _risk_state),
+                    ("EXECUTED_TOKENS_STATE_PATH", _token_state),
+                ):
+                    try:
+                        _state_path.relative_to(_repo_root)
+                        logger.warning(
+                            "startup.state_path_inside_repo: %s=%s is inside the repo root %s. "
+                            "pytest runs on this machine may overwrite production state files. "
+                            "Set PHOENIX_STATE_HOST_PATH (and PHOENIX_LOG_HOST_PATH) to a path "
+                            "outside the repo for production deployments (e.g. /var/lib/phoenix/state).",
+                            _state_label,
+                            _state_path,
+                            _repo_root,
+                        )
+                    except ValueError:
+                        pass  # path is outside repo root — safe
+            except Exception as _sp_exc:
+                logger.debug("startup: state-path repo-check failed (non-fatal): %s", _sp_exc)
+
         schema_checked_at = datetime.now(timezone.utc).isoformat().replace(
             "+00:00",
             "Z",

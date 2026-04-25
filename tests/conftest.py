@@ -26,6 +26,21 @@ def _test_runtime_defaults(monkeypatch):
     # the production log directory (logs/) that is bind-mounted in compose.
     test_log_dir = str(ROOT / ".test_tmp" / "logs")
     monkeypatch.setenv("APP_LOG_DIR", test_log_dir)
+    # §133 / Issue #12: Redirect production state files to .test_tmp/state so
+    # pytest runs never overwrite ./state/risk_positions.json or
+    # ./logs/executed_tokens_state.json used by the LIVE container between
+    # trading sessions.  Issue #19 already redirected log output; this
+    # extends that isolation to state files.
+    test_state_dir = ROOT / ".test_tmp" / "state"
+    test_state_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv(
+        "RISK_STATE_PATH",
+        str(test_state_dir / "risk_positions.json"),
+    )
+    monkeypatch.setenv(
+        "EXECUTED_TOKENS_STATE_PATH",
+        str(ROOT / ".test_tmp" / "logs" / "executed_tokens_state.json"),
+    )
 
 
 @pytest.fixture

@@ -143,6 +143,23 @@ The single-file Compose manifest wires the required LIVE settings directly into 
 - `ENABLE_EOD_EXIT=true`
 - `RISK_STATE_PATH=/app/state/risk_positions.json` — risk restart-helper persisted to the `/app/state` volume, separate from the log volume
 
+### §133 — State and log volume paths
+
+> **Required for production:** set `PHOENIX_STATE_HOST_PATH` and
+> `PHOENIX_LOG_HOST_PATH` to paths **outside the repo root** to prevent
+> pytest runs on the same machine from overwriting production state files
+> between LIVE sessions.
+
+```powershell
+# Recommended — set before running start-docker-secretstore.ps1:
+$env:PHOENIX_STATE_HOST_PATH = "C:\ProgramData\phoenix\state"
+$env:PHOENIX_LOG_HOST_PATH   = "C:\ProgramData\phoenix\logs"
+```
+
+If these are not set, the defaults (`./state` and `./logs`) inside the repo
+root are used — which is shared with pytest's write paths.  The LIVE startup
+emits a `startup.state_path_inside_repo` WARNING when this is detected.
+
 ---
 
 ## Verification after startup
