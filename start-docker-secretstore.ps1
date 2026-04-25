@@ -271,11 +271,36 @@ try {
     $env:CONTROL_PLANE_PG_PASSWORD_HOST | Out-File -FilePath (Join-Path $secretDir "control_plane_pg_password") -Encoding utf8 -NoNewline
     $env:ADMIN_API_KEY_HOST             | Out-File -FilePath (Join-Path $secretDir "admin_api_key")             -Encoding utf8 -NoNewline
     $env:DEMO_AUTH_TOKEN_SECRET_HOST    | Out-File -FilePath (Join-Path $secretDir "demo_auth_token_secret")    -Encoding utf8 -NoNewline
+
+    # §126 / Issue #5: ANGEL_POSTBACK_TOKEN — required for Angel broker order-status push
+    # notifications (ANGEL_POSTBACK_AUTH_MODE=direct_broker in LIVE).  If not set,
+    # lifecycle falls back to polling only; a WARNING is logged at startup.
+    $angelPostbackToken = [Environment]::GetEnvironmentVariable("ANGEL_POSTBACK_TOKEN", "Process")
+    if ([string]::IsNullOrWhiteSpace($angelPostbackToken)) {
+        try {
+            $angelPostbackToken = Get-Secret -Name "ANGEL_POSTBACK_TOKEN" -AsPlainText -ErrorAction Stop
+        }
+        catch {
+            $angelPostbackToken = ""
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($angelPostbackToken)) {
+        $angelPostbackToken | Out-File -FilePath (Join-Path $secretDir "angel_postback_token") -Encoding utf8 -NoNewline
+        Write-Host "  angel_postback_token: loaded from SecretStore/env" -ForegroundColor Green
+    }
+    else {
+        # Write an empty file so Docker Compose secret mount succeeds.
+        # Startup validator emits a WARNING (not error) when token is absent.
+        "" | Out-File -FilePath (Join-Path $secretDir "angel_postback_token") -Encoding utf8 -NoNewline
+        Write-Host "  angel_postback_token: NOT configured - postbacks will return 401, polling fallback active" -ForegroundColor Yellow
+        Write-Host "  To configure: Set-Secret -Name ANGEL_POSTBACK_TOKEN -Secret '<your-token>'" -ForegroundColor Cyan
+    }
+
     # Export the directory path so docker-compose can resolve ${PHX_SECRET_DIR}
     $env:PHX_SECRET_DIR = $secretDir
     Write-Host ""
     Write-Host "Docker secret files written to: $secretDir"
-    Write-Host "  (admin_api_key, demo_auth_token_secret, control_plane_pg_password)"
+    Write-Host "  (admin_api_key, demo_auth_token_secret, control_plane_pg_password, angel_postback_token)"
     Write-Host "  These files are read by Docker Compose secrets - not baked into container env."
 
     Write-Host ""
