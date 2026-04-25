@@ -89,6 +89,19 @@ If any backend is ever switched to Firestore:
 4. Monitor Firestore quota via GCP Console → Firestore → Usage
 5. Fallback on Firestore outage: switch `CONTROL_PLANE_BACKEND=postgres` and redeploy
 
+### PnL state store backends
+
+The PnL state store (`app/pnl/state_store.py`) supports four backends selected by the `PNL_STATE_BACKEND` environment variable:
+
+| Backend | Env value | LIVE status |
+|---|---|---|
+| `PostgresPnLStateStore` | `postgres` | **Required for authoritative LIVE use** |
+| `FirestorePnLStateStore` | `firestore` | Available but not active in current LIVE stack; requires GCP ADC credentials |
+| `RedisPnLStateStore` | `redis` or `cache` | Available for low-latency caching; requires `PNL_STATE_REDIS_URL`; not authoritative in LIVE |
+| `InMemoryPnLStateStore` | anything else / unset | Dev/test only; forbidden in LIVE for authoritative use |
+
+Only `PostgresPnLStateStore` satisfies the LIVE durable-store requirement (§2 storage policy). Redis may be used as a read-through cache layer but must not be the sole authoritative PnL store in LIVE. Firestore is treated identically to the routing-table Firestore rules above.
+
 ### Storage policy
 - **Authoritative stores** decide live behavior.
 - **Observed stores** provide reconciliation evidence.
@@ -127,6 +140,9 @@ Allowed states:
 - `TIMEOUT`
 - `UNKNOWN`
 - `RECONCILING`
+- `RECOVERY_PENDING`
+
+`RECOVERY_PENDING` is set during startup reconciliation for orders restored from durable state before broker evidence is evaluated. Orders in this state may transition to any active or terminal state once reconciliation completes. They do not accept new lifecycle mutations until reconciliation resolves them.
 
 Terminal states:
 - `FILLED`
@@ -152,6 +168,9 @@ Allowed internal position states:
 - `RECONCILING`
 - `DEGRADED`
 - `MANUAL_REVIEW`
+- `RECOVERY_PENDING`
+
+`RECOVERY_PENDING` is set during startup when persisted positions are restored from durable state before broker reconciliation completes. Positions in this state are not considered live and block new entries until reconciliation resolves them to an active state (`OPEN`, `ADOPTED`), a terminal state (`FLAT`), or an ambiguous state (`RECONCILING`, `DEGRADED`, `NONE`).
 
 Required fields:
 - `position_id`
@@ -308,7 +327,7 @@ flowchart TD
     end
 
     subgraph HubRuntime Init
-        HUB_INIT[Create hub runtime] --> CREATE_ENGINES[CapitalEngine + PnLEngine + RiskEngine + ProfitEngine]
+        HUB_INIT[Create hub runtime] --> CREATE_ENGINES[CapitalEngine + PnLEngine + RiskEngine + ProfitEngine pre-trade + SweepProfitEngine exit]
         CREATE_ENGINES --> CREATE_STATE[Create StateStore + PositionOwnershipStore + Outbox]
         CREATE_STATE --> CREATE_HUB[Create Hub + RoutingTable]
         CREATE_HUB --> CREATE_LIFECYCLE[Create OrderLifecycleService]
@@ -704,6 +723,9 @@ At startup, the system must reconcile in this exact sequence:
 `DEGRADED` blocks new entries for the affected strategy/account/contract and allows only safe exits or manual review actions.
 
 ### 11.5 Orphan and ambiguous-state workflow
+
+The `ReconciliationTimeoutWatcher` (`app/core/reconciliation_timeout_watcher.py`) runs as a background thread and enforces these rules automatically. It monitors all scopes that enter `RECONCILING` state, escalates to `ORPHAN_REVIEW` when the configurable threshold is exceeded, freezes fresh entries for the affected `OwnershipKey`, and emits structured alerts until convergence.
+
 - Any contract stuck in `RECONCILING` beyond threshold must alert operators and enter a review queue.
 - `ORPHAN_REVIEW` requires an explicit operator decision: adopt, flatten, suppress, or continue observing.
 - Adopting broker-held positions must record provenance, original broker evidence, and the actor or automated rule that approved adoption.
@@ -826,6 +848,9 @@ Single-poll auto-register of ghost positions or single-poll auto-remove of stale
 Position sync is not a replacement for the live market-data plane. It refreshes broker inventory and order evidence, but it does not by itself provide fresh ticks, bars, indicators, or non-stale open mark-to-market.
 
 ### 13.1 Degraded-entry criteria
+
+The `DegradedScopeManager` (`app/core/degraded_scope_manager.py`) is the single component responsible for tracking which scopes are in `DEGRADED` state and enforcing entry/exit/recovery criteria described in §13.1–13.3. All components that need to check or update degraded status must go through this manager rather than tracking state independently.
+
 Phoenix must place an affected strategy/account/contract scope into `DEGRADED` when any of the following occur:
 - ATM remap fails or remains ambiguous for an active or recently active `OwnershipKey`
 - Internal position state and broker evidence diverge beyond reconciliation threshold
@@ -942,6 +967,21 @@ The following endpoints require authentication, role-based authorization, and au
 - Demo auth routes, local test users, and developer shortcuts must be disabled in LIVE.
 - Break-glass and manual exit routes require elevated role checks, reason codes, and audit trails.
 - Control-plane secrets must come from Secret Manager or Postgres; repo/env-file fallback is forbidden in LIVE.
+
+### 15.4 Step-up authorization
+
+Dangerous privileged actions require a step-up token (`app/security/step_up.py`) in addition to normal RBAC:
+
+**Covered action classes** (from `DangerousActionClass` enum):
+- `KILL_SWITCH_CLEAR` / `KILL_SWITCH_REARM`
+- `STRATEGY_ENABLE` / `STRATEGY_DISABLE`
+- `CAPITAL_LIMIT_CHANGE`
+- `BREAK_GLASS`
+- `RUNTIME_CONFIG_OVERRIDE`
+
+Step-up tokens are short-lived (5-minute TTL), single-use, and bound to a specific action class. They are issued by re-authentication and stored in-memory with optional Postgres persistence. Alternatively, a **maker-checker** approval record (`ApprovalWorkflow`, §22.3) signed by a second admin may substitute for a step-up token.
+
+The `Entitlements` module (`app/security/entitlements.py`) gates fine-grained action permissions by role, tenant, and account scope, independent of the coarse RBAC layer in §15.
 
 ---
 
@@ -1199,6 +1239,8 @@ These components may co-reside initially, but their contracts must be explicit a
 
 All authoritative mutations for the same `OwnershipKey` must be serialized through a single scope-level executor, mailbox, transactional lock, or equivalent single-writer mechanism.
 
+This is implemented by `ScopeSerializer` (`app/orders/scope_serializer.py`), which provides per-`OwnershipKey` async executors. All components that need to mutate authoritative state for a scope must submit through `ScopeSerializer` rather than mutating directly.
+
 Required rule:
 - Strategy evaluation, lifecycle polling, reconciliation, ATM refresh recovery, position sync, and control-plane actions may propose mutations, but only the serialized scope mutator may commit them.
 
@@ -1212,6 +1254,8 @@ Minimum conflict policy (highest priority first):
 No component may directly mutate authoritative state for a scope while another authoritative mutation for the same scope is in flight outside this serialization boundary.
 
 ### 19.3 Authoritative-state anti-patterns (forbidden)
+
+`AntiPatternGuards` (`app/core/anti_pattern_guards.py`) and `P0OperationalGuards` (`app/core/p0_operational_guards.py`) provide runtime assertions that detect and log violations of these rules in production. They do not replace architecture enforcement but provide a second line of defense.
 
 The following are forbidden in production unless a narrowly scoped emergency flag and audit policy explicitly say otherwise:
 - Direct create/delete of authoritative positions from one broker poll
@@ -1278,3 +1322,171 @@ The following are forbidden in production unless a narrowly scoped emergency fla
 1. Further decompose the monolithic stream runtime into clearer components.
 2. Reduce shared mutable state between stream, hub, and broker-sync paths.
 3. Isolate strategy evaluation from broker reconciliation and lifecycle polling.
+
+---
+
+## 22. Adaptive Strategy Subsystem
+
+`app/strategies/adaptive/` implements the regime-driven strategy selection layer referenced in §7–8 diagrams.
+
+### 22.1 Regime Classification
+
+`RegimeClassifier` (`adaptive/regime.py`) evaluates a `MarketContext` snapshot on each bar close and classifies market conditions into one of five regimes:
+
+| Regime | Meaning |
+|---|---|
+| `TRENDING` | Strong directional trend (high ADX, DI spread) |
+| `NORMAL` | Moderate conditions, strategies may run normally |
+| `CHOPPY` | Low ADX, tight DI spread; mean-reversion conditions |
+| `HIGH_VOL` | ATR norm spike; position sizing constrained |
+| `NO_TRADE` | Conditions too adverse; entries blocked |
+
+Classification uses ADX, DI spread, ATR norm, EMA slope, and a configurable hold-bars hysteresis to prevent rapid regime flipping.
+
+### 22.2 Strategy Selection
+
+`StrategySelector` (`adaptive/strategy_selector.py`) maps the current `Regime` to an ordered list of candidate strategies from the routing table. It:
+- Reads `AUTO_STRATEGY_SELECT_ENABLED` to determine whether selection is automatic or operator-controlled.
+- Evicts prior-day selection state at IST midnight on the first `on_bar` call (the selector staleness guard from §5.3).
+- Filters out strategies absent from the routing table before returning candidates.
+
+### 22.3 Dynamic Policy Engine
+
+`DynamicPolicy` (`adaptive/dynamic_policy.py`) adjusts per-strategy parameters (position size multipliers, SL/TP offsets, cooldowns) at runtime based on the current regime and recent performance context. Policy updates are applied without restart and are recorded for audit.
+
+### 22.4 Market Context
+
+`MarketContext` (`adaptive/market_context.py`) aggregates the indicator snapshot used by both `RegimeClassifier` and `DynamicPolicy`. It is updated on every bar close by the stream worker.
+
+---
+
+## 23. Autonomy Envelope (PHX-STRAT-005)
+
+`AutonomyEnvelope` and `AutonomyEnvelopeRegistry` (`app/strategies/autonomy_envelope.py`) provide per-strategy hard-stop guardrails that are independent of the hub risk pipeline.
+
+Each strategy is assigned an envelope with the following limits:
+
+| Limit | Parameter | Enforcement |
+|---|---|---|
+| Max deployed capital | `max_capital_deployed` | Checked before every entry intent |
+| Max daily turnover | `max_daily_turnover` | Cumulative notional per IST day |
+| Trading time window | `allowed_time_start` / `allowed_time_end` | IST time bounds |
+| Symbol allowlist | `allowed_symbols` | Per-tick symbol validation |
+| Max drawdown | `max_drawdown_pct` | Fraction of capital; triggers auto-disable |
+
+When **any** envelope limit is breached:
+1. `EnvelopeBreach` exception is raised and caught by the caller.
+2. The strategy is automatically disabled via the strategy switch.
+3. A kill-switch trip is emitted for the strategy scope.
+4. An audit event is written.
+
+The registry (`AutonomyEnvelopeRegistry`) holds one envelope per strategy ID and is queried before order submission. Envelope state is not a substitute for hub risk checks — both layers must pass.
+
+---
+
+## 24. Decision Lineage (PHX-AUD-002)
+
+`DecisionLineage` (`app/core/decision_lineage.py`) creates a per-order audit trail that traces every order back to the full decision context at the moment of submission.
+
+### What is recorded
+
+Each `DecisionLineage` record links an `order_intent_id` to:
+- `strategy_id` and `strategy_version`
+- Signal values that triggered the decision (entry/exit indicators, regime)
+- Active `Regime` at decision time
+- Risk check results (`RiskCheckResult` list) — each check: name, passed/failed, value, limit
+- Execution outcome (terminal lifecycle state, fill price, slippage)
+
+### Storage
+
+Records are written to:
+1. The structured audit log immediately on creation.
+2. The `trade_decision_lineage` Postgres table for dashboard queries and compliance review.
+
+An in-memory LRU cache (`_LINEAGE_CACHE`, max 2000 entries) allows fast API reads without a DB round-trip.
+
+### Usage rule
+
+Every order created via the hub router must have a corresponding `DecisionLineage` record. Lineage is created in the `CREATED` state and updated at terminal state. Orders without lineage records are a compliance gap.
+
+---
+
+## 25. Approval Workflow (PHX-AUD-003)
+
+`ApprovalWorkflow` (`app/core/approval_workflow.py`) enforces maker-checker controls for production configuration and strategy changes.
+
+### Change kinds requiring approval
+
+| `ChangeKind` | Examples |
+|---|---|
+| `STRATEGY_CONFIG` | strategy parameter updates |
+| `CAPITAL_LIMIT` | per-account or per-strategy capital cap changes |
+| `RISK_POLICY` | SL/TP policy, daily-loss threshold changes |
+| `FEATURE_FLAG` | runtime feature flag overrides |
+| `STRATEGY_ENABLE` / `STRATEGY_DISABLE` | toggling a strategy in LIVE |
+| `GENERAL_CONFIG` | other runtime config changes |
+
+### Approval states
+
+`PENDING → APPROVED | REJECTED | SUPERSEDED | WITHDRAWN`
+
+Rules:
+- The approver must be a different identity from the requester.
+- On `APPROVED`, the change is applied and the full before/after diff is stored.
+- Rollback to the prior approved version is supported.
+- All decisions are emitted as audit events.
+- Open `PENDING` requests for the same change target supersede each other on new submission.
+
+---
+
+## 26. Rollout Ladder (PHX-SIM-005)
+
+`RolloutLadder` (`app/simulation/rollout_ladder.py`) governs the staged promotion of strategies from simulation to full live deployment.
+
+### Rollout states
+
+`DISABLED → PAPER → SHADOW → MICRO_LIVE → CAPPED_LIVE → SCALED_LIVE`
+
+| State | Capital fraction | Description |
+|---|---|---|
+| `DISABLED` | 0% | Strategy not running |
+| `PAPER` | 0% | Simulated fills against real prices |
+| `SHADOW` | 0% | Full order generation but broker orders not submitted |
+| `MICRO_LIVE` | 5% | Live broker orders at reduced capital |
+| `CAPPED_LIVE` | 25% | Live with a capital ceiling |
+| `SCALED_LIVE` | 100% | Full live deployment |
+
+### Promotion rules
+
+Promotion to the next state requires:
+1. **Quantitative criteria** (`PromotionCriteria`): minimum days in current state, minimum trade count, maximum drawdown, minimum Sharpe, minimum fill rate.
+2. **Operator approval** (maker-checker via `ApprovalWorkflow`, §25) — always required for any live state.
+3. A durable audit record of the promotion decision.
+
+### Demotion
+
+Any state may be demoted to `DISABLED` at any time. Live states (`MICRO_LIVE`, `CAPPED_LIVE`, `SCALED_LIVE`) auto-demote to `DISABLED` on an `AutonomyEnvelope` breach (§23).
+
+---
+
+## 27. Execution Quality Tracking (PHX-EXEC-004)
+
+`SlippageTracker` (`app/orders/slippage_tracker.py`) measures per-order execution quality and persists the data for operational review.
+
+### Metrics captured per order
+
+| Metric | Definition |
+|---|---|
+| Arrival price | Mid-price at the moment of order submission |
+| Fill price | Actual average fill price |
+| Implementation shortfall | `(fill_price − arrival_price) / arrival_price × 10000` bps |
+| Fill ratio | `fill_qty / intended_qty` |
+| Time-to-fill | Seconds from submission to terminal fill event |
+
+### Storage
+
+`SlippageRecord` objects are stored in a bounded in-memory ring (max 5000 records) and exported to Prometheus for dashboarding. Records are also persisted to Postgres for dashboard queries.
+
+### Usage rule
+
+`SlippageTracker` is updated by the hub lifecycle service on every terminal fill. High implementation shortfall or low fill ratio trends for a strategy are signals for position sizing or routing review.

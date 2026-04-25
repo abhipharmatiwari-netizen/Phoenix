@@ -386,6 +386,8 @@ class AppRuntime:
         self._hub_started = False
         self._ready = False  # Readiness latch: set only after full startup
         self._position_authority_restored = False  # True after load_position_records succeeds
+        self._position_records_loaded = 0  # Count of non-terminal position records restored
+        self._startup_ownership_gap_detected = False  # True if positions loaded but 0 ownership records
         self._bq_async_writer_started = False
         self._schema_status: dict[str, object] = {
             "status": "unknown",
@@ -544,13 +546,26 @@ class AppRuntime:
             ).strip().lower()
             _ssl_check_ok = _pg_sslmode in ("require", "verify-ca", "verify-full")
             _ssl_skip = _os.getenv("LIVE_PG_SSL_SKIP_CHECK", "").strip().lower() in ("1", "true", "yes")
+            # §105: Detect cloud deployment via K_SERVICE (set by Cloud Run).
+            # LIVE_PG_SSL_SKIP_CHECK=true is NEVER acceptable in cloud deployments —
+            # hard-abort in that case regardless of sslmode.  For local Docker Desktop
+            # (no K_SERVICE), the skip remains a warning-only exception.
+            _is_cloud = bool(_os.getenv("K_SERVICE", "").strip())
             if not _ssl_check_ok:
-                if _ssl_skip:
+                if _ssl_skip and _is_cloud:
+                    raise RuntimeError(
+                        "startup.ssl_error: LIVE_PG_SSL_SKIP_CHECK=true is forbidden in "
+                        "cloud deployments (K_SERVICE is set). "
+                        f"CONTROL_PLANE_PG_SSLMODE={_pg_sslmode!r} does not enforce encrypted "
+                        "Postgres transport. Set CONTROL_PLANE_PG_SSLMODE=require and remove "
+                        "LIVE_PG_SSL_SKIP_CHECK from the Cloud Run environment."
+                    )
+                elif _ssl_skip:
                     logger.warning(
                         "startup.ssl_warning: LIVE_PG_SSL_SKIP_CHECK=true — "
                         "CONTROL_PLANE_PG_SSLMODE=%r does not enforce encrypted Postgres transport. "
-                        "Acceptable only when Postgres is on the local host (e.g. local dev). "
-                        "Never set this in a remote/cloud deployment.",
+                        "Acceptable ONLY when Postgres is on the local host (e.g. Docker Desktop). "
+                        "Never set this in a remote or cloud deployment.",
                         _pg_sslmode,
                     )
                 else:
@@ -735,6 +750,7 @@ class AppRuntime:
                     _pos_dsn = get_control_plane_dsn()
                     with connect_with_retry(_pos_dsn, autocommit=True) as _pos_conn:
                         _loaded = order_lifecycle.load_position_records(_pos_conn)
+                    self._position_records_loaded = _loaded
                     self._position_authority_restored = _loaded > 0
                     logger.info(
                         "startup.position_records_loaded: restored %d authoritative "
@@ -1078,14 +1094,18 @@ class AppRuntime:
         return dict(self._operating_mode_status)
 
     def startup_recovery_status(self) -> dict[str, object]:
+        summary = dict(
+            self._startup_recovery_status.get("summary")
+            if isinstance(self._startup_recovery_status.get("summary"), dict)
+            else {}
+        )
+        # Inject position-restore counters so readyz and release evidence can gate on them.
+        summary["position_records_loaded"] = self._position_records_loaded
+        summary["startup_ownership_gap_detected"] = self._startup_ownership_gap_detected
         return {
             "status": self._startup_recovery_status.get("status"),
             "reason": self._startup_recovery_status.get("reason"),
-            "summary": dict(
-                self._startup_recovery_status.get("summary")
-                if isinstance(self._startup_recovery_status.get("summary"), dict)
-                else {}
-            ),
+            "summary": summary,
         }
 
     def release_evidence_snapshot(self) -> dict[str, Any]:
@@ -1260,10 +1280,30 @@ class AppRuntime:
                         "Failed to mark position ownership RECOVERY_PENDING: %s", exc
                     )
 
+        # §107: Detect ownership gap — non-terminal position records with no
+        # corresponding ownership records.  This means positions exist in the
+        # authoritative store but the ownership layer has nothing to fence.
+        # EOD exit and hub router exit rely on ownership records; missing ones
+        # mean those positions cannot be safely managed.
+        if self._position_records_loaded > 0 and ownership_marked == 0:
+            self._startup_ownership_gap_detected = True
+            logger.error(
+                "startup.ownership_gap_detected: %d non-terminal position record(s) "
+                "restored from Postgres but 0 ownership records were marked "
+                "RECOVERY_PENDING.  These positions are untracked by the ownership "
+                "layer (EOD exits, hub router exits, and ATM remap may not cover them). "
+                "Investigate internal_position_records table before accepting orders.",
+                self._position_records_loaded,
+            )
+        else:
+            self._startup_ownership_gap_detected = False
+
         logger.info(
-            "startup.recovery_pending_marked: lifecycle_contexts=%d ownership_records=%d",
+            "startup.recovery_pending_marked: lifecycle_contexts=%d ownership_records=%d"
+            " ownership_gap_detected=%s",
             lifecycle_marked,
             ownership_marked,
+            self._startup_ownership_gap_detected,
         )
 
     def _apply_startup_recovery_result(

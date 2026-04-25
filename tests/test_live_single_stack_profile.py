@@ -41,6 +41,19 @@ def test_live_compose_enables_postgres_leader_lease_single_stack_guard():
     assert match.group(1).strip() == "phoenix-live-single-stack"
 
 
+def test_live_compose_sslmode_default_is_require():
+    """§105: compose default for CONTROL_PLANE_PG_SSLMODE must be 'require', not 'prefer'."""
+    text = _read_text(LIVE_COMPOSE_PATH)
+    # Both the x-pg-env and x-db-client-env blocks must default to require.
+    assert ":-prefer}" not in text, (
+        "Found ':-prefer}' in compose — CONTROL_PLANE_PG_SSLMODE or PGSSLMODE defaults "
+        "to 'prefer'. Change the default to 'require' (issue #105)."
+    )
+    assert ":-require}" in text, (
+        "Expected ':-require}' for CONTROL_PLANE_PG_SSLMODE default in compose (issue #105)."
+    )
+
+
 def test_live_deployment_probes_use_readyz():
     compose_text = _read_text(LIVE_COMPOSE_PATH)
     dockerfile_text = _read_text(DOCKERFILE_PATH)

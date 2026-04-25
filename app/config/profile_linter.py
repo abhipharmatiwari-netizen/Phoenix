@@ -144,6 +144,16 @@ def _build_lint_settings(env: dict[str, str]) -> SimpleNamespace:
             env.get("DASHBOARD_AUTH_DISABLED"),
             default=False,
         ),
+        # §105 / §112 lint coverage
+        capital_limits_json=str(env.get("CAPITAL_LIMITS_JSON", "") or ""),
+        allow_live_capital_limits_default_only=_parse_bool(
+            env.get("ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY"),
+            default=False,
+        ),
+        allow_live_capital_checks_disabled=_parse_bool(
+            env.get("ALLOW_LIVE_CAPITAL_CHECKS_DISABLED"),
+            default=False,
+        ),
     )
 
 

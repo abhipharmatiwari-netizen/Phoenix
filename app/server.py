@@ -1187,28 +1187,48 @@ async def readyz() -> JSONResponse:
             return JSONResponse(status_code=503, content=payload)
 
     if _readiness_trade_mode() == "LIVE":
-        # §57 — Gate readiness on restored authoritative position state.
-        # If outbox recovery rehydrated records (prior positions existed) but the
-        # position-records load was NOT attempted or returned 0, report degraded.
+        # §57 / #108 — Gate readiness on restored authoritative position state.
+        # Block when ANY of the following is true:
+        #   (a) position_records_loaded > 0 but _position_authority_restored is False
+        #       (load failed or returned 0 after records existed in DB)
+        #   (b) _startup_ownership_gap_detected is True — positions loaded but no
+        #       corresponding ownership records exist (#107)
+        # The previous condition "unresolved_active > 0 and not pos_authority" was
+        # too narrow: it silently passed when the outbox was clean (0 unresolved)
+        # even if non-terminal position records had no ownership coverage.
         try:
             pos_authority = getattr(runtime, "_position_authority_restored", None)
+            ownership_gap = bool(getattr(runtime, "_startup_ownership_gap_detected", False))
             payload["position_authority_restored"] = bool(pos_authority)
-            recovery_summary = {}
+            payload["startup_ownership_gap_detected"] = ownership_gap
+            recovery_summary: dict = {}
             if callable(getattr(runtime, "startup_recovery_status", None)):
                 rs = runtime.startup_recovery_status()
                 recovery_summary = rs.get("summary") or {}
-            rehydrated = int((recovery_summary or {}).get("rehydrated", 0))
-            unresolved_active = int((recovery_summary or {}).get("unresolved_active", 0))
-            if unresolved_active > 0 and not pos_authority:
+            position_records_loaded = int((recovery_summary or {}).get("position_records_loaded", 0))
+            payload["position_records_loaded"] = position_records_loaded
+
+            if position_records_loaded > 0 and not pos_authority:
                 payload["ready"] = False
                 payload["reason"] = "position_authority_not_restored"
                 payload["position_authority_detail"] = (
-                    f"Outbox recovery found {unresolved_active} unresolved active record(s) but "
-                    f"internal_position_records were not loaded from Postgres. "
-                    f"Ensure migration 009 has been applied and the "
-                    f"startup.position_records_loaded log shows restored > 0."
+                    f"{position_records_loaded} non-terminal position record(s) were loaded "
+                    f"from Postgres but _position_authority_restored is False. "
+                    f"Check startup.position_records_loaded log and migration 009."
                 )
                 return JSONResponse(status_code=503, content=payload)
+
+            if ownership_gap:
+                payload["ready"] = False
+                payload["reason"] = "startup_ownership_gap_detected"
+                payload["position_authority_detail"] = (
+                    f"{position_records_loaded} non-terminal position record(s) exist in Postgres "
+                    f"but 0 ownership records were marked RECOVERY_PENDING. "
+                    f"These positions are untracked by the ownership layer. "
+                    f"Investigate internal_position_records and resolve before accepting orders."
+                )
+                return JSONResponse(status_code=503, content=payload)
+
         except Exception as _pos_exc:
             logger.warning("readyz: position authority check failed: %s", _pos_exc)
 
@@ -1240,6 +1260,34 @@ async def readyz() -> JSONResponse:
             pass
         except Exception as exc:
             logger.warning("readyz: balance schema check failed: %s", exc)
+
+        # §106: Gate readiness on at least one successful balance fetch per runner.
+        # Capital engine starts with empty state when RMS is down; fail-closed on
+        # missing state means all entries are blocked. Surface this explicitly rather
+        # than reporting false-green readiness.
+        try:
+            hub = getattr(runtime, "hub", None)
+            if hub is not None:
+                _all_runners = list(getattr(hub, "_account_runners", {}).values())
+                runners_never_synced = [
+                    r.broker_account_id
+                    for r in _all_runners
+                    if not getattr(r, "has_ever_synced_balance", True)
+                ]
+                payload["balance_sync_ready"] = len(runners_never_synced) == 0
+                payload["balance_sync_pending_runners"] = runners_never_synced
+                if runners_never_synced:
+                    payload["ready"] = False
+                    payload["reason"] = "balance_sync_not_ready"
+                    payload["balance_sync_detail"] = (
+                        f"Runner(s) {runners_never_synced} have never completed a "
+                        "successful balance fetch since startup. Capital engine has "
+                        "empty state; entries would be blocked by fail-closed policy. "
+                        "Wait for broker RMS to recover. See AB1004 runbook."
+                    )
+                    return JSONResponse(status_code=503, content=payload)
+        except Exception as exc:
+            logger.warning("readyz: balance sync ready check failed: %s", exc)
 
     # §85/§92: Surface degraded scope count and block readiness in LIVE when
     # active DEGRADED/RECONCILING/ORPHAN scopes require operator attention.

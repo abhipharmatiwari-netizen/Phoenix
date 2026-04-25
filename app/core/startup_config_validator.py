@@ -407,6 +407,24 @@ def validate_runtime_startup_settings(
             )
 
     trade_mode = str(env.get("TRADE_MODE", "PAPER") or "PAPER").strip().upper()
+
+    # §112: Fail hard if LIVE mode is active with a dev/local APP_ENV.
+    # app/dashboard/auth.py disables all auth when APP_ENV is local/dev/test.
+    # That bypass is intentional for development but catastrophic in LIVE.
+    # Only check when APP_ENV is EXPLICITLY set (not when it defaults to "local"
+    # due to absence — that is the test-harness default and not a mis-deployment).
+    _explicit_app_env = (
+        str(getattr(runtime_cfg, "app_env", None) or "").strip().lower()
+        or str(env.get("APP_ENV") or env.get("ENV") or "").strip().lower()
+    )
+    if trade_mode == "LIVE" and _explicit_app_env and _explicit_app_env in _LOCAL_APP_ENVS:
+        raise ValueError(
+            f"LIVE startup rejected: APP_ENV={_explicit_app_env!r} disables authentication "
+            f"(app/dashboard/auth.py). All admin and dashboard routes become "
+            f"unauthenticated in local/dev/test APP_ENV. "
+            f"Set APP_ENV=production for LIVE deployments."
+        )
+
     require_live = str(env.get("REQUIRE_LIVE_TRADE_MODE", "") or "").strip().lower()
     if require_live in {"1", "true", "yes", "on"} and trade_mode != "LIVE":
         errors.append(

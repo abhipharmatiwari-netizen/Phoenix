@@ -1,6 +1,10 @@
 # Runtime secrets — never commit
 .backend-live.env.runtime
 
+# Local diagnostic scripts (container-only, not for commit) — §109
+phx_audit.py
+phx_audit_*.py
+
 # Logs (production) and runtime state
 logs/
 state/

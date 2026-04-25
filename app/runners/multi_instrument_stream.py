@@ -1647,14 +1647,14 @@ def _filter_universe_by_instrument_control(
         for label, meta in instrument_meta.items()
         if instrument_controller.is_enabled(_underlying_label_for_label(label))
     }
-    logger.info("🔍 [STREAM] Allowed labels: %d of %d", len(allowed_labels), len(instrument_meta))
+    logger.info("[STREAM:filter] Allowed labels: %d of %d", len(allowed_labels), len(instrument_meta))
     logger.debug("   Allowed: %s", sorted(allowed_labels))
 
     instruments = [ins for ins in instruments if ins.get("label") in allowed_labels]
     instrument_meta = {k: v for k, v in instrument_meta.items() if k in allowed_labels}
     token_labels = {tok: lbl for tok, lbl in token_labels.items() if lbl in allowed_labels}
     logger.info(
-        "📝 [STREAM] After filtering: %d tokens, %d instruments",
+        "[STREAM:post-filter] After filtering: %d tokens, %d instruments",
         len(token_labels),
         len(instruments),
     )
@@ -1676,7 +1676,7 @@ def _filter_universe_by_instrument_control(
     # Remove empty exchanges (those with no tokens after filtering)
     token_list = [entry for entry in token_list if entry.get("tokens")]
 
-    logger.info("📡 [STREAM] Final token_list: %d exchanges", len(token_list))
+    logger.info("[STREAM:tokens] Final token_list: %d exchanges", len(token_list))
     for entry in token_list:
         logger.info(
             "   Exchange %s: %d tokens",
@@ -1963,7 +1963,7 @@ def stream_multi_instruments(
         jwt_token=jwt_token,
         api_key=api_key,
     )
-    logger.info(f"📊 [STREAM] Universe built: {len(instruments)} instruments, {len(token_list)} exchanges")
+    logger.info("[STREAM] Universe built: %d instruments, %d exchanges", len(instruments), len(token_list))
     for entry in token_list:
         logger.info(f"   Exchange {entry.get('exchangeType')}: {len(entry.get('tokens', []))} tokens")
     
@@ -2000,13 +2000,13 @@ def stream_multi_instruments(
         instrument_controller=instrument_controller,
         underlying_label_for_label=_underlying_label_for_label,
     )
-    logger.info(f"🔍 [STREAM] Allowed labels: {len(allowed_labels)} of {total_universe_labels}")
+    logger.info("[STREAM:filter] Allowed labels: %d of %d", len(allowed_labels), total_universe_labels)
     # logger.debug(f"   Allowed: {sorted(allowed_labels)}")
     
-    logger.info(f"📝 [STREAM] After filtering: {len(token_labels)} tokens, {len(instruments)} instruments")
+    logger.info("[STREAM:post-filter] After filtering: %d tokens, %d instruments", len(token_labels), len(instruments))
     
     
-    logger.info(f"📡 [STREAM] Final token_list: {len(token_list)} exchanges")
+    logger.info("[STREAM:tokens] Final token_list: %d exchanges", len(token_list))
     for entry in token_list:
         logger.info(f"   Exchange {entry.get('exchangeType')}: {len(entry.get('tokens', []))} tokens")
     
@@ -4185,7 +4185,7 @@ def stream_multi_instruments(
                     f"Route error on_data for {label}: {msg}"
                 )
             else:
-                logger.exception("❌ [ERROR] on_data processing failed for %s: %s", label, exc)
+                logger.exception("[ERROR] on_data processing failed for %s: %s", label, exc)
 
     def on_data(wsapp, message: dict):
         try:
@@ -4224,7 +4224,7 @@ def stream_multi_instruments(
     def on_close(wsapp):
         logger.info("WebSocket closed")
 
-    logger.info(f"🚀 [WEBSOCKET] Initializing runner with token_list...")
+    logger.info("[WEBSOCKET] Initializing runner with token_list...")
     total_tokens = sum(len(entry.get("tokens", [])) for entry in token_list)
     logger.info(f"   Exchanges: {len(token_list)}, Total tokens: {total_tokens}")
     for entry in token_list:

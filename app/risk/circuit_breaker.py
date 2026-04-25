@@ -133,8 +133,21 @@ class TradingCircuitBreaker:
             try:
                 resolved_state_store = build_circuit_breaker_state_store()
             except Exception as exc:
+                import os as _os
+                _trade_mode = str(
+                    _os.getenv("TRADE_MODE", "PAPER") or "PAPER"
+                ).strip().upper()
+                if _trade_mode == "LIVE":
+                    # §111: In LIVE, circuit breaker state must be durable.
+                    # An in-memory-only CB resets on every restart, allowing an
+                    # order burst after repeated broker failures on reconnect.
+                    raise RuntimeError(
+                        "circuit_breaker: Postgres state store initialization failed in "
+                        f"LIVE mode — cannot proceed without durable circuit breaker state: {exc}"
+                    ) from exc
                 logger.warning(
-                    "circuit_breaker_state_store_init_failed error=%s",
+                    "circuit_breaker_state_store_init_failed error=%s "
+                    "(non-fatal in PAPER/SHADOW — running in-memory)",
                     exc,
                 )
                 resolved_state_store = None

@@ -81,7 +81,17 @@ The bundled example command sets these explicitly if you do not override them:
 - `CONTROL_PLANE_PG_PORT=5432`
 - `CONTROL_PLANE_PG_DB=phoenix`
 - `CONTROL_PLANE_PG_USER=phoenix_app`
-- `CONTROL_PLANE_PG_SSLMODE=prefer`
+- `CONTROL_PLANE_PG_SSLMODE=require`
+
+  > **SSL exception for local Docker Desktop only**: If your Postgres instance on
+  > `host.docker.internal` does not have SSL configured (the default for a bare
+  > local install), you may set `LIVE_PG_SSL_SKIP_CHECK=true` in your PowerShell
+  > session **before** running the start script. This bypasses the SSL enforcement
+  > check and emits a WARNING at startup. This exception is valid **only** when
+  > Postgres is on the local machine with no external network exposure. Never set
+  > this for Cloud Run, a remote Postgres instance, or any deployment reachable
+  > over a network. Cloud deployments will hard-abort if `LIVE_PG_SSL_SKIP_CHECK=true`
+  > is detected (K_SERVICE is set). §105
 - `CAPITAL_LIMITS_JSON={"tenant-1:A1": {"max_notional_per_order": 500000, "max_gross_exposure": 1000000}}`
 - `HUB_DEFAULT_TENANT_ID=tenant-1`
 - `HUB_DEFAULT_BROKER_ACCOUNT_ID=A1`
@@ -294,6 +304,53 @@ docker compose -f .\docker-compose.live.single.yml up -d --build --force-recreat
 ```powershell
 docker compose -f .\docker-compose.live.single.yml down --remove-orphans
 ```
+
+---
+
+## Broker API unavailability at startup (AB1004 / balance sync failure) — §106 §116
+
+If the Angel One RMS (Risk Management System) endpoint is unavailable when the container
+starts, the `AccountRunner` balance sync will fail with errors like:
+
+```
+WARNING app.brokers.angel_client: event_type=BALANCE_FETCH_DEFERRED
+  broker_account_id=A1 | Balance fetch failed; kind=FetchFailureKind.OTHER
+  err=getRMS failed: {'message': 'Something Went Wrong, Please Try After Sometime',
+  'errorcode': 'AB1004', ...}
+```
+
+### What this means
+
+- The capital engine has **empty balance state** — it does not know available margin.
+- `CAPITAL_FAIL_CLOSED_ON_MISSING_STATE=true` blocks all new entries until balance
+  state is populated. The system starts but **cannot accept entry orders**.
+- After 3 consecutive failures (configurable via `BALANCE_SYNC_ALERT_THRESHOLD`),
+  the runner escalates to ERROR and emits a `balance_sync.persistent_failure` audit
+  event. The first event is the signal to investigate.
+- `/readyz` returns **503** with `"reason": "balance_sync_not_ready"` until at least
+  one successful balance fetch completes.
+
+### Recovery steps
+
+1. **Check `/readyz`**: look for `"balance_sync_ready": false` and
+   `"balance_sync_pending_runners"` to identify affected accounts.
+2. **Check Angel One status**: AB1004 often means the RMS API is temporarily down or
+   in a maintenance window (typical during 06:00–07:00 IST and 15:30–16:00 IST).
+3. **Wait and retry**: the runner retries on its normal poll interval (default 15 s).
+   Most AB1004 failures resolve within 2–5 minutes. Do not restart the container
+   unless the failure persists beyond 10 minutes with no recovery.
+4. **Look for recovery**: after a successful fetch, the log shows
+   `balance_sync.first_success broker_account_id=A1` and `/readyz` returns 200 for
+   the balance gate.
+5. **If persistent (> 10 min)**: verify Angel One credentials in Postgres
+   (`broker_credentials` table) and confirm the session token has not expired.
+   Re-run `start-docker-secretstore.ps1` to refresh credentials if needed.
+
+### When to abort
+
+If balance sync does not recover within 30 minutes and the market is open:
+- Activate the kill switch (global scope) to prevent any accidental entries.
+- Bring the container down and investigate broker account status.
 
 ---
 

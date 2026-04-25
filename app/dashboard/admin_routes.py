@@ -104,7 +104,12 @@ class ManualEodExitRequest(BaseModel):
 
 
 class BreakGlassFlattenRequest(BaseModel):
-    """Payload for break-glass manual flatten (Architecture S1 rule 3-4)."""
+    """Payload for break-glass manual flatten (Architecture S1 rule 3-4).
+
+    step_up_token is required in LIVE mode (ARCHITECTURE §15.4 / issue #113).
+    Obtain it first via POST /admin/step-up/issue with action_class=break_glass,
+    then include the returned token_id here.  The token is single-use, 5-minute TTL.
+    """
     tenant_id: str
     broker_account_id: str
     underlying: str
@@ -113,6 +118,7 @@ class BreakGlassFlattenRequest(BaseModel):
     option_right: str
     product_type: str
     reason: str
+    step_up_token: Optional[str] = None  # Required in LIVE; optional in PAPER/SHADOW
 
 
 class ResolveOrphanReviewRequest(BaseModel):
@@ -662,6 +668,36 @@ def break_glass_flatten(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="reason is required for break-glass operations.",
         )
+
+    # §113 / ARCHITECTURE §15.4: Require a step-up token in LIVE mode.
+    # Break-glass flatten bypasses ownership policy (position_ownership_bypass=True),
+    # so re-authentication via a short-lived step-up token is mandatory in LIVE.
+    import os as _os
+    _trade_mode = str(_os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper()
+    if _trade_mode == "LIVE":
+        if not payload.step_up_token:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "step_up_token is required for break-glass operations in LIVE mode. "
+                    "Obtain a token via POST /admin/step-up/issue with "
+                    "action_class=break_glass, then include the token_id here."
+                ),
+            )
+        from app.security.step_up import DangerousActionClass, consume_step_up_token
+        token_valid = consume_step_up_token(
+            token_id=payload.step_up_token,
+            actor=ctx.caller,
+            action_class=DangerousActionClass.BREAK_GLASS,
+        )
+        if not token_valid:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "step_up_token is invalid, expired, already used, or was not issued "
+                    "to the current actor. Issue a new BREAK_GLASS step-up token and retry."
+                ),
+            )
 
     try:
         contract_key = normalize_contract_key(

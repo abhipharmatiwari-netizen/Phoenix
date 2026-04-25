@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.brokers.backoff import BackoffState
+from app.core.audit_log import emit_audit_event
 from app.brokers.base import (
     Balance,
     BrokerClient,
@@ -134,6 +135,17 @@ class AccountRunner:
         self._positions_registry_released = False
         self._register_positions_key()
 
+        # §106: Balance sync readiness tracking.
+        # has_ever_synced_balance is set True on the first successful balance fetch.
+        # Used by /readyz to gate readiness in LIVE (no false-green when RMS is down).
+        self._has_ever_synced_balance: bool = False
+        # §116: Consecutive failure tracking for structured alert emission.
+        self._consecutive_balance_failures: int = 0
+        self._balance_alert_threshold: int = max(
+            1,
+            int(os.getenv("BALANCE_SYNC_ALERT_THRESHOLD", "3")),
+        )
+
     # ---------- Properties ----------
     # Return the tenant id for this runner.
     @property
@@ -155,6 +167,11 @@ class AccountRunner:
     def is_running(self) -> bool:
         """Return True if the runner main loop is currently active."""
         return self._running
+
+    @property
+    def has_ever_synced_balance(self) -> bool:
+        """True once at least one successful balance fetch has completed. §106"""
+        return self._has_ever_synced_balance
 
     # Build a key used for shared position sync locks/backoff.
     def _positions_key(self) -> tuple[str, BrokerAccountId]:
@@ -302,12 +319,52 @@ class AccountRunner:
             balance = await self._broker_client.get_balance()
             self._last_balance = balance
             self._state_store.set_balance(self._broker_account_id, balance)
+            # §106: Mark first-ever success so /readyz can gate on it.
+            if not self._has_ever_synced_balance:
+                self._has_ever_synced_balance = True
+                logger.info(
+                    "balance_sync.first_success: broker_account_id=%s",
+                    self.broker_account_id,
+                )
+            # §116: Reset consecutive failure counter on success.
+            if self._consecutive_balance_failures > 0:
+                prev = self._consecutive_balance_failures
+                self._consecutive_balance_failures = 0
+                emit_audit_event(
+                    "balance_sync.recovered",
+                    {
+                        "broker_account_id": self.broker_account_id,
+                        "tenant_id": self._tenant_id,
+                        "previous_consecutive_failures": prev,
+                    },
+                )
         except Exception as exc:
-            logger.warning(
-                "AccountRunner balance sync failed for %s: %s",
-                self.broker_account_id,
-                exc,
-            )
+            self._consecutive_balance_failures += 1
+            failures = self._consecutive_balance_failures
+            # §116: Escalate to ERROR and emit structured alert after threshold.
+            if failures >= self._balance_alert_threshold:
+                logger.error(
+                    "balance_sync.persistent_failure broker_account_id=%s "
+                    "consecutive_failures=%d err=%s",
+                    self.broker_account_id,
+                    failures,
+                    exc,
+                )
+                emit_audit_event(
+                    "balance_sync.persistent_failure",
+                    {
+                        "broker_account_id": self.broker_account_id,
+                        "tenant_id": self._tenant_id,
+                        "consecutive_failures": failures,
+                        "last_error": str(exc),
+                    },
+                )
+            else:
+                logger.warning(
+                    "AccountRunner balance sync failed for %s: %s",
+                    self.broker_account_id,
+                    exc,
+                )
 
     # Sync positions into state store with backoff handling.
     async def _sync_positions(self, *, force: bool = False) -> None:

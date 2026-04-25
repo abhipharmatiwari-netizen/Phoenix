@@ -154,6 +154,9 @@ def _set_live_safe_env(monkeypatch) -> None:
     monkeypatch.setenv("LIVE_PG_SSL_SKIP_CHECK", "true")
     monkeypatch.setenv("ADMIN_API_KEY", "test-key-injected-by-live-safe-env")
     monkeypatch.setenv("DEMO_AUTH_TOKEN_SECRET", "test-secret-injected-by-live-safe-env")
+    # §112: APP_ENV=production is required in LIVE; suppress the auth-bypass guard
+    # for tests that are testing other LIVE startup conditions.
+    monkeypatch.setenv("APP_ENV", "production")
     import pathlib
     monkeypatch.setattr(pathlib.Path, "iterdir", lambda self: iter([]))
 
