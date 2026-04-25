@@ -207,8 +207,13 @@ x-live-backend-env: &live-backend-env
   STREAM_DROP_UNMAPPED_TICKS: "false"
   STREAM_UNMAPPED_TICK_LOG_INTERVAL_SECONDS: "60"
 
-  ML_ENABLED: "true"
-  ML_MODE: "GATE"
+  # §131 / Issue #10: ML gate is not active in this release.
+  # app.ml module has been removed (test_ml_removed_or_disabled.py confirms);
+  # _allow_trade_by_ml() always returns True (no-op).  Setting ML_ENABLED=true
+  # caused /ml/health to report ml_enabled=true, misleading operators into
+  # believing an ML risk control was active when it was not.
+  ML_ENABLED: "false"
+  ML_MODE: "OFF"
 
 x-db-client-env: &db-client-env
   PGHOST: "${CONTROL_PLANE_PG_HOST:-host.docker.internal}"
