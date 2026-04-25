@@ -1269,10 +1269,14 @@ async def readyz() -> JSONResponse:
             hub = getattr(runtime, "hub", None)
             if hub is not None:
                 _all_runners = list(getattr(hub, "_account_runners", {}).values())
+                # §125 / Issue #4: default must be False (fail-closed) so any runner
+                # that does not expose has_ever_synced_balance blocks readiness.
+                # The previous default=True silently passed the gate when the attribute
+                # was absent, producing false-green readyz during AB1004 RMS outages.
                 runners_never_synced = [
                     r.broker_account_id
                     for r in _all_runners
-                    if not getattr(r, "has_ever_synced_balance", True)
+                    if not getattr(r, "has_ever_synced_balance", False)
                 ]
                 payload["balance_sync_ready"] = len(runners_never_synced) == 0
                 payload["balance_sync_pending_runners"] = runners_never_synced
