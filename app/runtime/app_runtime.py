@@ -538,7 +538,7 @@ class AppRuntime:
                 raise ValueError(
                     f"startup.placeholder_secret_error: TRADE_MODE=LIVE but placeholder/template "
                     f"values detected in secrets: {_bad_placeholders}. This indicates a legacy "
-                    f"reference env file (e.g. .docker-live.env) was used as-is. Inject real "
+                    f"reference env file (e.g. _LEGACY_ENV_REFERENCE.env, formerly .docker-live.env) was used as-is. Inject real "
                     f"secrets from SecretStore or Secret Manager before deploying to LIVE."
                 )
             _pg_sslmode = str(

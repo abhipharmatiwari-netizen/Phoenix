@@ -12,7 +12,10 @@ BUILD_SCRIPT_PATH = REPO_ROOT / "scripts" / "build_release_artifact.py"
 
 # Files that must NEVER appear in a release artifact.
 _FORBIDDEN_RELEASE_FILES = {
-    ".docker-live.env",  # SHADOW-mode env file with template placeholder secrets
+    # Renamed to _LEGACY_ENV_REFERENCE.env (#129); keep old name here so the
+    # test still catches any accidental reintroduction of the old filename.
+    ".docker-live.env",           # SHADOW-mode legacy reference; renamed in #129
+    "_LEGACY_ENV_REFERENCE.env",  # new name — also must not appear in release artifact
 }
 
 

@@ -7,9 +7,10 @@
 
 # Operator-only / legacy reference env files.
 # The approved LIVE secret path is start-docker-secretstore.ps1.
-# .docker-live.env intentionally has TRADE_MODE=SHADOW to prevent
-# accidental live use, but it must not enter the build context either.
+# Renamed to _LEGACY_ENV_REFERENCE.env (#129) to prevent accidental use;
+# both old and new names are excluded from the build context.
 .docker-live.env
+_LEGACY_ENV_REFERENCE.env
 
 # Local state, logs, and volatile data.
 logs/
