@@ -617,35 +617,43 @@ class AppRuntime:
             # The default compose binds ./state and ./logs (inside the repo).
             # Operators should set PHOENIX_STATE_HOST_PATH and PHOENIX_LOG_HOST_PATH
             # to paths outside the repo for production deployments.
-            try:
-                _risk_state = _pathlib.Path(
-                    _os.getenv("RISK_STATE_PATH", "./state/risk_positions.json")
-                ).resolve()
-                _token_state = _pathlib.Path(
-                    _os.getenv(
-                        "EXECUTED_TOKENS_STATE_PATH",
-                        "/app/logs/executed_tokens_state.json",
-                    )
-                ).resolve()
-                for _state_label, _state_path in (
-                    ("RISK_STATE_PATH", _risk_state),
-                    ("EXECUTED_TOKENS_STATE_PATH", _token_state),
-                ):
-                    try:
-                        _state_path.relative_to(_repo_root)
-                        logger.warning(
-                            "startup.state_path_inside_repo: %s=%s is inside the repo root %s. "
-                            "pytest runs on this machine may overwrite production state files. "
-                            "Set PHOENIX_STATE_HOST_PATH (and PHOENIX_LOG_HOST_PATH) to a path "
-                            "outside the repo for production deployments (e.g. /var/lib/phoenix/state).",
-                            _state_label,
-                            _state_path,
-                            _repo_root,
+            # Skip this warning inside Docker containers: inside the container /app is
+            # the workdir and /app/state is a proper volume mount; pytest does not run
+            # in the production container so there is no contamination risk.
+            _is_in_container = _pathlib.Path("/.dockerenv").exists() or bool(
+                _os.getenv("KUBERNETES_SERVICE_HOST")
+                or _os.getenv("K_SERVICE")  # Cloud Run
+            )
+            if not _is_in_container:
+                try:
+                    _risk_state = _pathlib.Path(
+                        _os.getenv("RISK_STATE_PATH", "./state/risk_positions.json")
+                    ).resolve()
+                    _token_state = _pathlib.Path(
+                        _os.getenv(
+                            "EXECUTED_TOKENS_STATE_PATH",
+                            "/app/logs/executed_tokens_state.json",
                         )
-                    except ValueError:
-                        pass  # path is outside repo root — safe
-            except Exception as _sp_exc:
-                logger.debug("startup: state-path repo-check failed (non-fatal): %s", _sp_exc)
+                    ).resolve()
+                    for _state_label, _state_path in (
+                        ("RISK_STATE_PATH", _risk_state),
+                        ("EXECUTED_TOKENS_STATE_PATH", _token_state),
+                    ):
+                        try:
+                            _state_path.relative_to(_repo_root)
+                            logger.warning(
+                                "startup.state_path_inside_repo: %s=%s is inside the repo root %s. "
+                                "pytest runs on this machine may overwrite production state files. "
+                                "Set PHOENIX_STATE_HOST_PATH (and PHOENIX_LOG_HOST_PATH) to a path "
+                                "outside the repo for production deployments (e.g. /var/lib/phoenix/state).",
+                                _state_label,
+                                _state_path,
+                                _repo_root,
+                            )
+                        except ValueError:
+                            pass  # path is outside repo root — safe
+                except Exception as _sp_exc:
+                    logger.debug("startup: state-path repo-check failed (non-fatal): %s", _sp_exc)
 
         schema_checked_at = datetime.now(timezone.utc).isoformat().replace(
             "+00:00",
