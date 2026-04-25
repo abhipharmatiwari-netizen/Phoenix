@@ -492,21 +492,40 @@ class OrderLifecycleService:
         self._process_response_fill(response, ctx, response_state=response_state)
 
     def mark_recovery_pending(self) -> int:
-        """Mark all tracked non-terminal order contexts as RECOVERY_PENDING.
+        """Mark all tracked non-terminal order contexts AND internal position records
+        as RECOVERY_PENDING before broker reconciliation (Architecture §11.1 step 4).
 
-        Called during startup before broker reconciliation (Architecture §11.1
-        step 4). Returns the number of contexts marked.
+        §123 / Issue #2: Previously only _contexts (order state machines) were marked.
+        _position_records loaded by load_position_records() were left in their persisted
+        state (e.g. OPEN), allowing broker reconciliation to treat them as authoritative
+        before evidence was evaluated.  Both classes of restored objects must be fenced.
+
+        Returns the total number of contexts + position records marked.
         """
         marked = 0
+
+        # Mark active order lifecycle contexts
         for key, ctx in list(self._contexts.items()):
             current_state = getattr(ctx, "state", None)
             if current_state is not None and not is_terminal(current_state):
                 ctx.state = OrderLifecycleState.RECOVERY_PENDING
                 marked += 1
+
+        # Mark internal position records (Architecture §11.1 step 4 / §3.3)
+        _terminal_position_states = {PositionState.FLAT, PositionState.NONE}
+        positions_marked = 0
+        for scope_key, rec in list(self._position_records.items()):
+            if rec.position_state not in _terminal_position_states:
+                rec.position_state = PositionState.RECOVERY_PENDING
+                positions_marked += 1
+        marked += positions_marked
+
         if marked:
             logger.info(
-                "Marked %d non-terminal order lifecycle contexts as RECOVERY_PENDING",
-                marked,
+                "startup.recovery_pending_marked_contexts: marked %d non-terminal "
+                "order contexts and %d position records as RECOVERY_PENDING",
+                marked - positions_marked,
+                positions_marked,
             )
         return marked
 
