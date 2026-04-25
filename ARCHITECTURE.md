@@ -795,6 +795,18 @@ Allowed kill-switch control states:
 - `CLEAR_PENDING`
 - `CLEARED`
 
+State machine (§132 — full transition sequence):
+
+```
+INACTIVE --trip--> TRIPPED --request_clear--> CLEAR_PENDING --confirm_clear--> CLEARED --rearm--> INACTIVE
+```
+
+Each action is a separate explicit operator call; none happen automatically.
+The `rearm` action (§15.4 `KILL_SWITCH_REARM`) requires step-up authorization
+and transitions `CLEARED → INACTIVE` to restore full entry eligibility.
+`CLEARED` alone does **not** restore entry eligibility — the `rearm` call is
+required. See §15.4 for step-up authorization requirements on `KILL_SWITCH_REARM`.
+
 Rules:
 - A trip may be scoped `global`, `tenant`, `account`, or `strategy`, and the persisted state must record that scope explicitly.
 - Clearing a kill switch never happens implicitly on the next profitable tick, next broker poll, or process restart.
@@ -803,7 +815,8 @@ Rules:
 - A clear request must fail while unresolved `RECONCILING`, `ORPHAN_REVIEW`, or other operator-blocking position states remain for the same control scope, unless a separately audited break-glass override is used.
 - `CLEAR_PENDING` means the operator requested release but Phoenix is still validating fresh data, unresolved positions, and authoritative store health.
 - `CLEARED` returns entry eligibility only to the cleared scope; it does not auto-enable disabled strategies, auto-remove degraded state, or auto-reenter positions.
-- Re-arming after `CLEARED` is an explicit state transition back to `INACTIVE` once validation succeeds and the action is durably recorded.
+- Re-arming after `CLEARED` is an explicit `rearm` action (step-up auth required per §15.4) that transitions `CLEARED → INACTIVE` once validation succeeds and the action is durably recorded.
+- **Entry eligibility is restored only when state is `INACTIVE`** — not when it is `CLEARED`. Operators must call `rearm` explicitly after `CLEARED`.
 
 ---
 

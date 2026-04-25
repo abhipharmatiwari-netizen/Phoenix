@@ -110,6 +110,13 @@ GET /admin/kill-switch/state
 
 All mutations are audited (resource_type=kill_switch) and persisted to Postgres immediately.
 
+> **Important (§132):** `CLEARED` does **not** restore entry eligibility.
+> After `confirm_clear` succeeds, the state is `CLEARED` but new entries are
+> still blocked until the operator explicitly calls `rearm` to transition to
+> `INACTIVE`.  Failing to call `rearm` will leave the system in `CLEARED`
+> state indefinitely — strategy signals will fire but orders will be blocked.
+> `rearm` requires a step-up authorization token (see §15.4 `KILL_SWITCH_REARM`).
+
 ---
 
 ## Practical clear procedures
