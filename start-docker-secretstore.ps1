@@ -30,7 +30,7 @@ if (-not $env:PHX_SECRETSTORE_BYPASS_RELAUNCH -and (Get-ExecutionPolicy) -ne "By
     }
 }
 
-function Require-Command {
+function Assert-Command {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Name,
@@ -45,7 +45,7 @@ function Require-Command {
     }
 }
 
-function Require-Module {
+function Assert-Module {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Name,
@@ -141,11 +141,11 @@ try {
         throw "Compose file not found: $composeFile"
     }
 
-    Require-Command -Name "docker" -HelpMessage "Docker CLI not found. Start Docker Desktop and ensure 'docker' is on PATH."
-    Require-Module -Name "Microsoft.PowerShell.SecretManagement" -HelpMessage "Install the Microsoft.PowerShell.SecretManagement module before running this helper."
-    Require-Module -Name "Microsoft.PowerShell.SecretStore" -HelpMessage "Install the Microsoft.PowerShell.SecretStore module before running this helper."
-    Require-Command -Name "Unlock-SecretStore" -HelpMessage "Unlock-SecretStore is unavailable after loading modules."
-    Require-Command -Name "Get-Secret" -HelpMessage "Get-Secret is unavailable after loading modules."
+    Assert-Command -Name "docker" -HelpMessage "Docker CLI not found. Start Docker Desktop and ensure 'docker' is on PATH."
+    Assert-Module -Name "Microsoft.PowerShell.SecretManagement" -HelpMessage "Install the Microsoft.PowerShell.SecretManagement module before running this helper."
+    Assert-Module -Name "Microsoft.PowerShell.SecretStore" -HelpMessage "Install the Microsoft.PowerShell.SecretStore module before running this helper."
+    Assert-Command -Name "Unlock-SecretStore" -HelpMessage "Unlock-SecretStore is unavailable after loading modules."
+    Assert-Command -Name "Get-Secret" -HelpMessage "Get-Secret is unavailable after loading modules."
 
     $storeConfig = Get-SecretStoreConfiguration -ErrorAction SilentlyContinue
     if ($storeConfig -and $storeConfig.Authentication -ne "None") {
@@ -255,24 +255,44 @@ try {
     # This prevents secrets from appearing in `docker inspect` environment output.
     $secretDir = Join-Path $env:TEMP "phx-secrets"
     New-Item -ItemType Directory -Force -Path $secretDir | Out-Null
-    # Restrict directory to current user only (best-effort on Windows)
+
+    # Reset the directory ACL to the current user with FullControl before
+    # writing secret files.  A previous run may have applied a restrictive ACL
+    # that blocks subsequent writes from the same user account.
     try {
-        $acl = Get-Acl $secretDir
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $acl = New-Object System.Security.AccessControl.DirectorySecurity
         $acl.SetAccessRuleProtection($true, $false)
         $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-            [System.Security.Principal.WindowsIdentity]::GetCurrent().Name,
-            "FullControl", "Allow"
+            $currentUser, "FullControl",
+            "ContainerInherit,ObjectInherit", "None", "Allow"
         )
         $acl.AddAccessRule($rule)
-        Set-Acl $secretDir $acl
+        Set-Acl -Path $secretDir -AclObject $acl
     } catch {
-        Write-Warning "Could not restrict secret dir permissions: $_"
+        Write-Warning "Could not set secret dir permissions (continuing): $_"
     }
-    $env:CONTROL_PLANE_PG_PASSWORD_HOST | Out-File -FilePath (Join-Path $secretDir "control_plane_pg_password") -Encoding utf8 -NoNewline
-    $env:ADMIN_API_KEY_HOST             | Out-File -FilePath (Join-Path $secretDir "admin_api_key")             -Encoding utf8 -NoNewline
-    $env:DEMO_AUTH_TOKEN_SECRET_HOST    | Out-File -FilePath (Join-Path $secretDir "demo_auth_token_secret")    -Encoding utf8 -NoNewline
 
-    # §126 / Issue #5: ANGEL_POSTBACK_TOKEN — required for Angel broker order-status push
+    # Helper: write a secret file, resetting its ACL if it already exists.
+    function Write-SecretFile {
+        param([string]$Path, [string]$Value)
+        if (Test-Path $Path) {
+            try {
+                $fi = New-Object System.IO.FileInfo($Path)
+                $acl = $fi.GetAccessControl()
+                $acl.SetAccessRuleProtection($false, $true)
+                $fi.SetAccessControl($acl)
+            } catch {}
+            Remove-Item -Path $Path -Force -ErrorAction SilentlyContinue
+        }
+        [System.IO.File]::WriteAllText($Path, $Value, [System.Text.Encoding]::UTF8)
+    }
+
+    Write-SecretFile -Path (Join-Path $secretDir "control_plane_pg_password") -Value $env:CONTROL_PLANE_PG_PASSWORD_HOST
+    Write-SecretFile -Path (Join-Path $secretDir "admin_api_key")             -Value $env:ADMIN_API_KEY_HOST
+    Write-SecretFile -Path (Join-Path $secretDir "demo_auth_token_secret")    -Value $env:DEMO_AUTH_TOKEN_SECRET_HOST
+
+    # §126 / Issue #5: ANGEL_POSTBACK_TOKEN - required for Angel broker order-status push
     # notifications (ANGEL_POSTBACK_AUTH_MODE=direct_broker in LIVE).  If not set,
     # lifecycle falls back to polling only; a WARNING is logged at startup.
     $angelPostbackToken = [Environment]::GetEnvironmentVariable("ANGEL_POSTBACK_TOKEN", "Process")
@@ -285,13 +305,13 @@ try {
         }
     }
     if (-not [string]::IsNullOrWhiteSpace($angelPostbackToken)) {
-        $angelPostbackToken | Out-File -FilePath (Join-Path $secretDir "angel_postback_token") -Encoding utf8 -NoNewline
+        Write-SecretFile -Path (Join-Path $secretDir "angel_postback_token") -Value $angelPostbackToken
         Write-Host "  angel_postback_token: loaded from SecretStore/env" -ForegroundColor Green
     }
     else {
         # Write an empty file so Docker Compose secret mount succeeds.
         # Startup validator emits a WARNING (not error) when token is absent.
-        "" | Out-File -FilePath (Join-Path $secretDir "angel_postback_token") -Encoding utf8 -NoNewline
+        Write-SecretFile -Path (Join-Path $secretDir "angel_postback_token") -Value ""
         Write-Host "  angel_postback_token: NOT configured - postbacks will return 401, polling fallback active" -ForegroundColor Yellow
         Write-Host "  To configure: Set-Secret -Name ANGEL_POSTBACK_TOKEN -Secret '<your-token>'" -ForegroundColor Cyan
     }
@@ -328,24 +348,291 @@ try {
     Write-Host "  CLIENT_PUBLIC_IP"
     Write-Host "  MAC_ADDRESS"
 
-    Invoke-External -Description "Stopping existing LIVE stack" -Command @("docker", "compose", "-f", $composeFile, "down", "--remove-orphans")
-    Invoke-External -Description "Starting LIVE stack" -Command @("docker", "compose", "-f", $composeFile, "up", "-d", "--build", "--force-recreate")
-    Invoke-External -Description "Showing container status" -Command @("docker", "compose", "-f", $composeFile, "ps")
+    # -----------------------------------------------------------------------
+    # PHASE 1 - Tear down existing stack
+    # -----------------------------------------------------------------------
+    $deployStart = Get-Date
+    Write-Host ""
+    Write-Host "================================================================" -ForegroundColor Cyan
+    Write-Host "  PHASE 1 - Stopping existing stack" -ForegroundColor Cyan
+    Write-Host "================================================================" -ForegroundColor Cyan
+    Invoke-External -Description "Stopping existing LIVE stack" `
+        -Command @("docker", "compose", "-f", $composeFile, "down", "--remove-orphans")
 
-    # Docker Compose local secrets are bind-mounted files, not Swarm-managed copies.
-    # Keep them for the lifetime of the stack so container restarts can still
-    # read /run/secrets/*. Remove them only after `docker compose down`.
+    # -----------------------------------------------------------------------
+    # PHASE 2 - Build image
+    # Always rebuild so every deploy picks up the latest committed code.
+    # docker compose up --build also builds, but an explicit step here
+    # gives the operator a clear build log separate from the startup log.
+    # -----------------------------------------------------------------------
     Write-Host ""
-    Write-Host "Secret files retained for container restart safety: $secretDir"
-    Write-Host "  Remove this directory only after stopping the stack with docker compose down."
+    Write-Host "================================================================" -ForegroundColor Cyan
+    Write-Host "  PHASE 2 - Building Docker image" -ForegroundColor Cyan
+    Write-Host "================================================================" -ForegroundColor Cyan
+    $buildStart = Get-Date
+    Invoke-External -Description "Building phoenix-v9-backend:live" `
+        -Command @("docker", "build", "-t", "phoenix-v9-backend:live", $repoRoot)
+    $buildSecs = [int]((Get-Date) - $buildStart).TotalSeconds
+    Write-Host "  Build completed in ${buildSecs}s" -ForegroundColor Green
+
+    # -----------------------------------------------------------------------
+    # PHASE 3 - Start stack (migrator -> db-preflight -> backend -> nginx)
+    # --no-build: image was already built in Phase 2; skip duplicate build.
+    # --force-recreate: ensures containers pick up new image + config hash.
+    # -----------------------------------------------------------------------
     Write-Host ""
-    Write-Host "=== MANDATORY: Capture release evidence before approving this deployment ===" -ForegroundColor Yellow
-    Write-Host "  Wait for the backend health check to pass, then run:" -ForegroundColor Yellow
-    Write-Host "    .\scripts\capture_release_evidence.ps1" -ForegroundColor Cyan
-    Write-Host "  Attach the output JSON to the deployment record / PR." -ForegroundColor Yellow
-    Write-Host "  See docs/runbooks/release_evidence.md for pass criteria." -ForegroundColor Yellow
+    Write-Host "================================================================" -ForegroundColor Cyan
+    Write-Host "  PHASE 3 - Starting LIVE stack" -ForegroundColor Cyan
+    Write-Host "================================================================" -ForegroundColor Cyan
+    Invoke-External -Description "Starting LIVE stack (migrator -> db-preflight -> backend -> nginx)" `
+        -Command @("docker", "compose", "-f", $composeFile, "up", "-d", "--no-build", "--force-recreate")
+
+    Write-Host ""
+    Write-Host "  Secret files retained for container restart safety: $secretDir"
+    Write-Host "  Remove this directory only after: docker compose down"
+
+    # -----------------------------------------------------------------------
+    # PHASE 4 - Wait for backend to become healthy
+    # Docker's own health check uses /readyz with a 45 s start_period.
+    # We poll docker inspect so the operator sees live progress.
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "================================================================" -ForegroundColor Cyan
+    Write-Host "  PHASE 4 - Waiting for backend health check" -ForegroundColor Cyan
+    Write-Host "================================================================" -ForegroundColor Cyan
+    $healthTimeout  = 180   # seconds - allow full startup + universe build
+    $healthInterval = 5     # poll every 5 s
+    $elapsed        = 0
+    $healthy        = $false
+
+    while ($elapsed -lt $healthTimeout) {
+        Start-Sleep $healthInterval
+        $elapsed += $healthInterval
+        $healthStatus = docker inspect phoenix-v9-backend --format "{{.State.Health.Status}}" 2>$null
+        $containerStatus = docker inspect phoenix-v9-backend --format "{{.State.Status}}" 2>$null
+        if ($containerStatus -eq "exited" -or $containerStatus -eq "dead") {
+            Write-Host ""
+            Write-Host "  FATAL: backend container exited unexpectedly." -ForegroundColor Red
+            Write-Host "  Last 40 log lines:" -ForegroundColor Red
+            $ErrorActionPreference = "Continue"
+            docker logs phoenix-v9-backend --tail 40 2>&1
+            $ErrorActionPreference = "Stop"
+            throw "Backend container exited during startup. Check logs above."
+        }
+        if ($healthStatus -eq "healthy") {
+            $healthy = $true
+            break
+        }
+        $dots = "." * (($elapsed / $healthInterval) % 4 + 1)
+        Write-Host ("  [{0,3}s / {1}s] status={2}{3}" -f $elapsed, $healthTimeout, $healthStatus, $dots)
+    }
+
+    if (-not $healthy) {
+        Write-Host ""
+        Write-Host "  TIMEOUT: backend did not become healthy within ${healthTimeout}s." -ForegroundColor Red
+        Write-Host "  Last 50 log lines:" -ForegroundColor Red
+        $ErrorActionPreference = "Continue"
+        docker logs phoenix-v9-backend --tail 50 2>&1
+        $ErrorActionPreference = "Stop"
+        throw "Health check timeout after ${healthTimeout}s. Deployment FAILED."
+    }
+
+    $startupSecs = [int]((Get-Date) - $deployStart).TotalSeconds
+    Write-Host ""
+    Write-Host ("  Backend HEALTHY after {0}s total (build={1}s + startup={2}s)" -f `
+        $startupSecs, $buildSecs, ($startupSecs - $buildSecs)) -ForegroundColor Green
+
+    # -----------------------------------------------------------------------
+    # PHASE 5 - Verify /readyz returns 200 and parse key fields
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "================================================================" -ForegroundColor Cyan
+    Write-Host "  PHASE 5 - /readyz gate" -ForegroundColor Cyan
+    Write-Host "================================================================" -ForegroundColor Cyan
+    $readyzOk     = $false
+    $readyzReason = "no response"
+    $readyzBody   = $null
+
+    for ($i = 0; $i -lt 8; $i++) {
+        $readyzResp = $null
+        try {
+            $readyzResp = Invoke-WebRequest -Uri "http://localhost/readyz" `
+                -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+        } catch {
+            $readyzReason = "exception: $($_.Exception.Message)"
+        }
+        if ($null -ne $readyzResp -and $readyzResp.StatusCode -eq 200) {
+            $readyzOk   = $true
+            $readyzBody = $readyzResp.Content | ConvertFrom-Json -ErrorAction SilentlyContinue
+            break
+        }
+        elseif ($null -ne $readyzResp) {
+            $readyzReason = "HTTP $($readyzResp.StatusCode)"
+            $bodyObj = $readyzResp.Content | ConvertFrom-Json -ErrorAction SilentlyContinue
+            if ($bodyObj -and $bodyObj.reason) { $readyzReason = $bodyObj.reason }
+        }
+        Start-Sleep 3
+    }
+
+    if (-not $readyzOk) {
+        Write-Host "  /readyz NOT OK - reason: $readyzReason" -ForegroundColor Red
+        throw "/readyz did not return 200 within retry window. Reason: $readyzReason"
+    }
+    Write-Host "  /readyz: 200 OK" -ForegroundColor Green
+    if ($readyzBody) {
+        # Use PSObject.Properties for safe optional-field access in PS5.1.
+        # Direct property access on ConvertFrom-Json objects throws when the
+        # field is absent; NoteProperty lookup is always safe.
+        $keyFields = @(
+            "ready", "startup_recovery_status", "position_authority_restored",
+            "startup_ownership_gap_detected", "kill_switch_active_count",
+            "balance_sync_ready", "stream_worker_running",
+            "running_runner_count", "degraded_scope_count"
+        )
+        $propMap = @{}
+        foreach ($p in $readyzBody.PSObject.Properties) { $propMap[$p.Name] = $p.Value }
+        foreach ($f in $keyFields) {
+            if ($propMap.ContainsKey($f)) {
+                $v = $propMap[$f]
+                # Determine display color: red for problem values, green otherwise.
+                # Use try/catch for numeric coercion to handle boolean fields safely.
+                $numVal = 0
+                try { $numVal = [int]"$v" } catch { $numVal = 0 }
+                $isRed = ($f -match "gap|kill_switch_active|degraded" -and $numVal -gt 0) -or
+                         ($f -eq "ready" -and "$v" -eq "False")
+                $color = if ($isRed) { "Red" } else { "Green" }
+                Write-Host ("    {0,-45} {1}" -f "${f}:", $v) -ForegroundColor $color
+            }
+        }
+    }
+
+    # -----------------------------------------------------------------------
+    # PHASE 6 - Key startup events from backend log
+    # Confirms every mandatory startup gate fired as expected.
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "================================================================" -ForegroundColor Cyan
+    Write-Host "  PHASE 6 - Startup gate evidence (from container log)" -ForegroundColor Cyan
+    Write-Host "================================================================" -ForegroundColor Cyan
+    # docker logs writes container output to stderr; suppress strict-mode throws
+    # by using a local Continue preference for this call only.
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $logLines = docker logs phoenix-v9-backend 2>&1
+    $ErrorActionPreference = $prevPref
+    $patterns = @(
+        "LIVE mode startup validation",
+        "Schema guard passed",
+        "startup.ssl_warning",
+        "startup.angel_postback_token",
+        "leader_lease.acquired",
+        "startup.ownership_preload",
+        "startup.recovery_pending_marked",
+        "startup.kill_switch_loaded",
+        "balance_sync.first_success",
+        "startup.outbox_evaluated",
+        "startup.runtime_ready",
+        "startup.indicator_seed_complete",
+        "Runtime exit routing mode"
+    )
+    foreach ($pat in $patterns) {
+        $match = $logLines | Where-Object { $_ -match [regex]::Escape($pat) } | Select-Object -Last 1
+        if ($match) {
+            # Trim timestamp prefix for brevity
+            $short = ($match -replace '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \[(\w+)\] [\w\.]+ :', '[$1]').Trim()
+            $color = if ($match -match "\[WARNING\]") { "Yellow" } elseif ($match -match "\[ERROR\]") { "Red" } else { "Green" }
+            Write-Host "  $short" -ForegroundColor $color
+        } else {
+            Write-Host "  [MISSING] $pat" -ForegroundColor Red
+        }
+    }
+
+    # -----------------------------------------------------------------------
+    # PHASE 7 - Container status snapshot
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "================================================================" -ForegroundColor Cyan
+    Write-Host "  PHASE 7 - Container status" -ForegroundColor Cyan
+    Write-Host "================================================================" -ForegroundColor Cyan
+    Invoke-External -Description "Container status" `
+        -Command @("docker", "compose", "-f", $composeFile, "ps")
+
+    # -----------------------------------------------------------------------
+    # PHASE 8 - Auto-capture release evidence
+    # Calls /readyz + /admin/release-evidence, validates all fields,
+    # and writes docs/release-evidence/<timestamp>-evidence.json.
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "================================================================" -ForegroundColor Cyan
+    Write-Host "  PHASE 8 - Capturing release evidence" -ForegroundColor Cyan
+    Write-Host "================================================================" -ForegroundColor Cyan
+    $evidenceScript = Join-Path $repoRoot "scripts\capture_release_evidence.ps1"
+    $adminKey = $env:ADMIN_API_KEY_HOST
+    if (-not $adminKey) {
+        # Try reading directly from the secret file (it's loaded into container env
+        # but the session env var is ADMIN_API_KEY_HOST not ADMIN_API_KEY)
+        $adminKeyFile = Join-Path $secretDir "admin_api_key"
+        if (Test-Path $adminKeyFile) {
+            $adminKey = (Get-Content $adminKeyFile -Raw).Trim()
+        }
+    }
+    if ($adminKey -and (Test-Path $evidenceScript)) {
+        try {
+            & $evidenceScript -AdminKey $adminKey -BaseUrl "http://localhost"
+        }
+        catch {
+            Write-Warning "Release evidence capture failed (non-fatal): $_"
+            Write-Host "  Run manually: .\scripts\capture_release_evidence.ps1" -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Host "  Skipping auto-capture (ADMIN_API_KEY not available in session)." -ForegroundColor Yellow
+        Write-Host "  Run manually: .\scripts\capture_release_evidence.ps1" -ForegroundColor Yellow
+    }
+
+    # -----------------------------------------------------------------------
+    # FINAL VERDICT
+    # -----------------------------------------------------------------------
+    $totalSecs = [int]((Get-Date) - $deployStart).TotalSeconds
+    Write-Host ""
+    Write-Host "================================================================" -ForegroundColor Green
+    Write-Host "  DEPLOYMENT COMPLETE" -ForegroundColor Green
+    Write-Host ("  Total time : {0}s (build {1}s + deploy {2}s)" -f `
+        $totalSecs, $buildSecs, ($totalSecs - $buildSecs)) -ForegroundColor Green
+    Write-Host "  Trade mode : LIVE" -ForegroundColor Green
+    Write-Host "  Stack      : phoenix-live (backend + nginx)" -ForegroundColor Green
+    Write-Host "  readyz     : 200 OK" -ForegroundColor Green
+    Write-Host "================================================================" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  GO - Phoenix is healthy and accepting orders." -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Next steps:" -ForegroundColor Cyan
+    Write-Host "  1. Review release evidence in docs/release-evidence/" -ForegroundColor Cyan
+    Write-Host "  2. Monitor logs: docker logs -f phoenix-v9-backend" -ForegroundColor Cyan
+    Write-Host "  3. Check dashboard: http://localhost" -ForegroundColor Cyan
+    Write-Host "  4. Confirm /readyz stays green through first 15 min of market open" -ForegroundColor Cyan
+    Write-Host ""
+    if ($LaunchedFromClick) {
+        Write-Host "  Press any key to close this window (stack continues running)..." -ForegroundColor DarkGray
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    }
 }
 catch {
+    Write-Host ""
+    Write-Host "================================================================" -ForegroundColor Red
+    Write-Host "  DEPLOYMENT FAILED" -ForegroundColor Red
+    Write-Host "================================================================" -ForegroundColor Red
+    Write-Host ""
     Write-Error $_
+    Write-Host ""
+    Write-Host "  Troubleshooting:" -ForegroundColor Yellow
+    Write-Host "  - docker logs phoenix-v9-backend --tail 100" -ForegroundColor Yellow
+    Write-Host "  - docker compose -f docker-compose.live.single.yml ps" -ForegroundColor Yellow
+    Write-Host "  - Check docs/runbooks/docker_desktop_live_deployment.md" -ForegroundColor Yellow
+    Write-Host ""
+    if ($LaunchedFromClick) {
+        Write-Host "  Press any key to close (error details above)..." -ForegroundColor DarkGray
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    }
     exit 1
 }
