@@ -971,8 +971,16 @@ class AppRuntime:
 
     @property
     def ready(self) -> bool:
-        """True only after full startup (recovery + reconciliation + hub init)."""
+        """True only after full startup (recovery + reconciliation + hub init).
+
+        §122 / Issue #1: Also returns False when _startup_ownership_gap_detected is
+        True so the strategy bridge is gated by the same condition as /readyz.
+        Previously the bridge only checked the _ready latch, meaning live orders could
+        flow while Docker considered the container unhealthy due to an ownership gap.
+        """
         if self._leader_lease is not None and not self._is_leader:
+            return False
+        if self._startup_ownership_gap_detected:
             return False
         return self._ready
 
