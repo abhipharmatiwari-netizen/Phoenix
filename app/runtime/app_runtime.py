@@ -1255,8 +1255,56 @@ class AppRuntime:
                         "Failed to mark order lifecycle RECOVERY_PENDING: %s", exc
                     )
 
-        # Mark position ownership records
+        # §124 / Issue #3: Pre-load ownership records from Postgres into memory before
+        # calling mark_all_recovery_pending().  mark_all_recovery_pending() iterates
+        # _ownership_records which is populated lazily — at startup it is always empty
+        # unless we explicitly trigger _ensure_account_loaded() for each active account.
+        # Without this step the mark always returns 0, firing a false ownership gap on
+        # every restart that has any non-terminal position records in the DB.
         position_ownership = getattr(runtime, "position_ownership_store", None)
+        if position_ownership is not None:
+            ensure_loaded_fn = getattr(position_ownership, "_ensure_account_loaded", None)
+            if callable(ensure_loaded_fn):
+                try:
+                    hub = getattr(runtime, "hub", None)
+                    runner_ids = []
+                    if hub is not None:
+                        list_fn = getattr(hub, "list_runner_ids", None)
+                        if callable(list_fn):
+                            runner_ids = list(list_fn())
+                    from app.core.identifiers import BrokerAccountId, TenantId
+                    for broker_account_id in runner_ids:
+                        runner = hub.get_runner(BrokerAccountId(str(broker_account_id)))
+                        if runner is None:
+                            continue
+                        tenant_id = getattr(runner, "tenant_id", None)
+                        if not tenant_id:
+                            continue
+                        ensure_loaded_fn(
+                            tenant_id=TenantId(str(tenant_id)),
+                            broker_account_id=BrokerAccountId(str(broker_account_id)),
+                        )
+                    if runner_ids:
+                        logger.info(
+                            "startup.ownership_preload: pre-loaded ownership store for %d "
+                            "account(s) before recovery-pending marking",
+                            len(runner_ids),
+                        )
+                except Exception as exc:
+                    if _live:
+                        logger.error(
+                            "startup.ownership_preload_failed: LIVE startup cannot proceed — "
+                            "ownership store pre-load failed: %s", exc
+                        )
+                        raise RuntimeError(
+                            f"LIVE startup aborted: failed to pre-load ownership store "
+                            f"before recovery-pending marking: {exc}"
+                        ) from exc
+                    logger.warning(
+                        "startup.ownership_preload_failed (non-fatal): %s", exc
+                    )
+
+        # Mark position ownership records
         if position_ownership is not None:
             mark_all_fn = getattr(position_ownership, "mark_all_recovery_pending", None)
             if callable(mark_all_fn):
