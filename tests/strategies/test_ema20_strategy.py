@@ -496,31 +496,6 @@ def test_ema20_allows_entries_at_first_entry_time(monkeypatch):
     assert strategy.position is not None
 
 
-def test_ema20_ignores_ml_gate_when_present(monkeypatch):
-    mod, strategy = _make_strategy(monkeypatch, require_rsi_falling="0")
-    calls = _patch_bridge(monkeypatch, mod)
-    strategy._ml_gate = object()
-
-    candle = _make_candle(datetime(2025, 1, 1, 4, 0, tzinfo=timezone.utc), 90.0)
-    strategy.on_bar(
-        "NG_FUT",
-        300,
-        candle,
-        {"ema_20": 100.0, "atr": 1.0, "rsi": 50.0},
-    )
-
-    assert len(calls) == 1
-
-
-def test_ema20_allow_trade_by_ml_is_noop_true(monkeypatch):
-    mod, strategy = _make_strategy(monkeypatch, require_rsi_falling="0")
-    candle = _make_candle(datetime(2025, 1, 1, 4, 0, tzinfo=timezone.utc), 90.0)
-    assert strategy._allow_trade_by_ml(
-        candle=candle,
-        indicators={"ema_20": 100.0, "atr": 1.0, "rsi": 50.0},
-    )
-
-
 def test_ema20_warns_when_qty_equals_known_lot_size(monkeypatch, caplog):
     monkeypatch.setenv("NG_EMA20_LOTS", "1250")
     with caplog.at_level("WARNING"):

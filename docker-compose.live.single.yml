@@ -207,11 +207,8 @@ x-live-backend-env: &live-backend-env
   STREAM_DROP_UNMAPPED_TICKS: "false"
   STREAM_UNMAPPED_TICK_LOG_INTERVAL_SECONDS: "60"
 
-  # §131 / Issue #10: ML gate is not active in this release.
-  # app.ml module has been removed (test_ml_removed_or_disabled.py confirms);
-  # _allow_trade_by_ml() always returns True (no-op).  Setting ML_ENABLED=true
-  # caused /ml/health to report ml_enabled=true, misleading operators into
-  # believing an ML risk control was active when it was not.
+  # ML gate has been removed. ML_ENABLED=false prevents /ml/health from
+  # reporting a feature as active when no ML risk control is wired.
   ML_ENABLED: "false"
   ML_MODE: "OFF"
 

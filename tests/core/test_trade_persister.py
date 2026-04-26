@@ -19,9 +19,8 @@ def test_record_trade_is_idempotent_and_uses_insert_id(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "trade_record_to_bq_row", lambda rec: {"trade_id": rec["trade_id"]})
 
     csv_path = tmp_path / "trades.csv"
-    decision_path = tmp_path / "trade_decisions.csv"
 
-    p1 = mod.TradePersister(csv_path=str(csv_path), decision_csv_path=str(decision_path))
+    p1 = mod.TradePersister(csv_path=str(csv_path))
     trade = {
         "trade_id": "T-100",
         "entry_ts": "2026-02-26T09:15:00+00:00",
@@ -34,7 +33,7 @@ def test_record_trade_is_idempotent_and_uses_insert_id(tmp_path, monkeypatch):
     p1.record_trade(trade)
     p1.close()
 
-    p2 = mod.TradePersister(csv_path=str(csv_path), decision_csv_path=str(decision_path))
+    p2 = mod.TradePersister(csv_path=str(csv_path))
     p2.record_trade(trade)
     p2.close()
 
@@ -60,8 +59,7 @@ def test_record_execution_and_decision_are_idempotent(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(mod, "trade_record_to_bq_row", lambda rec: {"trade_id": rec["trade_id"]})
 
-    decision_path = tmp_path / "trade_decisions.csv"
-    persister = mod.TradePersister(decision_csv_path=str(decision_path))
+    persister = mod.TradePersister()
     exec_row = {
         "trade_id": "EXEC-1",
         "timestamp": "2026-02-26T10:00:00+00:00",
@@ -70,29 +68,7 @@ def test_record_execution_and_decision_are_idempotent(tmp_path, monkeypatch):
     }
     persister.record_execution(exec_row)
     persister.record_execution(exec_row)
-
-    decision_row = {
-        "timestamp": "2026-02-26T10:01:00+00:00",
-        "decision": "NO_TRADE",
-        "no_trade_reason": "ml_gate",
-        "strategy_name": "ema20_strategy",
-        "underlying": "NIFTY_IDX",
-        "label": "NIFTY_IDX",
-        "template_name": "NA",
-        "side": "BUY",
-        "qty": 1,
-        "ml_p_up": 0.1,
-        "ml_p_down": 0.9,
-        "ml_gate_reason": "below_threshold",
-        "ml_gate_meta_json": {"threshold": 0.7},
-    }
-    persister.persist_decision(decision_row)
-    persister.persist_decision(decision_row)
     persister.close()
 
     assert len(bq_calls) == 1
     assert bq_calls[0][1] == "EXEC-1"
-
-    with decision_path.open("r", newline="") as f:
-        rows = list(csv.reader(f))
-    assert len(rows) == 2  # header + one decision

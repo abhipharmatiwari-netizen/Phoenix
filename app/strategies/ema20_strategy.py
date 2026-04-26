@@ -82,10 +82,6 @@ class Ema20Strategy(BaseStrategy):
         trail_trigger_pct: Optional[float] = None,
         first_entry_time: Optional[str] = None,
         square_off_time: Optional[str] = None,
-        model_store: Optional[Any] = None,
-        feature_assembler: Optional[Any] = None,
-        ml_env: Optional[Dict[str, Any]] = None,
-        recent_close_cache: int = 300,
         dynamic_policy: Optional[Dict[str, Any]] = None,
         config_resolver: Optional[StrategyValueResolver] = None,
         risk_manager: Optional[Any] = None,
@@ -221,11 +217,6 @@ class Ema20Strategy(BaseStrategy):
             )
             self._regime_classifier = RegimeClassifier(thresholds=thresholds)
             self._policy_engine = DynamicPolicyEngine(config=self._dynamic_policy_cfg)
-
-        # Backward-compatible constructor args retained, but ML gating is disabled.
-        self._ml_env = ml_env or {}
-        self.model_store = model_store
-        self.feature_assembler = feature_assembler
 
         settings = get_settings()
         if self.env_prefix == "NIFTY_":
@@ -1329,10 +1320,6 @@ class Ema20Strategy(BaseStrategy):
                 plus_di,
             )
             return False
-        return True
-
-    # ML gate intentionally disabled for EMA20; keep method for compatibility.
-    def _allow_trade_by_ml(self, *, candle: Any, indicators: Dict[str, Any]) -> bool:
         return True
 
     # Enter a short call once per signal bar.

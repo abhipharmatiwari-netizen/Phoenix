@@ -85,7 +85,6 @@ class CeOrbStrategy(BaseStrategy):
         env_prefix: str,
         underlying_label: str,
         params: Optional[Dict[str, Any]] = None,
-        ml_gate: Optional[Any] = None,
         config_resolver: Optional[StrategyValueResolver] = None,
     ) -> None:
         self.instrument_meta = instrument_meta
@@ -94,8 +93,6 @@ class CeOrbStrategy(BaseStrategy):
         self.env_prefix = env_prefix
         self.underlying_label = underlying_label
         self.underlying_key = self.underlying_label.replace("_IDX", "")
-        # Backward-compatible constructor arg retained; ML gating is disabled.
-        self._ml_gate = ml_gate
         cfg = params or {}
         self._cfg = config_resolver or StrategyValueResolver(
             env_prefix=self.env_prefix,

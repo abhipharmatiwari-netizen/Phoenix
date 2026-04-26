@@ -1,11 +1,9 @@
 """Data Plane trade persistence (§6–§7 BigQuery/tenant isolation), used by hub strategies."""
 
 # Persist trade and execution records to CSV, SQLite, and BigQuery.
-# Also records ML decision traces for offline analysis.
 import csv
 import os
 import sqlite3
-import json
 import threading
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Set
@@ -41,36 +39,22 @@ class TradePersister:
         bq_project: Optional[str] = None,
         bq_dataset: Optional[str] = None,
         bq_table: Optional[str] = None,
-        decision_csv_path: Optional[str] = None,
     ) -> None:
         self.csv_path = csv_path
         self.sqlite_path = sqlite_path
         self.bq_project = bq_project
         self.bq_dataset = bq_dataset
         self.bq_table = bq_table
-        if decision_csv_path is not None:
-            self.decision_csv_path = decision_csv_path
-        elif csv_path:
-            root, ext = os.path.splitext(csv_path)
-            self.decision_csv_path = f"{root}_decisions{ext or '.csv'}"
-        else:
-            self.decision_csv_path = None
 
         self._csv_header_written = False
-        self._decision_header_written = False
         self._sqlite_conn: Optional[sqlite3.Connection] = None
         self._seen_trade_ids: Set[str] = set()
         self._seen_execution_ids: Set[str] = set()
-        self._seen_decision_ids: Set[str] = set()
         self._seen_lock = threading.Lock()
         self._trade_seen_path = self._sidecar_path(self.csv_path, ".seen_trade_ids")
         self._execution_seen_path = self._sidecar_path(self.csv_path, ".seen_execution_ids")
-        self._decision_seen_path = self._sidecar_path(
-            self.decision_csv_path, ".seen_decision_ids"
-        )
         self._load_seen_ids(self._trade_seen_path, self._seen_trade_ids)
         self._load_seen_ids(self._execution_seen_path, self._seen_execution_ids)
-        self._load_seen_ids(self._decision_seen_path, self._seen_decision_ids)
 
         if self.sqlite_path:
             self._init_sqlite()
@@ -111,20 +95,6 @@ class TradePersister:
             except Exception as exc:
                 logger.warning("Failed writing dedupe sidecar %s: %s", path, exc)
             return True
-
-    # Normalize ML metadata to a JSON string if needed.
-    @staticmethod
-    def _normalize_ml_info(record: Dict[str, Any]) -> Dict[str, Any]:
-        if not record:
-            return {}
-        meta = record.get("ml_gate_meta_json")
-        if isinstance(meta, dict):
-            try:
-                record = dict(record)
-                record["ml_gate_meta_json"] = json.dumps(meta)
-            except Exception:
-                pass
-        return record
 
     # ---------- SQLite ----------
 
@@ -199,42 +169,10 @@ class TradePersister:
                 )
         self._csv_header_written = True
 
-    # Write the ML decision CSV header once.
-    def _ensure_decision_header(self) -> None:
-        if not self.decision_csv_path or self._decision_header_written:
-            return
-        os.makedirs(os.path.dirname(self.decision_csv_path) or ".", exist_ok=True)
-        need_header = (
-            not os.path.exists(self.decision_csv_path)
-            or os.path.getsize(self.decision_csv_path) == 0
-        )
-        if need_header:
-            with open(self.decision_csv_path, mode="a", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(
-                    [
-                        "timestamp",
-                        "decision",
-                        "no_trade_reason",
-                        "strategy_name",
-                        "underlying",
-                        "label",
-                        "template_name",
-                        "side",
-                        "qty",
-                        "ml_p_up",
-                        "ml_p_down",
-                        "ml_gate_reason",
-                        "ml_gate_meta_json",
-                    ]
-                )
-        self._decision_header_written = True
-
     # ---------- Public API ----------
 
-    # Persist a completed trade and its decision record if available.
+    # Persist a completed trade record.
     def record_trade(self, trade: Dict[str, Any]) -> None:
-        trade = self._normalize_ml_info(trade)
         insert_id = (
             trade.get("trade_id")
             or f"{trade.get('label')}|{trade.get('exit_ts')}|close"
@@ -270,26 +208,6 @@ class TradePersister:
                 insert_trade_record(bq_row, insert_id=str(insert_id))
             except Exception as exc:
                 logger.error("Failed to persist trade close to BigQuery: %s", exc)
-        if self.decision_csv_path:
-            decision_row = {
-                "timestamp": trade_row.get("exit_ts") or trade_row.get("entry_ts"),
-                "decision": "TRADE",
-                "no_trade_reason": trade_row.get("reason"),
-                "strategy_name": trade_row.get("strategy_name"),
-                "underlying": trade_row.get("underlying"),
-                "label": trade_row.get("label"),
-                "template_name": trade_row.get("template_name"),
-                "side": trade_row.get("side"),
-                "qty": trade_row.get("qty"),
-                "ml_p_up": trade_row.get("ml_p_up"),
-                "ml_p_down": trade_row.get("ml_p_down"),
-                "ml_gate_reason": trade_row.get("ml_gate_reason"),
-                "ml_gate_meta_json": trade_row.get("ml_gate_meta_json"),
-            }
-            try:
-                self.persist_decision(decision_row)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("Failed to persist ML decision for trade: %s", exc)
 
     # Persist a single execution/fill to BigQuery with de-duplication.
     def record_execution(self, execution: Dict[str, Any]) -> None:
@@ -340,56 +258,6 @@ class TradePersister:
                 logger.error(
                     "Failed to persist execution %s to BigQuery: %s", trade_id, exc
                 )
-
-    # Persist ML decisions (including no-trade) to CSV.
-    def persist_decision(self, record: Dict[str, Any]) -> None:
-        """
-        Persist ML gate decisions (including NO_TRADE) to CSV for offline analysis.
-        """
-        if not self.decision_csv_path:
-            return
-        try:
-            decision_key = "|".join(
-                [
-                    str(record.get("timestamp") or ""),
-                    str(record.get("decision") or ""),
-                    str(record.get("strategy_name") or ""),
-                    str(record.get("label") or ""),
-                    str(record.get("side") or ""),
-                    str(record.get("qty") or ""),
-                    str(record.get("no_trade_reason") or ""),
-                ]
-            )
-            if not self._claim_seen_id(
-                decision_key, self._seen_decision_ids, self._decision_seen_path
-            ):
-                logger.debug("Skipping duplicate decision record %s", decision_key)
-                return
-            self._ensure_decision_header()
-            meta_json = record.get("ml_gate_meta_json")
-            if isinstance(meta_json, dict):
-                meta_json = json.dumps(meta_json)
-            with open(self.decision_csv_path, mode="a", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(
-                    [
-                        record.get("timestamp"),
-                        record.get("decision"),
-                        record.get("no_trade_reason"),
-                        record.get("strategy_name"),
-                        record.get("underlying"),
-                        record.get("label"),
-                        record.get("template_name"),
-                        record.get("side"),
-                        record.get("qty"),
-                        record.get("ml_p_up"),
-                        record.get("ml_p_down"),
-                        record.get("ml_gate_reason"),
-                        meta_json,
-                    ]
-                )
-        except Exception as exc:
-            logger.error("Failed to persist ML decision: %s", exc)
 
     # Append a trade record to CSV storage.
     def _to_csv(self, row: Dict[str, Any]) -> None:

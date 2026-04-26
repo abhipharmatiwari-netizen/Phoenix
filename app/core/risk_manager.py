@@ -2072,12 +2072,6 @@ class RiskManager:
             "reason": entry.get("reason"),
             "fees": 0.0,
         }
-        ml_info = entry.get("ml_info") or {}
-        if ml_info:
-            trade_record["ml_p_up"] = ml_info.get("ml_p_up")
-            trade_record["ml_p_down"] = ml_info.get("ml_p_down")
-            trade_record["ml_gate_reason"] = ml_info.get("ml_gate_reason")
-            trade_record["ml_gate_meta_json"] = ml_info.get("ml_gate_meta_json")
         if self.trade_persister:
             self.trade_persister.record_trade(trade_record)
         dashboard_bus.close_position(

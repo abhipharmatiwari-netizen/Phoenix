@@ -92,7 +92,6 @@ class DeltaStrangleStrategy(BaseStrategy):
         delta_qty_per_leg_by_underlying: Optional[Dict[str, Any]] = None,
         entry_start_ist: str = "09:20",
         entry_end_ist: str = "15:00",
-        ml_gate: Optional[Any] = None,
         sl_pct: float = 0.30,
         tp_pct: float = 0.30,
         config_resolver: Optional[StrategyValueResolver] = None,
@@ -105,8 +104,6 @@ class DeltaStrangleStrategy(BaseStrategy):
         self.pe_label_prefix = pe_label_prefix
         self.risk_manager = risk_manager
         self.order_client = order_client
-        # Backward-compatible constructor arg retained; ML gating is disabled.
-        self._ml_gate = ml_gate
         self._cfg = config_resolver or StrategyValueResolver(
             env_prefix=self.env_prefix,
             params={},

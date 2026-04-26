@@ -18,7 +18,7 @@ import logging
 from time import monotonic
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List
-from collections import Counter, deque
+from collections import Counter
 from datetime import datetime, timezone
 
 from app.core.order_client import AngelOrderClient
@@ -112,10 +112,6 @@ class OptionStrategy(BaseStrategy):
         pe_label_prefix: str = "NG_ATM_PE",
         risk_manager: Optional[RiskManager] = None,
         vol_thresholds: Optional[Dict[str, Dict[str, Any]]] = None,
-        model_store: Optional[Any] = None,
-        feature_assembler: Optional[Any] = None,
-        ml_env: Optional[Dict[str, Any]] = None,
-        recent_close_cache: int = 300,
         config_resolver: Optional[StrategyValueResolver] = None,
     ) -> None:
         self.instrument_meta = instrument_meta
@@ -163,13 +159,6 @@ class OptionStrategy(BaseStrategy):
 
         # Signal frame: default 5m bars
         self.signal_timeframe = int(self._env("SIGNAL_TIMEFRAME", "300"))  # seconds
-        # Backward-compatible constructor args retained; ML gating is intentionally disabled.
-        self._ml_env = ml_env or {}
-        self.model_store = model_store
-        self.feature_assembler = feature_assembler
-        self._recent_closes: deque[float] = deque(
-            maxlen=max(50, int(recent_close_cache or 0))
-        )
 
         # ATR & RSI thresholds (per underlying)
         self.min_atr = float(self._env("MIN_ATR", "1.0"))
@@ -611,13 +600,6 @@ class OptionStrategy(BaseStrategy):
         if label != self.fut_label or timeframe_seconds != self.signal_timeframe:
             return
 
-        close_val = getattr(candle, "c", None) or getattr(candle, "close", None)
-        if close_val is not None:
-            try:
-                self._recent_closes.append(float(close_val))
-            except Exception:
-                pass
-
         atr = indicators.get("atr")
         rsi = indicators.get("rsi")
         macd = indicators.get("macd")
@@ -778,11 +760,9 @@ class OptionStrategy(BaseStrategy):
                     self.env_prefix,
                     self.neutral_template_name,
                 )
-            self._fire_template_with_ml(
+            self._fire_template(
                 self.neutral_template_name,
                 reason=f"regime={regime},signal=neutral",
-                candle=candle,
-                indicators=indicators,
             )
             return
 
@@ -791,14 +771,12 @@ class OptionStrategy(BaseStrategy):
 
         # 1) CALL shorts: use RSI down trend + MACD bear
         if bearish_call_signal:
-            self._fire_template_with_ml(
+            self._fire_template(
                 self.directional_template_ce,
                 reason=(
                     f"regime={regime},signal=bearish_call,"
                     f"rsi={rsi:.2f},macd={macd:.4f},macd_sig={macd_signal:.4f}"
                 ),
-                candle=candle,
-                indicators=indicators,
             )
             fired = True
 
@@ -809,11 +787,9 @@ class OptionStrategy(BaseStrategy):
                 self.env_prefix,
                 self.directional_template_pe,
             )
-            self._fire_template_with_ml(
+            self._fire_template(
                 self.directional_template_pe,
                 reason=f"regime={regime},signal=bullish_put",
-                candle=candle,
-                indicators=indicators,
             )
             fired = True
 
@@ -1009,24 +985,6 @@ class OptionStrategy(BaseStrategy):
         self.no_trade_counts[reason] += 1
         logger.info("[%s][NO_TRADE][%s] " + message, self.env_prefix, reason, *args)
 
-    # ML gating/persistence is intentionally disabled; method kept as compatibility no-op.
-    def _persist_ml_decision(
-        self,
-        prediction: Any,
-        *,
-        decision: str,
-        no_trade_reason: Optional[str] = None,
-        template_name: Optional[str] = None,
-    ) -> None:
-        _ = (prediction, decision, no_trade_reason, template_name)
-
-    # ML gate is removed; keep wrapper so existing call sites remain stable.
-    def _fire_template_with_ml(
-        self, template_name: str, reason: Optional[str], candle, indicators: Dict[str, Any]
-    ) -> None:
-        _ = (candle, indicators)
-        self._fire_template(template_name, reason=reason, ml_info=None)
-
     # Place an options order through the strategy bridge.
     def _place_option_order(
         self,
@@ -1039,7 +997,6 @@ class OptionStrategy(BaseStrategy):
         role: Optional[str] = None,
         reason: Optional[str] = None,
         purpose: Optional[OrderPurpose] = None,
-        ml_info: Optional[Dict[str, Any]] = None,
         broker_symbol: Optional[str] = None,
         exchange: Optional[str] = None,
         symbol_token: Optional[str] = None,
@@ -1213,8 +1170,6 @@ class OptionStrategy(BaseStrategy):
         self,
         template_name: str,
         reason: Optional[str] = None,
-        *,
-        ml_info: Optional[Dict[str, Any]] = None,
     ) -> None:
         tpl = self.templates.get(template_name)
         if not tpl:
@@ -1303,7 +1258,6 @@ class OptionStrategy(BaseStrategy):
                     role=leg_tpl.role,
                     reason=reason,
                     purpose=OrderPurpose.ENTRY,
-                    ml_info=ml_info,
                 )
                 if not success:
                     continue
@@ -1339,7 +1293,6 @@ class OptionStrategy(BaseStrategy):
                     role=leg_tpl.role,
                     reason=reason,
                     purpose=OrderPurpose.ENTRY,
-                    ml_info=ml_info,
                 )
                 if not success:
                     continue
