@@ -783,6 +783,19 @@ def validate_runtime_startup_settings(
                 "Set ANGEL_POSTBACK_TOKEN via Docker secret in start-docker-secretstore.ps1."
             )
 
+    # §155: HUB_DEFAULT_TENANT_ID must be explicitly set to a real tenant value in LIVE.
+    # The settings.py default 'tenant-1' matches the bundled compose manifest but an
+    # operator who forgets to set this in a custom profile would route all orders to the
+    # wrong tenant.  Reject 'tenant-default' (the historical placeholder) outright.
+    if trade_mode == "LIVE":
+        hub_tid = str(getattr(settings, "hub_default_tenant_id", "") or "").strip()
+        if not hub_tid or hub_tid == "tenant-default":
+            errors.append(
+                "TRADE_MODE=LIVE requires HUB_DEFAULT_TENANT_ID to be explicitly set to "
+                "a real production tenant (e.g. HUB_DEFAULT_TENANT_ID=tenant-1). "
+                "The placeholder value 'tenant-default' is not a valid tenant ID."
+            )
+
     if errors:
         details = "\n".join(f"- {e}" for e in errors)
         raise ValueError(f"Startup runtime setting validation failed:\n{details}")

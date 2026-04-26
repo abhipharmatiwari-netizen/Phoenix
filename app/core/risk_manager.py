@@ -176,6 +176,21 @@ class RiskManager:
             self._persist_state()
         self._publish_account_loss_guard(source="startup")
         self.restored_positions: Dict[str, Dict[str, Any]] = dict(self.open_positions)
+        # §147: In LIVE mode the hub/Postgres is authoritative for position state.
+        # risk_positions.json is a stream-runtime shadow used for intra-session signal
+        # gating only and must NOT be treated as authoritative (see anti_pattern_guards.py).
+        # Warn operators when the file contains positions at startup so they can verify
+        # the hub's internal_position_records are the ground truth.
+        if trade_mode == "LIVE" and self.open_positions:
+            logger.warning(
+                "startup.risk_positions_file_has_positions: RISK_STATE_PATH=%s contains %d "
+                "stream-side open_positions at startup. These are NON-AUTHORITATIVE — the hub's "
+                "internal_position_records (Postgres) are the source of truth in LIVE mode. "
+                "Positions: %s",
+                self.state_path,
+                len(self.open_positions),
+                list(self.open_positions.keys()),
+            )
         # Seed executed-token tracker from any restored open positions
         try:
             executed_tokens_tracker.bootstrap_from_positions(
