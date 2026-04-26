@@ -361,7 +361,7 @@ strategies:
     params:
       ema_period: 20
       timeframe_seconds: 300
-      require_rsi_falling: false    # optimized: was true - improves PF 1.05->1.08
+      require_rsi_falling: true
       use_adx_filter: false
       adx_period: 14
       min_adx: 18.0
@@ -370,8 +370,8 @@ strategies:
       square_off_time: "15:00"
       sl_pct: 0.20
       tp_pct: 0.30
-      trail_buffer_pct: 0.10
-      trail_trigger_pct: 0.15
+      trail_buffer_pct: 0.08
+      trail_trigger_pct: 0.12
       dynamic_policy:
         enabled: true
         policy_id: "ema20_banknifty_v1"
@@ -395,17 +395,19 @@ strategies:
             ema_period: 20
             use_adx_filter: false
             min_adx: 18.0
+            require_rsi_falling: true
             tp_pct: 0.30
-            trail_trigger_pct: 0.18
+            trail_trigger_pct: 0.15
             trail_buffer_pct: 0.06
             qty_mult: 1.0
           NORMAL:
             ema_period: 20
             use_adx_filter: true
             min_adx: 20.0
+            require_rsi_falling: true
             sl_pct: 0.20
             tp_pct: 0.30
-            trail_trigger_pct: 0.15
+            trail_trigger_pct: 0.12
             trail_buffer_pct: 0.08
             qty_mult: 1.0
           CHOPPY:
