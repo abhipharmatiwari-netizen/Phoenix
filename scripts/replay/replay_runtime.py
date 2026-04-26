@@ -127,7 +127,7 @@ UNDERLYING_MAP = {
     "BANKNIFTY": {
         "env_prefix": "BANKNIFTY_",
         "underlying_label": "BANKNIFTY_IDX",
-        "lot_size": 15,
+        "lot_size": 30,
         "exchange": "NSE",
     },
     "NG_FUT": {
