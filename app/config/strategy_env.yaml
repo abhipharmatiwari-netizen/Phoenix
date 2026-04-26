@@ -590,15 +590,15 @@ strategies:
       timeframe_seconds: 30
       vol_quantile: 0.45
       ema_atr_buffer: 0.05
-      rsi_min: 58
+      rsi_min: 52
       rsi_max: 72
-      macd_hist_min: 0.3
+      macd_hist_min: 0.0
       allow_near_macd: true
-      macd_near: 0.40
+      macd_near: 0.0
       strict_trend: false
-      min_adx: 16.0
-      min_di_spread: 2.0
-      sl_atr: 2.2
+      min_adx: 14.0
+      min_di_spread: 0.0
+      sl_atr: 2.0
       tp_atr: 2.5
       max_trades_per_day: 1
       ema_fail_bars: 3
@@ -630,28 +630,28 @@ strategies:
           chop_adx_max: 20
         profiles:
           TRENDING:
-            min_adx: 14.0
-            min_di_spread: 2.0
-            sl_atr: 2.2
+            min_adx: 12.0
+            min_di_spread: 0.0
+            sl_atr: 2.0
             tp_atr: 2.5
-            rsi_min: 55.0
+            rsi_min: 50.0
             rsi_max: 72.0
           NORMAL:
-            min_adx: 16.0
-            min_di_spread: 2.0
-            sl_atr: 2.2
+            min_adx: 14.0
+            min_di_spread: 0.0
+            sl_atr: 2.0
             tp_atr: 2.5
-            rsi_min: 58.0
+            rsi_min: 52.0
             rsi_max: 72.0
           CHOPPY:
             disable_entries: true
           HIGH_VOL:
-            min_adx: 22.0
-            min_di_spread: 5.0
+            min_adx: 20.0
+            min_di_spread: 0.0
             sl_atr: 2.5
             tp_atr: 2.0
             qty_mult: 0.6
-            rsi_min: 58.0
+            rsi_min: 55.0
             rsi_max: 68.0
           NO_TRADE:
             disable_entries: true
