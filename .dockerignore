@@ -5,12 +5,8 @@
 *.runtime.env
 .backend-live.env.runtime
 
-# Operator-only / legacy reference env files.
-# The approved LIVE secret path is start-docker-secretstore.ps1.
-# Renamed to _LEGACY_ENV_REFERENCE.env (#129) to prevent accidental use;
-# both old and new names are excluded from the build context.
+# Legacy env file name — excluded from the build context.
 .docker-live.env
-_LEGACY_ENV_REFERENCE.env
 
 # Local state, logs, and volatile data.
 logs/

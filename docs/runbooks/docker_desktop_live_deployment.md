@@ -11,7 +11,7 @@ It uses:
 - Postgres `broker_credentials` as the broker-secret path used by the bundled manifest
 - runtime-injected platform secrets for values such as `ADMIN_API_KEY`, auth token secret, and database password
 
-The older multi-file Compose path (`docker-compose.live.yml` + `docker-compose.postgres.override.yml` + `_LEGACY_ENV_REFERENCE.env`) is not a bundled go-live path unless you separately audit it and prove that the backend container resolves the full automated LIVE contract.
+The older multi-file Compose path (`docker-compose.live.yml` + `docker-compose.postgres.override.yml`) is not a bundled go-live path unless you separately audit it and prove that the backend container resolves the full automated LIVE contract.
 
 ---
 

@@ -48,7 +48,7 @@ The following are **not** the current recommended automated LIVE baseline:
 
 - legacy-authoritative LIVE mode
 - `DISABLE_STREAM_WORKER=true` for automated LIVE without an approved replacement market-data/bar/indicator plane
-- repo-managed secret values committed to git or placed in `.env` / `_LEGACY_ENV_REFERENCE.env`
+- repo-managed secret values committed to git or placed in `.env`
 - treating CSV, BigQuery, dashboard state, JSON helpers, or in-memory state as authoritative live control state
 - Cloud Run as the current default production path
 - Firestore-backed broker secrets as the current default production path
@@ -164,6 +164,6 @@ See the [capital limits runbook](docs/runbooks/capital_limits_configuration.md) 
 
 ## Non-LIVE usage
 
-The repo may still contain local or compatibility assets such as `docker.env`, `_LEGACY_ENV_REFERENCE.env`, `docker-compose.live.yml`, `docker-compose.postgres.override.yml`, and `cloudrun.env`. Those assets are not proof of LIVE readiness by themselves. LIVE approval depends on conformance to [`ARCHITECTURE.md`](ARCHITECTURE.md), the effective runtime environment, and release evidence.
+The repo may still contain local or compatibility assets such as `docker.env`, `docker-compose.live.yml`, `docker-compose.postgres.override.yml`, and `cloudrun.env`. Those assets are not proof of LIVE readiness by themselves. LIVE approval depends on conformance to [`ARCHITECTURE.md`](ARCHITECTURE.md), the effective runtime environment, and release evidence.
 
 Clean promotion artifacts should be produced with `scripts/build_release_artifact.py`. The builder now works even from a source snapshot without `.git`, and it excludes runtime injection files such as `*.env.runtime`, logs, caches, and tests from the release zip.
