@@ -76,6 +76,7 @@ def load_scrip_master() -> pd.DataFrame:
         logger.info("Using cached ScripMaster for %s: %s", today, cache_path)
         df = pd.read_json(cache_path)
         _SCRIP_MASTER_CACHE.update({"date": today, "df": df})
+        _prune_old_scrip_master_files(cache_dir, keep_days=7)
         return df
 
     logger.info("Downloading ScripMaster fresh for %s...", today)
@@ -86,7 +87,24 @@ def load_scrip_master() -> pd.DataFrame:
     except Exception:
         logger.warning("Failed to cache ScripMaster locally", exc_info=True)
     _SCRIP_MASTER_CACHE.update({"date": today, "df": df})
+    _prune_old_scrip_master_files(cache_dir, keep_days=7)
     return df
+
+
+def _prune_old_scrip_master_files(cache_dir: Path, *, keep_days: int = 7) -> None:
+    """Delete scrip_master_{date}.json files older than keep_days to prevent unbounded growth."""
+    import time as _time
+    cutoff = _time.time() - keep_days * 86400
+    try:
+        for old in cache_dir.glob("scrip_master_*.json"):
+            try:
+                if old.stat().st_mtime < cutoff:
+                    old.unlink()
+                    logger.debug("Pruned stale scrip master cache: %s", old.name)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 # Pick the nearest-expiry future for a symbol pattern.

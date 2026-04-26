@@ -47,3 +47,4 @@ pytest-cache-files-*
 google/
 *.json.secret
 gcp-sa.json
+app/models/

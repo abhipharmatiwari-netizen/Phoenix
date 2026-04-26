@@ -748,92 +748,90 @@ def build_instrument_universe(
     Builds the instrument universe from universe.yaml.
     Returns (instruments, token_labels, token_list, instrument_meta).
     """
-    logger.info("🔧 [UNIVERSE] Starting build_instrument_universe")
-    logger.info(f"   Universe path: {universe_path}")
-    
+    logger.info(“[BUILD] [UNIVERSE] Starting build_instrument_universe”)
+    logger.info(“   Universe path: %s”, universe_path)
+
     cfg = _load_universe(universe_path)
-    logger.info(f"✅ [UNIVERSE] Loaded config with {len(cfg.get('underlyings', []))} underlyings")
-    
+    logger.info(“[OK] [UNIVERSE] Loaded config with %d underlyings”, len(cfg.get(“underlyings”, [])))
+
     df = load_scrip_master()
-    logger.info(f"✅ [UNIVERSE] Loaded scrip master with {len(df)} rows")
+    logger.info(“[OK] [UNIVERSE] Loaded scrip master with %d rows”, len(df))
 
     instruments: List[Dict[str, Any]] = []
-    for entry in cfg.get("underlyings", []):
-        enabled = entry.get("enabled", True)
-        typ = (entry.get("type") or "").upper()
-        name = entry.get("name")
-        
+    for entry in cfg.get(“underlyings”, []):
+        enabled = entry.get(“enabled”, True)
+        typ = (entry.get(“type”) or “”).upper()
+        name = entry.get(“name”)
+
         if not enabled:
-            logger.info(f"⏭️  [UNIVERSE] Skipping disabled: {name}")
-            continue
-            
-        if not name:
-            logger.warning("❌ [UNIVERSE] Skipping entry without name: %s", entry)
+            logger.info(“[SKIP] [UNIVERSE] Skipping disabled: %s”, name)
             continue
 
-        logger.info(f"🔨 [UNIVERSE] Building {name} ({typ})")
+        if not name:
+            logger.warning(“[SKIP] [UNIVERSE] Skipping entry without name: %s”, entry)
+            continue
+
+        logger.info(“[BUILDING] [UNIVERSE] Building %s (%s)”, name, typ)
         try:
-            if typ == "FUT":
+            if typ == “FUT”:
                 new_instruments = _build_future_underlying(entry, df, jwt_token, api_key)
-                logger.info(f"   ✅ Added {len(new_instruments)} future instruments for {name}")
+                logger.info(“   [OK] Added %d future instruments for %s”, len(new_instruments), name)
                 instruments.extend(new_instruments)
-            elif typ == "INDEX":
+            elif typ == “INDEX”:
                 new_instruments = _build_index_underlying(entry, df, jwt_token, api_key)
-                logger.info(f"   ✅ Added {len(new_instruments)} index instruments for {name}")
+                logger.info(“   [OK] Added %d index instruments for %s”, len(new_instruments), name)
                 instruments.extend(new_instruments)
-            elif typ == "DATA":
+            elif typ == “DATA”:
                 new_instruments = _build_data_underlying(entry)
-                logger.info(f"   ✅ Added {len(new_instruments)} data instruments for {name}")
+                logger.info(“   [OK] Added %d data instruments for %s”, len(new_instruments), name)
                 instruments.extend(new_instruments)
             else:
-                logger.warning(f"❌ [UNIVERSE] Unsupported type {typ} for {name}, skipping")
+                logger.warning(“[SKIP] [UNIVERSE] Unsupported type %s for %s, skipping”, typ, name)
         except Exception as e:
             err_str = str(e)
             if (
-                "AG8001" in err_str
-                or "invalid token" in err_str.lower()
-                or "token expired" in err_str.lower()
-                or "unauthorized" in err_str.lower()
+                “AG8001” in err_str
+                or “invalid token” in err_str.lower()
+                or “token expired” in err_str.lower()
+                or “unauthorized” in err_str.lower()
             ):
                 raise  # propagate auth errors so the caller can re-login
-            logger.error(f"❌ [UNIVERSE] Error building {name}: {e}", exc_info=True)
+            logger.error(“[ERROR] [UNIVERSE] Error building %s: %s”, name, e, exc_info=True)
 
-    logger.info(f"📊 [UNIVERSE] Total instruments built: {len(instruments)}")
-    
-    token_labels = {str(inst["token"]): inst["label"] for inst in instruments}
-    logger.info(f"📝 [UNIVERSE] Created {len(token_labels)} token labels")
-    
+    logger.info(“[STATS] [UNIVERSE] Total instruments built: %d”, len(instruments))
+
+    token_labels = {str(inst[“token”]): inst[“label”] for inst in instruments}
+    logger.info(“[LABELS] [UNIVERSE] Created %d token labels”, len(token_labels))
+
     tokens_by_exchange = defaultdict(list)
     for inst in instruments:
-        tokens_by_exchange[inst["exchangeType"]].append(str(inst["token"]))
+        tokens_by_exchange[inst[“exchangeType”]].append(str(inst[“token”]))
 
     token_list = [
-        {"exchangeType": ex_type, "tokens": tok_list}
+        {“exchangeType”: ex_type, “tokens”: tok_list}
         for ex_type, tok_list in tokens_by_exchange.items()
     ]
-    
-    logger.info(f"🏢 [UNIVERSE] Instruments by exchange:")
-    for ex_type, tokens in tokens_by_exchange.items():
-        logger.info(f"   Exchange {ex_type}: {len(tokens)} tokens")
 
-    instrument_meta = {inst["label"]: inst for inst in instruments}
+    logger.info(“[EXCHANGES] [UNIVERSE] Instruments by exchange:”)
+    for ex_type, tokens in tokens_by_exchange.items():
+        logger.info(“   Exchange %s: %d tokens”, ex_type, len(tokens))
+
+    instrument_meta = {inst[“label”]: inst for inst in instruments}
 
     if not _should_log_full_instrument_list():
-        logger.info(
-            "ðŸ“‹ [UNIVERSE] Full instrument list suppressed; set UNIVERSE_LOG_FULL_LIST=1 to enable."
-        )
-        logger.info("âœ… [UNIVERSE] build_instrument_universe COMPLETE")
+        logger.info(“[LIST] [UNIVERSE] Full instrument list suppressed; set UNIVERSE_LOG_FULL_LIST=1 to enable.”)
+        logger.info(“[OK] [UNIVERSE] build_instrument_universe COMPLETE”)
         return instruments, token_labels, token_list, instrument_meta
 
-    logger.info("📋 [UNIVERSE] Full instrument list:")
+    logger.info(“[LIST] [UNIVERSE] Full instrument list:”)
     for inst in instruments:
         logger.info(
-            "   ✅ %s | token=%s | ex=%s | segment=%s",
-            inst["label"],
-            inst["token"],
-            inst["exchangeType"],
-            inst.get("segment", "N/A"),
+            “   [OK] %s | token=%s | ex=%s | segment=%s”,
+            inst[“label”],
+            inst[“token”],
+            inst[“exchangeType”],
+            inst.get(“segment”, “N/A”),
         )
 
-    logger.info("✅ [UNIVERSE] build_instrument_universe COMPLETE")
+    logger.info(“[OK] [UNIVERSE] build_instrument_universe COMPLETE”)
     return instruments, token_labels, token_list, instrument_meta
