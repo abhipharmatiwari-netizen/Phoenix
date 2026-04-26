@@ -352,7 +352,7 @@ def load_stability_feature_flags(
             _live_overrides["EXECUTED_TOKENS_PERSIST_ENABLED"] = True
 
         if _live_overrides and not _LIVE_POLICY_GATE_LOGGED:
-            sink.warning(
+            sink.info(
                 "LIVE mode policy gates enforced hardened defaults for: %s",
                 _live_overrides,
             )

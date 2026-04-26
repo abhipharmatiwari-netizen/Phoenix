@@ -1199,14 +1199,17 @@ async def readyz() -> JSONResponse:
         try:
             pos_authority = getattr(runtime, "_position_authority_restored", None)
             ownership_gap = bool(getattr(runtime, "_startup_ownership_gap_detected", False))
-            payload["position_authority_restored"] = bool(pos_authority)
-            payload["startup_ownership_gap_detected"] = ownership_gap
             recovery_summary: dict = {}
             if callable(getattr(runtime, "startup_recovery_status", None)):
                 rs = runtime.startup_recovery_status()
                 recovery_summary = rs.get("summary") or {}
             position_records_loaded = int((recovery_summary or {}).get("position_records_loaded", 0))
             payload["position_records_loaded"] = position_records_loaded
+            # When no position records were loaded there is nothing to restore;
+            # report authority as satisfied rather than misleadingly false.
+            effective_authority = True if position_records_loaded == 0 else bool(pos_authority)
+            payload["position_authority_restored"] = effective_authority
+            payload["startup_ownership_gap_detected"] = ownership_gap
 
             if position_records_loaded > 0 and not pos_authority:
                 payload["ready"] = False
