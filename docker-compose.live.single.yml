@@ -71,7 +71,7 @@ x-live-backend-env: &live-backend-env
   # by docker-entrypoint.sh. They do NOT appear in `docker inspect` output.
   ENABLE_DEMO_AUTH: "false"
   DASHBOARD_AUTH_DISABLED: "false"
-  DISABLE_CONTROL_TOWER_ROUTES: "true"
+  DISABLE_CONTROL_TOWER_ROUTES: "false"
 
   ENABLE_MULTI_HUB: "true"
   USE_HUB_ROUTER: "true"
