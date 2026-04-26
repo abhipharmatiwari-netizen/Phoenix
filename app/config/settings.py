@@ -195,13 +195,12 @@ class Settings(BaseSettings):
     )
     # ==== Hub defaults for single-tenant / legacy strategies ====
     hub_default_tenant_id: str = Field(
-        default="tenant-default",
+        default="tenant-1",
         validation_alias="HUB_DEFAULT_TENANT_ID",
         description=(
-            "Legacy/single-tenant fallback tenant_id used by strategy_bridge and trade_records "
-            "when a caller does not provide a tenant explicitly. Adding more tenants does NOT "
-            "require more env vars; multi-tenant flows should pass tenant_id explicitly and rely "
-            "on Firestore, not this default."
+            "Default tenant_id used by strategy_bridge and trade_records when a caller does not "
+            "provide a tenant explicitly. Must match the operator's production tenant. "
+            "Default 'tenant-1' matches the bundled LIVE compose manifest."
         ),
     )
     hub_default_broker_account_id: str = Field(
@@ -289,7 +288,7 @@ class Settings(BaseSettings):
         description="Allow explicit system-safety exit bypass for ownership lock.",
     )
     ownership_persist_pending_locks: bool = Field(
-        default=False,
+        default=True,
         validation_alias="OWNERSHIP_PERSIST_PENDING_LOCKS",
         description="Persist pending ownership locks using reserved ledger rows.",
     )
@@ -299,17 +298,17 @@ class Settings(BaseSettings):
         description="Enable adaptive strategy auto-selection by market regime.",
     )
     auto_strategy_max_active_per_underlying: int = Field(
-        default=1,
+        default=2,
         validation_alias="AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING",
         description="Maximum active strategies per underlying when auto-selection is enabled.",
     )
     auto_strategy_min_hold_seconds: float = Field(
-        default=300.0,
+        default=180.0,
         validation_alias="AUTO_STRATEGY_MIN_HOLD_SECONDS",
         description="Minimum hold window before switching selected strategies.",
     )
     order_lifecycle_persist_markers_required: bool = Field(
-        default=False,
+        default=True,
         validation_alias="ORDER_LIFECYCLE_PERSIST_MARKERS_REQUIRED",
         description="Fail startup if durable order lifecycle processed marker backend is unavailable.",
     )
