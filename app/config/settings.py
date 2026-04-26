@@ -736,6 +736,33 @@ class Settings(BaseSettings):
         validation_alias="APP_RUNTIME_STARTUP_VALIDATE",
         description="Enable strict startup configuration validation prior to runtime startup.",
     )
+    # ==== Startup audit flags ====
+    allow_live_capital_checks_disabled: bool = Field(
+        default=False,
+        validation_alias="ALLOW_LIVE_CAPITAL_CHECKS_DISABLED",
+        description=(
+            "STARTUP AUDIT ONLY — does NOT disable capital checks at runtime. "
+            "The actual runtime gate is ENABLE_CAPITAL_CHECKS. "
+            "Setting this to true is recorded in the startup safety summary and "
+            "permits startup to proceed when capital checks are explicitly disabled. "
+            "Should always be false in production LIVE deployments."
+        ),
+    )
+    # ==== Typed env vars previously read via raw os.getenv() ====
+    capital_margin_check_mode: str = Field(
+        default="enforce",
+        validation_alias="CAPITAL_MARGIN_CHECK_MODE",
+        description=(
+            "Capital margin enforcement mode consumed by feature_flags.py. "
+            "Choices: enforce | warn | off. "
+            "LIVE mode policy gates override 'off' to 'enforce'."
+        ),
+    )
+    position_sync_interval_seconds: int = Field(
+        default=90,
+        validation_alias="POSITION_SYNC_INTERVAL_SECONDS",
+        description="Interval (seconds) between broker position sync polls in the stream runner.",
+    )
 
     backend_url: str = Field(
         default="http://localhost:8080",
