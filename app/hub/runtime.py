@@ -371,7 +371,7 @@ class HubRuntime:
             circuit_breaker=self.circuit_breaker,
         )
 
-        # Routing table: build initial strategy -> (tenant, broker) map from Firestore
+        # Routing table: build initial strategy -> (tenant, broker) map from control-plane backend (Postgres in LIVE)
         self.routing_table = get_global_routing_table()
         try:
             self.routing_table.refresh()

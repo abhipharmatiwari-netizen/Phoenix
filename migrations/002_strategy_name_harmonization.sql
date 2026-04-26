@@ -1,6 +1,11 @@
 -- Sprint 9: Single-Name Strategy Harmonization
 -- Migrate all strategy_id references from kebab-case to canonical snake_case names.
 -- Underlying information moved to separate metadata in strategy configurations.
+--
+-- AUDIT TABLES: strategy_migration_log, canonical_strategy_registry, and the
+-- strategy_migration_mapping view created below are NOT queried by the production
+-- runtime. They exist for migration audit and rollback purposes only. Do not add
+-- runtime dependencies on these objects.
 
 -- Create legacy-to-canonical strategy name mapping
 -- This table tracks the migration and can be used for audit/rollback if needed

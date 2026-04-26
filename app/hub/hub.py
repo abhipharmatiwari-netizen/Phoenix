@@ -285,7 +285,7 @@ class Hub:
     # Reconcile runner set with the control-plane state.
     async def _reconcile_runners_once(self) -> None:
         """
-        Reconcile AccountRunners with current Firestore control-plane state.
+        Reconcile AccountRunners with current control-plane state (Postgres or Firestore depending on CONTROL_PLANE_BACKEND).
 
         For each broker account:
         - Determine runtime_mode (DISABLED/PAPER/LIVE/SHADOW).

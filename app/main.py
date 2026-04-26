@@ -228,18 +228,6 @@ def _load_cloudrun_env_if_local() -> None:
                 if key and key not in os.environ:
                     os.environ[key] = value
 
-        # Firestore ADC fallback disabled for local runs; keep explicit env only.
-        # current_creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-        # current_exists = bool(current_creds and Path(current_creds).exists())
-        # if not current_exists:
-        #     docs_creds = (
-        #         Path(__file__).resolve().parents[1]
-        #         / "docs"
-        #         / "moneymagnet-55-f04656cdffd6.json"
-        #     )
-        #     if docs_creds.exists():
-        #         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(docs_creds)
-
     except Exception as exc:
         logging.getLogger(__name__).warning(
             "Failed to load local env credentials: %s", exc
