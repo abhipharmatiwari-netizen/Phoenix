@@ -121,7 +121,7 @@ UNDERLYING_MAP = {
     "NIFTY": {
         "env_prefix": "NIFTY_",
         "underlying_label": "NIFTY_IDX",
-        "lot_size": 25,
+        "lot_size": 65,
         "exchange": "NSE",
     },
     "BANKNIFTY": {
