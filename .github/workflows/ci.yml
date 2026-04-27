@@ -112,3 +112,65 @@ jobs:
 
       - name: Verify test + lint gates passed
         run: echo "All gates passed — safe to release."
+
+  deploy-oci:
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    # Only deploy on push to main/master — not on PRs or manual dispatch.
+    if: >
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    environment: oci-production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to OCI Container Registry
+        run: |
+          echo "${{ secrets.OCIR_AUTH_TOKEN }}" | \
+            docker login "${{ vars.OCIR_REGION }}.ocir.io" \
+              -u "${{ vars.OCIR_NAMESPACE }}/${{ vars.OCIR_USERNAME }}" \
+              --password-stdin
+
+      - name: Build and push backend image
+        run: |
+          IMAGE="${{ vars.OCIR_REGION }}.ocir.io/${{ vars.OCIR_NAMESPACE }}/phoenix-prod/backend"
+          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" .
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
+
+      - name: Build and push frontend image
+        run: |
+          IMAGE="${{ vars.OCIR_REGION }}.ocir.io/${{ vars.OCIR_NAMESPACE }}/phoenix-prod/frontend"
+          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" ./frontend
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
+
+      - name: Build and push nginx image
+        run: |
+          IMAGE="${{ vars.OCIR_REGION }}.ocir.io/${{ vars.OCIR_NAMESPACE }}/phoenix-prod/nginx"
+          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" ./nginx
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
+
+      - name: Deploy to OCI Compute Instance via SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.OCI_DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh -i ~/.ssh/deploy_key \
+              -o StrictHostKeyChecking=no \
+              -o ProxyCommand="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -W %h:%p ${{ vars.OCI_BASTION_USER }}@${{ vars.OCI_BASTION_HOST }}" \
+              "${{ vars.OCI_INSTANCE_USER }}@${{ vars.OCI_INSTANCE_IP }}" \
+            "cd /opt/phoenix/app && \
+             docker compose -f docker-compose.oci-live.yml pull backend nginx frontend && \
+             docker compose -f docker-compose.oci-live.yml up -d --no-deps --no-build backend nginx"
+
+      - name: Verify deployment health
+        run: |
+          # Poll /readyz via SSH tunnel — not exposed publicly
+          ssh -i ~/.ssh/deploy_key \
+              -o StrictHostKeyChecking=no \
+              -o ProxyCommand="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -W %h:%p ${{ vars.OCI_BASTION_USER }}@${{ vars.OCI_BASTION_HOST }}" \
+              "${{ vars.OCI_INSTANCE_USER }}@${{ vars.OCI_INSTANCE_IP }}" \
+            "timeout 60 bash -c 'until curl -sf http://localhost:8080/readyz; do sleep 5; done'"
