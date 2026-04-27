@@ -313,11 +313,11 @@ class Settings(BaseSettings):
         description="Fail startup if durable order lifecycle processed marker backend is unavailable.",
     )
     capital_fail_closed_on_missing_state: bool = Field(
-        False,
+        True,
         validation_alias="CAPITAL_FAIL_CLOSED_ON_MISSING_STATE",
     )
     capital_fail_closed_on_missing_notional_price: bool = Field(
-        False,
+        True,
         validation_alias="CAPITAL_FAIL_CLOSED_ON_MISSING_NOTIONAL_PRICE",
     )
     capital_limits_json: str = Field(
@@ -353,7 +353,7 @@ class Settings(BaseSettings):
         description="If true, enforce daily loss protection on realized plus unrealized MTM.",
     )
     circuit_breaker_persist_state: bool = Field(
-        default=False,
+        default=True,
         validation_alias="CIRCUIT_BREAKER_PERSIST_STATE",
         description="Persist circuit breaker state across restarts using the configured control-plane store.",
     )
@@ -624,12 +624,12 @@ class Settings(BaseSettings):
         description="Optional prefix for Firestore collections to isolate environments.",
     )
     control_plane_backend: str = Field(
-        default="firestore",
+        default="postgres",
         validation_alias="CONTROL_PLANE_BACKEND",
         description="Control plane store backend: firestore|postgres.",
     )
     sweep_state_backend: str = Field(
-        default="firestore",
+        default="postgres",
         validation_alias="SWEEP_STATE_BACKEND",
         description="Sweep state store backend: firestore|postgres.",
     )

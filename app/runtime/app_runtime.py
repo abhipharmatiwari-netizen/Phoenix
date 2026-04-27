@@ -546,19 +546,28 @@ class AppRuntime:
             ).strip().lower()
             _ssl_check_ok = _pg_sslmode in ("require", "verify-ca", "verify-full")
             _ssl_skip = _os.getenv("LIVE_PG_SSL_SKIP_CHECK", "").strip().lower() in ("1", "true", "yes")
-            # §105: Detect cloud deployment via K_SERVICE (set by Cloud Run).
-            # LIVE_PG_SSL_SKIP_CHECK=true is NEVER acceptable in cloud deployments —
-            # hard-abort in that case regardless of sslmode.  For local Docker Desktop
-            # (no K_SERVICE), the skip remains a warning-only exception.
-            _is_cloud = bool(_os.getenv("K_SERVICE", "").strip())
+            # §105: Detect remote/cloud deployment.
+            # Signals checked (any one is sufficient):
+            #   K_SERVICE          — Google Cloud Run
+            #   OCI_RESOURCE_PRINCIPAL_REGION_URL — Oracle Cloud instance principal
+            #   REMOTE_DEPLOYMENT  — generic operator flag (set in any non-local env file)
+            # LIVE_PG_SSL_SKIP_CHECK=true is NEVER acceptable in remote/cloud deployments.
+            # For local Docker Desktop (none of the above set), the skip remains
+            # a warning-only exception.
+            _is_cloud = bool(
+                _os.getenv("K_SERVICE", "").strip()
+                or _os.getenv("OCI_RESOURCE_PRINCIPAL_REGION_URL", "").strip()
+                or _os.getenv("REMOTE_DEPLOYMENT", "").strip().lower() in ("1", "true", "yes")
+            )
             if not _ssl_check_ok:
                 if _ssl_skip and _is_cloud:
                     raise RuntimeError(
                         "startup.ssl_error: LIVE_PG_SSL_SKIP_CHECK=true is forbidden in "
-                        "cloud deployments (K_SERVICE is set). "
+                        "remote/cloud deployments (K_SERVICE, OCI_RESOURCE_PRINCIPAL_REGION_URL, "
+                        "or REMOTE_DEPLOYMENT is set). "
                         f"CONTROL_PLANE_PG_SSLMODE={_pg_sslmode!r} does not enforce encrypted "
                         "Postgres transport. Set CONTROL_PLANE_PG_SSLMODE=require and remove "
-                        "LIVE_PG_SSL_SKIP_CHECK from the Cloud Run environment."
+                        "LIVE_PG_SSL_SKIP_CHECK from the deployment environment."
                     )
                 elif _ssl_skip:
                     logger.warning(
