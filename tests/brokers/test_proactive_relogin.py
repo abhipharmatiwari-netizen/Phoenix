@@ -41,29 +41,27 @@ def test_returns_false_when_never_logged_in():
     assert client.is_token_near_expiry(margin_minutes=10) is False
 
 
-def test_returns_false_when_far_from_midnight():
+def test_returns_false_when_far_from_refresh_boundary():
     client = _make_client()
-    # Simulate login at 09:00 IST — midnight is 14.5 hours away
-    ist_offset = timedelta(hours=5, minutes=30)
-    now_ist = datetime(2026, 4, 24, 9, 0, 0, tzinfo=timezone.utc)
-    client._logged_in_at = now_ist - ist_offset  # UTC equivalent
+    # Logged in at 10:00 IST today = 04:30 UTC (after today's 08:00 IST boundary)
+    # Now it's also 10:00 IST — next 08:00 IST is ~22 hours away
+    utc_now = datetime(2026, 4, 24, 4, 30, 0, tzinfo=timezone.utc)
+    client._logged_in_at = datetime(2026, 4, 24, 3, 30, 0, tzinfo=timezone.utc)  # 09:00 IST
 
     with patch("app.brokers.angel_client.datetime") as mock_dt:
-        # 09:00 IST → far from midnight
-        utc_time = now_ist
-        mock_dt.now.return_value = utc_time
+        mock_dt.now.return_value = utc_now
         mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
         result = client.is_token_near_expiry(margin_minutes=10)
 
     assert result is False
 
 
-def test_returns_true_when_within_margin_of_midnight():
+def test_returns_true_when_within_margin_of_refresh_boundary():
     client = _make_client()
-    ist_offset = timedelta(hours=5, minutes=30)
-    # 23:53 IST = 18:23 UTC — midnight IST is 18:30 UTC, 7 min away → within 10 min margin
-    utc_now = datetime(2026, 4, 24, 18, 23, 0, tzinfo=timezone.utc)
-    client._logged_in_at = utc_now - timedelta(hours=14)
+    # 07:53 IST = 02:23 UTC — 08:00 IST boundary is 02:30 UTC, 7 min away → within 10 min margin
+    # Logged in yesterday at 10:00 IST = yesterday 04:30 UTC (after yesterday's boundary)
+    utc_now = datetime(2026, 4, 24, 2, 23, 0, tzinfo=timezone.utc)
+    client._logged_in_at = datetime(2026, 4, 23, 4, 30, 0, tzinfo=timezone.utc)
 
     with patch("app.brokers.angel_client.datetime") as mock_dt:
         mock_dt.now.return_value = utc_now
@@ -71,6 +69,39 @@ def test_returns_true_when_within_margin_of_midnight():
         result = client.is_token_near_expiry(margin_minutes=10)
 
     assert result is True
+
+
+def test_returns_true_when_token_already_stale_after_8am():
+    """Token issued before today's 08:00 IST but checked just after — already stale."""
+    client = _make_client()
+    # Logged in at April 27 10:00 IST = April 27 04:30 UTC (before today's 08:00 IST boundary)
+    client._logged_in_at = datetime(2026, 4, 27, 4, 30, 0, tzinfo=timezone.utc)
+    # Now it's April 28 08:05 IST = April 28 02:35 UTC (5 min after the 08:00 IST boundary)
+    utc_now = datetime(2026, 4, 28, 2, 35, 0, tzinfo=timezone.utc)
+
+    with patch("app.brokers.angel_client.datetime") as mock_dt:
+        mock_dt.now.return_value = utc_now
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        result = client.is_token_near_expiry(margin_minutes=10)
+
+    assert result is True
+
+
+def test_returns_false_after_post_boundary_relogin():
+    """After a successful post-08:00-IST relogin, token should not be flagged as near expiry."""
+    client = _make_client()
+    # Logged in at April 28 08:05 IST = April 28 02:35 UTC (after the 08:00 IST boundary)
+    client._logged_in_at = datetime(2026, 4, 28, 2, 35, 0, tzinfo=timezone.utc)
+    # Now it's April 28 08:10 IST = April 28 02:40 UTC
+    utc_now = datetime(2026, 4, 28, 2, 40, 0, tzinfo=timezone.utc)
+
+    with patch("app.brokers.angel_client.datetime") as mock_dt:
+        mock_dt.now.return_value = utc_now
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        result = client.is_token_near_expiry(margin_minutes=10)
+
+    # Next 08:00 IST boundary is ~23h50m away — should NOT trigger proactive relogin
+    assert result is False
 
 
 # ---------------------------------------------------------------------------

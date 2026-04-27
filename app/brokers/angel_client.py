@@ -356,39 +356,52 @@ class AngelBrokerClient(BrokerClient):
         self,
         *,
         margin_minutes: int = 10,
-        expiry_ist_hour: int = 0,
+        expiry_ist_hour: int = 8,
         expiry_ist_minute: int = 0,
         tz_offset_hours: int = 5,
         tz_offset_minutes: int = 30,
     ) -> bool:
-        """Return True if the Angel auth token will expire within *margin_minutes*.
+        """Return True if the Angel auth token is already expired or will expire within *margin_minutes*.
 
-        Angel One JWT tokens expire at midnight IST (00:00 IST = 18:30 UTC previous day).
-        This helper checks whether we are within *margin_minutes* of that boundary so
-        the AccountRunner can trigger a proactive re-login before the auth error window.
+        Tokens are refreshed daily at 08:00 IST (02:30 UTC).
+        Returns True in two cases:
+        1. The token was issued before the last 08:00 IST boundary — it is already stale.
+        2. The next 08:00 IST boundary is within *margin_minutes* — proactive refresh before the window.
         """
         if self._logged_in_at is None:
             return False
         now_utc = datetime.now(timezone.utc)
         ist_offset = timedelta(hours=tz_offset_hours, minutes=tz_offset_minutes)
         now_ist = now_utc + ist_offset
-        # Next midnight IST from now
         today_ist = now_ist.date()
-        midnight_ist = datetime(
+
+        # Midnight IST for the current IST calendar day expressed in UTC.
+        today_midnight_utc = datetime(
             today_ist.year, today_ist.month, today_ist.day,
             expiry_ist_hour, expiry_ist_minute, 0,
             tzinfo=timezone.utc,
         ) - ist_offset
-        if midnight_ist <= now_utc:
-            midnight_ist += timedelta(days=1)
-        seconds_to_expiry = (midnight_ist - now_utc).total_seconds()
+
+        # The most recent past midnight IST boundary.
+        if today_midnight_utc <= now_utc:
+            last_midnight_utc = today_midnight_utc
+        else:
+            last_midnight_utc = today_midnight_utc - timedelta(days=1)
+
+        # Case 1: token was issued before the last midnight IST — already expired.
+        if self._logged_in_at < last_midnight_utc:
+            return True
+
+        # Case 2: next midnight IST is approaching within the margin.
+        next_midnight_utc = last_midnight_utc + timedelta(days=1)
+        seconds_to_expiry = (next_midnight_utc - now_utc).total_seconds()
         return 0 < seconds_to_expiry <= margin_minutes * 60
 
     async def proactive_relogin_if_near_expiry(self, *, margin_minutes: int = 10) -> bool:
-        """Re-login proactively if the token is within *margin_minutes* of expiry.
+        """Re-login proactively if the token is within *margin_minutes* of the daily 08:00 IST refresh boundary.
 
         Returns True if a re-login was performed, False otherwise.
-        This prevents the midnight position-sync degradation window caused by
+        This prevents the position-sync degradation window caused by
         reacting to auth errors after the token has already expired (§79).
         """
         if not self.is_token_near_expiry(margin_minutes=margin_minutes):
