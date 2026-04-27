@@ -57,7 +57,7 @@ Before you start the bundled LIVE stack, all of the following must already be tr
 - The target subscription / strategy config rows exist.
 - The target `broker_credentials` row exists for the chosen `broker_account_id`.
 - Port `80` is free on the host.
-- The runtime can obtain `ADMIN_API_KEY`, `DEMO_AUTH_TOKEN_SECRET`, `CONTROL_PLANE_PG_PASSWORD`, `CLIENT_LOCAL_IP`, `CLIENT_PUBLIC_IP`, and `MAC_ADDRESS` from your approved LIVE secret process.
+- The runtime can obtain `ADMIN_API_KEY`, `DEMO_AUTH_TOKEN_SECRET`, `CONTROL_PLANE_PG_PASSWORD`, `ANGEL_POSTBACK_TOKEN`, `CLIENT_LOCAL_IP`, `CLIENT_PUBLIC_IP`, and `MAC_ADDRESS` from your approved LIVE secret process.
 
 ### If you use the bundled PowerShell helper
 
@@ -67,6 +67,7 @@ The helper script expects the following Windows modules and secret names:
 - `ADMIN_API_KEY`
 - `DEMO_AUTH_TOKEN_SECRET`
 - `CONTROL_PLANE_PG_PASSWORD`
+- `ANGEL_POSTBACK_TOKEN` (§126 — required for Angel broker postback authentication; without it all Angel postbacks return HTTP 401 and the lifecycle service misses fill events)
 - `CLIENT_LOCAL_IP`
 - `CLIENT_PUBLIC_IP`
 - `MAC_ADDRESS`
@@ -117,7 +118,7 @@ directory only after `docker compose down`.
 Do not use raw `docker compose up` directly unless the current PowerShell
 session has already exported all required non-secret env vars and
 `PHX_SECRET_DIR` points at existing `admin_api_key`, `demo_auth_token_secret`,
-and `control_plane_pg_password` files.
+`control_plane_pg_password`, and `angel_postback_token` files.
 
 ---
 
@@ -188,8 +189,10 @@ curl.exe http://localhost/health/summary
 This proves the backend container, not just the host shell, resolved the required automated LIVE tuple:
 
 ```powershell
-docker compose -f .\docker-compose.live.single.yml exec backend sh -lc "env | egrep '^(TRADE_MODE|REQUIRE_LIVE_TRADE_MODE|ENABLE_MULTI_HUB|USE_HUB_ROUTER|DISABLE_STREAM_WORKER|BROKER_SECRET_BACKEND|CONTROL_PLANE_BACKEND|SWEEP_STATE_BACKEND|APP_RUNTIME_STARTUP_VALIDATE|SCHEMA_CHECK_MODE|BROKER_SCHEMA_CHECK_MODE|DASHBOARD_AUTH_DISABLED|DISABLE_CONTROL_TOWER_ROUTES|ORDER_ROUTER_ENFORCE_IDEMPOTENCY|POSITION_OWNERSHIP_ENABLED|ENABLE_EOD_EXIT|RISK_STATE_PATH)='"
+docker compose -f .\docker-compose.live.single.yml exec backend sh -lc "env | egrep '^(TRADE_MODE|REQUIRE_LIVE_TRADE_MODE|ENABLE_MULTI_HUB|USE_HUB_ROUTER|DISABLE_STREAM_WORKER|BROKER_SECRET_BACKEND|CONTROL_PLANE_BACKEND|SWEEP_STATE_BACKEND|APP_RUNTIME_STARTUP_VALIDATE|SCHEMA_CHECK_MODE|BROKER_SCHEMA_CHECK_MODE|DASHBOARD_AUTH_DISABLED|DISABLE_CONTROL_TOWER_ROUTES|ORDER_ROUTER_ENFORCE_IDEMPOTENCY|POSITION_OWNERSHIP_ENABLED|ENABLE_EOD_EXIT|RISK_STATE_PATH|ANGEL_POSTBACK_AUTH_MODE)='"
 ```
+
+`ANGEL_POSTBACK_AUTH_MODE` must resolve to `direct_broker` in LIVE. If it is absent or set to `disabled`, all Angel broker postbacks return HTTP 401 and the lifecycle service will not receive fill events from broker-initiated callbacks (§126).
 
 ### 4. Stream-worker startup evidence
 

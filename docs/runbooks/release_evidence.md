@@ -31,7 +31,7 @@ deployment log or PR.
 | `trade_mode` | `"LIVE"` |
 | `runtime_ready` | `true` |
 | `is_leader` | `true` |
-| `position_authority_restored` | `true` (at least 1 position record loaded) |
+| `position_authority_restored` | `true` (at least 1 position record loaded) — see note below |
 | `schema_guard.status` | `"ok"` or empty missing lists |
 | `startup_recovery.status` | `"ok"` or `"skipped"` — never `"failed"` |
 | `stream_worker.running` | `true` |
@@ -46,6 +46,13 @@ deployment log or PR.
 
 Any field outside pass criteria is a **deployment blocker**. Do not approve release
 until every item passes.
+
+> **`position_authority_restored` on a fresh database:** On first deployment or after
+> a clean database restore with no prior session history, `position_authority_restored`
+> will be `false` because no position records exist in Postgres. This is expected
+> behavior and is not a blocker on initial deployment. Record this explicitly in the
+> deployment notes. On any subsequent deployment after positions have been written,
+> `false` is a blocker that requires investigation.
 
 ---
 

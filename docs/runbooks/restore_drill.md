@@ -8,10 +8,10 @@ This runbook defines how to test Phoenix backup and restore readiness. The goal 
 
 ## Recovery targets
 
-| Metric | Target | Meaning |
+| Metric | Target | Notes |
 |---|---|---|
-| **RTO** | 15 minutes | Time to restore service |
-| **RPO** | 5 minutes | Maximum acceptable data loss window |
+| **RTO** | < 30 minutes | Demonstrated 18 min on local Docker Desktop (2026-04-25 drill). Shorter targets require PITR-capable infrastructure (Cloud SQL). |
+| **RPO** | < 1 trading session | Local Docker Desktop: bounded by `pg_dump` schedule. Cloud SQL with WAL/PITR: configurable to minutes. |
 
 ---
 
@@ -43,6 +43,10 @@ Use your database platform's production backup mechanism. At minimum, maintain:
 - WAL / point-in-time recovery where supported
 - tested retention policy
 - operator access to restore into an isolated target database
+
+**RPO by deployment platform:**
+- **Local Docker Desktop** (host-local Postgres): backup cadence is limited to scheduled `pg_dump`. WAL archiving / point-in-time recovery (PITR) is not available without additional configuration. RPO is bounded by the `pg_dump` schedule (e.g. daily = up to one trading session of data loss).
+- **Cloud Run + Cloud SQL**: Cloud SQL provides automated WAL-based PITR with configurable retention. RPO can be reduced to minutes. PITR is the recommended backup strategy for cloud deployments.
 
 ### Manual backup example
 
@@ -82,11 +86,14 @@ Example checks:
 ```sql
 SELECT COUNT(*) FROM order_submission_outbox;
 SELECT COUNT(*) FROM position_ownership_ledger;
+SELECT COUNT(*) FROM internal_position_records;
 SELECT COUNT(*) FROM circuit_breaker_state;
 SELECT COUNT(*) FROM sweep_states;
 SELECT COUNT(*) FROM broker_credentials;
 SELECT COUNT(*) FROM users;
 ```
+
+Confirm that the `internal_position_records` row count matches the number of open positions expected from the backup window. Non-terminal rows in that table (position_state not in `FLAT`, `NONE`) will enter reconciliation on startup — verify these are expected, not artifacts of a stale backup.
 
 Also verify that obviously stale stuck submissions are not silently ignored:
 

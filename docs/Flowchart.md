@@ -335,6 +335,8 @@ flowchart TD
     end
 ```
 
+> **Architecture note — Position Sync Thread:** The ghost-registration and single-poll removal paths shown above are the **legacy stream-side** code (`risk_manager` / `restart_state.py`). In the current hub-authoritative LIVE mode, ARCHITECTURE.md §19.3 and P0 rule 5 forbid single-poll ghost creation or removal without reconciliation evidence. The authoritative sync path is the hub `AccountRunner` → `OrderLifecycleService` / `PositionOwnershipStore` flow governed by reconciliation rules in §11. The stream-side paths shown here exist only for the legacy authority path and for restart-helper seeding.
+
 ## 9. Hub Multi-Tenant Architecture
 
 ```mermaid
