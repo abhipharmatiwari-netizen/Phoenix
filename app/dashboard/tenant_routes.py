@@ -365,6 +365,15 @@ async def get_account_pnl(
                     ),
                 },
             }
+        # No snapshot for this strategy — return null rather than silently
+        # falling through to the account-level aggregate, which would show
+        # the sum of all strategies' PnL mislabelled as this strategy's PnL.
+        return {
+            "tenant_id": ctx.tenant_id,
+            "broker_account_id": broker_account_id,
+            "strategy_id": strategy_id,
+            "pnl": None,
+        }
 
     # Account-level aggregate: combine realized PnL snapshots with live position marks.
     realized = pnl_engine.get_current_realized_pnl(
