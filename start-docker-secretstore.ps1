@@ -363,24 +363,24 @@ try {
         -Command @("docker", "compose", "-f", $composeFile, "down", "--remove-orphans")
 
     # -----------------------------------------------------------------------
-    # PHASE 2 - Build image
+    # PHASE 2 - Build images
     # Always rebuild so every deploy picks up the latest committed code.
-    # docker compose up --build also builds, but an explicit step here
-    # gives the operator a clear build log separate from the startup log.
+    # Build through Compose so every service with a local build context is
+    # tagged before Phase 3 starts with --no-build.
     # -----------------------------------------------------------------------
     Write-Host ""
     Write-Host "================================================================" -ForegroundColor Cyan
-    Write-Host "  PHASE 2 - Building Docker image" -ForegroundColor Cyan
+    Write-Host "  PHASE 2 - Building Docker images" -ForegroundColor Cyan
     Write-Host "================================================================" -ForegroundColor Cyan
     $buildStart = Get-Date
-    Invoke-External -Description "Building phoenix-v9-backend:live" `
-        -Command @("docker", "build", "-t", "phoenix-v9-backend:live", $repoRoot)
+    Invoke-External -Description "Building Compose images (backend + nginx)" `
+        -Command @("docker", "compose", "-f", $composeFile, "build", "backend", "nginx")
     $buildSecs = [int]((Get-Date) - $buildStart).TotalSeconds
     Write-Host "  Build completed in ${buildSecs}s" -ForegroundColor Green
 
     # -----------------------------------------------------------------------
     # PHASE 3 - Start stack (migrator -> db-preflight -> backend -> nginx)
-    # --no-build: image was already built in Phase 2; skip duplicate build.
+    # --no-build: images were already built in Phase 2; skip duplicate build.
     # --force-recreate: ensures containers pick up new image + config hash.
     # -----------------------------------------------------------------------
     Write-Host ""

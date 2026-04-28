@@ -1,0 +1,150 @@
+﻿{
+    "captured_at":  "2026-04-28T09:47:45.2001546+05:30",
+    "commit_sha":  "d40ce0aa708bcda1adeb25939b57d61c94d3ac22",
+    "image_id":  "sha256:06ff64a7ab2f018a31cb80899526690f271728a457e68ee89e8827e7bc219cb1",
+    "all_checks_pass":  false,
+    "readyz":  {
+                   "timestamp":  "2026-04-28T04:17:42.642838Z",
+                   "leader_lease_status":  {
+                                               "enabled":  true,
+                                               "owned":  true,
+                                               "task_running":  true,
+                                               "backend":  "postgres",
+                                               "lease_id":  "phoenix-live-single-stack",
+                                               "owner_id":  "de4d8d304a32",
+                                               "renew_failures":  0
+                                           },
+                   "startup_recovery_status":  "ok",
+                   "startup_recovery_summary":  {
+                                                    "scanned":  0,
+                                                    "rehydrated":  0,
+                                                    "adopted":  0,
+                                                    "replayed":  0,
+                                                    "deferred":  0,
+                                                    "failed":  0,
+                                                    "unresolved_active":  0,
+                                                    "tenant_count":  0,
+                                                    "broker_account_count":  0,
+                                                    "tenant_record_counts":  {
+
+                                                                             },
+                                                    "broker_account_record_counts":  {
+
+                                                                                     },
+                                                    "position_records_loaded":  0,
+                                                    "startup_ownership_gap_detected":  false
+                                                },
+                   "runner_count":  1,
+                   "registered_runner_count":  1,
+                   "running_runner_count":  1,
+                   "failed_runner_count":  0,
+                   "stream_worker_expected":  true,
+                   "stream_worker_running":  true,
+                   "watchdog_running":  true,
+                   "position_sync_last_ok_ts":  "2026-04-28T04:17:28.342813+00:00",
+                   "position_sync_age_seconds":  14.3,
+                   "position_sync_stale":  false,
+                   "position_sync_threshold_seconds":  180.0,
+                   "orders_sync_last_ok_ts":  "2026-04-28T04:17:28.539104+00:00",
+                   "orders_sync_age_seconds":  14.1,
+                   "orders_sync_stale":  false,
+                   "orders_sync_threshold_seconds":  180.0,
+                   "kill_switch_active_count":  0,
+                   "kill_switch_source":  "kill_switch_manager",
+                   "position_records_loaded":  0,
+                   "position_authority_restored":  true,
+                   "startup_ownership_gap_detected":  false,
+                   "active_instrument_count":  113,
+                   "balance_schema_violation_count":  0,
+                   "degraded_scope_count":  0,
+                   "position_state_counts":  {
+
+                                             },
+                   "postgres_transport":  {
+                                              "sslmode":  "prefer",
+                                              "ssl_enforced":  false,
+                                              "live_pg_ssl_skip_check":  true
+                                          },
+                   "ready":  true
+               },
+    "release_evidence":  {
+                             "generated_at":  "2026-04-28T04:17:43.522389Z",
+                             "trade_mode":  "LIVE",
+                             "app_env":  "production",
+                             "hub_instance":  "phoenix-live-1",
+                             "runtime_ready":  true,
+                             "is_leader":  true,
+                             "position_authority_restored":  false,
+                             "operating_mode":  {
+                                                    "mode":  "HUB_AUTHORITATIVE",
+                                                    "authority_path":  "hub",
+                                                    "reason":  "Resolved from enable_multi_hub=True, use_hub_router=True, disable_stream_worker=False (stream plane only; authority resolved from hub/router flags)"
+                                                },
+                             "schema_guard":  {
+                                                  "status":  "ok",
+                                                  "checked_at":  "2026-04-28T04:17:22.474760Z",
+                                                  "missing_tables":  [
+
+                                                                     ],
+                                                  "missing_indexes":  [
+
+                                                                      ]
+                                              },
+                             "startup_recovery":  {
+                                                      "status":  "ok",
+                                                      "reason":  null,
+                                                      "summary":  {
+                                                                      "scanned":  0,
+                                                                      "rehydrated":  0,
+                                                                      "adopted":  0,
+                                                                      "replayed":  0,
+                                                                      "deferred":  0,
+                                                                      "failed":  0,
+                                                                      "unresolved_active":  0,
+                                                                      "tenant_count":  0,
+                                                                      "broker_account_count":  0,
+                                                                      "tenant_record_counts":  {
+
+                                                                                               },
+                                                                      "broker_account_record_counts":  {
+
+                                                                                                       },
+                                                                      "position_records_loaded":  0,
+                                                                      "startup_ownership_gap_detected":  false
+                                                                  }
+                                                  },
+                             "stream_worker":  {
+                                                   "running":  true,
+                                                   "fatal_error":  null,
+                                                   "stop_requested":  false
+                                               },
+                             "runner_count":  0,
+                             "runner_ids":  [
+
+                                            ],
+                             "position_records_in_memory":  0,
+                             "position_records_active":  0,
+                             "kill_switch":  {
+                                                 "source":  "kill_switch_manager",
+                                                 "records":  [
+
+                                                             ],
+                                                 "active_count":  0
+                                             },
+                             "synthetic_contamination_cleared":  true,
+                             "postgres_transport":  {
+                                                        "sslmode":  "prefer",
+                                                        "ssl_enforced":  false,
+                                                        "live_pg_ssl_skip_check":  true,
+                                                        "transport_note":  "local-only-bypass-approved"
+                                                    },
+                             "safety_flags":  {
+                                                  "enable_capital_checks":  true,
+                                                  "enable_risk_checks":  true,
+                                                  "order_submission_outbox_required":  true,
+                                                  "position_ownership_enabled":  true,
+                                                  "disable_trading_window_filter":  false,
+                                                  "risk_fail_open_on_missing_pnl":  false
+                                              }
+                         }
+}

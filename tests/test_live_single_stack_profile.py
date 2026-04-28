@@ -8,6 +8,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 LIVE_COMPOSE_PATH = REPO_ROOT / "docker-compose.live.single.yml"
 DOCKERFILE_PATH = REPO_ROOT / "Dockerfile"
 NGINX_TEMPLATE_PATH = REPO_ROOT / "nginx" / "nginx.conf.template"
+SECRETSTORE_LAUNCHER_PATH = REPO_ROOT / "start-docker-secretstore.ps1"
 
 
 def _read_text(path: Path) -> str:
@@ -63,3 +64,10 @@ def test_live_deployment_probes_use_readyz():
     assert 'test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]' in compose_text
     assert 'test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/readyz >/dev/null 2>&1 || exit 1"]' in compose_text
     assert "location /readyz {" in nginx_template_text
+
+
+def test_secretstore_launcher_builds_all_local_live_images_before_no_build_up():
+    script_text = _read_text(SECRETSTORE_LAUNCHER_PATH)
+
+    assert '@("docker", "compose", "-f", $composeFile, "build", "backend", "nginx")' in script_text
+    assert '@("docker", "compose", "-f", $composeFile, "up", "-d", "--no-build", "--force-recreate")' in script_text
