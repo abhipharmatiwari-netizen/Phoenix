@@ -117,6 +117,18 @@ class PnLEngine:
             snap.control_open_qty = 0
 
     # Get or create a snapshot for a tenant/account/strategy.
+    def _get_snapshot(
+        self,
+        tenant_id: TenantId,
+        broker_account_id: BrokerAccountId,
+        strategy_id: StrategyId,
+    ) -> Optional[PnLSnapshot]:
+        return self._state_store.get_snapshot(
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+            strategy_id=strategy_id,
+        )
+
     def _get_or_create_snapshot(
         self,
         tenant_id: TenantId,
@@ -233,14 +245,18 @@ class PnLEngine:
 
     # Consume a trade event and update realized PnL.
     def on_trade(self, event: TradeEvent) -> None:
-        """
-        Consume a trade event and update realized PnL.
+        """Consume a trade event and update the cash-flow realized PnL ledger.
 
-        Phase 1:
-        - Assumes each trade's PnL effect is encoded in event.qty * event.price (gross),
-          minus fees. Buys have positive qty and reduce PnL (cash outflow), sells
-          have negative qty and increase PnL (cash inflow). In practice, integrating
-          with real position accounting will refine this.
+        The ledger uses signed cash flows: sells add proceeds (positive), buys
+        subtract cost (negative).  This correctly nets to actual realized P&L
+        once a position is fully closed.  For open positions the ledger includes
+        the sale proceeds of the open leg, which overstates realized P&L until
+        the round-trip completes.
+
+        net_open_qty / open_avg_price are maintained alongside so that callers
+        can compute the corrected display realized P&L:
+            display_realized = realized_pnl + net_open_qty * open_avg_price
+        (subtracts the open-position contribution from the cash-flow ledger).
         """
         snap = self._get_or_create_snapshot(
             event.tenant_id,
@@ -248,15 +264,88 @@ class PnLEngine:
             event.strategy_id,
         )
         self._reset_if_new_day(snap, event.trade_time)
+
+        # Cash-flow ledger (unchanged — risk engine depends on this).
         snap.realized_pnl -= event.qty * event.price
         snap.realized_pnl -= event.fees
+
+        # Update open-position tracker so display_realized can be corrected.
+        self._update_open_position(snap, event.qty, event.price)
+
         snap.as_of = event.trade_time
         snap.freshness_updated_at = event.trade_time
         snap.freshness_source = "trade"
         self._state_store.upsert_snapshot(snap)
-        
+
         # Persist to BigQuery in real-time
         self._persist_snapshot(snap)
+
+    @staticmethod
+    def _update_open_position(snap: "PnLSnapshot", qty: int, price: float) -> None:
+        """Maintain net_open_qty and open_avg_price for the display correction."""
+        prev = snap.net_open_qty
+        new_net = prev + qty
+
+        if prev == 0:
+            snap.net_open_qty = qty
+            snap.open_avg_price = price if qty != 0 else 0.0
+        elif (prev > 0 and qty > 0) or (prev < 0 and qty < 0):
+            # Increasing in the same direction: update weighted average price.
+            abs_new = abs(new_net)
+            snap.open_avg_price = (
+                (abs(prev) * snap.open_avg_price + abs(qty) * price) / abs_new
+                if abs_new > 0 else 0.0
+            )
+            snap.net_open_qty = new_net
+        else:
+            # Opposite direction: partial close or full reversal.
+            snap.net_open_qty = new_net
+            if new_net == 0:
+                snap.open_avg_price = 0.0
+            elif (prev > 0 and qty < 0 and abs(qty) > abs(prev)) or \
+                 (prev < 0 and qty > 0 and abs(qty) > abs(prev)):
+                # Reversal: new position opens in opposite direction at current price.
+                snap.open_avg_price = price
+            # else: partial close, existing avg_price still applies to the remainder.
+
+    def restore_open_position(
+        self,
+        tenant_id: TenantId,
+        broker_account_id: BrokerAccountId,
+        strategy_id: StrategyId,
+        net_open_qty: int,
+        open_avg_price: float,
+    ) -> None:
+        """Restore ephemeral open-position state from internal_position_records on startup.
+
+        Called once per active position during hub startup so that the display
+        correction (display_realized = realized_pnl + net_open_qty * open_avg_price)
+        gives the right value even for positions opened in a prior container lifetime.
+        Not persisted to DB — derived from internal_position_records each restart.
+        """
+        snap = self._get_snapshot(tenant_id, broker_account_id, strategy_id)
+        if snap is None:
+            return
+        snap.net_open_qty = int(net_open_qty)
+        snap.open_avg_price = float(open_avg_price)
+
+    def get_display_realized_pnl(
+        self,
+        tenant_id: TenantId,
+        broker_account_id: BrokerAccountId,
+        strategy_id: StrategyId,
+    ) -> Optional[float]:
+        """Return realized PnL corrected for open position contributions.
+
+        The cash-flow ledger (realized_pnl) books sell proceeds even for open
+        shorts, inflating realized_pnl until the round-trip completes.  This
+        method subtracts the open-position contribution so the displayed value
+        reflects only truly locked-in P&L from fully closed trades.
+        """
+        snap = self._get_snapshot(tenant_id, broker_account_id, strategy_id)
+        if snap is None:
+            return None
+        return float(snap.realized_pnl) + float(snap.net_open_qty) * float(snap.open_avg_price)
 
     # Update unrealized PnL and exposure for a snapshot.
     def update_unrealized_and_exposure(

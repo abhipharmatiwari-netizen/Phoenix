@@ -22,7 +22,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from app.config.settings import get_settings
 from app.core.clock import IClock, SystemClock
-from app.core.identifiers import BrokerAccountId, TenantId
+from app.core.identifiers import BrokerAccountId, StrategyId, TenantId
 from app.hub.hub import Hub
 from app.hub.routing_table import get_global_routing_table
 from app.data.state_store import StateStore
@@ -269,7 +269,52 @@ def _seed_runtime_pnl_snapshots(
         result.account_pairs_count,
         f" error={result.error}" if result.error else "",
     )
+
+    # Restore ephemeral open-position state (net_open_qty / open_avg_price) from
+    # internal_position_records so display_realized_pnl is correct after restarts.
+    _restore_pnl_open_positions(pnl_engine)
+
     return result
+
+
+def _restore_pnl_open_positions(pnl_engine: "PnLEngine") -> None:
+    """Populate net_open_qty/open_avg_price on PnL snapshots from DB position records.
+
+    These ephemeral fields are not persisted in pnl_snapshots; without this
+    restore step the display_realized_pnl correction would be wrong after a
+    container restart because net_open_qty would start at 0, causing the
+    cash-flow sell proceeds of open shorts to appear as realized profit.
+    """
+    try:
+        from app.data.postgres import connect_with_retry, get_control_plane_dsn
+        dsn = get_control_plane_dsn()
+        with connect_with_retry(dsn, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT tenant_id, account_id, strategy_id, net_qty, avg_open_price
+                    FROM internal_position_records
+                    WHERE position_state NOT IN ('FLAT', 'NONE')
+                      AND net_qty != 0
+                """)
+                rows = cur.fetchall()
+        for tenant_id, account_id, strategy_id, net_qty, avg_open_price in rows:
+            try:
+                pnl_engine.restore_open_position(
+                    tenant_id=TenantId(tenant_id),
+                    broker_account_id=BrokerAccountId(account_id),
+                    strategy_id=StrategyId(strategy_id),
+                    net_open_qty=int(net_qty or 0),
+                    open_avg_price=float(avg_open_price or 0.0),
+                )
+            except Exception as exc:
+                logger.warning("pnl.restore_open_position failed for %s/%s/%s: %s",
+                               tenant_id, account_id, strategy_id, exc)
+        if rows:
+            logger.info(
+                "pnl.open_position_restore: restored net_open_qty for %d position(s)", len(rows)
+            )
+    except Exception as exc:
+        logger.warning("pnl.open_position_restore failed (non-fatal): %s", exc)
 
 
 class HubRuntime:

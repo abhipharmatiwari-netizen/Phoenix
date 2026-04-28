@@ -349,12 +349,22 @@ async def get_account_pnl(
                 if mark_source == "mark_update"
                 else float(live_mark["gross_exposure"])
             )
+            # Use display-corrected realized PnL that subtracts open-position
+            # cash-flow contributions (sell proceeds of uncovered shorts are
+            # booked by the cash-flow ledger but are not true realized P&L).
+            display_realized = pnl_engine.get_display_realized_pnl(
+                tenant_id=ctx.tenant_id,
+                broker_account_id=broker_account_id,
+                strategy_id=strategy_id,
+            )
+            if display_realized is None:
+                display_realized = float(snapshot.realized_pnl or 0.0)
             return {
                 "tenant_id": ctx.tenant_id,
                 "broker_account_id": broker_account_id,
                 "strategy_id": strategy_id,
                 "pnl": {
-                    "realized_pnl": float(snapshot.realized_pnl or 0.0),
+                    "realized_pnl": round(display_realized, 2),
                     "unrealized_pnl": round(unrealized_pnl, 2),
                     "gross_exposure": round(gross_exposure, 2),
                     "as_of": (snapshot.as_of or now).isoformat(),

@@ -53,6 +53,14 @@ class PnLSnapshot:
     control_open_pnl: float = 0.0          # MTM on open positions
     control_open_premium: float = 0.0      # sum of entry premiums (open legs)
     control_open_qty: int = 0              # open short-option leg units
+    # Position-tracking fields (ephemeral — not persisted to DB, restored from
+    # internal_position_records on startup).  Used to compute display_realized_pnl
+    # which corrects the cash-flow realized_pnl for open positions: the cash-flow
+    # ledger books SELL proceeds as positive even before a short is covered, so
+    # display_realized = realized_pnl + net_open_qty * open_avg_price cancels the
+    # open contribution and shows only locked-in P&L from fully closed trades.
+    net_open_qty: int = 0                  # signed net open qty (+long, -short)
+    open_avg_price: float = 0.0            # weighted average entry price of open position
 
 
 @dataclass(frozen=True)
