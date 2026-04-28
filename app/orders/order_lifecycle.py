@@ -516,8 +516,14 @@ class OrderLifecycleService:
         positions_marked = 0
         for scope_key, rec in list(self._position_records.items()):
             if rec.position_state not in _terminal_position_states:
-                rec.position_state = PositionState.RECOVERY_PENDING
-                positions_marked += 1
+                if float(rec.net_qty or 0) == 0:
+                    # net_qty=0 means the position is already closed in the broker.
+                    # Promote directly to FLAT — no broker reconciliation needed and
+                    # no ownership record required, so this cannot create an ownership gap.
+                    rec.position_state = PositionState.FLAT
+                else:
+                    rec.position_state = PositionState.RECOVERY_PENDING
+                    positions_marked += 1
         marked += positions_marked
 
         if marked:
