@@ -1045,9 +1045,11 @@ def resolve_expired_contracts(
         min_age_days=payload.min_age_days,
     )
     emit_audit_event(
-        event_type="ADMIN_RESOLVE_EXPIRED_CONTRACTS",
         actor=ctx.caller,
-        details={
+        action="resolve_expired_contracts",
+        resource_type="outbox",
+        resource_id=str(payload.symbol_pattern),
+        metadata={
             "symbol_pattern": payload.symbol_pattern,
             "min_age_days": payload.min_age_days,
             "rows_updated": updated,
@@ -1117,9 +1119,11 @@ def kill_switch_trip(
         raise HTTPException(status_code=409, detail=str(exc))
     _save_kill_switch_state(ksm)
     emit_audit_event(
-        event_type="ADMIN_KILL_SWITCH_TRIP",
         actor=ctx.caller,
-        details={"scope": payload.scope, "scope_id": payload.scope_id, "reason": payload.reason},
+        action="kill_switch_trip",
+        resource_type="kill_switch",
+        resource_id=str(payload.scope_id),
+        metadata={"scope": payload.scope, "scope_id": payload.scope_id, "reason": payload.reason},
     )
     return {"status": "tripped", "record_id": record.id, "state": record.state.value}
 
@@ -1178,10 +1182,12 @@ def kill_switch_request_clear(
         )
     _save_kill_switch_state(ksm)
     emit_audit_event(
-        event_type="ADMIN_KILL_SWITCH_REQUEST_CLEAR",
         actor=ctx.caller,
-        details={"scope": payload.scope, "scope_id": payload.scope_id,
-                 "reason_code": payload.reason_code, "break_glass": payload.break_glass},
+        action="kill_switch_request_clear",
+        resource_type="kill_switch",
+        resource_id=str(payload.scope_id),
+        metadata={"scope": payload.scope, "scope_id": payload.scope_id,
+                  "reason_code": payload.reason_code, "break_glass": payload.break_glass},
     )
     return {"status": "clear_pending", "record_id": record.id, "state": record.state.value}
 
@@ -1205,9 +1211,11 @@ def kill_switch_confirm_clear(
         raise HTTPException(status_code=409, detail=str(exc))
     _save_kill_switch_state(ksm)
     emit_audit_event(
-        event_type="ADMIN_KILL_SWITCH_CONFIRM_CLEAR",
         actor=ctx.caller,
-        details={"scope": payload.scope, "scope_id": payload.scope_id},
+        action="kill_switch_confirm_clear",
+        resource_type="kill_switch",
+        resource_id=str(payload.scope_id),
+        metadata={"scope": payload.scope, "scope_id": payload.scope_id},
     )
     return {"status": "cleared", "record_id": record.id, "state": record.state.value}
 
@@ -1231,9 +1239,11 @@ def kill_switch_rearm(
         raise HTTPException(status_code=409, detail=str(exc))
     _save_kill_switch_state(ksm)
     emit_audit_event(
-        event_type="ADMIN_KILL_SWITCH_REARM",
         actor=ctx.caller,
-        details={"scope": payload.scope, "scope_id": payload.scope_id},
+        action="kill_switch_rearm",
+        resource_type="kill_switch",
+        resource_id=str(payload.scope_id),
+        metadata={"scope": payload.scope, "scope_id": payload.scope_id},
     )
     return {"status": "inactive", "record_id": record.id, "state": record.state.value}
 
@@ -1262,9 +1272,11 @@ def get_release_evidence(ctx: AdminContext = Depends(get_admin_context)) -> dict
     runtime = get_app_runtime()
     evidence = runtime.release_evidence_snapshot()
     emit_audit_event(
-        event_type="ADMIN_RELEASE_EVIDENCE_READ",
         actor=ctx.caller,
-        details={"trade_mode": evidence.get("trade_mode")},
+        action="release_evidence_read",
+        resource_type="release_evidence",
+        resource_id="live",
+        metadata={"trade_mode": evidence.get("trade_mode")},
     )
     return evidence
 

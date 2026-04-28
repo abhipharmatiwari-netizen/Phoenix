@@ -142,7 +142,12 @@ def safe_compare_token(expected: Optional[str], actual: Optional[str]) -> bool:
     actual_text = str(actual or "").strip()
     if not expected_text or not actual_text:
         return False
-    return hmac.compare_digest(expected_text, actual_text)
+    # encode to bytes: hmac.compare_digest rejects str with non-ASCII code points
+    # (e.g. UTF-8 BOM injected by PowerShell 5.1 WriteAllText with the default
+    # UTF8 encoder, which includes the BOM and is then read by the container shell).
+    return hmac.compare_digest(
+        expected_text.encode("utf-8"), actual_text.encode("utf-8")
+    )
 
 
 

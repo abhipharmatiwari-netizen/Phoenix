@@ -285,7 +285,10 @@ try {
             } catch {}
             Remove-Item -Path $Path -Force -ErrorAction SilentlyContinue
         }
-        [System.IO.File]::WriteAllText($Path, $Value, [System.Text.Encoding]::UTF8)
+        # PowerShell 5.1 [System.Text.Encoding]::UTF8 writes a BOM; use explicit
+        # no-BOM encoder so Linux containers read the value without a leading U+FEFF.
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($Path, $Value, $utf8NoBom)
     }
 
     Write-SecretFile -Path (Join-Path $secretDir "control_plane_pg_password") -Value $env:CONTROL_PLANE_PG_PASSWORD_HOST

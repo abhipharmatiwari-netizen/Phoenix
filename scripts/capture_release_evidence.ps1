@@ -33,7 +33,7 @@ $ErrorActionPreference = "Stop"
 # ---------------------------------------------------------------------------
 function Invoke-PhoenixApi {
     param([string]$Path)
-    $headers = @{ "Authorization" = "Bearer $AdminKey" }
+    $headers = @{ "X-Admin-Key" = $AdminKey }
     try {
         $response = Invoke-RestMethod `
             -Uri "$BaseUrl$Path" `
