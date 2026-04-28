@@ -12,6 +12,9 @@ import {
 
 const TENANT_STORAGE_KEY = 'phoenix.tenant_id';
 const AUTH_TOKEN_STORAGE_KEY = 'token';
+const REFRESH_TOKEN_STORAGE_KEY = 'refresh_token';
+
+export const AUTH_SESSION_CHANGED_EVENT = 'phoenix-auth-session-changed';
 
 interface LoginPayload {
   email: string;
@@ -20,12 +23,20 @@ interface LoginPayload {
 
 interface LoginResponse {
   token: string;
+  refresh_token?: string | null;
+  expires_in?: number;
   user: {
     id: string;
     email: string;
     name: string;
     role: string;
   };
+}
+
+interface RefreshResponse {
+  token: string;
+  refresh_token?: string | null;
+  expires_in?: number;
 }
 
 interface AuthenticatedUserResponse {
@@ -163,7 +174,14 @@ export function setTenantId(tenantId: string): void {
   }
 }
 
-function readStoredAuthToken(): string | null {
+function dispatchAuthSessionChanged(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.dispatchEvent(new Event(AUTH_SESSION_CHANGED_EVENT));
+}
+
+export function getStoredAuthToken(): string | null {
   if (typeof window === 'undefined') {
     return null;
   }
@@ -171,8 +189,114 @@ function readStoredAuthToken(): string | null {
   return token ? token.trim() : null;
 }
 
+function readStoredRefreshToken(): string | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  const token = window.localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY);
+  return token ? token.trim() : null;
+}
+
+export function storeAuthSession(
+  token: string,
+  refreshToken?: string | null,
+): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const normalizedToken = token.trim();
+  if (normalizedToken) {
+    window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, normalizedToken);
+  } else {
+    window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+  }
+
+  if (refreshToken !== undefined) {
+    const normalizedRefresh = String(refreshToken || '').trim();
+    if (normalizedRefresh) {
+      window.localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, normalizedRefresh);
+    } else {
+      window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+    }
+  }
+
+  dispatchAuthSessionChanged();
+}
+
+export function clearAuthSession(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+  window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+  dispatchAuthSessionChanged();
+}
+
 function bffPath(path: string): string {
   return `/bff/${path.replace(/^\/+/, '')}`;
+}
+
+let refreshInFlight: Promise<string | null> | null = null;
+
+function isAuthPath(path: string): boolean {
+  const normalized = `/${path.replace(/^\/+/, '')}`;
+  return normalized === '/auth/login'
+    || normalized === '/auth/refresh'
+    || normalized === '/auth/logout';
+}
+
+async function refreshStoredSession(): Promise<string | null> {
+  if (!refreshInFlight) {
+    refreshInFlight = refreshStoredSessionOnce().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
+}
+
+async function refreshStoredSessionOnce(): Promise<string | null> {
+  const refreshToken = readStoredRefreshToken();
+  if (!refreshToken) {
+    return null;
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(buildUrl(BACKEND_BASE_URL, '/auth/refresh'), {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+  } catch {
+    return null;
+  }
+
+  const raw = await response.text();
+  const payload = raw ? safeJsonParse(raw) : null;
+  if (!response.ok) {
+    if (response.status === 400 || response.status === 401) {
+      clearAuthSession();
+    }
+    return null;
+  }
+
+  const nextToken = typeof payload === 'object' && payload !== null
+    ? String((payload as RefreshResponse).token || '').trim()
+    : '';
+  if (!nextToken) {
+    clearAuthSession();
+    return null;
+  }
+
+  const nextRefreshToken = typeof payload === 'object' && payload !== null
+    ? (payload as RefreshResponse).refresh_token
+    : undefined;
+  storeAuthSession(nextToken, nextRefreshToken ?? null);
+  return nextToken;
 }
 
 async function request<T>({
@@ -188,8 +312,9 @@ async function request<T>({
   if (!requestHeaders.has('Accept')) {
     requestHeaders.set('Accept', 'application/json');
   }
-  const storedToken = readStoredAuthToken();
-  if (storedToken && !requestHeaders.has('Authorization')) {
+  const storedToken = getStoredAuthToken();
+  const attachedStoredToken = Boolean(storedToken && !requestHeaders.has('Authorization'));
+  if (storedToken && attachedStoredToken) {
     requestHeaders.set('Authorization', `Bearer ${storedToken}`);
   }
   if (includeTenantHeader && !requestHeaders.has('X-Tenant-Id')) {
@@ -202,11 +327,22 @@ async function request<T>({
     requestHeaders.set('Content-Type', 'application/json');
   }
 
-  const response = await fetch(buildUrl(baseUrl, path, query), {
+  const url = buildUrl(baseUrl, path, query);
+  const encodedBody = body === undefined ? undefined : JSON.stringify(body);
+  const send = () => fetch(url, {
     method,
     headers: requestHeaders,
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: encodedBody,
   });
+
+  let response = await send();
+  if (response.status === 401 && attachedStoredToken && !isAuthPath(path)) {
+    const refreshedToken = await refreshStoredSession();
+    if (refreshedToken) {
+      requestHeaders.set('Authorization', `Bearer ${refreshedToken}`);
+      response = await send();
+    }
+  }
 
   const raw = await response.text();
   const payload = raw ? safeJsonParse(raw) : null;
@@ -215,6 +351,9 @@ async function request<T>({
     const detail = typeof payload === 'object' && payload !== null
       ? (payload as { detail?: unknown }).detail
       : payload;
+    if (response.status === 401 && attachedStoredToken && !isAuthPath(path)) {
+      clearAuthSession();
+    }
     throw new Error(String(detail || `${response.status} ${response.statusText}`));
   }
 

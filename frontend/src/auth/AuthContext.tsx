@@ -1,6 +1,12 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import jwt_decode from 'jwt-decode';
-import { AuthService } from '../client';
+import {
+  AUTH_SESSION_CHANGED_EVENT,
+  AuthService,
+  clearAuthSession,
+  getStoredAuthToken,
+  storeAuthSession,
+} from '../client';
 import { User, Role, normalizeRole } from '../lib/rbac';
 
 interface DecodedToken {
@@ -13,7 +19,7 @@ interface DecodedToken {
 interface AuthContextType {
   token: string | null;
   user: User | null;
-  login: (token: string) => void;
+  login: (token: string, refreshToken?: string | null) => void;
   logout: () => void;
   isAuthenticated: boolean;
 }
@@ -21,10 +27,7 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 function readStoredToken(): string | null {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-  return window.localStorage.getItem('token');
+  return getStoredAuthToken();
 }
 
 function decodeToken(token: string | null): User | null {
@@ -46,23 +49,46 @@ function decodeToken(token: string | null): User | null {
   }
 }
 
+function isAuthError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /invalid token|unauthorized|invalid or expired refresh token/i.test(message);
+}
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [token, setToken] = useState<string | null>(() => readStoredToken());
   const [user, setUser] = useState<User | null>(() => decodeToken(readStoredToken()));
 
   useEffect(() => {
+    if (typeof window === 'undefined') {
+      return undefined;
+    }
+
+    const syncSession = () => {
+      setToken(readStoredToken());
+    };
+    const syncStorageSession = (event: StorageEvent) => {
+      if (event.key === 'token' || event.key === 'refresh_token') {
+        syncSession();
+      }
+    };
+
+    window.addEventListener(AUTH_SESSION_CHANGED_EVENT, syncSession);
+    window.addEventListener('storage', syncStorageSession);
+    return () => {
+      window.removeEventListener(AUTH_SESSION_CHANGED_EVENT, syncSession);
+      window.removeEventListener('storage', syncStorageSession);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!token) {
       setUser(null);
-      if (typeof window !== 'undefined') {
-        window.localStorage.removeItem('token');
-      }
+      clearAuthSession();
       return;
     }
 
     const fallbackUser = decodeToken(token);
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem('token', token);
-    }
+    storeAuthSession(token);
     setUser(fallbackUser);
 
     let cancelled = false;
@@ -80,16 +106,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           canAccessAllTenants: !!session.can_access_all_tenants,
         });
       })
-      .catch(() => {
+      .catch((err) => {
         if (cancelled) {
           return;
         }
-        if (!fallbackUser) {
+        if (!fallbackUser || isAuthError(err)) {
           setUser(null);
           setToken(null);
-          if (typeof window !== 'undefined') {
-            window.localStorage.removeItem('token');
-          }
+          clearAuthSession();
         }
       });
 
@@ -98,25 +122,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, [token]);
 
-  const login = (newToken: string) => {
+  const login = (newToken: string, refreshToken?: string | null) => {
     const nextUser = decodeToken(newToken);
-    setToken(newToken);
+    setToken(nextUser ? newToken : null);
     setUser(nextUser);
-    if (typeof window !== 'undefined') {
-      if (nextUser) {
-        window.localStorage.setItem('token', newToken);
-      } else {
-        window.localStorage.removeItem('token');
-      }
+    if (nextUser) {
+      storeAuthSession(newToken, refreshToken ?? null);
+    } else {
+      clearAuthSession();
     }
   };
 
   const logout = () => {
     setToken(null);
     setUser(null);
-    if (typeof window !== 'undefined') {
-      window.localStorage.removeItem('token');
-    }
+    clearAuthSession();
   };
 
   const isAuthenticated = !!user;

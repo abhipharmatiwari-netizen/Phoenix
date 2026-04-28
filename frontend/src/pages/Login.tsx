@@ -21,7 +21,7 @@ const Login: React.FC = () => {
     setError(null);
     try {
       const response = await AuthService.login({ email, password });
-      login(response.token);
+      login(response.token, response.refresh_token ?? null);
       navigate('/');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed');
