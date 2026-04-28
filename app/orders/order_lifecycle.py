@@ -643,7 +643,13 @@ class OrderLifecycleService:
                    last_evidence_at, last_reconciled_at
             FROM internal_position_records
             WHERE position_state NOT IN ('FLAT', 'NONE')
+              AND net_qty != 0
         """
+        # net_qty = 0 records are excluded: they are effectively flat regardless
+        # of their position_state (e.g. FLAT_PENDING_CONFIRMATION after a fill).
+        # Loading them triggers the ownership gap detector because they have no
+        # matching entry in position_ownership_ledger (ownership is only written
+        # for open legs).  Skipping them avoids a false gap on every restart.
         loaded = 0
         with conn.cursor() as cur:
             cur.execute(sql)
