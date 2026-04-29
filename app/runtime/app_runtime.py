@@ -1232,8 +1232,32 @@ class AppRuntime:
             hub = getattr(runtime, "hub", None)
             if hub is not None:
                 runners = getattr(hub, "_runners", {})
-                evidence["runner_count"] = len(runners)
-                evidence["runner_ids"] = list(runners.keys())
+                fallback_runner_count = (
+                    len(runners) if isinstance(runners, dict) else 0
+                )
+                registered = int(
+                    getattr(
+                        hub,
+                        "registered_runner_count",
+                        getattr(hub, "runner_count", fallback_runner_count),
+                    )
+                    or 0
+                )
+                running = int(getattr(hub, "running_runner_count", 0) or 0)
+                failed = int(getattr(hub, "failed_runner_count", 0) or 0)
+                runner_ids_getter = getattr(hub, "list_runner_ids", None)
+                if callable(runner_ids_getter):
+                    runner_ids = [str(runner_id) for runner_id in runner_ids_getter()]
+                elif isinstance(runners, dict):
+                    runner_ids = [str(runner_id) for runner_id in runners.keys()]
+                else:
+                    runner_ids = []
+
+                evidence["runner_count"] = registered
+                evidence["registered_runner_count"] = registered
+                evidence["running_runner_count"] = running
+                evidence["failed_runner_count"] = failed
+                evidence["runner_ids"] = runner_ids
         except Exception:
             evidence["runner_count"] = -1
 

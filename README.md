@@ -103,6 +103,8 @@ For the bundled Docker/Desktop path, nginx is the browser-facing entrypoint. Dir
 | [Break-glass flatten](docs/runbooks/break_glass_flatten.md) | Emergency contract exit via admin route |
 | [Orphan review resolution](docs/runbooks/resolve_orphan_review.md) | How to resolve ORPHAN_REVIEW position states |
 | [Kill switch reference](docs/runbooks/kill_switch.md) | Kill switch detection and clear procedures |
+| [Runtime KPIs and SLO targets](docs/kpis_slos.md) | Day-1 monitor set, alert thresholds, cutover evidence requirements |
+| [Strategy runtime diagnostics](docs/runbooks/strategy_runtime_diagnostics.md) | `STRATEGY_BAR_SKIP` event reference and startup snapshot artifact |
 | [Cloud Run deployment reference](docs/runbooks/cloud_run_live_deployment.md) | Reference / roadmap material only |
 
 ---
@@ -116,7 +118,7 @@ nginx/                            Reverse proxy and frontend image config
 migrations/                       SQL migrations and bootstrap assets
 scripts/                          Operator utility scripts (generate_sbom.py, replay engine, etc.)
 scripts/replay/                   Bar-by-bar deterministic replay harness and optimizer
-tests/                            Test suite (1551 tests)
+tests/                            Test suite (1714+ tests)
 docs/runbooks/                    Operator procedures
 .github/workflows/                CI — security scan (gitleaks, pip-audit, SBOM generation)
 Dockerfile                        Backend image build (multi-stage, non-root, healthcheck built in)

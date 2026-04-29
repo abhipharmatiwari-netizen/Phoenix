@@ -72,6 +72,34 @@ class _DummyLifecycle:
         self.stopped += 1
 
 
+def test_release_evidence_snapshot_uses_public_hub_runner_counts():
+    class _Hub:
+        _runners = {}
+        registered_runner_count = 1
+        running_runner_count = 1
+        failed_runner_count = 0
+
+        @property
+        def runner_count(self) -> int:
+            return self.registered_runner_count
+
+        def list_runner_ids(self) -> list[str]:
+            return ["ACC1"]
+
+    runtime = AppRuntime(
+        settings_getter=lambda: SimpleNamespace(enable_multi_hub=True),
+        hub_runtime_getter=lambda: SimpleNamespace(hub=_Hub()),
+    )
+
+    evidence = runtime.release_evidence_snapshot()
+
+    assert evidence["runner_count"] == 1
+    assert evidence["registered_runner_count"] == 1
+    assert evidence["running_runner_count"] == 1
+    assert evidence["failed_runner_count"] == 0
+    assert evidence["runner_ids"] == ["ACC1"]
+
+
 class _DummyOrderRouter:
     def __init__(self) -> None:
         self.recoveries = 0

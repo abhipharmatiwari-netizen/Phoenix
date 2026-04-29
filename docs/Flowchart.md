@@ -4,6 +4,12 @@
 > (leader lease, sweep state, control plane, PnL). Firestore references in this diagram apply
 > to the Cloud Run / GCP deployment path only. Both paths share the same application code;
 > the backend is selected by `LEADER_LEASE_BACKEND`, `CONTROL_PLANE_BACKEND`, etc.
+>
+> **BigQuery note:** The BigQuery async writer (`BQ_START`, `bq-async-writer` thread, and all
+> `BQ`/`BigQuery` nodes in this diagram) is attempted in **all** deployment modes, including
+> Docker/Desktop LIVE. It is non-authoritative and non-critical: if GCP credentials are absent or
+> the BQ client cannot initialise, the writer logs a WARNING and the runtime continues normally.
+> BigQuery is a supplementary analytics sink, not an authoritative operational store.
 
 ## 1. System Boot & Initialization
 
