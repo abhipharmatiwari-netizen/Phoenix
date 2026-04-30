@@ -161,3 +161,63 @@ def test_request_json_with_retry_retries_access_rate_403(monkeypatch):
 
     assert data.get("status") is True
     assert len(conn.requests) == 2
+
+
+def test_request_json_with_retry_retries_transport_timeout(monkeypatch):
+    class _Resp:
+        status = 200
+
+        def read(self):
+            return b'{"status": true, "data": {"ok": true}}'
+
+    class _Conn:
+        def __init__(self):
+            self.requests = 0
+            self.closed = 0
+
+        def request(self, method, path, body=None, headers=None):
+            _ = method, path, body, headers
+            self.requests += 1
+            if self.requests == 1:
+                raise TimeoutError("Connection timed out")
+
+        def getresponse(self):
+            return _Resp()
+
+        def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr(angel_login.rate_limiter, "acquire", lambda *_a, **_k: None)
+    monkeypatch.setattr(angel_login.time, "sleep", lambda *_a, **_k: None)
+
+    conn = _Conn()
+    data = angel_login._request_json_with_retry(
+        conn=conn,
+        method="POST",
+        path="/rest/auth/angelbroking/user/v1/loginByPassword",
+        body="{}",
+        headers={},
+        limiter_key="loginByPassword",
+        operation="ANGEL_LOGIN",
+        max_attempts=2,
+    )
+
+    assert data.get("status") is True
+    assert conn.requests == 2
+    assert conn.closed == 1
+
+
+def test_make_angel_connection_uses_login_timeout_env(monkeypatch):
+    observed = {}
+
+    class _Conn:
+        def __init__(self, host, timeout=None):
+            observed["host"] = host
+            observed["timeout"] = timeout
+
+    monkeypatch.setenv("ANGEL_LOGIN_HTTP_TIMEOUT_SECONDS", "3.5")
+    monkeypatch.setattr(angel_login.http.client, "HTTPSConnection", _Conn)
+
+    angel_login._make_angel_connection()
+
+    assert observed == {"host": "apiconnect.angelone.in", "timeout": 3.5}

@@ -54,6 +54,36 @@ STATE_VARIABLE = "WEB"
 logger = logging.getLogger("angel_login")
 """Module logger for Angel login helper."""
 
+API_HOST = "apiconnect.angelone.in"
+_LOGIN_HTTP_TIMEOUT_SECONDS_DEFAULT = 10.0
+
+
+def _login_http_timeout_seconds() -> float:
+    """Resolve the bounded timeout for Angel login/generate-token HTTP calls."""
+    for name in ("ANGEL_LOGIN_HTTP_TIMEOUT_SECONDS", "ANGEL_HTTP_TIMEOUT_SECONDS"):
+        raw = os.getenv(name)
+        if raw in (None, ""):
+            continue
+        try:
+            return max(1.0, float(raw))
+        except (TypeError, ValueError):
+            logger.warning(
+                "Ignoring invalid %s=%r; using default Angel login timeout %.1fs",
+                name,
+                raw,
+                _LOGIN_HTTP_TIMEOUT_SECONDS_DEFAULT,
+            )
+            break
+    return _LOGIN_HTTP_TIMEOUT_SECONDS_DEFAULT
+
+
+def _make_angel_connection() -> http.client.HTTPSConnection:
+    return http.client.HTTPSConnection(
+        API_HOST,
+        timeout=_login_http_timeout_seconds(),
+    )
+
+
 def _require_pyotp():
     if pyotp is None:
         raise RuntimeError("pyotp is required for Angel TOTP login flows but is not installed")
@@ -135,10 +165,39 @@ def _request_json_with_retry(
     attempts = max(1, int(max_attempts))
     for attempt in range(1, attempts + 1):
         rate_limiter.acquire(limiter_key)
-        conn.request(method, path, body=body, headers=headers)
-        response = conn.getresponse()
-        status_code = int(getattr(response, "status", 0) or 0)
-        body_text = response.read().decode("utf-8", errors="replace")
+        try:
+            conn.request(method, path, body=body, headers=headers)
+            response = conn.getresponse()
+            status_code = int(getattr(response, "status", 0) or 0)
+            body_text = response.read().decode("utf-8", errors="replace")
+        except (TimeoutError, OSError, http.client.HTTPException) as exc:
+            close = getattr(conn, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            if attempt < attempts:
+                sleep_seconds = random.uniform(
+                    _RETRYABLE_LOGIN_DELAY_SECONDS[0],
+                    _RETRYABLE_LOGIN_DELAY_SECONDS[1],
+                )
+                logger.warning(
+                    "event_type=ANGEL_LOGIN_RETRY operation=%s reason=transport_error "
+                    "error_type=%s attempt=%d/%d sleep=%.3fs error=%s",
+                    operation,
+                    type(exc).__name__,
+                    attempt,
+                    attempts,
+                    sleep_seconds,
+                    _safe_response_snippet(str(exc)) or "-",
+                )
+                time.sleep(sleep_seconds)
+                continue
+            raise RuntimeError(
+                f"{operation} failed: transport_error={type(exc).__name__} "
+                f"message={_safe_response_snippet(str(exc))}"
+            ) from exc
 
         if status_code < 200 or status_code >= 300:
             if attempt < attempts and _is_retryable_login_response(
@@ -336,7 +395,7 @@ def angel_login_and_get_tokens():
     # 2) Generate TOTP using the *local* variable
     current_totp = _require_pyotp().TOTP(totp_secret).now()
 
-    conn = http.client.HTTPSConnection("apiconnect.angelone.in")
+    conn = _make_angel_connection()
 
     # ---- 3) LOGIN (clientcode + password + TOTP) ----
     login_payload = json.dumps(
@@ -429,7 +488,7 @@ def angel_login_with_secrets(secrets: AngelSecrets) -> AngelLoginTokens:
     """
     current_totp = _require_pyotp().TOTP(secrets.totp_secret).now()
 
-    conn = http.client.HTTPSConnection("apiconnect.angelone.in")
+    conn = _make_angel_connection()
 
     login_payload = json.dumps(
         {
@@ -508,7 +567,7 @@ def angel_logout(jwt_token: str, api_key: str = API_KEY) -> bool:
     Best-effort logout to close the session. Rate limited per Angel guidelines.
     """
     network_identity = _resolve_env_network_identity("legacy env broker logout")
-    conn = http.client.HTTPSConnection("apiconnect.angelone.in")
+    conn = _make_angel_connection()
     payload = json.dumps({"clientcode": CLIENT_CODE})
     headers = {
         "Authorization": f"Bearer {jwt_token}",
