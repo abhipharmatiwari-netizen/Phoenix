@@ -1,8 +1,8 @@
 # Oracle Cloud Infrastructure (OCI) LIVE manifest
 #
 # Differences from docker-compose.live.single.yml:
-#   - Images pulled from OCI Container Registry (OCIR) — no local build
-#   - No local `db` or `db-preflight` postgres service — uses OCI Database for PostgreSQL
+#   - Images pulled from OCI Container Registry (OCIR) â€” no local build
+#   - No local `db` or `db-preflight` postgres service â€” uses OCI Database for PostgreSQL
 #   - CONTROL_PLANE_PG_HOST points to OCI DB private endpoint
 #   - REMOTE_DEPLOYMENT=true triggers hard-abort on LIVE_PG_SSL_SKIP_CHECK
 #   - Secrets sourced from /run/secrets/ (written by scripts/fetch-secrets.sh via OCI Vault)
@@ -83,7 +83,7 @@ x-live-backend-env: &live-backend-env
 
   ENABLE_DEMO_AUTH: "false"
   DASHBOARD_AUTH_DISABLED: "false"
-  # Control tower routes are disabled on OCI — never expose strategy selector matrix
+  # Control tower routes are disabled on OCI â€” never expose strategy selector matrix
   # directly from cloud-hosted deployments.
   DISABLE_CONTROL_TOWER_ROUTES: "true"
 
@@ -110,7 +110,7 @@ x-live-backend-env: &live-backend-env
 
   ENABLE_CAPITAL_CHECKS: "true"
   ALLOW_LIVE_CAPITAL_CHECKS_DISABLED: "false"
-  # CAPITAL_LIMITS_JSON must contain real per-account limits — never leave as {}.
+  # CAPITAL_LIMITS_JSON must contain real per-account limits â€” never leave as {}.
   # Format: {"<tenant_id>:<account_id>":{"max_gross_exposure":N,"max_net_exposure":N}}
   # Set via phoenix-deploy.env on the OCI VM; retrieve limits from ops planning docs.
   CAPITAL_LIMITS_JSON: "${CAPITAL_LIMITS_JSON:?Set CAPITAL_LIMITS_JSON with real per-account limits}"
@@ -344,7 +344,7 @@ services:
             }
 
   backend:
-    image: "${OCIR_REGION:-ap-mumbai-1}.ocir.io/${OCIR_NAMESPACE:?Set OCIR_NAMESPACE}/phoenix-prod/backend:${IMAGE_TAG:?Set IMAGE_TAG to a specific git SHA — never deploy latest}"
+    image: "${OCIR_REGION:-ap-mumbai-1}.ocir.io/${OCIR_NAMESPACE:?Set OCIR_NAMESPACE}/phoenix-prod/backend:${IMAGE_TAG:?Set IMAGE_TAG to a specific git SHA â€” never deploy latest}"
     container_name: phoenix-oci-backend
     init: true
     restart: unless-stopped
@@ -385,7 +385,7 @@ services:
         max-file: "5"
 
   nginx:
-    image: "${OCIR_REGION:-ap-mumbai-1}.ocir.io/${OCIR_NAMESPACE:?Set OCIR_NAMESPACE}/phoenix-prod/nginx:${IMAGE_TAG:?Set IMAGE_TAG to a specific git SHA — never deploy latest}"
+    image: "${OCIR_REGION:-ap-mumbai-1}.ocir.io/${OCIR_NAMESPACE:?Set OCIR_NAMESPACE}/phoenix-prod/nginx:${IMAGE_TAG:?Set IMAGE_TAG to a specific git SHA â€” never deploy latest}"
     container_name: phoenix-oci-web
     init: true
     restart: unless-stopped
@@ -393,7 +393,7 @@ services:
       backend:
         condition: service_healthy
     ports:
-      # Port 80: HTTP → HTTPS redirect + ACME challenge
+      # Port 80: HTTP â†’ HTTPS redirect + ACME challenge
       # Port 8443: TLS terminated at nginx (OCI LB uses TCP passthrough on 443)
       - "0.0.0.0:80:80"
       - "0.0.0.0:8443:8443"
@@ -405,15 +405,20 @@ services:
       - ALL
     cap_add:
       - NET_BIND_SERVICE
+      - CHOWN
+      - SETGID
+      - SETUID
     mem_limit: "256m"
     memswap_limit: "256m"
     pids_limit: 50
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/readyz >/dev/null 2>&1 || exit 1"]
+      # Port 80 now redirects to HTTPS; check port 8443 directly with cert validation skipped
+      # (cert is for the public domain, not 127.0.0.1 — skip-cert-check is safe for localhost probe)
+      test: ["CMD-SHELL", "wget -q --no-check-certificate -O - https://127.0.0.1:8443/readyz >/dev/null 2>&1 || exit 1"]
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 15s
     logging:
       driver: json-file
       options:
