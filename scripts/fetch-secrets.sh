@@ -47,18 +47,32 @@ fetch_secret() {
   local secret_name="$1"
   local oci_secret_name="phoenix-${secret_name}"
   local out_path="$SECRETS_DIR/$secret_name"
+  local tmp_path="${out_path}.tmp"
 
   echo "Fetching secret: $oci_secret_name -> $out_path"
 
-  "$OCI_CLI_BIN" secrets secret-bundle get-secret-bundle-by-name \
+  # Fetch to a temp file so a vault error never truncates the live secret file.
+  if ! "$OCI_CLI_BIN" secrets secret-bundle get-secret-bundle-by-name \
     --secret-name "$oci_secret_name" \
     --vault-id "$OCI_VAULT_ID" \
     --auth instance_principal \
     --query 'data."secret-bundle-content".content' \
     --raw-output \
-    | base64 -d > "$out_path"
+    | base64 -d > "$tmp_path"; then
+    rm -f "$tmp_path"
+    echo "ERROR: Failed to fetch $oci_secret_name — existing file left unchanged." >&2
+    return 1
+  fi
 
-  chmod 600 "$out_path"
+  # Reject empty output — a 0-byte secret is never valid.
+  if [ ! -s "$tmp_path" ]; then
+    rm -f "$tmp_path"
+    echo "ERROR: $oci_secret_name returned empty content — existing file left unchanged." >&2
+    return 1
+  fi
+
+  mv "$tmp_path" "$out_path"
+  chmod 644 "$out_path"
 }
 
 fetch_secret "admin_api_key"
