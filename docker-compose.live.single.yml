@@ -71,6 +71,11 @@ x-live-backend-env: &live-backend-env
   # by docker-entrypoint.sh. They do NOT appear in `docker inspect` output.
   ENABLE_DEMO_AUTH: "false"
   DASHBOARD_AUTH_DISABLED: "false"
+  # Docker Desktop LIVE policy: control tower routes are intentionally enabled here
+  # so operators can use the strategy matrix UI from the local dashboard.
+  # OCI / cloud deployments set DISABLE_CONTROL_TOWER_ROUTES=true (see docker-compose.oci-live.yml).
+  # NETWORK ISOLATION REQUIRED: port 80 must be bound to 127.0.0.1 (localhost only) or a
+  # trusted LAN segment. Never expose this port to the public internet without disabling this.
   DISABLE_CONTROL_TOWER_ROUTES: "false"
 
   ENABLE_MULTI_HUB: "true"

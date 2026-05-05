@@ -24,6 +24,23 @@ logger = logging.getLogger("order_client")
 
 API_HOST = "apiconnect.angelone.in"
 HTTP_TIMEOUT_SECONDS = float(os.getenv("ANGEL_HTTP_TIMEOUT_SECONDS", "10"))
+
+
+def _make_angel_connection() -> http.client.HTTPSConnection:
+    proxy = (
+        os.environ.get("ANGEL_HTTPS_PROXY")
+        or os.environ.get("HTTPS_PROXY")
+        or os.environ.get("https_proxy")
+    )
+    if proxy:
+        from urllib.parse import urlparse
+        p = urlparse(proxy)
+        conn = http.client.HTTPSConnection(
+            p.hostname, p.port or 8080, timeout=HTTP_TIMEOUT_SECONDS
+        )
+        conn.set_tunnel(API_HOST, 443)
+        return conn
+    return http.client.HTTPSConnection(API_HOST, timeout=HTTP_TIMEOUT_SECONDS)
 HISTORICAL_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
 
 class AngelHTTPBlockedError(RuntimeError):
@@ -343,7 +360,7 @@ class AngelOrderClient:
         limiter_key: str = "getAllPositions",
     ) -> Dict[str, Any]:
         rate_limiter.acquire(limiter_key)
-        conn = http.client.HTTPSConnection(API_HOST, timeout=HTTP_TIMEOUT_SECONDS)
+        conn = _make_angel_connection()
         if body is None:
             conn.request(method, path, headers=self._headers())
         else:
@@ -435,7 +452,7 @@ class AngelOrderClient:
         body = json.dumps(payload)
         logger.debug("Placing order payload_head=%s", _payload_head(payload))
 
-        conn = http.client.HTTPSConnection(API_HOST, timeout=HTTP_TIMEOUT_SECONDS)
+        conn = _make_angel_connection()
         rate_limiter.acquire("placeOrder")
         conn.request(
             "POST",
@@ -466,7 +483,7 @@ class AngelOrderClient:
         Fetch RMS details; useful before trading in LIVE mode.
         """
         rate_limiter.acquire("getRMS")
-        conn = http.client.HTTPSConnection(API_HOST, timeout=HTTP_TIMEOUT_SECONDS)
+        conn = _make_angel_connection()
         conn.request(
             "GET",
             "/rest/secure/angelbroking/user/v1/getRMS",
@@ -507,7 +524,7 @@ class AngelOrderClient:
         body = json.dumps(payload)
         logger.debug("Historical candle request payload_head=%s", _payload_head(payload))
         rate_limiter.acquire("historical")
-        conn = http.client.HTTPSConnection(API_HOST, timeout=HTTP_TIMEOUT_SECONDS)
+        conn = _make_angel_connection()
         conn.request(
             "POST",
             "/rest/secure/angelbroking/historical/v1/getCandleData",
@@ -694,7 +711,7 @@ class AngelOrderClient:
         Fetch order book (all orders) from Angel One SmartAPI.
         """
         rate_limiter.acquire("getOrderBook")
-        conn = http.client.HTTPSConnection(API_HOST, timeout=HTTP_TIMEOUT_SECONDS)
+        conn = _make_angel_connection()
         conn.request(
             "GET",
             "/rest/secure/angelbroking/order/v1/getOrderBook",
@@ -737,7 +754,7 @@ class AngelOrderClient:
             symbol or "-",
         )
         rate_limiter.acquire("cancelOrder")
-        conn = http.client.HTTPSConnection(API_HOST, timeout=HTTP_TIMEOUT_SECONDS)
+        conn = _make_angel_connection()
         conn.request(
             "POST",
             "/rest/secure/angelbroking/order/v1/cancelOrder",
@@ -765,7 +782,7 @@ class AngelOrderClient:
         if not order_id:
             raise ValueError("order_id is required")
         rate_limiter.acquire("getOrderDetails")
-        conn = http.client.HTTPSConnection(API_HOST, timeout=HTTP_TIMEOUT_SECONDS)
+        conn = _make_angel_connection()
         conn.request(
             "GET",
             f"/rest/secure/angelbroking/order/v1/details/{order_id}",

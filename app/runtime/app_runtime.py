@@ -238,7 +238,9 @@ class WorkerWatchdog:
 
     def _record_restart_attempt(self, now_mono: float) -> None:
         self._restart_attempts += 1
-        base = self._restart_backoff_base_seconds * (2 ** max(0, self._restart_attempts - 1))
+        # Use float base to avoid OverflowError when attempt count is very large (>~1023);
+        # 2.0**huge_exp yields inf, and min(max_seconds, inf) == max_seconds.
+        base = self._restart_backoff_base_seconds * (2.0 ** max(0, self._restart_attempts - 1))
         backoff = min(self._restart_backoff_max_seconds, base)
         jitter = 0.0
         if self._restart_backoff_jitter_ratio > 0.0:

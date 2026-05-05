@@ -218,10 +218,23 @@ def get_ltp_for_tokens(
     last_error: Exception | None = None
 
     for attempt in range(1, UNIVERSE_QUOTE_MAX_ATTEMPTS + 1):
-        conn = http.client.HTTPSConnection(
-            "apiconnect.angelone.in",
-            timeout=UNIVERSE_QUOTE_TIMEOUT_SECONDS,
+        proxy = (
+            os.environ.get("ANGEL_HTTPS_PROXY")
+            or os.environ.get("HTTPS_PROXY")
+            or os.environ.get("https_proxy")
         )
+        if proxy:
+            from urllib.parse import urlparse
+            p = urlparse(proxy)
+            conn = http.client.HTTPSConnection(
+                p.hostname, p.port or 8080, timeout=UNIVERSE_QUOTE_TIMEOUT_SECONDS
+            )
+            conn.set_tunnel("apiconnect.angelone.in", 443)
+        else:
+            conn = http.client.HTTPSConnection(
+                "apiconnect.angelone.in",
+                timeout=UNIVERSE_QUOTE_TIMEOUT_SECONDS,
+            )
         try:
             rate_limiter.acquire("quote")
             conn.request(

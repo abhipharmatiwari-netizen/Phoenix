@@ -175,6 +175,7 @@ class SmartWebSocketRunner:
         self._consecutive_network_failures: int = 0
 
         self._patch_close_signature()
+        self._patch_proxy_connect()
         self.sws.on_open = self._on_open
 
     def _log_error_throttled(self, message: str, *, level: int = logging.WARNING) -> None:
@@ -220,6 +221,54 @@ class SmartWebSocketRunner:
             % (open_seconds, self._consecutive_network_failures),
             level=logging.ERROR,
         )
+
+    # Patch SmartWebSocketV2.connect() to route via HTTP CONNECT proxy when set.
+    def _patch_proxy_connect(self) -> None:
+        proxy_url = (
+            os.environ.get("ANGEL_HTTPS_PROXY")
+            or os.environ.get("HTTPS_PROXY")
+            or os.environ.get("https_proxy")
+        )
+        if not proxy_url:
+            return
+        from urllib.parse import urlparse
+        import ssl as _ssl
+        p = urlparse(proxy_url)
+        proxy_host = p.hostname
+        proxy_port = p.port or 8080
+        sws = self.sws
+
+        def _connect_via_proxy():
+            headers = {
+                "Authorization": sws.auth_token,
+                "x-api-key": sws.api_key,
+                "x-client-code": sws.client_code,
+                "x-feed-token": sws.feed_token,
+            }
+            import websocket as _ws
+            sws.wsapp = _ws.WebSocketApp(
+                sws.ROOT_URI,
+                header=headers,
+                on_open=sws._on_open,
+                on_error=sws._on_error,
+                on_close=sws._on_close,
+                on_data=sws._on_data,
+                on_ping=sws._on_ping,
+                on_pong=sws._on_pong,
+            )
+            sws.wsapp.run_forever(
+                sslopt={"cert_reqs": _ssl.CERT_NONE},
+                ping_interval=sws.HEART_BEAT_INTERVAL,
+                http_proxy_host=proxy_host,
+                http_proxy_port=proxy_port,
+                proxy_type="http",
+            )
+
+        logger.info(
+            "WebSocket proxy configured: %s:%s", proxy_host, proxy_port
+        )
+        import types
+        sws.connect = types.MethodType(lambda _self: _connect_via_proxy(), sws)
 
     # Patch on_close to tolerate different websocket-client signatures.
     def _patch_close_signature(self) -> None:

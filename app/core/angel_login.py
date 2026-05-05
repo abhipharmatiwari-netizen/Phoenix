@@ -78,6 +78,19 @@ def _login_http_timeout_seconds() -> float:
 
 
 def _make_angel_connection() -> http.client.HTTPSConnection:
+    proxy = (
+        os.environ.get("ANGEL_HTTPS_PROXY")
+        or os.environ.get("HTTPS_PROXY")
+        or os.environ.get("https_proxy")
+    )
+    if proxy:
+        from urllib.parse import urlparse
+        p = urlparse(proxy)
+        conn = http.client.HTTPSConnection(
+            p.hostname, p.port or 8080, timeout=_login_http_timeout_seconds()
+        )
+        conn.set_tunnel(API_HOST, 443)
+        return conn
     return http.client.HTTPSConnection(
         API_HOST,
         timeout=_login_http_timeout_seconds(),

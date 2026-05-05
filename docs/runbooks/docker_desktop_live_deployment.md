@@ -2,6 +2,9 @@
 
 > **Status:** Bundled Docker/Desktop implementation runbook for the current recommended automated LIVE runtime.
 
+> **Cloud deployment?** For the production OCI deployment (Oracle Cloud, Vultr proxy, OCIR images),
+> see [oci_live_deployment.md](oci_live_deployment.md) instead.
+
 This runbook describes the Docker Desktop / Windows path bundled with this document set.
 
 It uses:
@@ -234,6 +237,7 @@ The following WARNING-level messages can appear on a clean host-local Docker/Des
 |---|---|
 | `LIVE mode policy gates enforced hardened defaults for: {...}` | Confirms LIVE-mode flags were auto-promoted; informational |
 | `startup.ssl_warning: LIVE_PG_SSL_SKIP_CHECK=true` | Expected only for host-local Docker deployments where Postgres does not have SSL enabled; harmless when Postgres is on `host.docker.internal` with no external exposure |
+| `WebSocket proxy configured: <host>:<port>` | Expected on OCI/cloud deployments when `ANGEL_HTTPS_PROXY` is set; confirms WebSocket traffic will tunnel through the proxy |
 | `illegal transition blocked ... from_state=RECONCILING ... escalating to DEGRADED` | Stale position records from expired prior-session option contracts are safely escalated to DEGRADED; not a live position problem |
 
 Messages containing `strategy.unroutable` or `strategy.unroutable_selector_excluded`
