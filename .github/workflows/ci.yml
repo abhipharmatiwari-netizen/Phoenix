@@ -31,7 +31,10 @@ jobs:
     env:
       APP_ENV: test
       DASHBOARD_AUTH_DISABLED: "1"
-      DEMO_AUTH_TOKEN_SECRET: ci-test-secret-do-not-use
+      # CI-only test secret — intentionally low entropy, never used in LIVE.
+      # The LIVE AUTH_TOKEN_SECRET is stored in OCI Vault and is a separate value.
+      AUTH_TOKEN_SECRET: ci-test-secret-do-not-use
+      DEMO_AUTH_TOKEN_SECRET: ci-test-secret-do-not-use   # backward-compat alias
       CONTROL_PLANE_DSN: postgresql://phoenix:phoenix@localhost:5432/phoenix_test
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
@@ -135,42 +138,60 @@ jobs:
       - name: Build and push backend image
         run: |
           IMAGE="${{ vars.OCIR_REGION }}.ocir.io/${{ vars.OCIR_NAMESPACE }}/phoenix-prod/backend"
-          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" .
+          docker build -t "$IMAGE:${{ github.sha }}" .
           docker push "$IMAGE:${{ github.sha }}"
-          docker push "$IMAGE:latest"
-
-      - name: Build and push frontend image
-        run: |
-          IMAGE="${{ vars.OCIR_REGION }}.ocir.io/${{ vars.OCIR_NAMESPACE }}/phoenix-prod/frontend"
-          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" ./frontend
-          docker push "$IMAGE:${{ github.sha }}"
-          docker push "$IMAGE:latest"
+          # 'latest' is not pushed — deployments must use explicit SHA tags
 
       - name: Build and push nginx image
         run: |
           IMAGE="${{ vars.OCIR_REGION }}.ocir.io/${{ vars.OCIR_NAMESPACE }}/phoenix-prod/nginx"
-          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" ./nginx
+          docker build -t "$IMAGE:${{ github.sha }}" -f nginx/Dockerfile .
           docker push "$IMAGE:${{ github.sha }}"
-          docker push "$IMAGE:latest"
 
-      - name: Deploy to OCI Compute Instance via SSH
+      - name: Set up SSH known hosts
         run: |
           mkdir -p ~/.ssh
+          # Write pinned host keys stored as a GitHub Actions secret.
+          # Generate with: ssh-keyscan <bastion_host> <instance_ip> | base64
+          echo "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Write deploy key
+        run: |
           echo "${{ secrets.OCI_DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+
+      - name: Deploy to OCI Compute Instance via bastion
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          BASTION_USER: ${{ vars.OCI_BASTION_USER }}
+          BASTION_HOST: ${{ vars.OCI_BASTION_HOST }}
+          INSTANCE_USER: ${{ vars.OCI_INSTANCE_USER }}
+          INSTANCE_IP: ${{ vars.OCI_INSTANCE_IP }}
+        run: |
           ssh -i ~/.ssh/deploy_key \
-              -o StrictHostKeyChecking=no \
-              -o ProxyCommand="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -W %h:%p ${{ vars.OCI_BASTION_USER }}@${{ vars.OCI_BASTION_HOST }}" \
-              "${{ vars.OCI_INSTANCE_USER }}@${{ vars.OCI_INSTANCE_IP }}" \
+              -o ProxyCommand="ssh -i ~/.ssh/deploy_key -W %h:%p ${BASTION_USER}@${BASTION_HOST}" \
+              "${INSTANCE_USER}@${INSTANCE_IP}" \
             "cd /opt/phoenix/app && \
-             docker compose -f docker-compose.oci-live.yml pull backend nginx frontend && \
-             docker compose -f docker-compose.oci-live.yml up -d --no-deps --no-build backend nginx"
+             IMAGE_TAG=${IMAGE_TAG} docker compose \
+               -f docker-compose.oci-live.yml \
+               -f /opt/phoenix/phoenix-override.yml \
+               --env-file /opt/phoenix/phoenix-deploy.env \
+               pull backend nginx && \
+             IMAGE_TAG=${IMAGE_TAG} docker compose \
+               -f docker-compose.oci-live.yml \
+               -f /opt/phoenix/phoenix-override.yml \
+               --env-file /opt/phoenix/phoenix-deploy.env \
+               up -d --no-deps --no-build backend nginx"
 
       - name: Verify deployment health
+        env:
+          BASTION_USER: ${{ vars.OCI_BASTION_USER }}
+          BASTION_HOST: ${{ vars.OCI_BASTION_HOST }}
+          INSTANCE_USER: ${{ vars.OCI_INSTANCE_USER }}
+          INSTANCE_IP: ${{ vars.OCI_INSTANCE_IP }}
         run: |
-          # Poll /readyz via SSH tunnel — not exposed publicly
           ssh -i ~/.ssh/deploy_key \
-              -o StrictHostKeyChecking=no \
-              -o ProxyCommand="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -W %h:%p ${{ vars.OCI_BASTION_USER }}@${{ vars.OCI_BASTION_HOST }}" \
-              "${{ vars.OCI_INSTANCE_USER }}@${{ vars.OCI_INSTANCE_IP }}" \
+              -o ProxyCommand="ssh -i ~/.ssh/deploy_key -W %h:%p ${BASTION_USER}@${BASTION_HOST}" \
+              "${INSTANCE_USER}@${INSTANCE_IP}" \
             "timeout 60 bash -c 'until curl -sf http://localhost:8080/readyz; do sleep 5; done'"

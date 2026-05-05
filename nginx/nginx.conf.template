@@ -2,9 +2,14 @@ upstream backend {
     server backend:8080;
 }
 
+# Rate-limiting zones (applied per client IP)
+limit_req_zone $binary_remote_addr zone=auth:10m rate=5r/m;
+limit_req_zone $binary_remote_addr zone=admin:10m rate=30r/m;
+limit_req_zone $binary_remote_addr zone=webhook:10m rate=60r/m;
+limit_req_zone $binary_remote_addr zone=general:10m rate=60r/m;
+
 # Prefer the X-Forwarded-Proto sent by an upstream load balancer (e.g. OCI LB,
-# AWS ALB) so the backend sees the client-facing protocol (https).  Falls back
-# to $scheme when no LB header is present (local Docker Desktop deployment).
+# AWS ALB) so the backend sees the client-facing protocol (https).
 map $http_x_forwarded_proto $forwarded_proto {
     default $scheme;
     https   https;
@@ -18,8 +23,16 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # Security headers (applied on all responses, including HTML)
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+
     # API and BFF proxy
     location /bff/ {
+        limit_req zone=general burst=30 nodelay;
         proxy_pass http://backend;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -28,6 +41,7 @@ server {
     }
 
     location /auth/ {
+        limit_req zone=auth burst=10 nodelay;
         proxy_pass http://backend;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -56,7 +70,7 @@ server {
     }
 
     location /metrics {
-        # Restrict to internal scrape path — require admin key or deny externally.
+        # Restrict to internal scrape path — require admin key or deny.
         if ($http_x_admin_key != "${ADMIN_API_KEY}") {
             return 403;
         }
@@ -64,8 +78,9 @@ server {
         proxy_set_header Host $host;
     }
 
-    # Angel broker postback webhook — critical for order fill notifications
+    # Angel broker postback webhook
     location /webhook/ {
+        limit_req zone=webhook burst=30 nodelay;
         proxy_pass http://backend;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -75,6 +90,7 @@ server {
 
     # Admin routes — strategy management, instrument control
     location /admin/ {
+        limit_req zone=admin burst=20 nodelay;
         proxy_pass http://backend;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -84,6 +100,7 @@ server {
 
     # Tenant routes — account positions, orders, PnL
     location /tenant/ {
+        limit_req zone=general burst=30 nodelay;
         proxy_pass http://backend;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -100,13 +117,10 @@ server {
         proxy_set_header X-Forwarded-Proto $forwarded_proto;
     }
 
-    # Control tower routes — strategy selector matrix and toggles (only when enabled in backend)
+    # Control tower routes are blocked at the nginx layer for cloud deployments.
+    # The backend also enforces DISABLE_CONTROL_TOWER_ROUTES=true as defence-in-depth.
     location /api/control_tower/ {
-        proxy_pass http://backend;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $forwarded_proto;
+        return 404;
     }
 
     # WebSocket support
@@ -118,7 +132,6 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        # No static admin key injection — WebSocket auth uses per-connection tickets.
         proxy_read_timeout 86400;
     }
 

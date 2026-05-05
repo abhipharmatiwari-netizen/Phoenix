@@ -100,19 +100,38 @@ def _app_env() -> str:
     return str(os.getenv("APP_ENV") or os.getenv("ENV") or "local").strip().lower() or "local"
 
 
+_KNOWN_WEAK_SECRETS = frozenset({
+    "ci-test-secret-do-not-use",
+    "CHANGE_ME",
+    "CHANGE_ME_LONG_RANDOM_STRING",
+    "secret",
+    "password",
+    "demo",
+})
+
+
 def _token_secret() -> str:
     from app.config.settings import get_settings
 
     settings = get_settings()
+    # Prefer AUTH_TOKEN_SECRET; fall back to DEMO_AUTH_TOKEN_SECRET for migration.
     configured = str(
-        getattr(settings, "demo_auth_token_secret", None)
+        getattr(settings, "auth_token_secret", None)
+        or os.getenv("AUTH_TOKEN_SECRET", "")
+        or getattr(settings, "demo_auth_token_secret", None)
         or os.getenv("DEMO_AUTH_TOKEN_SECRET", "")
     ).strip()
-    if configured:
-        return configured
-    raise RuntimeError(
-        "DEMO_AUTH_TOKEN_SECRET must be configured explicitly; implicit auth-secret fallback is disabled"
-    )
+    if not configured:
+        raise RuntimeError(
+            "AUTH_TOKEN_SECRET must be configured; set it via OCI Vault / Docker secret"
+        )
+    app_env = _app_env()
+    if app_env in ("production", "live") and configured in _KNOWN_WEAK_SECRETS:
+        raise RuntimeError(
+            f"AUTH_TOKEN_SECRET is set to a known-weak test value in {app_env!r} mode. "
+            "Use a cryptographically random secret of at least 32 bytes."
+        )
+    return configured
 
 
 def _normalize_role(value: object) -> Role:
@@ -275,12 +294,8 @@ def _update_user_role(email: str, role: Role) -> bool:
 
 
 def _next_user_id() -> str:
-    with _conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM users")
-            row = cur.fetchone()
-            count = row[0] if row else 0
-    return f"user_{count + 1}"
+    from uuid import uuid4
+    return str(uuid4())
 
 
 def _extract_bearer_token(authorization: Optional[str]) -> str:

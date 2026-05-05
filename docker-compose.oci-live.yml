@@ -69,7 +69,7 @@ x-live-backend-env: &live-backend-env
   HOST: "0.0.0.0"
   PORT: "8080"
   BACKEND_URL: "http://127.0.0.1:8080"
-  CORS_ORIGINS: "https://${PHOENIX_DOMAIN:-phoenix.example.com}"
+  CORS_ORIGINS: "https://${PHOENIX_DOMAIN:?Set PHOENIX_DOMAIN to the production domain}"
 
   CONTROL_PLANE_BACKEND: "postgres"
   SWEEP_STATE_BACKEND: "postgres"
@@ -110,7 +110,10 @@ x-live-backend-env: &live-backend-env
 
   ENABLE_CAPITAL_CHECKS: "true"
   ALLOW_LIVE_CAPITAL_CHECKS_DISABLED: "false"
-  CAPITAL_LIMITS_JSON: "${CAPITAL_LIMITS_JSON:?Set CAPITAL_LIMITS_JSON}"
+  # CAPITAL_LIMITS_JSON must contain real per-account limits — never leave as {}.
+  # Format: {"<tenant_id>:<account_id>":{"max_gross_exposure":N,"max_net_exposure":N}}
+  # Set via phoenix-deploy.env on the OCI VM; retrieve limits from ops planning docs.
+  CAPITAL_LIMITS_JSON: "${CAPITAL_LIMITS_JSON:?Set CAPITAL_LIMITS_JSON with real per-account limits}"
   CAPITAL_FAIL_CLOSED_ON_MISSING_STATE: "true"
   CAPITAL_FAIL_CLOSED_ON_MISSING_NOTIONAL_PRICE: "true"
   CAPITAL_MARGIN_SHORT_OPTION_PER_LOT: "200000"
@@ -341,7 +344,7 @@ services:
             }
 
   backend:
-    image: "${OCIR_REGION:-ap-mumbai-1}.ocir.io/${OCIR_NAMESPACE:?Set OCIR_NAMESPACE}/phoenix-prod/backend:${IMAGE_TAG:-latest}"
+    image: "${OCIR_REGION:-ap-mumbai-1}.ocir.io/${OCIR_NAMESPACE:?Set OCIR_NAMESPACE}/phoenix-prod/backend:${IMAGE_TAG:?Set IMAGE_TAG to a specific git SHA — never deploy latest}"
     container_name: phoenix-oci-backend
     init: true
     restart: unless-stopped
@@ -354,13 +357,20 @@ services:
       <<: *live-backend-env
     secrets:
       - admin_api_key
-      - demo_auth_token_secret
+      - auth_token_secret
       - control_plane_pg_password
       - angel_postback_token
     volumes:
       - "${PHOENIX_LOG_HOST_PATH:-/opt/phoenix/logs}:/app/logs"
       - "${PHOENIX_STATE_HOST_PATH:-/opt/phoenix/state}:/app/state"
       - "${PHOENIX_CERTS_HOST_PATH:-/opt/phoenix/certs}:/app/certs:ro"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: "1g"
+    memswap_limit: "1g"
+    pids_limit: 300
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
       interval: 30s
@@ -375,7 +385,7 @@ services:
         max-file: "5"
 
   nginx:
-    image: "${OCIR_REGION:-ap-mumbai-1}.ocir.io/${OCIR_NAMESPACE:?Set OCIR_NAMESPACE}/phoenix-prod/nginx:${IMAGE_TAG:-latest}"
+    image: "${OCIR_REGION:-ap-mumbai-1}.ocir.io/${OCIR_NAMESPACE:?Set OCIR_NAMESPACE}/phoenix-prod/nginx:${IMAGE_TAG:?Set IMAGE_TAG to a specific git SHA — never deploy latest}"
     container_name: phoenix-oci-web
     init: true
     restart: unless-stopped
@@ -383,11 +393,21 @@ services:
       backend:
         condition: service_healthy
     ports:
-      # Bind on all interfaces — OCI Load Balancer forwards inbound traffic on port 80.
-      # TLS is terminated at the OCI Load Balancer; nginx sees plain HTTP internally.
+      # Port 80: HTTP → HTTPS redirect + ACME challenge
+      # Port 8443: TLS terminated at nginx (OCI LB uses TCP passthrough on 443)
       - "0.0.0.0:80:80"
+      - "0.0.0.0:8443:8443"
     secrets:
       - admin_api_key
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    mem_limit: "256m"
+    memswap_limit: "256m"
+    pids_limit: 50
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/readyz >/dev/null 2>&1 || exit 1"]
       interval: 30s
@@ -401,12 +421,13 @@ services:
         max-file: "5"
 
 # Secrets are written to /run/secrets/ by scripts/fetch-secrets.sh before compose up.
-# The script pulls them from OCI Vault via the instance principal (no credentials needed).
+# The script pulls them from OCI Vault via instance principal auth (no credentials needed).
+# Secret file names match the OCI Vault secret names (without the phoenix- prefix).
 secrets:
   admin_api_key:
     file: "/run/secrets/admin_api_key"
-  demo_auth_token_secret:
-    file: "/run/secrets/demo_auth_token_secret"
+  auth_token_secret:
+    file: "/run/secrets/auth_token_secret"
   control_plane_pg_password:
     file: "/run/secrets/control_plane_pg_password"
   angel_postback_token:

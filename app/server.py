@@ -1145,8 +1145,9 @@ async def readyz() -> JSONResponse:
                 interval_seconds=ord_interval,
                 label="orders_sync",
             )
-            payload.update(pos_report)
-            payload.update(ord_report)
+            # Include only stale/ready status in public readyz — not raw timestamps.
+            payload["position_sync_stale"] = pos_report["position_sync_stale"]
+            payload["orders_sync_stale"] = ord_report["orders_sync_stale"]
             if pos_report["position_sync_stale"]:
                 payload["ready"] = False
                 payload["reason"] = "position_sync_stale"
@@ -1282,16 +1283,11 @@ async def readyz() -> JSONResponse:
                     if not getattr(r, "has_ever_synced_balance", False)
                 ]
                 payload["balance_sync_ready"] = len(runners_never_synced) == 0
-                payload["balance_sync_pending_runners"] = runners_never_synced
+                # Account IDs of unsynced runners are kept in logs/admin endpoint only.
                 if runners_never_synced:
                     payload["ready"] = False
                     payload["reason"] = "balance_sync_not_ready"
-                    payload["balance_sync_detail"] = (
-                        f"Runner(s) {runners_never_synced} have never completed a "
-                        "successful balance fetch since startup. Capital engine has "
-                        "empty state; entries would be blocked by fail-closed policy. "
-                        "Wait for broker RMS to recover. See AB1004 runbook."
-                    )
+                    payload["balance_sync_pending_count"] = len(runners_never_synced)
                     return JSONResponse(status_code=503, content=payload)
         except Exception as exc:
             logger.warning("readyz: balance sync ready check failed: %s", exc)
@@ -1335,18 +1331,8 @@ async def readyz() -> JSONResponse:
             )
             return JSONResponse(status_code=503, content=payload)
 
-    # §99: Surface Postgres transport security state in readyz for operator visibility.
-    try:
-        import os as _server_os
-        _pg_sslmode = str(_server_os.getenv("CONTROL_PLANE_PG_SSLMODE", "prefer") or "prefer").lower()
-        _ssl_skip = str(_server_os.getenv("LIVE_PG_SSL_SKIP_CHECK", "false") or "false").lower() in ("1", "true", "yes")
-        payload["postgres_transport"] = {
-            "sslmode": _pg_sslmode,
-            "ssl_enforced": _pg_sslmode in ("require", "verify-ca", "verify-full"),
-            "live_pg_ssl_skip_check": _ssl_skip,
-        }
-    except Exception:
-        pass
+    # Postgres transport security state is surfaced in the authenticated release-evidence
+    # endpoint (/admin/release-evidence) only — not in the public /readyz response.
 
     payload["ready"] = True
     return JSONResponse(status_code=200, content=payload)

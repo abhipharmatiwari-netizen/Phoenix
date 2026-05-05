@@ -5,21 +5,24 @@
 # OCI Compute Instance.  Uses OCI Instance Principal auth (no API keys needed).
 #
 # Required env vars:
-#   OCI_VAULT_ID              OCID of the phoenix-vault
+#   OCI_VAULT_ID              OCID of the phoenix-vault (retrieve from ops secrets store)
 #
 # Optional env vars:
 #   SECRETS_DIR               output directory (default: /run/secrets)
 #   OCI_CLI_BIN               path to oci CLI (default: oci)
 #
 # Usage:
-#   sudo OCI_VAULT_ID=ocid1.vault.oc1... ./scripts/fetch-secrets.sh
+#   sudo OCI_VAULT_ID=<VAULT_OCID> ./scripts/fetch-secrets.sh
 #
-# Secrets written (names match docker-entrypoint.sh convention: file = secret name):
-#   admin_api_key
-#   demo_auth_token_secret
-#   control_plane_pg_password
-#   angel_postback_token
-#   dashboard_hmac_secret
+# Secrets written (names match Docker secret file convention: filename → env var):
+#   admin_api_key             → ADMIN_API_KEY
+#   auth_token_secret         → AUTH_TOKEN_SECRET  (JWT signing; was demo_auth_token_secret)
+#   control_plane_pg_password → CONTROL_PLANE_PG_PASSWORD
+#   angel_postback_token      → ANGEL_POSTBACK_TOKEN
+#   dashboard_hmac_secret     → DASHBOARD_HMAC_SECRET
+#
+# OCI Vault secret names follow the convention: phoenix-<secret_name>
+# e.g. phoenix-auth_token_secret, phoenix-admin_api_key, etc.
 
 set -eu
 
@@ -59,7 +62,7 @@ fetch_secret() {
 }
 
 fetch_secret "admin_api_key"
-fetch_secret "demo_auth_token_secret"
+fetch_secret "auth_token_secret"
 fetch_secret "control_plane_pg_password"
 fetch_secret "angel_postback_token"
 fetch_secret "dashboard_hmac_secret"

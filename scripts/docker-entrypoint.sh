@@ -1,8 +1,21 @@
 #!/bin/sh
 # Load Docker secrets into environment variables before the main process starts.
+#
 # Each file under /run/secrets/ becomes an env var named after the file
-# (upper-cased, hyphens -> underscores).  Values are never written to
-# docker inspect output because this script runs inside the container.
+# (upper-cased, hyphens → underscores).
+#
+# Security note: secrets are exported as env vars so that pydantic-settings and
+# os.getenv() callers throughout the app can read them without file I/O at every
+# call site. This is a known trade-off: the values become visible in
+# /proc/<pid>/environ inside the container. To limit exposure:
+#   - The container runs as non-root (appuser), so /proc/<pid>/environ is not
+#     world-readable by default.
+#   - No crash reporter or log sink that captures full env is configured.
+#   - Secrets never appear in `docker inspect` because they are set here at
+#     runtime, not in the compose environment block.
+#
+# If a secret file is empty or missing, the corresponding env var is not set,
+# which causes the app to fail at startup (fail-closed behaviour).
 set -e
 
 SECRETS_DIR="${SECRETS_DIR:-/run/secrets}"

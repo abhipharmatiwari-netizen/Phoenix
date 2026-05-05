@@ -1,0 +1,55 @@
+# phoenix-override.yml.example
+#
+# Copy to /opt/phoenix/phoenix-override.yml on the OCI VM and fill in CHANGE_ME values.
+# This file is version-controlled as a template; the filled copy is NOT committed to git.
+#
+# Usage:
+#   docker compose \
+#     -f /opt/phoenix/app/docker-compose.oci-live.yml \
+#     -f /opt/phoenix/phoenix-override.yml \
+#     --env-file /opt/phoenix/phoenix-deploy.env \
+#     up -d --no-deps backend
+#
+# Security rules for this file:
+#   - NO bind mounts of individual .py source files — patches are in the OCIR image
+#   - NO ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true — set real CAPITAL_LIMITS_JSON instead
+#   - NO LIVE_PG_SSL_SKIP_CHECK=true without an approved compensating control on record
+#   - Volumes: only logs, state, certs — no source tree mounts
+
+name: phoenix-oci-live
+
+services:
+  backend:
+    environment:
+      # Proxy required for Angel One API/WebSocket (OCI IPs are blocked by Angel One firewall)
+      ANGEL_HTTPS_PROXY: "http://CHANGE_ME_PROXY_IP:8888"
+      HTTPS_PROXY: "http://CHANGE_ME_PROXY_IP:8888"
+
+      # CORS — must match the actual public domain
+      CORS_ORIGINS: "https://CHANGE_ME_PHOENIX_DOMAIN"
+
+      # Postgres DSN — points to local container (no sslmode=require for local socket)
+      # If using OCI Database for PostgreSQL, use sslmode=require and remove this override.
+      CONTROL_PLANE_DB_DSN: "postgresql://phoenix_app@phoenix-oci-postgres:5432/phoenix"
+      CONTROL_PLANE_PG_SSLMODE: "prefer"
+      # Acknowledge the SSL bypass for the local container path:
+      LIVE_PG_SSL_SKIP_CHECK: "true"
+      REMOTE_DEPLOYMENT: "false"
+
+      # Capital limits — set real per-account values; remove the bypass flag below
+      # CAPITAL_LIMITS_JSON is set via phoenix-deploy.env
+      # ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY: "true"  # <-- REMOVE this once real limits are set
+
+    volumes:
+      # Only persistent data volumes — NO source file bind mounts
+      - "/opt/phoenix/logs:/app/logs"
+      - "/opt/phoenix/state:/app/state"
+      - "/opt/phoenix/certs:/app/certs:ro"
+
+  nginx:
+    ports:
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:8443:8443"
+    volumes:
+      - "/opt/phoenix/certs:/etc/letsencrypt:ro"
+      - "/opt/phoenix/acme-challenge:/var/www/acme-challenge:ro"

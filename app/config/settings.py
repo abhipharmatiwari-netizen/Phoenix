@@ -135,10 +135,19 @@ class Settings(BaseSettings):
         validation_alias="ANGEL_POSTBACK_RELAY_TOKEN",
         description="Shared secret token expected from the authenticated relay when ANGEL_POSTBACK_AUTH_MODE=RELAY.",
     )
+    auth_token_secret: Optional[str] = Field(
+        default=None,
+        validation_alias="AUTH_TOKEN_SECRET",
+        description=(
+            "Secret used to sign all /auth JWT tokens (access and refresh). "
+            "Must be cryptographically random, minimum 32 bytes. "
+            "Stored in OCI Vault as phoenix-auth_token_secret."
+        ),
+    )
     demo_auth_token_secret: Optional[str] = Field(
         default=None,
         validation_alias="DEMO_AUTH_TOKEN_SECRET",
-        description="Secret used to sign demo /auth bearer-like tokens.",
+        description="Deprecated alias for auth_token_secret. Use AUTH_TOKEN_SECRET instead.",
     )
     admin_api_key_secret: Optional[str] = Field(
         default=None,
