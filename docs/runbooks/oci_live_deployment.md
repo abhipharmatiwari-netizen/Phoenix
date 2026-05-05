@@ -8,29 +8,31 @@
 ## Architecture overview
 
 ```
-Internet (Angel One SmartAPI / WebSocket)
+Internet users / Angel One postback
         │
+        ▼ HTTP :80 (redirects to HTTPS) / HTTPS :443
+OCI Load Balancer — phoenix-lb (161.118.189.93, public subnet)
+        │ port 80 → VM:80   port 443 (TCP passthrough) → VM:8443
         ▼
-Vultr Mumbai VPS — phoenix-proxy (65.20.69.50)
-  tinyproxy :8888  ◄── only accepts from OCI NAT IP 141.148.216.169
-        │
-        ▼ (HTTPS CONNECT tunnel)
 OCI Mumbai — phoenix-vm (10.0.2.83, private subnet)
   NAT Gateway outbound IP: 141.148.216.169
         │
-  docker phoenix-oci-backend  (image from OCIR)
-  docker phoenix-oci-web      (nginx, port 80)
+  docker phoenix-oci-web      (nginx, :80 redirect + :8443 TLS)
+  docker phoenix-oci-backend  (image from OCIR, :8080)
   docker phoenix-oci-postgres (Postgres)
         │
-        ▼ (port 80 inbound)
-OCI Load Balancer — phoenix-lb (161.118.189.93, public subnet)
+        ▼ (outbound via NAT — Angel One blocks direct OCI IPs)
+Vultr Mumbai VPS — phoenix-proxy (65.20.69.50)
+  tinyproxy :8888  ◄── only accepts from 141.148.216.169
         │
-        ▼
-Internet users / Angel One postback
+        ▼ (HTTPS CONNECT tunnel)
+Angel One SmartAPI / WebSocket (apiconnect.angelone.in)
 ```
 
 **Why the proxy?** Angel One's SmartAPI firewall blocks OCI's cloud IP ranges at the TCP level.
 All Angel One HTTP (REST) and WebSocket traffic is tunnelled through the Vultr proxy via HTTP CONNECT.
+
+**HTTPS:** TLS is terminated at nginx on the OCI VM (port 8443). The OCI LB uses TCP passthrough on port 443 so the full TLS certificate chain reaches the client. Certificate: Let's Encrypt via `161.118.189.93.sslip.io`, expires 90 days, auto-renewed.
 
 ---
 
@@ -38,9 +40,15 @@ All Angel One HTTP (REST) and WebSocket traffic is tunnelled through the Vultr p
 
 | Resource | Value |
 |---|---|
+| **Dashboard URL** | `https://161.118.189.93.sslip.io` |
 | OCI VM private IP | `10.0.2.83` |
 | OCI NAT gateway outbound IP | `141.148.216.169` |
 | OCI Load Balancer public IP | `161.118.189.93` |
+| Nginx HTTP port (redirect) | `80` |
+| Nginx HTTPS port (TLS) | `8443` |
+| TLS domain | `161.118.189.93.sslip.io` |
+| TLS certificate | Let's Encrypt (ECDSA P-256, expires 90 days) |
+| Cert renewal cron | 1st and 15th of each month, 03:00 IST |
 | Vultr proxy IP | `65.20.69.50` |
 | Proxy port | `8888` |
 | OCI compartment OCID | `ocid1.compartment.oc1..aaaaaaaajupjauxguwhkb7j75nbqv5qbkuid7tyvezsgev2u3v4e6uh3cyfq` |
@@ -59,8 +67,8 @@ Log into [smartapi.angelbroking.com](https://smartapi.angelbroking.com) and conf
 | Field | Value |
 |---|---|
 | **IP Whitelist** | `141.148.216.169` (OCI NAT gateway) |
-| **Redirect URL** | `http://161.118.189.93/` |
-| **Postback URL** | `http://161.118.189.93/webhook/angel/postback` |
+| **Redirect URL** | `https://161.118.189.93.sslip.io/` |
+| **Postback URL** | `https://161.118.189.93.sslip.io/webhook/angel/postback` |
 
 The postback URL receives Angel One order fill events. Without it, the lifecycle service
 never receives fills and positions remain unreconciled.
@@ -107,18 +115,26 @@ All persistent deployment state lives under `/opt/phoenix/`:
 
 ```
 /opt/phoenix/
-├── app/                          # Git checkout of Phoenix repo (source of truth for patched files)
-│   ├── app/core/angel_login.py   # Patched: ANGEL_HTTPS_PROXY support
-│   ├── app/core/order_client.py  # Patched: ANGEL_HTTPS_PROXY support
+├── app/                              # Git checkout of Phoenix repo
+│   ├── app/core/angel_login.py       # Patched: ANGEL_HTTPS_PROXY support
+│   ├── app/core/order_client.py      # Patched: ANGEL_HTTPS_PROXY support
 │   ├── app/core/universe_builder.py  # Patched: ANGEL_HTTPS_PROXY support
-│   ├── app/core/ws_runner.py     # Patched: WebSocket proxy_type support
+│   ├── app/core/ws_runner.py         # Patched: WebSocket proxy_type support
 │   ├── app/runtime/app_runtime.py    # Patched: watchdog backoff overflow fix
+│   ├── nginx/nginx-ssl.conf.template # SSL nginx config template (repo-tracked)
 │   └── docker-compose.oci-live.yml   # Base compose manifest (OCIR images)
 ├── phoenix-override.yml          # Compose override: bind mounts + env overrides
 ├── phoenix-deploy.env            # Required env vars for docker compose
+├── nginx-ssl.conf.template       # SSL nginx template (copied from repo, ADMIN_API_KEY substituted)
+├── nginx-ssl.conf                # Rendered SSL config (substituted, NOT in git — regenerate after cred rotation)
+├── renew-cert.sh                 # TLS cert renewal script (called by cron)
+├── acme-challenge/               # Let's Encrypt HTTP-01 challenge webroot
+├── certs/                        # Let's Encrypt certificates (live/ and archive/)
+│   └── live/161.118.189.93.sslip.io/
+│       ├── fullchain.pem         # Cert chain (mounted into nginx)
+│       └── privkey.pem           # Private key (mounted into nginx)
 ├── state/                        # Persistent runtime state (risk, positions)
-├── certs/                        # TLS certificates
-└── logs/                         # Application logs
+└── logs/                         # Application logs + cert-renewal.log
 ```
 
 ---
@@ -138,14 +154,30 @@ docker compose \
 
 This recreates **only the backend** container. The override applies:
 - `ANGEL_HTTPS_PROXY=http://65.20.69.50:8888` as a real container env var
+- `CORS_ORIGINS=https://161.118.189.93.sslip.io`
 - Bind mounts for all 5 patched source files from the host source tree
 - `CONTROL_PLANE_DB_DSN` without SSL (local Postgres container)
 - `ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true`
 
+### Redeploy nginx (after config or cert changes)
+
+```bash
+cd /opt/phoenix/app
+# Re-render the SSL config (re-substitute ADMIN_API_KEY)
+ADMIN_KEY=$(sudo cat /run/secrets/admin_api_key)
+sed "s/\${ADMIN_API_KEY}/${ADMIN_KEY}/" /opt/phoenix/nginx-ssl.conf.template > /opt/phoenix/nginx-ssl.conf
+
+docker compose \
+  -f docker-compose.oci-live.yml \
+  -f /opt/phoenix/phoenix-override.yml \
+  --env-file /opt/phoenix/phoenix-deploy.env \
+  up -d --no-deps --force-recreate nginx
+```
+
 ### After code changes
 
 1. SCP the changed file(s) to `/opt/phoenix/app/app/...` on the VM
-2. Run the deploy command above — the bind mount picks up the new file automatically
+2. Run the backend deploy command above — the bind mount picks up the new file automatically
 
 ---
 
@@ -234,16 +266,30 @@ The `state` column (migration `014`) must be present — run pending migrations 
 ### 1. Health and readiness
 
 ```bash
-# From local machine
-curl http://161.118.189.93/health | python3 -m json.tool
-curl http://161.118.189.93/readyz | python3 -m json.tool
+# From local machine — use HTTPS
+curl https://161.118.189.93.sslip.io/health | python3 -m json.tool
+curl https://161.118.189.93.sslip.io/readyz | python3 -m json.tool
 ```
 
 Expected for a fully healthy system:
 - `/health`: `"stream_worker_running": true, "watchdog_running": true`
 - `/readyz`: `"ready": true, "runner_count": 1, "running_runner_count": 1`
 
-### 2. Angel One connectivity
+### 2. TLS / security headers
+
+```bash
+curl -I https://161.118.189.93.sslip.io/health 2>&1 | grep -E 'strict-transport|x-frame|x-content|content-security'
+```
+
+Expected headers present: `Strict-Transport-Security`, `X-Frame-Options`, `X-Content-Type-Options`, `Content-Security-Policy`.
+
+```bash
+# HTTP must redirect to HTTPS (301)
+curl -I http://161.118.189.93.sslip.io/ 2>&1 | grep -E 'HTTP/|Location'
+# Expected: HTTP/1.1 301 ... Location: https://...
+```
+
+### 3. Angel One connectivity
 
 ```bash
 # From OCI VM
@@ -258,18 +304,110 @@ docker exec phoenix-oci-backend curl -s --max-time 8 \
 # Expected: 200 or 400 (not a timeout)
 ```
 
-### 3. Live tick stream
+### 4. Live tick stream
 
 ```bash
 docker logs phoenix-oci-backend --tail 20 2>&1 | grep "BAR CLOSED"
 # Should show bars closing with RSI/MACD/ATR values during market hours (09:15–15:30 IST)
 ```
 
-### 4. Readyz outside market hours
+### 5. Readyz outside market hours
 
 Outside market hours, `/readyz` returns `503 no_runners_registered`. This is expected —
 runners only register when the stream worker is active and has a healthy WebSocket session.
 During market hours `runner_count` should be ≥ 1.
+
+---
+
+## TLS certificate management
+
+### Current certificate
+
+| Property | Value |
+|---|---|
+| Domain | `161.118.189.93.sslip.io` |
+| CA | Let's Encrypt (ECDSA P-256 / E7 intermediate) |
+| Location on VM | `/opt/phoenix/certs/live/161.118.189.93.sslip.io/` |
+| Expires | 90 days from issue; renews every ~60 days via cron |
+
+### Auto-renewal (cron)
+
+Runs at 03:00 IST on 1st and 15th of each month:
+```bash
+sudo crontab -l | grep renew  # verify cron is registered
+```
+
+The renewal script `/opt/phoenix/renew-cert.sh`:
+1. Stops `phoenix-oci-web` (releases port 80 for ~30 seconds)
+2. Runs `certbot/certbot renew --standalone` in Docker
+3. Re-renders `nginx-ssl.conf` with the updated cert
+4. Restarts `phoenix-oci-web`
+
+Logs: `/opt/phoenix/logs/cert-renewal.log`
+
+### Manual renewal
+
+```bash
+# If renewal fails or cert is close to expiry
+docker stop phoenix-oci-web
+
+docker run --rm \
+  -p 80:80 \
+  -v /opt/phoenix/certs:/etc/letsencrypt \
+  certbot/certbot renew --standalone --non-interactive --agree-tos
+
+# Re-render nginx config and restart
+ADMIN_KEY=$(sudo cat /run/secrets/admin_api_key)
+sed "s/\${ADMIN_API_KEY}/${ADMIN_KEY}/" /opt/phoenix/nginx-ssl.conf.template > /opt/phoenix/nginx-ssl.conf
+docker start phoenix-oci-web
+```
+
+### After ADMIN_API_KEY rotation
+
+`nginx-ssl.conf` embeds the ADMIN_API_KEY (controls `/metrics` endpoint access).
+After rotating the key, re-render the config and restart nginx:
+
+```bash
+ADMIN_KEY=$(sudo cat /run/secrets/admin_api_key)
+sed "s/\${ADMIN_API_KEY}/${ADMIN_KEY}/" /opt/phoenix/nginx-ssl.conf.template > /opt/phoenix/nginx-ssl.conf
+docker compose -f /opt/phoenix/app/docker-compose.oci-live.yml \
+  -f /opt/phoenix/phoenix-override.yml \
+  --env-file /opt/phoenix/phoenix-deploy.env \
+  up -d --no-deps --force-recreate nginx
+```
+
+---
+
+## Admin user setup (first-time only)
+
+The `users` table is empty on fresh deployments. Create the admin user:
+
+```bash
+# On OCI VM — generates a pbkdf2 hash and inserts the user
+python3 - << 'PYEOF'
+import hashlib, secrets, base64, uuid, subprocess
+
+password = 'CHOOSE_A_STRONG_PASSWORD'
+salt = secrets.token_hex(16)
+key = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 200_000)
+b64 = base64.urlsafe_b64encode(key).rstrip(b'=').decode()
+phash = f"pbkdf2${salt}${b64}"
+uid = str(uuid.uuid4())
+
+sql = f"INSERT INTO users (id, email, name, password_hash, role) VALUES ('{uid}', 'admin@phoenix.com', 'Admin', '{phash}', 'admin') ON CONFLICT DO NOTHING;"
+subprocess.run(['docker', 'exec', 'phoenix-oci-postgres', 'psql', '-U', 'phoenix_app', '-d', 'phoenix', '-c', sql])
+
+# Get the user_id for entitlement
+result = subprocess.run(['docker', 'exec', 'phoenix-oci-postgres', 'psql', '-U', 'phoenix_app', '-d', 'phoenix',
+    '-t', '-c', f"SELECT id FROM users WHERE email='admin@phoenix.com'"], capture_output=True, text=True)
+user_id = result.stdout.strip()
+sql2 = f"INSERT INTO user_tenant_entitlements (user_id, tenant_id) VALUES ('{user_id}', 'tenant-1') ON CONFLICT DO NOTHING;"
+subprocess.run(['docker', 'exec', 'phoenix-oci-postgres', 'psql', '-U', 'phoenix_app', '-d', 'phoenix', '-c', sql2])
+print(f"Created user: admin@phoenix.com")
+PYEOF
+```
+
+Login at `https://161.118.189.93.sslip.io/login`.
 
 ---
 
@@ -286,6 +424,7 @@ They must be kept in the VM source tree and are tracked in the Git repo.
 | `app/core/ws_runner.py` | WebSocket proxy via `http_proxy_host/port` + `proxy_type="http"` in `run_forever()` |
 | `app/runtime/app_runtime.py` | Watchdog backoff: `2 **` → `2.0 **` to prevent `OverflowError` at ~1038 restart attempts |
 | `migrations/014_broker_credentials_state.sql` | `ALTER TABLE broker_credentials ADD COLUMN state JSONB NOT NULL DEFAULT '{}'` |
+| `nginx/nginx-ssl.conf.template` | Dual-server nginx config: port 80 redirect + port 8443 TLS with security headers |
 
 ---
 
@@ -337,6 +476,27 @@ the bind mount is in `phoenix-override.yml`.
 Check the full error message. Common causes:
 - `ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true` not in override → add to `phoenix-override.yml`
 - `CONTROL_PLANE_DB_DSN` using `sslmode=require` but local Postgres has no SSL → override in `phoenix-override.yml`
+
+### HTTPS returns SSL handshake error or connection reset
+
+Cause: `nginx-ssl.conf` was overwritten by the nginx entrypoint (it reads `/tmp/nginx.conf.template` and writes to `/etc/nginx/conf.d/default.conf`). If the template was corrupted, the SSL server block is lost.
+
+Fix: Re-render and force-recreate nginx:
+```bash
+ADMIN_KEY=$(sudo cat /run/secrets/admin_api_key)
+sed "s/\${ADMIN_API_KEY}/${ADMIN_KEY}/" /opt/phoenix/nginx-ssl.conf.template > /opt/phoenix/nginx-ssl.conf
+cd /opt/phoenix/app
+docker compose -f docker-compose.oci-live.yml -f /opt/phoenix/phoenix-override.yml \
+  --env-file /opt/phoenix/phoenix-deploy.env up -d --no-deps --force-recreate nginx
+```
+
+Verify: `docker exec phoenix-oci-web grep 'listen 8443' /etc/nginx/conf.d/default.conf`
+
+### TLS cert expired or near expiry
+
+Check expiry: `echo | openssl s_client -connect 161.118.189.93.sslip.io:443 2>/dev/null | openssl x509 -noout -dates`
+
+If expired, run `/opt/phoenix/renew-cert.sh` manually.
 
 ### Bastion session expired
 
