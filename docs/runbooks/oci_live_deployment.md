@@ -134,25 +134,54 @@ All persistent deployment state lives under `/opt/phoenix/`:
 
 ```
 /opt/phoenix/
-├── app/                              # Git checkout of Phoenix repo
+├── app/                              # Git checkout of Phoenix repo (git pull to update)
 │   ├── docker-compose.oci-live.yml   # Base compose manifest (OCIR images)
 │   └── nginx/nginx-ssl.conf.template # SSL nginx config template (repo-tracked)
-├── phoenix-override.yml          # Compose override: env overrides (see phoenix-override.yml.example)
-├── phoenix-deploy.env            # Required non-secret env vars for docker compose
-├── renew-cert.sh                 # TLS cert renewal script (called by cron)
-├── acme-challenge/               # Let's Encrypt HTTP-01 challenge webroot
-├── certs/                        # Let's Encrypt certificates (live/ and archive/)
+├── phoenix-override.yml              # Compose override (see phoenix-override.yml.example)
+├── phoenix-deploy.env                # Non-secret env vars consumed by docker compose
+├── nginx-ssl-prerendered.conf.template  # SSL template with PHOENIX_DOMAIN pre-substituted
+│                                        # (re-generate if domain changes — see override example)
+├── harden-proxy.sh                   # One-time proxy hardening script (already run)
+├── renew-cert.sh                     # TLS cert renewal script (called by cron)
+├── acme-challenge/                   # Let's Encrypt HTTP-01 challenge webroot
+├── certs/                            # Let's Encrypt certificates
 │   └── live/<PHOENIX_DOMAIN>/
-│       ├── fullchain.pem         # Cert chain (mounted into nginx)
-│       └── privkey.pem           # Private key (mounted into nginx)
-├── state/                        # Persistent runtime state (risk, positions)
-└── logs/                         # Application logs + cert-renewal.log
+│       ├── fullchain.pem             # Cert chain (mounted into nginx)
+│       └── privkey.pem               # Private key (mounted into nginx)
+├── state/                            # Persistent runtime state (risk, positions)
+└── logs/                             # Application logs + cert-renewal.log
 ```
 
-> **No source-file bind mounts.** All proxy and watchdog patches are tracked in the git repo
-> and baked into the OCIR image at build time. The `phoenix-override.yml` must NOT bind-mount
-> individual `.py` files. See `phoenix-override.yml.example` in the repo root for the approved
-> override template.
+> **Bind mounts:** The current `phoenix-override.yml` includes temporary bind mounts of 8 source
+> files from `/opt/phoenix/app/app/` because the OCIR `:latest` image predates the proxy patches.
+> These mounts must be removed once IMAGE_TAG is pinned to commit `56d7b22` or later.
+> See `phoenix-override.yml.example` for the full annotated template including removal instructions.
+
+---
+
+## Git operations on the VM
+
+The git checkout at `/opt/phoenix/app` is owned by `opc`. Root shell requires a one-time config:
+
+```bash
+# Required once per root session before git commands:
+git config --global --add safe.directory /opt/phoenix/app
+cd /opt/phoenix/app && git pull origin main
+```
+
+After pulling, redeploy to pick up any changes:
+
+```bash
+CONTROL_PLANE_PG_PASSWORD_HOST=dummy docker compose \
+  -f docker-compose.oci-live.yml \
+  -f /opt/phoenix/phoenix-override.yml \
+  --env-file /opt/phoenix/phoenix-deploy.env \
+  up -d --no-deps backend nginx
+```
+
+> `CONTROL_PLANE_PG_PASSWORD_HOST=dummy` is required to satisfy compose validation for the
+> `migrator` service (which is not deployed here). The backend reads the real password from
+> `/run/secrets/control_plane_pg_password`, not from this env var.
 
 ---
 
@@ -162,7 +191,7 @@ From `/opt/phoenix/app` on the OCI VM:
 
 ```bash
 cd /opt/phoenix/app
-docker compose \
+CONTROL_PLANE_PG_PASSWORD_HOST=dummy docker compose \
   -f docker-compose.oci-live.yml \
   -f /opt/phoenix/phoenix-override.yml \
   --env-file /opt/phoenix/phoenix-deploy.env \
@@ -170,10 +199,10 @@ docker compose \
 ```
 
 This recreates **only the backend** container. The override applies:
-- `ANGEL_HTTPS_PROXY=http://<PROXY_IP>:8888` as a real container env var
-- `CORS_ORIGINS=https://<PHOENIX_DOMAIN>`
-- `CONTROL_PLANE_DB_DSN` pointing to the local Postgres container
-- `ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY` — **must be removed** once real capital limits are set
+- `ANGEL_HTTPS_PROXY=http://<PROXY_IP>:8888` — Angel One proxy routing
+- `CORS_ORIGINS=https://<PHOENIX_DOMAIN>` — CORS allowed origin
+- `CONTROL_PLANE_DB_DSN` — points to local Postgres container (no SSL)
+- `DISABLE_CONTROL_TOWER_ROUTES=true` — blocks strategy matrix routes at backend
 
 ### Redeploy nginx (after cert changes or nginx config update)
 
@@ -196,38 +225,44 @@ the container. The rendered config never touches the host filesystem.
 
 ### After code changes
 
-1. Push changes to git → CI builds and pushes a new OCIR image tagged with the commit SHA.
-2. Pull and deploy the new image:
+1. Push changes to git → CI builds and pushes a new OCIR image tagged with `$GITHUB_SHA`.
+2. Update `IMAGE_TAG` in `phoenix-deploy.env` to the new SHA.
+3. Git pull on the VM and redeploy:
 
 ```bash
-cd /opt/phoenix/app
-IMAGE_TAG=<GIT_SHA> docker compose \
+git config --global --add safe.directory /opt/phoenix/app
+cd /opt/phoenix/app && git pull origin main
+
+CONTROL_PLANE_PG_PASSWORD_HOST=dummy docker compose \
   -f docker-compose.oci-live.yml \
   -f /opt/phoenix/phoenix-override.yml \
   --env-file /opt/phoenix/phoenix-deploy.env \
-  up -d --no-deps backend
+  up -d --no-deps backend nginx
 ```
 
-> **Never SCP individual `.py` files onto the VM and rely on bind mounts.**
-> All changes must go through git → CI → OCIR image → compose deploy.
+> Once `IMAGE_TAG` is pinned to a SHA that includes commit `56d7b22` or later,
+> remove the 8 bind-mount lines from `phoenix-override.yml` (the image contains the patches).
 
 ---
 
 ## Proxy server (Vultr)
 
-The proxy is a Vultr Mumbai VPS running tinyproxy. Connect via SSH key (password auth is disabled):
+The proxy is a Vultr Mumbai VPS running tinyproxy.
+
+**SSH access:** Key-only auth (password auth disabled, root login key-only).
+The OCI VM's key at `/home/opc/.ssh/proxy_key` is authorised on the proxy.
 
 ```bash
-ssh -i <SSH_KEY_PATH> <PROXY_USER>@<PROXY_IP>
+# From OCI VM:
+ssh -i /home/opc/.ssh/proxy_key root@<PROXY_IP>
 
-# Check tinyproxy status
-systemctl is-active tinyproxy
-ss -tlnp | grep 8888
+# Or test without connecting:
+ssh -i /home/opc/.ssh/proxy_key root@<PROXY_IP> "systemctl is-active tinyproxy"
 ```
 
-Expected: `active` and `LISTEN` on port 8888.
+Expected: `active`.
 
-### Config file
+### tinyproxy config
 
 `/etc/tinyproxy/tinyproxy.conf`:
 ```
@@ -243,16 +278,23 @@ Allow <NAT_GATEWAY_IP>
 `Restart=always` is set via `/etc/systemd/system/tinyproxy.service.d/restart.conf` —
 tinyproxy auto-restarts on crash and on VM reboot.
 
-### UFW rules (proxy VM)
+### UFW rules (proxy VM — hardened 2026-05-05)
 
-```bash
-# Port 8888 accepts only from the OCI NAT gateway:
-ufw allow from <NAT_GATEWAY_IP> to any port 8888
-# SSH accepts only from the OCI NAT gateway (operator accesses via OCI bastion → proxy):
-ufw allow from <NAT_GATEWAY_IP> to any port 22
-ufw deny 22
-ufw enable
 ```
+8888    ALLOW   <NAT_GATEWAY_IP>
+22      ALLOW   <NAT_GATEWAY_IP>
+```
+
+SSH (port 22) accepts only from the OCI NAT gateway. Password auth and root+password
+login are disabled in `/etc/ssh/sshd_config`.
+
+### Hardening already applied
+
+- `PasswordAuthentication no`
+- `PermitRootLogin prohibit-password`
+- Port 22 restricted to `<NAT_GATEWAY_IP>` via UFW
+- Port 8888 restricted to `<NAT_GATEWAY_IP>` via UFW
+- 51 security updates applied 2026-05-05; kernel upgraded to 6.8.0-111
 
 ---
 
@@ -433,10 +475,56 @@ docker compose \
 
 ---
 
+## OCI Vault secrets management
+
+Secrets are written to `/run/secrets/` on the VM by `scripts/fetch-secrets.sh` using
+instance principal auth (no credentials required on the VM).
+
+### Running fetch-secrets.sh
+
+OCI CLI is installed under `opc`. Run as `opc` (not root):
+
+```bash
+# As opc:
+OCI_CLI_BIN=/home/opc/bin/oci \
+OCI_VAULT_ID=<VAULT_OCID> \
+  bash /opt/phoenix/app/scripts/fetch-secrets.sh
+```
+
+The script fetches these vault secrets (all named `phoenix-<name>` in OCI Vault):
+
+| Local file | OCI Vault secret | Status |
+|---|---|---|
+| `admin_api_key` | `phoenix-admin_api_key` | Create in Vault Console if missing |
+| `auth_token_secret` | `phoenix-auth_token_secret` | ✅ Created 2026-05-05 |
+| `control_plane_pg_password` | `phoenix-control_plane_pg_password` | Create in Vault Console if missing |
+| `angel_postback_token` | `phoenix-angel_postback_token` | Create in Vault Console if missing |
+| `dashboard_hmac_secret` | `phoenix-dashboard_hmac_secret` | Create in Vault Console if missing |
+
+> **Important:** `fetch-secrets.sh` uses atomic write (temp file → rename) and rejects
+> empty responses. A vault 404 or auth failure leaves the existing file unchanged.
+> If a vault secret is missing, the local file is preserved — not truncated.
+
+### Restoring secrets manually
+
+If a `/run/secrets/` file is missing or empty, restore from OCI Console:
+
+1. **OCI Console → Identity & Security → Vault → phoenix-vault → Secrets**
+2. Click the secret → copy the value
+3. As root on the VM: `printf '%s' 'VALUE' > /run/secrets/<name>`
+4. Redeploy: `CONTROL_PLANE_PG_PASSWORD_HOST=dummy docker compose ... up -d --no-deps backend nginx`
+
+---
+
 ## Patches applied to source tree
 
-All patches are tracked in git and baked into the OCIR image at build time.
-**No bind mounts of individual source files are required or permitted.**
+All patches are tracked in git. The OCIR `:latest` image predates the proxy patches
+(built before commit `56d7b22`). Until the image is rebuilt, the `phoenix-override.yml`
+bind-mounts the patched files from the git checkout.
+
+**To remove bind mounts:** build and push a new OCIR image via CI, update `IMAGE_TAG` in
+`phoenix-deploy.env` to the new git SHA, redeploy, then delete the bind-mount lines from
+`phoenix-override.yml`.
 
 | File | Fix |
 |---|---|
@@ -445,8 +533,11 @@ All patches are tracked in git and baked into the OCIR image at build time.
 | `app/core/universe_builder.py` | Same proxy support for universe quote calls |
 | `app/core/ws_runner.py` | WebSocket proxy via `http_proxy_host/port` + `proxy_type="http"` |
 | `app/runtime/app_runtime.py` | Watchdog backoff: `2.0 **` to prevent `OverflowError` at high restart counts |
+| `app/server.py` | `postgres_transport` removed from public `/readyz`; sensitive fields stripped |
+| `app/api/auth_routes.py` | `AUTH_TOKEN_SECRET` primary; weak-secret check in LIVE; UUID user IDs |
+| `app/config/settings.py` | `auth_token_secret` field added alongside deprecated `demo_auth_token_secret` |
 | `migrations/014_broker_credentials_state.sql` | `ALTER TABLE broker_credentials ADD COLUMN state JSONB` |
-| `nginx/nginx-ssl.conf.template` | Dual-server config: port 80 redirect + port 8443 TLS with security headers |
+| `nginx/nginx-ssl.conf.template` | Dual-server: port 80 redirect + port 8443 TLS + security headers + rate limiting |
 
 ---
 
@@ -535,3 +626,58 @@ After updating `broker_credentials` in Postgres, restart the backend:
 ```bash
 docker restart phoenix-oci-backend
 ```
+
+---
+
+## Known pending items (as of 2026-05-05)
+
+These items are not blocking live trading but should be completed before the next deployment cycle.
+
+### 1. Create missing OCI Vault secrets
+
+The following secrets exist only as local files on the VM (not yet in OCI Vault).
+If the VM is reprovisioned or `fetch-secrets.sh` is re-run, they must be restored manually.
+Create them in **OCI Console → Vault → phoenix-vault → Secrets**:
+
+- `phoenix-admin_api_key`
+- `phoenix-control_plane_pg_password`
+- `phoenix-angel_postback_token`
+- `phoenix-dashboard_hmac_secret`
+
+### 2. Deploy new OCIR image and remove bind mounts
+
+CI builds a new image on every push to `main`. Once a new image is available:
+
+```bash
+# Update phoenix-deploy.env on VM:
+IMAGE_TAG=<NEW_GIT_SHA>   # replace latest with explicit SHA
+
+# Redeploy:
+CONTROL_PLANE_PG_PASSWORD_HOST=dummy docker compose \
+  -f docker-compose.oci-live.yml \
+  -f /opt/phoenix/phoenix-override.yml \
+  --env-file /opt/phoenix/phoenix-deploy.env \
+  up -d --no-deps backend nginx
+
+# Then remove the 8 bind-mount lines from phoenix-override.yml
+```
+
+### 3. Scrub git history
+
+Real infrastructure identifiers (OCIDs, IPs, broker client code) appear in git history
+before commit `56d7b22`. Scrub with `git filter-repo`:
+
+```bash
+pip install git-filter-repo
+git filter-repo --replace-text replacements.txt --force
+git push --force origin main
+```
+
+Where `replacements.txt` maps each real value to `REDACTED_<NAME>`.
+
+### 4. Postgres SSL enforcement (F-03)
+
+The local `phoenix-oci-postgres` container runs without TLS. This is an accepted
+compensating control (loopback Docker network, no external exposure).
+The long-term fix is to migrate to OCI Database for PostgreSQL and remove the
+`LIVE_PG_SSL_SKIP_CHECK=true` override.

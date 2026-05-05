@@ -1,20 +1,24 @@
 # phoenix-override.yml.example
 #
-# Copy to /opt/phoenix/phoenix-override.yml on the OCI VM and fill in CHANGE_ME values.
+# Copy to /opt/phoenix/phoenix-override.yml on the OCI VM and fill in real values.
 # This file is version-controlled as a template; the filled copy is NOT committed to git.
 #
 # Usage:
-#   docker compose \
+#   CONTROL_PLANE_PG_PASSWORD_HOST=dummy docker compose \
 #     -f /opt/phoenix/app/docker-compose.oci-live.yml \
 #     -f /opt/phoenix/phoenix-override.yml \
 #     --env-file /opt/phoenix/phoenix-deploy.env \
-#     up -d --no-deps backend
+#     up -d --no-deps backend nginx
 #
-# Security rules for this file:
-#   - NO bind mounts of individual .py source files — patches are in the OCIR image
+# Note: CONTROL_PLANE_PG_PASSWORD_HOST=dummy is required to satisfy the compose
+# validation for the migrator service even when only deploying backend/nginx.
+# The backend reads the real password from /run/secrets/control_plane_pg_password.
+#
+# Security invariants for this file:
 #   - NO ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true — set real CAPITAL_LIMITS_JSON instead
 #   - NO LIVE_PG_SSL_SKIP_CHECK=true without an approved compensating control on record
-#   - Volumes: only logs, state, certs — no source tree mounts
+#   - Bind mounts: only logs, state, certs — no source file mounts (see note below)
+#   - nginx must never mount a host-rendered config file (ADMIN_API_KEY leakage)
 
 name: phoenix-oci-live
 
@@ -25,31 +29,66 @@ services:
       ANGEL_HTTPS_PROXY: "http://CHANGE_ME_PROXY_IP:8888"
       HTTPS_PROXY: "http://CHANGE_ME_PROXY_IP:8888"
 
-      # CORS — must match the actual public domain
+      # CORS — must match the actual public domain (same as PHOENIX_DOMAIN in deploy env)
       CORS_ORIGINS: "https://CHANGE_ME_PHOENIX_DOMAIN"
 
-      # Postgres DSN — points to local container (no sslmode=require for local socket)
-      # If using OCI Database for PostgreSQL, use sslmode=require and remove this override.
+      # Postgres DSN — local container path (no SSL; see F-03 compensating control)
+      # Switch to sslmode=require + OCI DB endpoint when migrating to OCI Database service.
       CONTROL_PLANE_DB_DSN: "postgresql://phoenix_app@phoenix-oci-postgres:5432/phoenix"
       CONTROL_PLANE_PG_SSLMODE: "prefer"
-      # Acknowledge the SSL bypass for the local container path:
       LIVE_PG_SSL_SKIP_CHECK: "true"
       REMOTE_DEPLOYMENT: "false"
 
-      # Capital limits — set real per-account values; remove the bypass flag below
-      # CAPITAL_LIMITS_JSON is set via phoenix-deploy.env
-      # ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY: "true"  # <-- REMOVE this once real limits are set
+      DISABLE_CONTROL_TOWER_ROUTES: "true"
 
     volumes:
-      # Only persistent data volumes — NO source file bind mounts
       - "/opt/phoenix/logs:/app/logs"
       - "/opt/phoenix/state:/app/state"
       - "/opt/phoenix/certs:/app/certs:ro"
 
+      # ── TEMPORARY BIND MOUNTS ────────────────────────────────────────────────
+      # The OCIR :latest image was built before the proxy patches were committed.
+      # These bind mounts overlay the image files with the patched versions from
+      # the git checkout until a new image is built and deployed.
+      #
+      # REMOVE these lines once IMAGE_TAG is pinned to commit 56d7b22 or later:
+      #   1. Build new image: CI pushes on every push to main
+      #   2. Update IMAGE_TAG in phoenix-deploy.env to the new git SHA
+      #   3. docker compose ... up -d --no-deps backend nginx
+      #   4. Delete the 8 lines below
+      - "/opt/phoenix/app/app/core/angel_login.py:/app/app/core/angel_login.py:ro"
+      - "/opt/phoenix/app/app/core/order_client.py:/app/app/core/order_client.py:ro"
+      - "/opt/phoenix/app/app/core/universe_builder.py:/app/app/core/universe_builder.py:ro"
+      - "/opt/phoenix/app/app/core/ws_runner.py:/app/app/core/ws_runner.py:ro"
+      - "/opt/phoenix/app/app/runtime/app_runtime.py:/app/app/runtime/app_runtime.py:ro"
+      - "/opt/phoenix/app/app/server.py:/app/app/server.py:ro"
+      - "/opt/phoenix/app/app/api/auth_routes.py:/app/app/api/auth_routes.py:ro"
+      - "/opt/phoenix/app/app/config/settings.py:/app/app/config/settings.py:ro"
+      # ── END TEMPORARY BIND MOUNTS ────────────────────────────────────────────
+
   nginx:
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --no-check-certificate -O - https://127.0.0.1:8443/readyz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     ports:
       - "0.0.0.0:80:80"
       - "0.0.0.0:8443:8443"
     volumes:
+      # Pre-rendered SSL template: PHOENIX_DOMAIN substituted, ADMIN_API_KEY substituted at container start.
+      # Regenerate if PHOENIX_DOMAIN changes:
+      #   python3 -c "
+      #     import pathlib
+      #     t = pathlib.Path('/opt/phoenix/app/nginx/nginx-ssl.conf.template').read_text()
+      #     pathlib.Path('/opt/phoenix/nginx-ssl-prerendered.conf.template').write_text(
+      #         t.replace('\${PHOENIX_DOMAIN}', 'CHANGE_ME_PHOENIX_DOMAIN'))
+      #   "
+      - "/opt/phoenix/nginx-ssl-prerendered.conf.template:/tmp/nginx.conf.template:ro"
       - "/opt/phoenix/certs:/etc/letsencrypt:ro"
       - "/opt/phoenix/acme-challenge:/var/www/acme-challenge:ro"
