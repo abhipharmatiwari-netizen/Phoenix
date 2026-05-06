@@ -36,8 +36,6 @@ jobs:
       AUTH_TOKEN_SECRET: ci-test-secret-do-not-use
       DEMO_AUTH_TOKEN_SECRET: ci-test-secret-do-not-use   # backward-compat alias
       CONTROL_PLANE_DSN: postgresql://phoenix:phoenix@localhost:5432/phoenix_test
-      # Settings.control_plane_db_dsn reads CONTROL_PLANE_DB_DSN (not CONTROL_PLANE_DSN).
-      CONTROL_PLANE_DB_DSN: postgresql://phoenix:phoenix@localhost:5432/phoenix_test
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
 
