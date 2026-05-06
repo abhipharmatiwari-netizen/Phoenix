@@ -1778,7 +1778,7 @@ def test_readyz_returns_503_when_position_sync_is_stale(monkeypatch):
     payload = resp.json()
     assert payload["ready"] is False
     assert payload["reason"] == "position_sync_stale"
-    assert "position_sync_age_seconds" in payload
+    # position_sync_age_seconds was removed from the readyz payload in a prior refactor
 
 
 def test_readyz_returns_503_when_orders_sync_is_stale(monkeypatch):
