@@ -278,7 +278,7 @@ class AccountRunner:
         try:
             while self._running:
                 # §79: Proactively refresh the broker auth token before the
-                # daily 08:00 IST refresh boundary (default: 10 min before).
+                # daily 00:00 IST reset boundary (default: 10 min before).
                 # This prevents the position-sync degradation that occurs
                 # when a stale token is detected only after auth errors fire.
                 proactive_relogin = getattr(

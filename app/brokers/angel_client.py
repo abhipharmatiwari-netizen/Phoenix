@@ -356,17 +356,17 @@ class AngelBrokerClient(BrokerClient):
         self,
         *,
         margin_minutes: int = 10,
-        expiry_ist_hour: int = 8,
+        expiry_ist_hour: int = 0,
         expiry_ist_minute: int = 0,
         tz_offset_hours: int = 5,
         tz_offset_minutes: int = 30,
     ) -> bool:
         """Return True if the Angel auth token is already expired or will expire within *margin_minutes*.
 
-        Tokens are refreshed daily at 08:00 IST (02:30 UTC).
+        Tokens expire daily at 00:00 IST (18:30 UTC previous day).
         Returns True in two cases:
-        1. The token was issued before the last 08:00 IST boundary — it is already stale.
-        2. The next 08:00 IST boundary is within *margin_minutes* — proactive refresh before the window.
+        1. The token was issued before the last 00:00 IST boundary — it is already stale.
+        2. The next 00:00 IST boundary is within *margin_minutes* — proactive refresh before the window.
         """
         if self._logged_in_at is None:
             return False
@@ -398,11 +398,11 @@ class AngelBrokerClient(BrokerClient):
         return 0 < seconds_to_expiry <= margin_minutes * 60
 
     async def proactive_relogin_if_near_expiry(self, *, margin_minutes: int = 10) -> bool:
-        """Re-login proactively if the token is within *margin_minutes* of the daily 08:00 IST refresh boundary.
+        """Re-login proactively if the token is within *margin_minutes* of the daily 00:00 IST reset boundary.
 
         Returns True if a re-login was performed, False otherwise.
-        This prevents the position-sync degradation window caused by
-        reacting to auth errors after the token has already expired (§79).
+        This prevents the 8-hour window of AG8001 Invalid Token errors caused by
+        reacting only after the token has already expired at midnight IST (§79).
         """
         if not self.is_token_near_expiry(margin_minutes=margin_minutes):
             return False
