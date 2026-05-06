@@ -58,6 +58,8 @@ port 443 so the full TLS certificate chain reaches the client. Certificate: Let'
 | TLS domain | `<PHOENIX_DOMAIN>` |
 | TLS certificate | Let's Encrypt (ECDSA P-256, expires 90 days) |
 | Cert renewal cron | 1st and 15th of each month, 03:00 IST |
+| Trading start cron | 09:00 IST Mon–Fri (skips NSE holidays) |
+| Trading stop cron | 00:00 IST Mon–Fri (full shutdown if next day is a holiday) |
 | Vultr proxy IP | `<PROXY_IP>` |
 | Proxy port | `8888` |
 | OCI compartment OCID | `<COMPARTMENT_OCID>` |
@@ -472,6 +474,72 @@ docker compose \
 > **After ADMIN_API_KEY rotation:** Simply force-recreate the nginx container (command above).
 > The container reads the updated secret from `/run/secrets/admin_api_key` at startup.
 > No host-side config file needs to be updated.
+
+---
+
+## Trading-day scheduler
+
+Phoenix automatically starts before market open and stops at midnight IST on weekdays.
+Both crons are installed in **root's crontab** on the VM.
+
+### Cron entries
+
+```
+30 18 * * 0-4   /opt/phoenix/stop-phoenix.sh   >> /opt/phoenix/logs/cron-scheduler.log 2>&1
+30  3 * * 1-5   /opt/phoenix/start-phoenix.sh  >> /opt/phoenix/logs/cron-scheduler.log 2>&1
+```
+
+UTC ↔ IST conversion (cron runs in UTC on OCI):
+- `30 3 UTC` = `09:00 IST` (Mon–Fri)
+- `30 18 UTC` = `00:00 IST` next day (Sun–Thu UTC = Mon–Fri IST midnight)
+
+### Behaviour
+
+**`stop-phoenix.sh`** — runs at midnight IST every weeknight:
+1. Stops `phoenix-oci-backend` unconditionally.
+2. Reads `/opt/phoenix/nse-holidays.txt` — if **the next trading morning** (today's IST date, since we just crossed midnight) is on the list, also stops `phoenix-oci-web` for a complete shutdown.
+3. Otherwise, nginx stays up; LB health checks continue, API calls return 502 gracefully.
+
+**`start-phoenix.sh`** — runs at 09:00 IST Mon–Fri:
+1. Reads `/opt/phoenix/nse-holidays.txt` — exits silently if today is a holiday.
+2. Starts `phoenix-oci-web` first if it was stopped during a holiday full-shutdown (post-holiday recovery).
+3. Pulls latest `main` from git into `/opt/phoenix/app`, then starts `phoenix-oci-backend`.
+4. Waits 90s for healthcheck and logs container status.
+
+Logs: `/opt/phoenix/logs/cron-scheduler.log`
+
+### NSE holiday calendar
+
+File: `/opt/phoenix/nse-holidays.txt` (one date per line, `YYYY-MM-DD`, `#` comments).
+Source repo: [docs/nse-holidays.txt](../nse-holidays.txt).
+
+Update once per year when NSE publishes the official calendar (typically November):
+
+```bash
+# On laptop, edit docs/nse-holidays.txt and commit
+# Then on the VM as opc:
+scp docs/nse-holidays.txt opc@<vm>:/tmp/nse-holidays.txt
+sudo mv /tmp/nse-holidays.txt /opt/phoenix/nse-holidays.txt
+```
+
+NSE may announce special trading days or closures on short notice — monitor
+[nseindia.com/resources/exchange-communication-holidays](https://www.nseindia.com/resources/exchange-communication-holidays).
+
+### Manual operations
+
+```bash
+# Verify cron entries on VM
+sudo crontab -l
+
+# Run scripts ad-hoc (idempotent — safe to re-run)
+sudo /opt/phoenix/start-phoenix.sh
+sudo /opt/phoenix/stop-phoenix.sh
+
+# Tail scheduler logs
+tail -f /opt/phoenix/logs/cron-scheduler.log
+```
+
+> **Edge case — same-day deploy:** If you deploy code mid-day and the scheduler later starts the backend, `start-phoenix.sh` runs `git pull origin main` before `up -d` so the new code is picked up. If the backend is already running, the script is a no-op.
 
 ---
 

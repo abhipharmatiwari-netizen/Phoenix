@@ -1,12 +1,13 @@
 #!/bin/sh
 # start-phoenix.sh — start Phoenix backend on trading days at market pre-open
 #
-# Called by cron at 08:00 IST (02:30 UTC) Mon-Fri.
+# Called by cron at 09:00 IST (03:30 UTC) Mon-Fri.
 # Skips start on NSE market holidays listed in /opt/phoenix/nse-holidays.txt.
+# Restarts nginx first if it was stopped during a prior holiday full-shutdown.
 #
 # Cron entry (on OCI VM, cron runs in UTC):
-#   30 2 * * 1-5 /opt/phoenix/start-phoenix.sh >> /opt/phoenix/logs/cron-scheduler.log 2>&1
-#   (08:00 IST Mon-Fri = 02:30 UTC Mon-Fri)
+#   30 3 * * 1-5 /opt/phoenix/start-phoenix.sh >> /opt/phoenix/logs/cron-scheduler.log 2>&1
+#   (09:00 IST Mon-Fri = 03:30 UTC Mon-Fri)
 #
 # Holiday file format: /opt/phoenix/nse-holidays.txt
 #   One date per line in YYYY-MM-DD format (IST calendar date).
@@ -23,8 +24,8 @@ LOG_TAG="start-phoenix"
 
 log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') [$LOG_TAG] $*"; }
 
-# Current IST date (UTC + 5:30 = UTC + 5h30m).
-# We use Python for reliable IST date calculation; falls back to date if unavailable.
+# Current IST date (UTC + 5:30).
+# Python used for reliable IST date calculation; falls back to date if unavailable.
 if command -v python3 >/dev/null 2>&1; then
     TODAY_IST=$(python3 -c "
 from datetime import datetime, timezone, timedelta
@@ -32,7 +33,6 @@ ist = timezone(timedelta(hours=5, minutes=30))
 print(datetime.now(ist).strftime('%Y-%m-%d'))
 ")
 else
-    # Fallback: add 5.5 hours to UTC. Imprecise near midnight but cron fires at 08:00 IST.
     TODAY_IST=$(date -u -d '+5 hours 30 minutes' '+%Y-%m-%d' 2>/dev/null \
                 || date -u -v+5H -v+30M '+%Y-%m-%d')
 fi
@@ -42,7 +42,6 @@ log "Today (IST): $TODAY_IST"
 # Check if today is an NSE holiday.
 if [ -f "$HOLIDAYS_FILE" ]; then
     while IFS= read -r line; do
-        # Strip comments and whitespace.
         clean=$(echo "$line" | sed 's/#.*//' | tr -d ' \t\r')
         [ -z "$clean" ] && continue
         if [ "$clean" = "$TODAY_IST" ]; then
@@ -50,6 +49,18 @@ if [ -f "$HOLIDAYS_FILE" ]; then
             exit 0
         fi
     done < "$HOLIDAYS_FILE"
+fi
+
+# Ensure nginx is running — it may have been stopped during a holiday full-shutdown.
+if ! docker ps --filter name=phoenix-oci-web --filter status=running -q | grep -q .; then
+    log "nginx not running — starting it before backend (post-holiday recovery)."
+    CONTROL_PLANE_PG_PASSWORD_HOST=dummy \
+      docker compose \
+        -f "$COMPOSE_FILE" \
+        -f "$OVERRIDE_FILE" \
+        --env-file "$ENV_FILE" \
+        up -d --no-deps web
+    sleep 5
 fi
 
 # Check backend is not already running.
