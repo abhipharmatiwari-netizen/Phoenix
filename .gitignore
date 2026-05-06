@@ -50,3 +50,8 @@ env/
 
 # Release build artifacts (zip files are build outputs, not source)
 release/*.zip
+
+# Backtest artefacts
+replay_output/
+.backtest_venv/
+debug.log

@@ -255,6 +255,24 @@ NG_EMA20_MIN_ATR=1.2
 
 All profit-booking params (PHX#182/#183/#184) are also accessible via the `_live_param_*` resolver, so dynamic-policy regime profiles can override them in `strategy_env.yaml`.
 
+### PHX#185 Sweep Result — `tp_pct` is not tunable in current replay (2026-05-06)
+
+A 504-combo `tp_pct` sweep was run against the local-DB `indicator_bars` (39 trading days, 2026-02-23 to 2026-04-30) on all three underlyings. **Across all 42 base-param groups (15 NIFTY + 15 BANKNIFTY + 12 NG_FUT), every `tp_pct ∈ {0.15, 0.20, 0.25, 0.30, 0.35, 0.45, 0.50}` produced identical net P&L.** The optimizer's per-underlying conclusion was unchanged.
+
+| Underlying | Trades | Net P&L (any tp_pct) | Discriminating groups |
+|---|---|---|---|
+| NIFTY_IDX | 33 | -1740.02 | 0 / 15 |
+| BANKNIFTY_IDX | 37 | -1948.47 | 0 / 15 |
+| NG_FUT | varied | -691.16 | 0 / 12 |
+
+**Root cause:** Replay's option-pricing model is a deterministic underlying-driven proxy with no theta decay. Intra-trade option premiums rarely move > 15%, so no `tp_pct ≥ 0.15` ever triggers — every trade exits at REPLAY_SESSION_BOUNDARY/EOD instead. In LIVE, theta over 4-hour holding periods compounds with directional premium moves to make 20-50% intra-day premium drops common; the replay does not capture this.
+
+**Decision:** No `tp_pct` config change. Defaults preserved. To actually tune PHX#185:
+- (a) Backfill `indicator_bars` with real option-chain history (multi-day data engineering project), or
+- (b) Wait until ~30 trading days of production data accumulate with the new TP1/give-back/decay code, then segment exit_attribution.jsonl by regime to drive recommendations from real fills.
+
+Reproducer: `scripts/ops/run_replay_quiet.py --mode optimize --strategy ema20_strategy --underlying NIFTY --start-date 2026-02-23 --end-date 2026-04-30 --max-combos 600`. Analysis script: `scripts/ops/analyze_tp_discrimination.py`.
+
 ---
 
 ## 3. put_momentum_scalper
