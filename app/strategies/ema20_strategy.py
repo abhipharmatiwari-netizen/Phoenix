@@ -83,6 +83,16 @@ class Ema20Strategy(BaseStrategy):
         first_entry_time: Optional[str] = None,
         square_off_time: Optional[str] = None,
         dynamic_policy: Optional[Dict[str, Any]] = None,
+        # PHX#182: partial booking at first target. tp1_pct=None disables TP1.
+        tp1_pct: Optional[float] = None,
+        tp1_qty_pct: float = 0.0,
+        # PHX#183: give-back guardrail. giveback_pct=None disables.
+        giveback_pct: Optional[float] = None,
+        giveback_arm_pct: Optional[float] = None,
+        # PHX#184: time-decay accelerator. minutes=None disables.
+        decay_tighten_minutes_before_eod: Optional[int] = None,
+        decay_tp_multiplier: float = 1.0,
+        decay_trail_buffer_multiplier: float = 1.0,
         config_resolver: Optional[StrategyValueResolver] = None,
         risk_manager: Optional[Any] = None,
     ) -> None:
@@ -108,6 +118,38 @@ class Ema20Strategy(BaseStrategy):
             float(trail_trigger_pct)
             if trail_trigger_pct is not None
             else None
+        )
+        # PHX#182: TP1 partial booking. tp1_pct=None or tp1_qty_pct<=0 disables.
+        self.tp1_pct: Optional[float] = (
+            float(tp1_pct) if tp1_pct is not None and float(tp1_pct) > 0 else None
+        )
+        self.tp1_qty_pct: float = max(0.0, min(1.0, float(tp1_qty_pct or 0.0)))
+        # PHX#183: give-back guardrail.
+        self.giveback_pct: Optional[float] = (
+            float(giveback_pct)
+            if giveback_pct is not None and float(giveback_pct) > 0
+            else None
+        )
+        self.giveback_arm_pct: Optional[float] = (
+            float(giveback_arm_pct)
+            if giveback_arm_pct is not None and float(giveback_arm_pct) > 0
+            else None
+        )
+        # PHX#184: time-decay accelerator.
+        self.decay_tighten_minutes_before_eod: Optional[int] = (
+            int(decay_tighten_minutes_before_eod)
+            if decay_tighten_minutes_before_eod is not None
+            and int(decay_tighten_minutes_before_eod) > 0
+            else None
+        )
+        self.decay_tp_multiplier: float = max(
+            0.0, float(decay_tp_multiplier) if decay_tp_multiplier is not None else 1.0
+        )
+        self.decay_trail_buffer_multiplier: float = max(
+            0.0,
+            float(decay_trail_buffer_multiplier)
+            if decay_trail_buffer_multiplier is not None
+            else 1.0,
         )
         default_require_rsi = (
             bool(require_rsi_falling) if require_rsi_falling is not None else True
@@ -681,6 +723,10 @@ class Ema20Strategy(BaseStrategy):
             trail_active=False,
             entry_time=entry_time,
             strategy_context=dict(strategy_context),
+            # PHX#182: restored positions assume no prior partial booking. If a
+            # restart happens after a TP1 fill, the broker qty already reflects
+            # the residual; using it as both qty and original_qty is correct.
+            original_qty=qty,
         )
 
     def _apply_restored_strategy_context(self, raw_context: Any) -> None:
@@ -763,6 +809,14 @@ class Ema20Strategy(BaseStrategy):
             logger.debug("[%s] EMA20 debug gate listener failed", self.env_prefix)
 
     # Handle tick updates and manage exits.
+    #
+    # Order of evaluation (first match wins):
+    #   1. SL  — hard stop, must always win.
+    #   2. GIVEBACK (PHX#183) — peak-retrace guardrail, fires before trail to
+    #      preserve gains when trailing is loose or disabled.
+    #   3. TRAIL — trailing stop on best_price.
+    #   4. TP1 (PHX#182) — partial book at first target, leaves residual to ride.
+    #   5. TP — full target hit.
     def _manage_position_tick(self, pos: "Ema20Position", ltp: float) -> None:
         trail_buffer_pct = self._live_param_float(
             "trail_buffer_pct",
@@ -779,31 +833,64 @@ class Ema20Strategy(BaseStrategy):
         # §90: Cooldown between trail SL tightenings — prevents rapid cascade
         # tightening from a burst of ticks in a fast market.
         trail_update_cooldown_s = self._live_param_float("trail_update_cooldown_seconds", 0.0)
+
+        # PHX#184: tighten tp_price and trail_buffer once we cross into the
+        # decay window (configured minutes before square_off). Recompute once.
+        trail_buffer_pct, tp_pct_live = self._apply_decay_window(
+            pos=pos,
+            trail_buffer_pct=trail_buffer_pct,
+            tp_pct_live=tp_pct_live,
+        )
+
+        # Track best (lowest) price for trailing and give-back math regardless
+        # of whether trailing is enabled — give-back uses the same anchor.
+        if ltp < pos.best_price:
+            pos.best_price = ltp
+
+        # PHX#183: peak_pct tracks the best move-in-favour reached so far
+        # (anchored on best_price); current_pct uses ltp and may be lower.
+        peak_pct = (pos.entry_price - pos.best_price) / max(pos.entry_price, 0.000001)
+        current_pct = (pos.entry_price - ltp) / max(pos.entry_price, 0.000001)
+        if peak_pct > pos.max_favorable_pct:
+            pos.max_favorable_pct = float(peak_pct)
+        giveback_pct = self._live_param_optional_float("giveback_pct", self.giveback_pct)
+        giveback_arm = self._live_param_optional_float(
+            "giveback_arm_pct", self.giveback_arm_pct
+        )
+        if (
+            giveback_pct is not None
+            and giveback_pct > 0
+            and giveback_arm is not None
+            and giveback_arm > 0
+            and not pos.giveback_armed
+            and pos.max_favorable_pct >= giveback_arm
+        ):
+            pos.giveback_armed = True
+            logger.info(
+                "[%s] EMA20 giveback armed | label=%s peak_pct=%.4f arm_pct=%.4f",
+                self.env_prefix,
+                pos.option_label,
+                pos.max_favorable_pct,
+                giveback_arm,
+            )
+
+        # ── Trailing-stop maintenance ────────────────────────────────────────
         if trail_buffer_pct > 0:
-            if ltp < pos.best_price:
-                pos.best_price = ltp
             trigger_pct = (
                 trail_trigger_live if trail_trigger_live is not None else tp_pct_live
             )
-            if trigger_pct > 0:
-                move_pct = (pos.entry_price - pos.best_price) / max(
-                    pos.entry_price, 0.000001
-                )
-                if move_pct >= trigger_pct:
-                    pos.trail_active = True
+            # Trail activates on peak (best_price) — once activated, stays active.
+            if trigger_pct > 0 and peak_pct >= trigger_pct:
+                pos.trail_active = True
             if pos.trail_active:
-                # Percentage-based trail SL
                 new_trail_sl_pct = pos.best_price * (1.0 + trail_buffer_pct)
-                # Absolute minimum buffer: best_price + min_abs_buffer
                 new_trail_sl_abs = (
                     pos.best_price + float(trail_min_abs_buffer)
                     if trail_min_abs_buffer > 0
                     else new_trail_sl_pct
                 )
-                # Use whichever gives more protection (higher SL)
                 new_trail_sl = max(new_trail_sl_pct, new_trail_sl_abs)
                 if new_trail_sl < pos.sl_price:
-                    # Respect cooldown between tightenings
                     now_mono = time.monotonic()
                     last_tighten = getattr(pos, "_last_trail_tighten_at", 0.0)
                     if (
@@ -819,22 +906,145 @@ class Ema20Strategy(BaseStrategy):
                             pos.best_price,
                         )
                         pos.sl_price = new_trail_sl
-                        object.__setattr__(pos, "_last_trail_tighten_at", now_mono) if hasattr(pos, "__dataclass_fields__") else setattr(pos, "_last_trail_tighten_at", now_mono)
-                if ltp >= pos.sl_price:
-                    self._exit_position(reason="TRAIL", price=ltp, position=pos)
-                    return
-            else:
-                if ltp >= pos.sl_price:
-                    self._exit_position(reason="SL", price=ltp, position=pos)
-                    return
-                if ltp <= pos.tp_price:
-                    self._exit_position(reason="TP", price=ltp, position=pos)
-                    return
-        else:
-            if ltp >= pos.sl_price:
-                self._exit_position(reason="SL", price=ltp, position=pos)
-            elif ltp <= pos.tp_price:
-                self._exit_position(reason="TP", price=ltp, position=pos)
+                        setattr(pos, "_last_trail_tighten_at", now_mono)
+
+        # ── Exit triggers — order matters (see method docstring) ────────────
+        # 1. SL always wins.
+        if ltp >= pos.sl_price:
+            reason = "TRAIL" if pos.trail_active else "SL"
+            self._exit_position(reason=reason, price=ltp, position=pos)
+            return
+
+        # 2. Give-back guardrail (PHX#183).
+        if (
+            pos.giveback_armed
+            and giveback_pct is not None
+            and giveback_pct > 0
+        ):
+            allowed_floor = pos.max_favorable_pct * (1.0 - giveback_pct)
+            # Use current_pct (anchored on ltp) — peak_pct never falls so we'd never trigger.
+            if current_pct < allowed_floor:
+                logger.info(
+                    "[%s] EMA20 giveback exit | label=%s peak_pct=%.4f current_pct=%.4f floor_pct=%.4f giveback_pct=%.4f",
+                    self.env_prefix,
+                    pos.option_label,
+                    pos.max_favorable_pct,
+                    current_pct,
+                    allowed_floor,
+                    giveback_pct,
+                )
+                self._exit_position(reason="GIVEBACK", price=ltp, position=pos)
+                return
+
+        # 3. TP1 — partial booking (PHX#182).
+        if not pos.tp1_filled:
+            tp1_pct_live = self._live_param_optional_float("tp1_pct", self.tp1_pct)
+            tp1_qty_pct_live = self._live_param_float(
+                "tp1_qty_pct", float(self.tp1_qty_pct), minimum=0.0
+            )
+            if tp1_pct_live is not None and tp1_pct_live > 0 and tp1_qty_pct_live > 0:
+                tp1_price = pos.entry_price * (1.0 - float(tp1_pct_live))
+                if ltp <= tp1_price:
+                    tp1_lots = self._compute_tp1_lots(pos, tp1_qty_pct_live)
+                    if tp1_lots > 0 and tp1_lots < int(pos.qty):
+                        logger.info(
+                            "[%s] EMA20 TP1 partial book | label=%s ltp=%.3f tp1_price=%.3f tp1_lots=%d/%d tp1_pct=%.4f tp1_qty_pct=%.4f",
+                            self.env_prefix,
+                            pos.option_label,
+                            ltp,
+                            tp1_price,
+                            tp1_lots,
+                            int(pos.qty),
+                            tp1_pct_live,
+                            tp1_qty_pct_live,
+                        )
+                        self._exit_position(
+                            reason="TP1",
+                            price=ltp,
+                            position=pos,
+                            partial_lots=tp1_lots,
+                        )
+                        return
+                    # tp1_qty_pct rounds to entire position → fall through to TP.
+
+        # 4. Standard TP.
+        if ltp <= pos.tp_price:
+            self._exit_position(reason="TP", price=ltp, position=pos)
+
+    # PHX#182: compute the lot count for a TP1 partial exit, rounded to lot size
+    # boundaries when known, capped to (qty - 1) so at least one lot remains.
+    def _compute_tp1_lots(self, pos: "Ema20Position", tp1_qty_pct: float) -> int:
+        base_qty = int(pos.original_qty or pos.qty)
+        if base_qty <= 1:
+            return 0
+        target = float(base_qty) * float(tp1_qty_pct)
+        lots = int(math.floor(target))
+        if lots <= 0:
+            return 0
+        # Always leave at least one lot to ride. If tp1_qty_pct rounds to the
+        # whole position, signal "no partial — let TP handle it" by returning 0.
+        max_partial = int(pos.qty) - 1
+        if max_partial <= 0:
+            return 0
+        return min(lots, max_partial)
+
+    # PHX#184: when within decay_tighten_minutes_before_eod, recompute the
+    # effective tp_price and trail_buffer_pct ONCE and stamp the position so
+    # we don't recompute on every tick.
+    def _apply_decay_window(
+        self,
+        *,
+        pos: "Ema20Position",
+        trail_buffer_pct: float,
+        tp_pct_live: float,
+    ) -> tuple[float, float]:
+        if pos.decay_window_applied:
+            # Already tightened — keep returning the current effective values.
+            return trail_buffer_pct, tp_pct_live
+        sc = pos.strategy_context or {}
+        minutes_window = sc.get("decay_tighten_minutes_before_eod")
+        try:
+            minutes_window = int(minutes_window) if minutes_window is not None else 0
+        except (TypeError, ValueError):
+            minutes_window = 0
+        if minutes_window <= 0 or self.square_off_time is None:
+            return trail_buffer_pct, tp_pct_live
+        minutes_remaining = self._minutes_to_square_off()
+        if minutes_remaining is None or minutes_remaining > minutes_window:
+            return trail_buffer_pct, tp_pct_live
+        tp_mult = float(sc.get("decay_tp_multiplier", 1.0) or 1.0)
+        trail_mult = float(sc.get("decay_trail_buffer_multiplier", 1.0) or 1.0)
+        new_tp_pct = max(0.0, tp_pct_live * tp_mult)
+        new_trail_buffer = max(0.0, trail_buffer_pct * trail_mult)
+        new_tp_price = pos.entry_price * (1.0 - new_tp_pct)
+        # Only tighten — never loosen tp_price (a multiplier > 1 is allowed by
+        # config but should not push tp_price further from entry mid-trade).
+        if new_tp_price > pos.tp_price:
+            pos.tp_price = float(new_tp_price)
+        pos.decay_window_applied = True
+        logger.info(
+            "[%s] EMA20 decay window applied | label=%s minutes_left=%d window=%d tp_pct=%.4f->%.4f trail_buffer=%.4f->%.4f tp_price=%.3f",
+            self.env_prefix,
+            pos.option_label,
+            int(minutes_remaining),
+            int(minutes_window),
+            tp_pct_live,
+            new_tp_pct,
+            trail_buffer_pct,
+            new_trail_buffer,
+            pos.tp_price,
+        )
+        return new_trail_buffer, new_tp_pct
+
+    # PHX#184: minutes from now (IST) to square_off_time. Returns None if not configured.
+    def _minutes_to_square_off(self) -> Optional[int]:
+        if self.square_off_time is None:
+            return None
+        now_ist = self._now_ist()
+        target = datetime.combine(now_ist.date(), self.square_off_time, tzinfo=IST)
+        if now_ist >= target:
+            return 0
+        return int((target - now_ist).total_seconds() // 60)
 
     def on_tick(self, label: str, ltp: float) -> None:
         if not hasattr(self, "last_price"):
@@ -1095,6 +1305,14 @@ class Ema20Strategy(BaseStrategy):
             "first_entry_delay_minutes": 0,
             "disable_entries": False,
             "qty_mult": 1.0,
+            # PHX#182/#183/#184: profit-booking enhancement params.
+            "tp1_pct": self.tp1_pct,
+            "tp1_qty_pct": float(self.tp1_qty_pct),
+            "giveback_pct": self.giveback_pct,
+            "giveback_arm_pct": self.giveback_arm_pct,
+            "decay_tighten_minutes_before_eod": self.decay_tighten_minutes_before_eod,
+            "decay_tp_multiplier": float(self.decay_tp_multiplier),
+            "decay_trail_buffer_multiplier": float(self.decay_trail_buffer_multiplier),
         }
 
     def _refresh_effective_params(self, *, candle: Any, indicators: Dict[str, Any]) -> None:
@@ -1368,13 +1586,51 @@ class Ema20Strategy(BaseStrategy):
             "trail_trigger_pct",
             self.trail_trigger_pct,
         )
+        # PHX#182/#183/#184: capture profit-booking params at entry so they're
+        # frozen for the lifetime of the position (matches existing freeze semantics).
+        tp1_pct_live = self._live_param_optional_float("tp1_pct", self.tp1_pct)
+        tp1_qty_pct_live = self._live_param_float(
+            "tp1_qty_pct", float(self.tp1_qty_pct), minimum=0.0
+        )
+        giveback_pct_live = self._live_param_optional_float(
+            "giveback_pct", self.giveback_pct
+        )
+        giveback_arm_pct_live = self._live_param_optional_float(
+            "giveback_arm_pct", self.giveback_arm_pct
+        )
+        decay_minutes_live = self._live_param_int(
+            "decay_tighten_minutes_before_eod",
+            int(self.decay_tighten_minutes_before_eod or 0),
+            minimum=0,
+        )
+        decay_tp_mult_live = self._live_param_float(
+            "decay_tp_multiplier", float(self.decay_tp_multiplier), minimum=0.0
+        )
+        decay_trail_mult_live = self._live_param_float(
+            "decay_trail_buffer_multiplier",
+            float(self.decay_trail_buffer_multiplier),
+            minimum=0.0,
+        )
         entry_strategy_context = {
             "sl_pct": float(sl_pct_live),
             "tp_pct": float(tp_pct_live),
             "trail_buffer_pct": float(trail_buffer_pct_live),
             "trail_trigger_pct": trail_trigger_pct_live,
+            "tp1_pct": tp1_pct_live,
+            "tp1_qty_pct": float(tp1_qty_pct_live),
+            "giveback_pct": giveback_pct_live,
+            "giveback_arm_pct": giveback_arm_pct_live,
+            "decay_tighten_minutes_before_eod": (
+                int(decay_minutes_live) if decay_minutes_live > 0 else None
+            ),
+            "decay_tp_multiplier": float(decay_tp_mult_live),
+            "decay_trail_buffer_multiplier": float(decay_trail_mult_live),
             "managed_exit_mode": "strategy",
             "broker_brackets_enabled": False,
+            # PHX#186: snapshot regime at entry for exit attribution.
+            "regime_at_entry": (
+                self._current_regime.value if self._current_regime else ""
+            ),
         }
         order_req = OrderRequest(
             symbol=broker_symbol,
@@ -1448,6 +1704,7 @@ class Ema20Strategy(BaseStrategy):
             trail_active=False,
             entry_time=self._now_utc(),
             strategy_context=dict(entry_strategy_context),
+            original_qty=effective_lots,  # PHX#182: track full position size for partial-exit math
         )
         self._sync_primary_position()
         if self._dynamic_enabled and self._policy_engine is not None:
@@ -1932,13 +2189,17 @@ class Ema20Strategy(BaseStrategy):
             now_ist = self._now_ist()
         return now_ist.time() < self.first_entry_time
 
-    # Exit the current position.
+    # Exit the current position (or a partial slice when partial_lots is set).
+    #
+    # When partial_lots is provided (PHX#182 TP1), exactly that many lots are
+    # closed and the position is retained with reduced qty rather than dropped.
     def _exit_position(
         self,
         reason: str,
         price: Optional[float] = None,
         *,
         position: Optional["Ema20Position"] = None,
+        partial_lots: Optional[int] = None,
     ) -> None:
         pos = position or self.position
         if not pos:
@@ -1972,14 +2233,26 @@ class Ema20Strategy(BaseStrategy):
         broker_symbol = pos.broker_symbol or self._resolve_broker_symbol(meta, pos.option_label)
         exchange = pos.exchange or meta.get("exchange") or meta.get("exch_seg")
         token = pos.symbol_token or self._resolve_symbol_token(meta)
-        exit_lots = self._resolve_exit_lots(pos)
+        # PHX#182: partial exits specify exact lots; full exits resolve from broker state.
+        is_partial = partial_lots is not None and int(partial_lots) > 0
+        if is_partial:
+            requested = int(partial_lots)
+            available = max(0, int(pos.qty))
+            exit_lots = max(0, min(requested, max(0, available - 1)))
+        else:
+            exit_lots = self._resolve_exit_lots(pos)
+            # Cap to local qty in case state_store has not yet reflected an
+            # earlier partial fill.
+            if pos.qty and int(pos.qty) > 0:
+                exit_lots = min(int(exit_lots), int(pos.qty))
         if exit_lots <= 0:
             logger.warning(
-                "[%s] EMA20 exit qty invalid; skipping exit | label=%s broker_symbol=%s qty=%s",
+                "[%s] EMA20 exit qty invalid; skipping exit | label=%s broker_symbol=%s qty=%s partial=%s",
                 self.env_prefix,
                 pos.option_label,
                 broker_symbol,
                 exit_lots,
+                is_partial,
             )
             return
         order_req = OrderRequest(
@@ -2081,7 +2354,112 @@ class Ema20Strategy(BaseStrategy):
                 )
             return
         self._reset_exit_retry_state()
+        # PHX#182/#186: partial exits keep the position open with reduced qty;
+        # full exits drop it. Either way, emit an attribution telemetry record.
+        if is_partial:
+            new_qty = max(0, int(pos.qty) - int(exit_lots))
+            pos.qty = new_qty
+            if reason == "TP1":
+                pos.tp1_filled = True
+            logger.info(
+                "[%s] EMA20 partial exit applied | label=%s reason=%s closed=%d remaining=%d",
+                self.env_prefix,
+                pos.option_label,
+                reason,
+                int(exit_lots),
+                new_qty,
+            )
+            self._emit_exit_attribution(
+                pos=pos,
+                reason=reason,
+                exit_price=float(ltp),
+                exit_lots=int(exit_lots),
+                final=False,
+            )
+            return
+        self._emit_exit_attribution(
+            pos=pos,
+            reason=reason,
+            exit_price=float(ltp),
+            exit_lots=int(exit_lots),
+            final=True,
+        )
         self._drop_managed_position(pos.option_label, reason=f"exit_{reason.lower()}")
+
+    # PHX#186: emit a structured exit-attribution event to support post-hoc
+    # evaluation of the profit-booking policy. Best-effort (errors swallowed).
+    def _emit_exit_attribution(
+        self,
+        *,
+        pos: "Ema20Position",
+        reason: str,
+        exit_price: float,
+        exit_lots: int,
+        final: bool,
+    ) -> None:
+        try:
+            entry_price = float(pos.entry_price or 0.0)
+            profit_pct = (
+                (entry_price - float(exit_price)) / entry_price
+                if entry_price > 0
+                else 0.0
+            )
+            held_seconds = max(
+                0.0,
+                (self._now_utc() - pos.entry_time).total_seconds(),
+            )
+            sc = pos.strategy_context or {}
+            payload = {
+                "v": 1,
+                "schema": "ema20.exit_attribution",
+                "ts": self._now_utc().isoformat(),
+                "env_prefix": self.env_prefix,
+                "underlying": str(self.underlying_label),
+                "label": pos.option_label,
+                "broker_symbol": pos.broker_symbol,
+                "reason": reason,
+                "final": bool(final),
+                "entry_price": entry_price,
+                "exit_price": float(exit_price),
+                "peak_favorable_pct": float(pos.max_favorable_pct or 0.0),
+                "final_profit_pct": float(profit_pct),
+                "held_seconds": float(held_seconds),
+                "trail_was_active": bool(pos.trail_active),
+                "tp1_filled": bool(pos.tp1_filled),
+                "decay_window_applied": bool(pos.decay_window_applied),
+                "exit_lots": int(exit_lots),
+                "original_qty": int(pos.original_qty or pos.qty or 0),
+                "remaining_qty": int(pos.qty or 0) if not final else 0,
+                "regime_at_entry": str(sc.get("regime_at_entry") or ""),
+                "regime_at_exit": (
+                    self._current_regime.value if self._current_regime else ""
+                ),
+                "policy_id": str(self._dynamic_policy_id or ""),
+            }
+            logger.info(
+                "[%s] exit_attribution | %s",
+                self.env_prefix,
+                payload,
+            )
+            self._write_exit_attribution_jsonl(payload)
+        except Exception:
+            logger.debug(
+                "[%s] EMA20 exit attribution emit failed",
+                self.env_prefix,
+                exc_info=True,
+            )
+
+    def _write_exit_attribution_jsonl(self, payload: Dict[str, Any]) -> None:
+        try:
+            import json
+            log_dir = self._cfg.get("APP_LOG_DIR", "/app/logs") or "/app/logs"
+            path = os.path.join(str(log_dir), "exit_attribution.jsonl")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload, default=str) + "\n")
+        except Exception:
+            # File logging is best-effort; the structured logger above is the source of truth.
+            pass
 
     # Force exit any open position.
     def force_exit_all(
@@ -2217,6 +2595,15 @@ class Ema20Position:
     entry_time: datetime
     strategy_context: Dict[str, Any] = field(default_factory=dict)
     fill_price_confirmed: bool = False  # §91: True once broker fill price applied
+    # PHX#182: partial booking state.
+    tp1_filled: bool = False
+    original_qty: Optional[int] = None  # qty at entry, before any partial exits
+    # PHX#183: give-back guardrail tracking. max_favorable_pct is the peak
+    # favourable move (entry - best_price) / entry seen so far.
+    max_favorable_pct: float = 0.0
+    giveback_armed: bool = False
+    # PHX#184: set True once the time-decay window has tightened tp_price.
+    decay_window_applied: bool = False
 
     def adjust_for_fill_price(
         self,

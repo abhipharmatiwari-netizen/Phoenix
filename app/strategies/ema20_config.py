@@ -46,6 +46,16 @@ class Ema20Config:
     skip_entry_hours_ist: Tuple[int, ...]
     min_ema_gap_pct: float
     dynamic_policy: DynamicPolicyConfig
+    # PHX#182: partial profit booking at first target.
+    tp1_pct: Optional[float] = None
+    tp1_qty_pct: float = 0.0
+    # PHX#183: give-back guardrail — exit if profit retraces from peak.
+    giveback_pct: Optional[float] = None
+    giveback_arm_pct: Optional[float] = None
+    # PHX#184: time-decay accelerator — tighten exits near square-off.
+    decay_tighten_minutes_before_eod: Optional[int] = None
+    decay_tp_multiplier: float = 1.0
+    decay_trail_buffer_multiplier: float = 1.0
 
     def first_entry_time_hhmm(self) -> Optional[str]:
         return self.first_entry_time.strftime("%H:%M") if self.first_entry_time else None
@@ -363,6 +373,64 @@ def build_ema20_config(
         dynamic_policy=parse_dynamic_policy_config(
             _pick("dynamic_policy") or {},
             strict=strict,
+        ),
+        # PHX#182: partial booking at first target.
+        tp1_pct=_to_float(
+            _pick("tp1_pct"),
+            default=None,
+            strict=strict,
+            field_name="tp1_pct",
+            min_value=0.0,
+        ),
+        tp1_qty_pct=float(
+            _to_float(
+                _pick("tp1_qty_pct"),
+                default=0.0,
+                strict=strict,
+                field_name="tp1_qty_pct",
+                min_value=0.0,
+            )
+        ),
+        # PHX#183: give-back guardrail.
+        giveback_pct=_to_float(
+            _pick("giveback_pct"),
+            default=None,
+            strict=strict,
+            field_name="giveback_pct",
+            min_value=0.0,
+        ),
+        giveback_arm_pct=_to_float(
+            _pick("giveback_arm_pct"),
+            default=None,
+            strict=strict,
+            field_name="giveback_arm_pct",
+            min_value=0.0,
+        ),
+        # PHX#184: time-decay accelerator.
+        decay_tighten_minutes_before_eod=_to_int(
+            _pick("decay_tighten_minutes_before_eod"),
+            default=0,
+            strict=strict,
+            field_name="decay_tighten_minutes_before_eod",
+            min_value=0,
+        ) or None,
+        decay_tp_multiplier=float(
+            _to_float(
+                _pick("decay_tp_multiplier"),
+                default=1.0,
+                strict=strict,
+                field_name="decay_tp_multiplier",
+                min_value=0.0,
+            )
+        ),
+        decay_trail_buffer_multiplier=float(
+            _to_float(
+                _pick("decay_trail_buffer_multiplier"),
+                default=1.0,
+                strict=strict,
+                field_name="decay_trail_buffer_multiplier",
+                min_value=0.0,
+            )
         ),
     )
 

@@ -187,7 +187,59 @@
 - **BANKNIFTY is profitable with no RSI filter.** RSI_falling requirement removes a few profitable entries. Without it, PF improves to 1.08.
 - **NG_FUT is the strongest EMA20 performer.** EMA-8 on NG yields +14.40% over 19 days (PF=2.55). Raising min_atr from 0.9 to 1.2 filters out 2 weak-ATR days and boosts win rate from 71.4% to 85.7%. The SAFE config (ATR>1.2, ADX>24, RSI_falling) yields PF=411 on 5 trades but is overfitted to this sample.
 - **ADX filter is harmful** on NIFTY and BANKNIFTY but neutral on NG_FUT — NG already has strong directional moves.
-- **SL/TP re-calibration needed:** Current pct-based SL/TP on option premiums don't trigger intraday. Consider ATR-based SL/TP (like exclusive_ce_buy uses) or tighter percentage thresholds (10%/15%) for faster exits.
+- **SL/TP re-calibration needed:** Current pct-based SL/TP on option premiums don't trigger intraday. PHX#182/#183/#184 (below) add partial booking, give-back, and time-decay tightening to address this.
+
+### Profit-Booking Enhancements (PHX#182, #183, #184, #186)
+
+These tunables ship **disabled by default** — current behaviour is preserved unless explicitly enabled per regime/instrument in `strategy_env.yaml` or via env vars.
+
+#### TP1 partial booking (PHX#182)
+Books a fraction of the position at a first target, trails the residual on existing TP/SL/TRAIL logic. Closes at least one lot less than the full position (always leaves a runner).
+
+```yaml
+params:
+  tp1_pct: 0.20         # fire TP1 when premium drops 20%
+  tp1_qty_pct: 0.5      # close 50% of original lots
+```
+
+Position state on partial fill: `qty` decrements, `tp1_filled=true`, position kept open. Order tag: `EMA20_EXIT_TP1`. Subsequent triggers (TP/SL/TRAIL/EOD) close the residual.
+
+#### Give-back guardrail (PHX#183)
+Tracks peak favourable move; exits if profit retraces from peak by configured fraction. Useful when trailing is loose or disabled (e.g., CHOPPY regime).
+
+```yaml
+params:
+  giveback_pct: 0.5         # exit if profit drops to 50% of peak
+  giveback_arm_pct: 0.10    # only arm after 10% favourable move
+```
+
+Order tag: `EMA20_EXIT_GIVEBACK`. Evaluation order: SL > GIVEBACK > TRAIL > TP1 > TP. SL always wins.
+
+#### Time-decay accelerator (PHX#184)
+Tightens `tp_pct` and `trail_buffer_pct` once minutes-to-square-off drops below a threshold. Recompute is one-shot per position (`decay_window_applied` flag).
+
+```yaml
+params:
+  decay_tighten_minutes_before_eod: 90    # tighten in last 90 minutes
+  decay_tp_multiplier: 0.7                # tp_pct × 0.7 in window
+  decay_trail_buffer_multiplier: 0.5      # trail × 0.5 in window
+```
+
+Multipliers > 1.0 are ignored (never loosen `tp_price` mid-trade).
+
+#### Exit attribution telemetry (PHX#186)
+Every exit emits a structured log line and writes a JSONL record to `${APP_LOG_DIR:-/app/logs}/exit_attribution.jsonl`:
+
+```json
+{"v":1,"schema":"ema20.exit_attribution","reason":"TP1","final":false,
+ "entry_price":100.0,"exit_price":80.0,"peak_favorable_pct":0.20,
+ "final_profit_pct":0.20,"held_seconds":3450,"trail_was_active":false,
+ "tp1_filled":true,"decay_window_applied":false,"exit_lots":2,
+ "original_qty":4,"remaining_qty":2,"regime_at_entry":"TRENDING",
+ "regime_at_exit":"TRENDING","policy_id":"ema20_nifty_v1"}
+```
+
+Use this to A/B test whether partial booking improves realised P&L vs. trailing alone. Schema-versioned (`v: 1`) so future fields don't break downstream tooling.
 
 ### Environment Variables
 ```bash
@@ -200,6 +252,8 @@ BANKNIFTY_EMA20_REQUIRE_RSI_FALLING=false
 # NG EMA20
 NG_EMA20_MIN_ATR=1.2
 ```
+
+All profit-booking params (PHX#182/#183/#184) are also accessible via the `_live_param_*` resolver, so dynamic-policy regime profiles can override them in `strategy_env.yaml`.
 
 ---
 

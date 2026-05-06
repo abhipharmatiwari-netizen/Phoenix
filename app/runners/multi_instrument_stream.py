@@ -2622,6 +2622,14 @@ def stream_multi_instruments(
                     first_entry_time=ema_cfg.first_entry_time_hhmm(),
                     square_off_time=ema_cfg.square_off_time_hhmm(),
                     dynamic_policy=ema_cfg.dynamic_policy.to_public_dict(),
+                    # PHX#182/#183/#184: profit-booking enhancements.
+                    tp1_pct=ema_cfg.tp1_pct,
+                    tp1_qty_pct=ema_cfg.tp1_qty_pct,
+                    giveback_pct=ema_cfg.giveback_pct,
+                    giveback_arm_pct=ema_cfg.giveback_arm_pct,
+                    decay_tighten_minutes_before_eod=ema_cfg.decay_tighten_minutes_before_eod,
+                    decay_tp_multiplier=ema_cfg.decay_tp_multiplier,
+                    decay_trail_buffer_multiplier=ema_cfg.decay_trail_buffer_multiplier,
                     config_resolver=resolver,
                     risk_manager=risk_manager,
                 )

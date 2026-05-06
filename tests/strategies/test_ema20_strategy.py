@@ -639,14 +639,21 @@ def test_ema20_entry_carries_live_strategy_context(monkeypatch):
     assert len(calls) == 1
     order_req = calls[0]["order_req"]
     assert order_req.position_label == "NG_ATM_CE_100"
-    assert order_req.strategy_context == {
-        "sl_pct": pytest.approx(0.30),
-        "tp_pct": pytest.approx(0.30),
-        "trail_buffer_pct": pytest.approx(0.0),
-        "trail_trigger_pct": None,
-        "managed_exit_mode": "strategy",
-        "broker_brackets_enabled": False,
-    }
+    ctx = order_req.strategy_context
+    # Legacy entry context fields are unchanged when profit-booking enhancements
+    # are disabled (PHX#182/#183/#184 default = off).
+    assert ctx["sl_pct"] == pytest.approx(0.30)
+    assert ctx["tp_pct"] == pytest.approx(0.30)
+    assert ctx["trail_buffer_pct"] == pytest.approx(0.0)
+    assert ctx["trail_trigger_pct"] is None
+    assert ctx["managed_exit_mode"] == "strategy"
+    assert ctx["broker_brackets_enabled"] is False
+    # New keys default to disabled values.
+    assert ctx["tp1_pct"] is None
+    assert ctx["tp1_qty_pct"] == pytest.approx(0.0)
+    assert ctx["giveback_pct"] is None
+    assert ctx["giveback_arm_pct"] is None
+    assert ctx["decay_tighten_minutes_before_eod"] is None
 
 
 def test_ema20_exit_timeout_clears_local_position_when_broker_state_is_fresh_and_flat(
