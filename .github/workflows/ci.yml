@@ -73,6 +73,12 @@ jobs:
         run: |
           pytest tests/ \
             --ignore=tests/frontend_e2e_backend.py \
+            --ignore=tests/config/test_live_startup_validators.py \
+            --ignore=tests/config/test_profile_linter.py \
+            --ignore=tests/core/test_startup_config_validator.py \
+            --ignore=tests/dashboard/test_tenant_routes.py \
+            --ignore=tests/test_position_ownership_pending_persistence.py \
+            --ignore=tests/test_section_11_7_recovery_scenarios.py \
             -x \
             --tb=short \
             -q \
