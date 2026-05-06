@@ -309,7 +309,7 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
         exchange: Optional[str] = None,
         symbol_token: Optional[str] = None,
     ) -> SpreadLeg:
-        resolved_meta = meta or self.instrument_meta.get(label, {})
+        meta or self.instrument_meta.get(label, {})
         resolved_symbol, resolved_exchange, resolved_token = self._resolve_order_identity(
             label
         )
@@ -1172,8 +1172,6 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
 
     # Find ATM CE/PE labels for a given expiry.
     def _atm_options(self, expiry: date) -> Tuple[Optional[str], Optional[str]]:
-        ce = None
-        pe = None
         best_ce = None
         best_pe = None
         ce_dist = None

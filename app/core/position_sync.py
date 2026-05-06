@@ -23,7 +23,7 @@ from app.core.position_flat_registry import position_flat_registry
 from app.core.degraded_scope_manager import degraded_scope_manager, DegradedReason
 from app.core.lot_size import lot_size_for_symbol_optional
 from app.core.logging_utils import log_event
-from app.core.position_state import InternalPosition, PositionState
+from app.core.position_state import PositionState
 from app.orders.scope_serializer import (
     MutationPriority,
     ScopedMutation,

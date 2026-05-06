@@ -3,9 +3,8 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from app.config.settings import Settings
-from app.core.identifiers import BrokerAccountId, StrategyId, TenantId
+from app.core.identifiers import BrokerAccountId, TenantId
 from app.hub.exit_engines import ProfitSweepEngine
-from app.brokers.base import ProductType, Position
 from app.pnl.profit_lock import ProfitLockManager
 
 

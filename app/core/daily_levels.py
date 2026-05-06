@@ -168,7 +168,7 @@ class DailyLevelsCache:
             return None
         last = candles[-1]
         try:
-            ts_raw, o, h, l, c, *_rest = last
+            ts_raw, o, h, low_, c, *_rest = last
             if isinstance(ts_raw, (int, float)):
                 dt = datetime.fromtimestamp(ts_raw)
             else:
@@ -176,7 +176,7 @@ class DailyLevelsCache:
             return DailyLevels(
                 trading_date=dt.date(),
                 pdh=float(h),
-                pdl=float(l),
+                pdl=float(low_),
                 pclose=float(c),
                 popen=float(o),
             )

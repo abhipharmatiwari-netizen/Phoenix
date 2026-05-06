@@ -4,7 +4,7 @@ Test real-time PnL persistence to BigQuery.
 
 import pytest
 from datetime import datetime, timezone
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import patch
 
 from app.pnl.pnl_engine import PnLEngine
 from app.pnl.types import TradeEvent

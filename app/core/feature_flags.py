@@ -6,7 +6,6 @@ to a previous flag version (Architecture S2 source-of-truth matrix).
 
 from __future__ import annotations
 
-import copy
 import logging
 import threading
 from dataclasses import asdict, dataclass, field

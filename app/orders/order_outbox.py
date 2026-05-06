@@ -1035,10 +1035,7 @@ def purge_old_terminal_outbox_records(*, retain_days: int = 90) -> int:
 
 def build_order_submission_outbox() -> OrderSubmissionOutbox:
     settings = get_settings()
-    persist_enabled = not (
-        str(os.getenv("ORDER_SUBMISSION_OUTBOX_ENABLED", "true")).strip().lower()
-        in {"0", "false", "no"}
-    )
+    persist_enabled = str(os.getenv("ORDER_SUBMISSION_OUTBOX_ENABLED", "true")).strip().lower() not in {"0", "false", "no"}
     trade_mode = str(os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper()
     strict_default = trade_mode == "LIVE"
     strict_required = strict_default or _is_true(

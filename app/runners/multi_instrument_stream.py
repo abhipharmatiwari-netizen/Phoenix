@@ -77,7 +77,7 @@ from app.core.operating_mode import resolve_operating_mode_from_runtime
 from app.core.p0_operational_guards import P0RuleViolation, assert_legacy_exit_allowed
 from app.runners.stream_indicator_plan import (
     build_indicator_engine_plan,
-    parse_timeframe_to_seconds as _parse_timeframe_to_seconds,
+    parse_timeframe_to_seconds as _parse_timeframe_to_seconds,  # noqa: F401 — re-export consumed by tests
 )
 from app.runners.stream_runtime import (
     run_stream_lifecycle as _run_stream_lifecycle_impl,

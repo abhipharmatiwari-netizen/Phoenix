@@ -9,10 +9,10 @@ from __future__ import annotations
 import pytest
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from app.core.identifiers import BrokerAccountId, TenantId
-from app.hub.sweep_state import SweepState, SweepStateStore, SweepStateManager
+from app.hub.sweep_state import SweepStateStore, SweepStateManager
 
 
 @pytest.fixture
@@ -210,7 +210,7 @@ class TestSweepIntegration:
         """Test that multiple instances can coordinate through shared state."""
         # Setup two separate managers (simulating two running instances)
         store1 = SweepStateStore(mock_firestore_client)
-        manager1 = SweepStateManager(store1)
+        SweepStateManager(store1)
         
         store2 = SweepStateStore(mock_firestore_client)
         manager2 = SweepStateManager(store2)

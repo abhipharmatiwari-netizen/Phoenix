@@ -671,7 +671,7 @@ class ExclusiveNiftyCeBuyStrategy(BaseStrategy):
         candidates.sort(key=lambda x: x[1])
         strikes = [s for _, s in candidates]
         diffs = [b - a for a, b in zip(strikes[:-1], strikes[1:]) if (b - a) > 0]
-        strike_step = diffs[0] if diffs else 50.0
+        diffs[0] if diffs else 50.0
         atm_label, atm_strike = min(candidates, key=lambda x: abs(x[1] - spot))
         return atm_label
 

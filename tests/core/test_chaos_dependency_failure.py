@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import threading
 import time
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -259,7 +258,7 @@ class TestBrokerFailoverChaos:
         assert manager.get_health("angel") == BrokerHealth.FAILED
 
     def test_recovery_after_successes(self):
-        from app.brokers.failover import BrokerFailoverManager, BrokerFailoverPolicy, BrokerHealth, FailoverMode
+        from app.brokers.failover import BrokerFailoverManager, BrokerFailoverPolicy, BrokerHealth
 
         manager = BrokerFailoverManager()
         manager.register(BrokerFailoverPolicy(
@@ -394,7 +393,7 @@ class TestMarketDataValidatorChaos:
         assert any(a.anomaly_type == "crossed_book" for a in result.anomalies)
 
     def test_out_of_order_timestamp_detected(self):
-        from app.data.market_data_validator import DataQualityLevel, MarketDataValidator
+        from app.data.market_data_validator import MarketDataValidator
 
         validator = MarketDataValidator()
         now = time.time()
@@ -445,9 +444,11 @@ class TestSessionStoreChaos:
         # Create a token
         token_str = _make_token(user_id="u1", email="a@b.com", role=Role.VIEWER)
         # Parse to get jti
-        import json, base64
+        import json
+        import base64
         parts = token_str.split(".")
-        pad = lambda s: s + "=" * (-len(s) % 4)
+        def pad(s):
+            return s + "=" * (-len(s) % 4)
         payload = json.loads(base64.urlsafe_b64decode(pad(parts[1])))
         jti = payload.get("jti")
         exp = payload.get("exp", int(_time.time()) + 3600)

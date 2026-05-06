@@ -13,7 +13,6 @@ import os
 import time
 import threading
 from collections import defaultdict
-from typing import Optional
 
 from fastapi import Request, HTTPException, status
 

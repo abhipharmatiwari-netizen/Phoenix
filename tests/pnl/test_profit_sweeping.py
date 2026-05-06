@@ -3,12 +3,11 @@ Comprehensive tests for profit sweeping functionality.
 """
 
 import pytest
-from typing import Optional
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from app.pnl.pnl_engine import PnLEngine
-from app.pnl.profit_engine import ProfitEngine, ProfitConfig, ProfitDecision
-from app.pnl.types import TradeEvent, PnLSnapshot, PnLSnapshotKey
+from app.pnl.profit_engine import ProfitEngine
+from app.pnl.types import TradeEvent
 from app.core.identifiers import TenantId, BrokerAccountId, StrategyId
 
 

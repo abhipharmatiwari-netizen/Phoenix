@@ -970,7 +970,7 @@ class ProfitSweepEngine:
             tenant_id = runner.tenant_id
             broker_account_id = runner.broker_account_id
             strategy_id = StrategyId("profit_sweep_multiple")
-            is_paper = str(runner.runtime_mode).upper() == "PAPER"
+            str(runner.runtime_mode).upper() == "PAPER"
             
             # Check if sweep allowed using persistent state
             # MULTIPLE strategy: max N sweeps per day with cooldown
@@ -1196,7 +1196,7 @@ class ProfitSweepEngine:
         return exited_count
 
 
-from app.hub.eod_state import EODStateManager
+from app.hub.eod_state import EODStateManager  # noqa: E402 — late import to break circular dependency
 
 # Orchestrate end-of-day exits across all active accounts.
 @dataclass

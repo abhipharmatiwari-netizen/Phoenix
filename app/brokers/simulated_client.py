@@ -7,6 +7,7 @@ Used for PAPER mode before we wire to actual broker APIs.
 from __future__ import annotations
 
 import logging
+from typing import List
 
 from app.brokers.base import (
     Balance,

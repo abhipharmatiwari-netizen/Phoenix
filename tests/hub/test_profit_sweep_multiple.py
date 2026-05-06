@@ -50,7 +50,7 @@ def mock_pnl_engine_multiple():
 def sweep_engine_multiple(mock_settings_multiple, mock_pnl_engine_multiple):
     """Create ProfitSweepEngine with MULTIPLE strategy."""
     from app.hub.sweep_state import SweepStateManager, SweepStateStore
-    from unittest.mock import MagicMock, AsyncMock
+    from unittest.mock import MagicMock
     
     mock_sweep_engine = MagicMock()
     mock_state_store = MagicMock()

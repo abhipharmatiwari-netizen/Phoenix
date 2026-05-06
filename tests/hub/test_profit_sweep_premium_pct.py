@@ -6,7 +6,6 @@ from app.config.settings import Settings
 from app.core.identifiers import BrokerAccountId, TenantId
 from app.hub.exit_engines import ProfitSweepEngine
 from app.pnl.profit_lock import ProfitLockManager
-from app.pnl.types import PnLSnapshot, PnLSnapshotKey
 from app.pnl.pnl_engine import PnLEngine
 from app.pnl.state_store import InMemoryPnLStateStore
 

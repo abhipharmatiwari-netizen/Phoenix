@@ -21,10 +21,8 @@ from app.tenants.firestore_client import (
     get_all_active_tenants,
     get_enabled_broker_accounts,
     get_all_subscriptions,
-    get_broker_account,
-    upsert_broker_account,
 )
-from app.tenants.models import SubscriptionModel, BrokerAccountModel
+from app.tenants.models import SubscriptionModel
 from app.tenants.subscription_service import (
     compute_account_runtime_mode,
     is_subscription_active,
@@ -393,21 +391,18 @@ class Hub:
             if mode == "DISABLED":
                 # Provide UNAMBIGUOUS diagnostics - only one reason
                 if not account.enabled:
-                    reason = "disabled_flag"
                     logger.warning(
                         "[RECONCILE] ⚠️ DISABLED %s@%s: Account explicitly disabled (broker_account.enabled=False)",
                         account.broker_account_id,
                         account.tenant_id,
                     )
                 elif not subscriptions:
-                    reason = "no_subscription"
                     logger.warning(
                         "[RECONCILE] ⚠️ DISABLED %s@%s: No subscriptions found for this account",
                         account.broker_account_id,
                         account.tenant_id,
                     )
                 elif not any(is_subscription_active(sub) for sub in subscriptions):
-                    reason = "subscription_inactive"
                     logger.warning(
                         "[RECONCILE] ⚠️ DISABLED %s@%s: %d subscriptions exist but NONE are active. "
                         "Details: %s",
@@ -420,7 +415,6 @@ class Hub:
                         ),
                     )
                 else:
-                    reason = "invalid_mode"
                     logger.warning(
                         "[RECONCILE] ⚠️ DISABLED %s@%s: Active subscription exists but mode is invalid. "
                         "Active sub mode: %s",

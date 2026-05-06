@@ -7,7 +7,7 @@ ambiguity and ensure consistency across config, runtime, persistence, and APIs.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, Type
+from typing import Dict, Type
 
 from app.strategies.base import BaseStrategy
 
@@ -131,7 +131,7 @@ def get_strategy_metadata(canonical_name: str) -> StrategyMetadata:
 
 def get_strategy_class(canonical_name: str) -> Type[BaseStrategy]:
     """Get the strategy class for a canonical name."""
-    metadata = get_strategy_metadata(canonical_name)
+    get_strategy_metadata(canonical_name)
     if canonical_name not in _STRATEGY_CLASSES:
         raise RuntimeError(
             f"Strategy class '{canonical_name}' not registered. "

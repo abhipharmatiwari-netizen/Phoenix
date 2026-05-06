@@ -1,7 +1,7 @@
 """Tests for persistent sweep state management."""
 
 import pytest
-from unittest.mock import MagicMock, PropertyMock
+from unittest.mock import MagicMock
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 

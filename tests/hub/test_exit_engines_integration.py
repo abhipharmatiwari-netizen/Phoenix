@@ -4,14 +4,11 @@ Tests interaction between ProfitSweepEngine and SweepStateManager.
 """
 
 import pytest
-import logging
-from datetime import datetime
-from zoneinfo import ZoneInfo
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock
 
 from app.config.settings import Settings
-from app.core.identifiers import TenantId, BrokerAccountId, StrategyId
-from app.brokers.base import Position, OrderSide, OrderStatus, ProductType
+from app.core.identifiers import TenantId, BrokerAccountId
+from app.brokers.base import Position, ProductType
 from app.data.state_store import StateStore
 from app.pnl.pnl_engine import PnLEngine
 from app.pnl.profit_engine import ProfitEngine as SweepProfitEngine

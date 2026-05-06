@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List
 
 logger = logging.getLogger(__name__)
 

@@ -317,7 +317,6 @@ class GlobalKillSwitchInterceptor:
         # Check durable KillSwitchManager (Architecture §12.1 — primary path in LIVE).
         try:
             from app.hub.runtime import get_hub_runtime
-            from app.risk.kill_switch import KillSwitchScope
             ksm = getattr(get_hub_runtime(), "kill_switch_manager", None)
             if ksm is not None:
                 tripped = ksm.is_tripped_for_scope(

@@ -23,7 +23,6 @@ from fastapi import (
     Request,
     WebSocket,
     WebSocketDisconnect,
-    Header,
     Query,
     status,
     Depends,

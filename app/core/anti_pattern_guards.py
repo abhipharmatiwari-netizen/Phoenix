@@ -13,7 +13,6 @@ These guards are fail-closed checks that prevent:
 
 import logging
 import threading
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 

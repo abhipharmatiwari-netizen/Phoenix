@@ -25,7 +25,6 @@ from scripts.replay.replay_engine import (
     ReplayEngine,
     build_mock_instrument_meta,
 )
-import scripts.replay.replay_engine as replay_engine_mod
 import scripts.replay.replay_runtime as replay_runtime_mod
 import scripts.replay.run_replay as run_replay_mod
 

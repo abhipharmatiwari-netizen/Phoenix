@@ -438,7 +438,7 @@ class CeOrbStrategy(BaseStrategy):
     # Resolve quantity to trade for a label.
     def _qty_for_label(self, label: str) -> int:
         meta = self.instrument_meta.get(label, {})
-        lot_size = int(meta.get("lot_size") or 1)
+        int(meta.get("lot_size") or 1)
         qty_mult = self._adaptive_policy.get_float("qty_mult", 1.0, minimum=0.01)
         qty = max(1, int(round(float(max(1, self.lots_per_trade)) * float(qty_mult))))
         return qty

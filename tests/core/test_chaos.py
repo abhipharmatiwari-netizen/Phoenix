@@ -10,8 +10,7 @@ Provides simulation harnesses for:
 import threading
 import time
 from contextlib import contextmanager
-from typing import Any, Callable, Optional
-from unittest.mock import MagicMock
+from typing import Any, Optional
 
 
 # ---------------------------------------------------------------------------

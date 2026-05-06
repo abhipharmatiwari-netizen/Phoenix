@@ -66,7 +66,7 @@ class IndicatorSessionRow:
     ts_end: Optional[datetime]
     o: float
     h: float
-    l: float
+    l: float  # noqa: E741 — canonical OHLC field name
     c: float
     atr: Optional[float]
     rsi: Optional[float]

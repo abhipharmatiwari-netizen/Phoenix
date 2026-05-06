@@ -47,7 +47,6 @@ def _fake_accounts_empty():
 
 
 def _fake_accounts_one(monkeypatch):
-    from app.hub.routing_table import HubRoute
     from types import SimpleNamespace
 
     account = SimpleNamespace(

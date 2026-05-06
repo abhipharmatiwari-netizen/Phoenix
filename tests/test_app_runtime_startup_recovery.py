@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 

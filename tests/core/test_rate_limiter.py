@@ -1,7 +1,5 @@
-import time
 import importlib
 
-import pytest
 
 
 def test_rate_limiter_no_limit_is_noop(monkeypatch):

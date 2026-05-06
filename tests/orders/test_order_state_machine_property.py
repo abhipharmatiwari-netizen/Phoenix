@@ -24,7 +24,6 @@ from app.orders.order_state import (
     OrderLifecycleState,
     classify_broker_status,
     is_terminal,
-    is_terminal_fill,
     to_outbox_status,
     validate_order_transition,
 )

@@ -1,8 +1,6 @@
 """Tests for profit sweep settings configuration."""
 
-import os
 import pytest
-from pydantic import ValidationError
 
 from app.config.settings import Settings
 

@@ -807,7 +807,6 @@ class AppRuntime:
             if trade_mode == "LIVE" and order_lifecycle is not None:
                 try:
                     from app.orders.order_lifecycle import OrderLifecycleService
-                    import datetime as _dt_pre
                     _pre_cleaned = OrderLifecycleService.force_terminal_positions_by_symbol_pattern(
                         symbol_pattern="",  # not used for position records (age-only)
                         min_age_days=7,  # weekly expiry — 7 days is sufficient

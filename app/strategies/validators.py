@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, field_validator, model_validator
 
-from app.strategies.naming import canonicalize_strategy_name, validate_canonical_name_strict
+from app.strategies.naming import canonicalize_strategy_name
 from app.strategies.registry import get_strategy_metadata, AUTHORIZED_STRATEGIES
 
 logger = logging.getLogger(__name__)

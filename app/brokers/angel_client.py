@@ -16,7 +16,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta, time as dt_time
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Any, List, Optional
 

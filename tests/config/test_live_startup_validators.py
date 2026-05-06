@@ -83,7 +83,6 @@ class TestHubDefaultTenantIdValidator:
 
     def _run(self, env_overrides=None, settings_overrides=None):
         from app.config.boot_config import initialize_boot_config
-        import os
         env = _base_live_env(**(env_overrides or {}))
         with pytest.MonkeyPatch().context() as mp:
             for k, v in env.items():
@@ -119,7 +118,6 @@ class TestRequireLiveTradeModeGuard:
 
     def test_require_live_with_shadow_raises(self):
         from app.config.boot_config import initialize_boot_config
-        import os
         env = _base_live_env(
             TRADE_MODE="SHADOW",
             REQUIRE_LIVE_TRADE_MODE="true",

@@ -12,7 +12,6 @@ Validates:
 from __future__ import annotations
 
 import importlib
-import os
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -133,7 +132,7 @@ class TestHealthEndpoints:
              patch("app.server.strategy_switchboard", mock_runtime.strategy_switchboard), \
              patch("app.server.instrument_controller", mock_runtime.instrument_controller):
             try:
-                from httpx import ASGITransport, AsyncClient
+                from httpx import ASGITransport, AsyncClient  # noqa: F401 — availability probe
                 # Return async client info for async tests
                 return {"runtime": mock_runtime, "use_httpx": True}
             except ImportError:

@@ -10,7 +10,6 @@ Rule 21: Non-authoritative components may propose but never commit
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 

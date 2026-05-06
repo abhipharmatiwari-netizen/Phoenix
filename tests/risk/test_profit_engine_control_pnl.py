@@ -12,9 +12,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
 
-from app.risk.profit_engine import ProfitDecision, ProfitEngine
+from app.risk.profit_engine import ProfitEngine
 from app.core.identifiers import BrokerAccountId, StrategyId, TenantId
 
 
@@ -100,7 +99,7 @@ def test_profit_check_blocks_when_control_pnl_exceeds_target():
                 strategy_id=StrategyId("ema20_strategy"),
             )
 
-    assert result.allowed is False, f"Expected block when control_pnl=6000 >= target=5000"
+    assert result.allowed is False, "Expected block when control_pnl=6000 >= target=5000"
 
 
 def test_profit_check_falls_back_to_cash_when_no_control_data():

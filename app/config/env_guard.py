@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import os
 from enum import Enum
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 

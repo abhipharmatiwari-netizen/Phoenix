@@ -6,12 +6,7 @@ than falling back to the synthetic __runtime_exit__ identity.
 """
 from __future__ import annotations
 
-import importlib
-import sys
-from types import ModuleType
-from unittest.mock import MagicMock, patch
 
-import pytest
 
 # ---------------------------------------------------------------------------
 # Helpers to build a minimal _submit_runtime_exit_via_hub closure the same
@@ -126,7 +121,7 @@ def test_shadow_mode_allows_runtime_exit_fallback():
 def test_contamination_marker_includes_runtime_exit():
     """__runtime_exit__ must be in the startup synthetic contamination marker list."""
     from app.runtime import app_runtime
-    import ast, inspect
+    import inspect
 
     source = inspect.getsource(app_runtime.AppRuntime.start)
     # Verify the string literal is present in the source

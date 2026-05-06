@@ -1,7 +1,6 @@
 """Tests for alert rules (H5)."""
 
 from app.core.alert_rules import (
-    AlertEvaluator,
     AlertSeverity,
     DeadletterGrowthRule,
     LeaseRenewalFailureRule,

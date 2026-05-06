@@ -4,7 +4,7 @@ Tests cover: token list filtering, structure preservation, batching, and logging
 """
 
 import unittest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import patch
 from collections import defaultdict
 
 
@@ -459,7 +459,7 @@ class TestEdgeCases(unittest.TestCase):
     def test_large_token_count(self):
         """Test with large token count."""
         token_count = 500
-        tokens = [str(i) for i in range(token_count)]
+        [str(i) for i in range(token_count)]
         batch_size = 25
         
         batch_count = (token_count + batch_size - 1) // batch_size
@@ -547,7 +547,7 @@ class TestIntegration(unittest.TestCase):
             {"label": "BANKNIFTY_PE", "token": "200002", "exchangeType": "NFO"},
         ]
         
-        token_labels = {str(i["token"]): i["label"] for i in instruments}
+        {str(i["token"]): i["label"] for i in instruments}
         
         # Filter: only NIFTY
         allowed_labels = {"NIFTY_IDX", "NIFTY_PE"}

@@ -1,6 +1,5 @@
 """Tests for reconciliation timeout watcher (M2)."""
 
-import time
 
 from app.core.reconciliation_timeout_watcher import (
     ReconciliationTimeoutWatcher,

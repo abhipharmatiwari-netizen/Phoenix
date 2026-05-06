@@ -5,9 +5,8 @@ Comprehensive tests for kill switch functionality.
 import datetime as dt
 import importlib
 import json
-from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 

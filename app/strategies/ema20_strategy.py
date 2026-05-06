@@ -30,7 +30,6 @@ from app.strategies.adaptive.regime import Regime, RegimeClassifier, RegimeThres
 from app.config.settings import get_settings
 from app.brokers.base import (
     OrderRequest,
-    OrderResponse,
     OrderPurpose,
     OrderSide,
     OrderType,

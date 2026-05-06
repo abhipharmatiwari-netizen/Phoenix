@@ -5,7 +5,6 @@ import pytest
 from app.core.feature_flags import (
     FeatureFlagVersionStore,
     StabilityFeatureFlags,
-    load_stability_feature_flags,
 )
 
 

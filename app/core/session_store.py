@@ -39,7 +39,6 @@ _REFRESH_TOKEN_TTL = 7 * 24 * 60 * 60  # 7 days
 
 def _try_postgres_revoke(jti: str, expires_at: int) -> None:
     try:
-        from psycopg.rows import tuple_row  # type: ignore
         from app.data.postgres import connect_with_retry, get_control_plane_dsn
         dsn = get_control_plane_dsn()
         with connect_with_retry(dsn, autocommit=True) as conn:

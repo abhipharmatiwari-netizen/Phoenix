@@ -4,7 +4,6 @@ Tests the batching logic without requiring Angel SmartAPI connection.
 """
 
 import unittest
-from unittest.mock import Mock, call, patch
 
 
 class TestBatchSubscription(unittest.TestCase):
@@ -77,7 +76,7 @@ class TestBatchSubscription(unittest.TestCase):
         """Test that correct number of subscribe calls would be made."""
         subscribe_calls = 0
         for i in range(0, len(self.token_list), self.subscription_batch_size):
-            batch = self.token_list[i:i+self.subscription_batch_size]
+            self.token_list[i:i+self.subscription_batch_size]
             # Simulate subscribe call
             subscribe_calls += 1
 

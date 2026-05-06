@@ -494,14 +494,13 @@ def test_same_day_state_is_not_invalidated():
 
 def test_staleness_summary_reflects_stale_entries_before_select():
     """staleness_summary() reports stale entries that haven't been evicted yet."""
-    from datetime import date
     cfg = StrategySelectorConfig.from_raw(
         {"enabled": True, "max_active_per_underlying": 1, "min_hold_seconds": 0}
     )
     selector = StrategySelector(cfg)
 
     # Directly plant a prior-day state entry
-    from app.strategies.adaptive.strategy_selector import _SelectionState, _IST, _ist_date
+    from app.strategies.adaptive.strategy_selector import _SelectionState
     yesterday_ts = _ist_ts(2026, 4, 19, 10, 0)
     from app.strategies.adaptive.regime import Regime as _Regime
     selector._state["BANKNIFTY"] = _SelectionState(

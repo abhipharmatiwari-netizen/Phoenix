@@ -524,7 +524,7 @@ async def logout(
 ) -> dict:
     """Revoke the current session token and all refresh tokens (PHX-SEC-005)."""
     token = _extract_bearer_token(authorization)
-    payload = _parse_token.__wrapped__(token) if hasattr(_parse_token, "__wrapped__") else None
+    _parse_token.__wrapped__(token) if hasattr(_parse_token, "__wrapped__") else None
     # Re-parse without revocation check to get the jti
     try:
         header_part, payload_part, _ = token.split(".", 2)

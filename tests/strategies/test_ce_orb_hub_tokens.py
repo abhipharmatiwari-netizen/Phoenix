@@ -1,4 +1,3 @@
-import pytest
 
 from app.brokers.base import OrderResponse
 from app.strategies.ce_orb import CeOrbStrategy

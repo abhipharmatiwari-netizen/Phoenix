@@ -10,11 +10,7 @@ This test suite verifies:
 """
 
 import logging
-import threading
-import time
 from datetime import datetime, timezone, timedelta
-from collections import deque
-from unittest.mock import Mock, patch, MagicMock
 import pytest
 
 # Configure logging to capture test outputs

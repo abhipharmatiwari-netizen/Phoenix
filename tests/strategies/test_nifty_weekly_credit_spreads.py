@@ -2,7 +2,6 @@ import importlib
 import types
 from datetime import date, datetime, timezone
 
-import pytest
 
 from app.brokers.base import OrderResponse
 

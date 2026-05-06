@@ -89,7 +89,6 @@ def test_indicator_seed_priority_postgres_before_csv():
 
     seeded = 0
     seeded_history_source = "none"
-    seeded_history_bars = []
     allowed_seed_labels = {"NIFTY"}
 
     class _FakeEngine:

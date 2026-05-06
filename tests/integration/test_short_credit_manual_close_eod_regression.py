@@ -10,7 +10,7 @@ Scenario:
 """
 import pytest
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock
 
 from app.pnl.pnl_engine import PnLEngine
 from app.pnl.state_store import InMemoryPnLStateStore

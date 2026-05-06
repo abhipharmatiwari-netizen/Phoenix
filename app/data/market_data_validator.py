@@ -261,7 +261,6 @@ class MarketDataValidator:
         )
         if consecutive >= pause_threshold:
             try:
-                from app.risk.stale_quote_guard import stale_quote_guard
                 # Force stale by not recording a quote — the guard will see it as stale
                 # on next check_or_raise call
                 logger.warning(

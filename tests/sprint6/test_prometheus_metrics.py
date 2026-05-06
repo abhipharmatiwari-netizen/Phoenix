@@ -89,7 +89,7 @@ class TestRenderMetrics:
     def test_empty_store_renders_uptime(self):
         output = render_metrics()
         assert "phoenix_uptime_seconds" in output
-        lines = [l for l in output.splitlines() if l and not l.startswith("#")]
+        lines = [line for line in output.splitlines() if line and not line.startswith("#")]
         assert len(lines) >= 1
 
 

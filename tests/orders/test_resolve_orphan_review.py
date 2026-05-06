@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.orders.ownership_state import OwnershipRecord, OwnershipState
+from app.orders.ownership_state import OwnershipState
 from app.orders.position_ownership import (
     ContractKey,
     PositionOwnershipStore,

@@ -2,7 +2,7 @@
 
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import patch, MagicMock
 from types import SimpleNamespace
 import importlib
 
@@ -109,7 +109,6 @@ class TestTenantScopedPositionsEndpoint:
 
 def test_positions_endpoint_returns_correct_structure():
     """Test that positions response has expected structure."""
-    expected_keys = {"tenant_id", "broker_account_id", "positions"}
     # This is a contract test - verify response shape
     assert True  # Placeholder for schema validation
 

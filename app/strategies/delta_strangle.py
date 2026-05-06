@@ -32,7 +32,6 @@ from app.strategies.restart_state import (
 from app.brokers.base import (
     OrderPurpose,
     OrderRequest,
-    OrderResponse,
     OrderSide,
     OrderType,
     ProductType,

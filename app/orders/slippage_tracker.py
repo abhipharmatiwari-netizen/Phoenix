@@ -203,7 +203,6 @@ class SlippageTracker:
     @staticmethod
     def _emit_prometheus(rec: SlippageRecord) -> None:
         try:
-            from app.core.metrics import Histogram, Gauge
             # Lazy-register per-strategy slippage histogram
             # (reuse existing metrics module patterns)
             pass  # Prometheus metric emission handled in metrics.py

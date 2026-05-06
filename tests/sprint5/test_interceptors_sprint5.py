@@ -5,11 +5,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Optional
 
-import pytest
 
 from app.brokers.base import (
     OrderRequest,
-    OrderResponse,
     OrderSide,
     OrderType,
     ProductType,

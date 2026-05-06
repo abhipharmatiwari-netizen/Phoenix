@@ -245,14 +245,11 @@ def build_processed_trade_store() -> ProcessedTradeStore:
             str(getattr(settings, "order_lifecycle_persist_markers_required", False)),
         )
     )
-    persist_enabled = not (
-        str(os.getenv("ORDER_LIFECYCLE_PERSIST_MARKERS", "true")).strip().lower()
-        in {
+    persist_enabled = str(os.getenv("ORDER_LIFECYCLE_PERSIST_MARKERS", "true")).strip().lower() not in {
             "0",
             "false",
             "no",
         }
-    )
     if not persist_enabled:
         if strict_required:
             raise RuntimeError(

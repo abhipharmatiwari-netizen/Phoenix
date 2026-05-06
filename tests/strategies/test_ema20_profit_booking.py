@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib
 import json
-import types
 from datetime import datetime, timezone
 
 import pytest

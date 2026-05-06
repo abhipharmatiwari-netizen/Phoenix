@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-import pytest
 
 from app.risk.circuit_breaker import CircuitBreakerConfig, TradingCircuitBreaker
 
