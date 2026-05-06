@@ -425,6 +425,62 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  backend-watchdog:
+    image: docker:cli
+    container_name: phoenix-oci-watchdog
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: "64m"
+    memswap_limit: "64m"
+    pids_limit: 10
+    command:
+      - sh
+      - -c
+      - |
+          FAILS=0
+          STOPPED=0
+          RECOVER=0
+          echo "[watchdog] started — polling http://backend:8080/health every 10s"
+          while true; do
+            if wget -q -O /dev/null --timeout=5 http://backend:8080/health 2>/dev/null; then
+              FAILS=0
+              if [ "$$STOPPED" = "1" ]; then
+                RECOVER=$$((RECOVER+1))
+                echo "[watchdog] backend healthy (recover $$RECOVER/2)"
+                if [ "$$RECOVER" -ge 2 ]; then
+                  echo "[watchdog] backend recovered — starting nginx"
+                  docker start phoenix-oci-web || true
+                  STOPPED=0
+                  RECOVER=0
+                fi
+              fi
+            else
+              RECOVER=0
+              if [ "$$STOPPED" = "0" ]; then
+                FAILS=$$((FAILS+1))
+                echo "[watchdog] backend fail $$FAILS/3"
+                if [ "$$FAILS" -ge 3 ]; then
+                  echo "[watchdog] backend down — stopping nginx"
+                  docker stop phoenix-oci-web || true
+                  STOPPED=1
+                  FAILS=0
+                fi
+              fi
+            fi
+            sleep 10
+          done
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
 # Secrets are written to /run/secrets/ by scripts/fetch-secrets.sh before compose up.
 # The script pulls them from OCI Vault via instance principal auth (no credentials needed).
 # Secret file names match the OCI Vault secret names (without the phoenix- prefix).
