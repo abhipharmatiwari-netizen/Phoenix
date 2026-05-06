@@ -1334,7 +1334,7 @@ def test_readyz_returns_200_when_single_runner_is_running(monkeypatch):
     )
     with TestClient(server.app) as client:
         resp = client.get("/readyz")
-    assert resp.status_code == 200, f"readyz returned {resp.status_code}: {resp.json()}"
+    assert resp.status_code == 200
     payload = resp.json()
     assert payload["ready"] is True
     assert payload["registered_runner_count"] == 1

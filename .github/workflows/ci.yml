@@ -39,6 +39,9 @@ jobs:
       # Prevent RuntimeError during TestClient startup when PG credentials are absent.
       # Defaults to True which forces hard failure; tests use DummyAppRuntime anyway.
       ORDER_LIFECYCLE_PERSIST_MARKERS_REQUIRED: "false"
+      # Instrument universe degraded check: in CI there are no live instruments,
+      # set to 0 so readyz does not fail with instrument_universe_degraded.
+      MIN_TRADEABLE_INSTRUMENTS: "0"
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
 
