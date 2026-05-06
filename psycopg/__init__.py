@@ -28,32 +28,11 @@ class ProgrammingError(Error):
     """Programming error placeholder."""
 
 
-def connect(*args, **kwargs):
-    """Delegate to real psycopg when available; otherwise raise a clear error.
-
-    When the real psycopg[binary] package is installed (e.g. in CI after
-    `pip install -r requirements.txt`), this shim delegates to it so tests
-    that genuinely need a database connection can use one. In lightweight
-    sandbox environments where psycopg is not installed, the RuntimeError
-    prompts the test author to monkeypatch psycopg.connect instead.
-    """
-    import importlib
-    import sys
-
-    # Remove this module from sys.modules temporarily so importlib can find
-    # the real psycopg in site-packages rather than the repo-root shim.
-    _this = sys.modules.pop("psycopg", None)
-    try:
-        _real = importlib.import_module("psycopg")
-        return _real.connect(*args, **kwargs)
-    except ModuleNotFoundError:
-        raise RuntimeError(
-            "psycopg is not installed in this lightweight environment; "
-            "tests should monkeypatch psycopg.connect or use app.data.postgres helpers"
-        )
-    finally:
-        if _this is not None:
-            sys.modules["psycopg"] = _this
+def connect(*_args, **_kwargs):
+    raise RuntimeError(
+        "psycopg is not installed in this lightweight environment; "
+        "tests should monkeypatch psycopg.connect or use app.data.postgres helpers"
+    )
 
 
 __all__ = [

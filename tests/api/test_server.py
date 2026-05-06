@@ -816,6 +816,11 @@ def _postback_settings(**overrides):
 def test_angel_postback_legacy_mode_keeps_admin_auth(api_client, monkeypatch):
     client, _ = api_client
     monkeypatch.setenv("ANGEL_POSTBACK_AUTH_MODE", "LEGACY")
+    # Ensure auth is required so the missing X-Admin-Key returns 401 before
+    # any Postgres paths are hit. CI sets APP_ENV=test + DASHBOARD_AUTH_DISABLED=1
+    # which bypasses auth; clearing that flag reinstates the requirement.
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("DASHBOARD_AUTH_DISABLED", raising=False)
     monkeypatch.setattr(server, "get_settings", lambda: _postback_settings())
     monkeypatch.setattr(
         importlib.import_module("app.dashboard.auth"),
