@@ -1,0 +1,34 @@
+# NSE Market Holidays 2026
+# Format: YYYY-MM-DD (IST calendar date)
+# Update this file each year when NSE publishes the holiday calendar.
+# Source: https://www.nseindia.com/resources/exchange-communication-holidays
+# Last updated: 2026-05-06
+#
+# Copy to /opt/phoenix/nse-holidays.txt on the OCI VM after any changes.
+# The start-phoenix.sh script reads this file before starting on weekdays.
+
+# ── 2026 NSE Equity Segment Holidays ──────────────────────────────────────────
+2026-01-26  # Republic Day
+2026-03-25  # Holi
+2026-04-10  # Good Friday
+2026-04-14  # Dr. Babasaheb Ambedkar Jayanti
+2026-04-15  # Ram Navami (check NSE calendar; may vary)
+2026-05-01  # Maharashtra Day
+2026-08-15  # Independence Day
+2026-10-02  # Mahatma Gandhi Jayanti (Dussehra may shift; verify)
+2026-10-21  # Dussehra (tentative — verify with NSE)
+2026-10-28  # Diwali - Laxmi Pujan (tentative — verify with NSE)
+2026-10-29  # Diwali - Balipratipada (tentative — verify with NSE)
+2026-11-05  # Gurunanak Jayanti (tentative — verify with NSE)
+2026-12-25  # Christmas
+
+# ── Notes ─────────────────────────────────────────────────────────────────────
+# 1. Tentative dates marked above must be confirmed against the official NSE
+#    holiday list published typically in November of the preceding year.
+# 2. NSE may announce special trading days or closures on short notice.
+#    Monitor: https://www.nseindia.com and update this file as needed.
+# 3. MCX (commodity) holidays may differ slightly; NG_FUT uses MCX.
+#    If a day is an MCX holiday but not NSE, the NG strategy will be idle
+#    naturally (no ticks) but other strategies will trade normally.
+#    Add MCX-only holidays here if you want to prevent the backend
+#    from starting on those days — or handle per-exchange in strategy config.
