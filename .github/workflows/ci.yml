@@ -36,6 +36,9 @@ jobs:
       AUTH_TOKEN_SECRET: ci-test-secret-do-not-use
       DEMO_AUTH_TOKEN_SECRET: ci-test-secret-do-not-use   # backward-compat alias
       CONTROL_PLANE_DSN: postgresql://phoenix:phoenix@localhost:5432/phoenix_test
+      # Prevent RuntimeError during TestClient startup when PG credentials are absent.
+      # Defaults to True which forces hard failure; tests use DummyAppRuntime anyway.
+      ORDER_LIFECYCLE_PERSIST_MARKERS_REQUIRED: "false"
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
 
