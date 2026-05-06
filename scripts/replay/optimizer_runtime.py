@@ -25,6 +25,16 @@ DEFAULT_PARAMS: Dict[str, Dict[str, Any]] = {
         "use_adx_filter": False,
         "min_adx": 18.0,
         "signal_timeframe": 300,
+        # PHX#182/#183/#184: profit-booking enhancements default-disabled so
+        # baseline replay matches LIVE ship behaviour. Operators wire focused
+        # sweeps by extending the relevant grid below.
+        "tp1_pct": None,
+        "tp1_qty_pct": 0.0,
+        "giveback_pct": None,
+        "giveback_arm_pct": None,
+        "decay_tighten_minutes_before_eod": None,
+        "decay_tp_multiplier": 1.0,
+        "decay_trail_buffer_multiplier": 1.0,
     },
     "put_momentum_scalper": {
         "option_sl_pct": 0.25,
@@ -52,11 +62,15 @@ DEFAULT_PARAMS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# PHX#185: tp_pct sweep grid spans the full range called out in the issue.
+# Per-regime tuning (TRENDING/NORMAL/CHOPPY/HIGH_VOL) is achieved by
+# segmenting replay output by `regime_at_entry` from the exit_attribution.jsonl
+# and ranking each regime's slice independently in post-processing.
 EMA20_GRIDS: Dict[str, Dict[str, List[Any]]] = {
     "default": {
         "ema_period": [20, 30],
         "sl_pct": [0.20, 0.25, 0.30],
-        "tp_pct": [0.20, 0.30, 0.40],
+        "tp_pct": [0.15, 0.20, 0.25, 0.30, 0.35, 0.45, 0.50],
         "require_rsi_falling": [True, False],
         "use_adx_filter": [False, True],
         "min_adx": [16.0, 18.0, 22.0],
@@ -64,12 +78,59 @@ EMA20_GRIDS: Dict[str, Dict[str, List[Any]]] = {
     "NG_FUT": {
         "ema_period": [8, 13, 20],
         "sl_pct": [0.15, 0.20, 0.25],
-        "tp_pct": [0.20, 0.30, 0.40],
+        "tp_pct": [0.15, 0.20, 0.25, 0.30, 0.35, 0.45, 0.50],
         "min_atr": [0.8, 1.0, 1.2, 1.5],
         "require_rsi_falling": [False, True],
         "use_adx_filter": [False, True],
     },
 }
+
+# PHX#182/#183/#184: opt-in grids for the new profit-booking params. These are
+# NOT merged into EMA20_GRIDS by default — combinatorial blow-up would push the
+# combo count past max_combos and dilute meaningful coverage. Operators wire a
+# focused sweep by either:
+#   1. Calling `extended_ema20_grid(...)` from a custom optimizer driver, OR
+#   2. Editing strategy_grid() to merge for a specific run.
+EMA20_TP1_GRID: Dict[str, List[Any]] = {
+    "tp1_pct": [None, 0.15, 0.20, 0.25],
+    "tp1_qty_pct": [0.0, 0.33, 0.50],
+}
+
+EMA20_GIVEBACK_GRID: Dict[str, List[Any]] = {
+    "giveback_pct": [None, 0.40, 0.50, 0.60],
+    "giveback_arm_pct": [None, 0.10, 0.15],
+}
+
+EMA20_DECAY_GRID: Dict[str, List[Any]] = {
+    "decay_tighten_minutes_before_eod": [None, 60, 90],
+    "decay_tp_multiplier": [1.0, 0.7, 0.5],
+    "decay_trail_buffer_multiplier": [1.0, 0.7, 0.5],
+}
+
+
+def extended_ema20_grid(
+    underlying_key: str,
+    *,
+    include_tp1: bool = False,
+    include_giveback: bool = False,
+    include_decay: bool = False,
+) -> Dict[str, List[Any]]:
+    """Build an EMA20 sweep grid extended with selected profit-booking params.
+
+    Use to run a focused PHX#182/#183/#184 sweep from a custom driver:
+
+        grid = extended_ema20_grid("NIFTY", include_tp1=True)
+        # then feed into run_grid_search via custom strategy_grid override
+    """
+    base = dict(EMA20_GRIDS["default"])
+    base.update(EMA20_GRIDS.get(underlying_key, {}))
+    if include_tp1:
+        base.update(EMA20_TP1_GRID)
+    if include_giveback:
+        base.update(EMA20_GIVEBACK_GRID)
+    if include_decay:
+        base.update(EMA20_DECAY_GRID)
+    return base
 
 PUT_MOM_PARAM_GRID: Dict[str, List[Any]] = {
     "option_sl_pct": [0.20, 0.25, 0.30],

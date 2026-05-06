@@ -120,6 +120,45 @@ The report bundle includes:
 - Supports walk-forward out-of-sample scoring.
 - Exports review-only YAML/JSON recommendations. Replay never auto-edits `strategy_env.yaml`.
 
+### EMA20 profit-booking sweeps (PHX#182, #183, #184, #185)
+
+`EMA20_GRIDS["default"]` covers `tp_pct ∈ {0.15, 0.20, 0.25, 0.30, 0.35, 0.45, 0.50}` —
+the explicit sweep called for in PHX#185. Per-regime tuning
+(TRENDING / NORMAL / CHOPPY / HIGH_VOL) is achieved by segmenting replay
+output by `regime_at_entry` from `exit_attribution.jsonl` and ranking each
+slice independently in post-processing.
+
+The new profit-booking params (PHX#182 TP1, PHX#183 give-back, PHX#184 decay)
+are NOT auto-merged into the default grid — combinatorial blow-up would dilute
+coverage. Use `extended_ema20_grid(...)` from `optimizer_runtime` to compose
+focused sweeps:
+
+```python
+from scripts.replay.optimizer_runtime import extended_ema20_grid
+
+# PHX#185 tp_pct sweep, baseline (no profit-booking enhancements)
+grid = extended_ema20_grid("NIFTY")  # ~504 combos
+
+# Enable TP1 sweep alongside tp_pct
+grid = extended_ema20_grid("NIFTY", include_tp1=True)  # ~6048 combos
+
+# Full sweep — requires --max-combos 100000+
+grid = extended_ema20_grid(
+    "NIFTY",
+    include_tp1=True,
+    include_giveback=True,
+    include_decay=True,
+)
+```
+
+Sequencing recommended in PHX#185:
+1. Run baseline `tp_pct` sweep (`grid = extended_ema20_grid("NIFTY")`) — pick top
+   3 `tp_pct` values per regime.
+2. Hold `tp_pct` to top values, sweep `tp1_pct + tp1_qty_pct`
+   (`include_tp1=True`).
+3. Smoke-test final config in DEMO mode for one full trading day before LIVE
+   rollout.
+
 ## Remaining Approximations
 
 - Historical option chains are still unavailable, so option marks/fills remain proxy-based.

@@ -342,6 +342,14 @@ def build_ema20_strategy(
         trail_trigger_pct=p.get("trail_trigger_pct"),
         first_entry_time=p.get("first_entry_time"),
         square_off_time=p.get("square_off_time"),
+        # PHX#182/#183/#184: profit-booking enhancements.
+        tp1_pct=p.get("tp1_pct"),
+        tp1_qty_pct=float(p.get("tp1_qty_pct", 0.0)),
+        giveback_pct=p.get("giveback_pct"),
+        giveback_arm_pct=p.get("giveback_arm_pct"),
+        decay_tighten_minutes_before_eod=p.get("decay_tighten_minutes_before_eod"),
+        decay_tp_multiplier=float(p.get("decay_tp_multiplier", 1.0)),
+        decay_trail_buffer_multiplier=float(p.get("decay_trail_buffer_multiplier", 1.0)),
         risk_manager=MockRiskManager(),
         config_resolver=StrategyValueResolver(
             env_prefix=uinfo["env_prefix"],
