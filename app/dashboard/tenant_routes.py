@@ -374,34 +374,76 @@ async def get_account_pnl(
                         else None
                     ),
                 },
+                "strategy_unknown": False,
             }
-        # No snapshot for this strategy — return null rather than silently
-        # falling through to the account-level aggregate, which would show
-        # the sum of all strategies' PnL mislabelled as this strategy's PnL.
+        # No snapshot for this strategy. Do NOT silently aggregate other
+        # strategies' realized PnL into this one (would mislabel it). Instead
+        # return live unrealized + gross_exposure from the broker positions
+        # cache so the page is never blank when positions exist, and flag the
+        # response so the UI can surface a hint.
         return {
             "tenant_id": ctx.tenant_id,
             "broker_account_id": broker_account_id,
             "strategy_id": strategy_id,
-            "pnl": None,
+            "pnl": {
+                "realized_pnl": 0.0,
+                "unrealized_pnl": float(live_mark["unrealized_pnl"]),
+                "gross_exposure": float(live_mark["gross_exposure"]),
+                "as_of": now.isoformat(),
+                "session_date": None,
+            },
+            "strategy_unknown": True,
         }
 
     # Account-level aggregate: combine realized PnL snapshots with live position marks.
-    realized = pnl_engine.get_current_realized_pnl(
+    # Use display-corrected realized so per-strategy open-position cash-flow
+    # contributions are removed before summing (matches strategy-scoped path).
+    display_realized_account = pnl_engine.get_display_realized_pnl_account(
         tenant_id=ctx.tenant_id,
         broker_account_id=broker_account_id,
     )
-    realized_f = float(realized or 0.0)
 
     return {
         "tenant_id": ctx.tenant_id,
         "broker_account_id": broker_account_id,
         "strategy_id": strategy_id,
         "pnl": {
-            "realized_pnl": realized_f,
+            "realized_pnl": round(display_realized_account, 2),
             "unrealized_pnl": float(live_mark["unrealized_pnl"]),
             "gross_exposure": float(live_mark["gross_exposure"]),
             "as_of": now.isoformat(),
+            "session_date": None,
         },
+        "strategy_unknown": False,
+    }
+
+
+# Return strategy_ids that actually have PnL snapshots for this account.
+# Drives the PnL page strategy dropdown; replaces reliance on the operator-
+# managed broker_accounts.default_strategies field, which goes stale as
+# real strategies are added/removed.
+@router.get("/me/accounts/{broker_account_id}/strategies")
+async def list_account_strategies(
+    broker_account_id: BrokerAccountId,
+    ctx: TenantContext = Depends(get_tenant_context),
+):
+    account = get_broker_account(broker_account_id)
+    if not _account_allowed_for_context(account, ctx):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Broker account not found for this tenant.",
+        )
+
+    runtime = get_hub_runtime()
+    pnl_engine: PnLEngine = runtime.pnl_engine
+    strategies = pnl_engine.list_account_strategies(
+        tenant_id=ctx.tenant_id,
+        broker_account_id=broker_account_id,
+    )
+    return {
+        "tenant_id": ctx.tenant_id,
+        "broker_account_id": broker_account_id,
+        "strategies": [str(s) for s in strategies],
     }
 
 

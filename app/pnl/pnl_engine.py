@@ -461,6 +461,48 @@ class PnLEngine:
             self._state_store.upsert_snapshot(snap)
         return snap
 
+    # Return strategy_ids that have snapshots for this account (excludes bootstrap seed).
+    def list_account_strategies(
+        self,
+        tenant_id: TenantId,
+        broker_account_id: BrokerAccountId,
+    ) -> list[StrategyId]:
+        snaps = self._state_store.list_account_snapshots(
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+        )
+        seen: list[StrategyId] = []
+        seen_set: set[StrategyId] = set()
+        for snap in snaps:
+            sid = snap.key.strategy_id
+            if sid == ACCOUNT_BOOTSTRAP_STRATEGY_ID:
+                continue
+            if sid in seen_set:
+                continue
+            seen_set.add(sid)
+            seen.append(sid)
+        return seen
+
+    # Account-level display-corrected realized PnL: sums per-strategy display_realized
+    # so cash-flow contributions of open positions are removed from each strategy's
+    # realized number before aggregation. Mirrors get_display_realized_pnl but
+    # account-scoped.
+    def get_display_realized_pnl_account(
+        self,
+        tenant_id: TenantId,
+        broker_account_id: BrokerAccountId,
+    ) -> float:
+        snaps = self._state_store.list_account_snapshots(
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+        )
+        total = 0.0
+        for snap in snaps:
+            total += float(snap.realized_pnl or 0.0) + float(snap.net_open_qty or 0) * float(
+                snap.open_avg_price or 0.0
+            )
+        return total
+
     def _list_scoped_snapshots(
         self,
         tenant_id: TenantId,

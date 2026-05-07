@@ -79,8 +79,15 @@ interface OrdersResponse {
 interface PnlResponse {
   tenant_id: string;
   broker_account_id: string;
-  strategy_id: string;
+  strategy_id: string | null;
   pnl: PnLSnapshot | null;
+  strategy_unknown?: boolean;
+}
+
+interface StrategiesResponse {
+  tenant_id: string;
+  broker_account_id: string;
+  strategies: string[];
 }
 
 interface TradesResponse {
@@ -475,11 +482,20 @@ export const TenantService = {
 
   getAccountPnl(
     brokerAccountId: string,
-    strategyId: string,
+    strategyId?: string,
   ): Promise<PnlResponse> {
     return request<PnlResponse>({
       path: bffPath(`/tenant/me/accounts/${brokerAccountId}/pnl`),
-      query: { strategy_id: strategyId },
+      query: strategyId ? { strategy_id: strategyId } : undefined,
+      includeTenantHeader: true,
+    });
+  },
+
+  getAccountStrategies(
+    brokerAccountId: string,
+  ): Promise<StrategiesResponse> {
+    return request<StrategiesResponse>({
+      path: bffPath(`/tenant/me/accounts/${brokerAccountId}/strategies`),
       includeTenantHeader: true,
     });
   },

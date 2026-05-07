@@ -13,7 +13,7 @@ from app.core.identifiers import BrokerAccountId, StrategyId, TenantId
 from app.pnl.types import PnLSnapshot, PnLSnapshotKey
 
 MODULE_PATH = "app.dashboard.tenant_routes"
-CALLABLE_NAMES = ['list_my_accounts', 'get_account_balance', 'get_account_positions', 'get_account_pnl', 'get_my_trades']
+CALLABLE_NAMES = ['list_my_accounts', 'get_account_balance', 'get_account_positions', 'get_account_pnl', 'list_account_strategies', 'get_my_trades']
 
 
 def test_import_module_succeeds():
@@ -124,6 +124,7 @@ async def test_get_account_pnl_uses_live_position_marks_for_account_aggregate(mo
         pnl_engine=SimpleNamespace(
             get_snapshot=lambda **kwargs: None,
             get_current_realized_pnl=lambda **kwargs: 150.0,
+            get_display_realized_pnl_account=lambda **kwargs: 150.0,
         ),
     )
 
@@ -155,6 +156,7 @@ async def test_get_account_pnl_uses_live_position_marks_for_account_aggregate(mo
     assert payload["pnl"]["realized_pnl"] == 150.0
     assert payload["pnl"]["unrealized_pnl"] == pytest.approx(2768.0)
     assert payload["pnl"]["gross_exposure"] == pytest.approx(46698.0)
+    assert payload["strategy_unknown"] is False
 
 
 @pytest.mark.asyncio
@@ -192,6 +194,7 @@ async def test_get_account_pnl_overlays_live_marks_when_strategy_snapshot_has_no
         pnl_engine=SimpleNamespace(
             get_snapshot=lambda **kwargs: snapshot,
             get_current_realized_pnl=lambda **kwargs: 275.0,
+            get_display_realized_pnl=lambda **kwargs: 275.0,
         ),
     )
 
@@ -221,3 +224,96 @@ async def test_get_account_pnl_overlays_live_marks_when_strategy_snapshot_has_no
     assert payload["pnl"]["realized_pnl"] == 275.0
     assert payload["pnl"]["unrealized_pnl"] == pytest.approx(3537.5)
     assert payload["pnl"]["gross_exposure"] == pytest.approx(29625.0)
+    assert payload["strategy_unknown"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_account_pnl_returns_live_marks_when_strategy_snapshot_missing(monkeypatch):
+    """Regression: when a strategy_id has no snapshot, return live unrealized +
+    gross_exposure from open positions (not pnl: null). Otherwise the page
+    blanks out to ₹0 across all four cards even though the broker has open
+    positions."""
+    tenant_routes = importlib.import_module("app.dashboard.tenant_routes")
+    state_store = StateStore()
+    state_store.set_positions(
+        "acc-1",
+        [
+            Position(
+                symbol="NATURALGAS22MAY26255CE",
+                quantity=1250,
+                avg_price=14.30,
+                product_type=ProductType.INTRADAY,
+            ),
+        ],
+    )
+
+    runtime = SimpleNamespace(
+        state_store=state_store,
+        pnl_engine=SimpleNamespace(
+            get_snapshot=lambda **kwargs: None,
+            get_display_realized_pnl=lambda **kwargs: None,
+            get_display_realized_pnl_account=lambda **kwargs: 0.0,
+            get_current_realized_pnl=lambda **kwargs: 0.0,
+        ),
+    )
+
+    monkeypatch.setattr(
+        tenant_routes,
+        "get_broker_account",
+        lambda broker_account_id: SimpleNamespace(
+            broker_account_id=broker_account_id,
+            tenant_id="tenant-123",
+        ),
+    )
+    monkeypatch.setattr(tenant_routes, "get_hub_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        tenant_routes.dashboard_bus,
+        "get_last_price_for_instrument",
+        lambda **kwargs: 16.15 if kwargs.get("symbol") == "NATURALGAS22MAY26255CE" else None,
+    )
+    monkeypatch.setattr(tenant_routes.dashboard_bus, "get_last_price", lambda label: None)
+
+    payload = await tenant_routes.get_account_pnl(
+        broker_account_id=BrokerAccountId("acc-1"),
+        strategy_id=StrategyId("default"),
+        ctx=TenantContext(tenant_id="tenant-123"),
+    )
+
+    assert payload["pnl"] is not None
+    assert payload["strategy_unknown"] is True
+    assert payload["pnl"]["realized_pnl"] == 0.0
+    assert payload["pnl"]["unrealized_pnl"] == pytest.approx(2312.5)
+    assert payload["pnl"]["gross_exposure"] == pytest.approx(20187.5)
+
+
+@pytest.mark.asyncio
+async def test_list_account_strategies_returns_strategies_excluding_seed(monkeypatch):
+    tenant_routes = importlib.import_module("app.dashboard.tenant_routes")
+
+    runtime = SimpleNamespace(
+        state_store=SimpleNamespace(),
+        pnl_engine=SimpleNamespace(
+            list_account_strategies=lambda **kwargs: [
+                StrategyId("ema20_strategy"),
+                StrategyId("delta_strangle"),
+            ],
+        ),
+    )
+
+    monkeypatch.setattr(
+        tenant_routes,
+        "get_broker_account",
+        lambda broker_account_id: SimpleNamespace(
+            broker_account_id=broker_account_id,
+            tenant_id="tenant-123",
+        ),
+    )
+    monkeypatch.setattr(tenant_routes, "get_hub_runtime", lambda: runtime)
+
+    payload = await tenant_routes.list_account_strategies(
+        broker_account_id=BrokerAccountId("acc-1"),
+        ctx=TenantContext(tenant_id="tenant-123"),
+    )
+
+    assert payload["broker_account_id"] == "acc-1"
+    assert payload["strategies"] == ["ema20_strategy", "delta_strangle"]

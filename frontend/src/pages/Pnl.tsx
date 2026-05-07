@@ -7,12 +7,15 @@ import PnlChart from '../components/charts/PnlChart';
 import Card from '../components/shared/Card';
 
 const REFRESH_MS = 15_000;
+const ALL_STRATEGIES = '__all__';
 
 const Pnl: React.FC = () => {
   const [accounts, setAccounts] = useState<BrokerAccount[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState('');
-  const [selectedStrategy, setSelectedStrategy] = useState('');
+  const [strategies, setStrategies] = useState<string[]>([]);
+  const [selectedStrategy, setSelectedStrategy] = useState<string>(ALL_STRATEGIES);
   const [pnl, setPnl] = useState<PnLSnapshot | null>(null);
+  const [strategyUnknown, setStrategyUnknown] = useState(false);
   const [pnlHistory, setPnlHistory] = useState<{ time: string; pnl: number }[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -25,9 +28,7 @@ const Pnl: React.FC = () => {
         if (active) {
           setAccounts(resp.accounts);
           if (resp.accounts.length > 0) {
-            const first = resp.accounts[0];
-            setSelectedAccountId(first.broker_account_id);
-            setSelectedStrategy(first.default_strategies[0] || 'default');
+            setSelectedAccountId(resp.accounts[0].broker_account_id);
           }
         }
       } catch (err) {
@@ -40,11 +41,34 @@ const Pnl: React.FC = () => {
     return () => { active = false; };
   }, []);
 
+  // Refresh available strategies from backend whenever the account changes.
+  useEffect(() => {
+    if (!selectedAccountId) {
+      setStrategies([]);
+      return;
+    }
+    let active = true;
+    TenantService.getAccountStrategies(selectedAccountId)
+      .then(resp => {
+        if (!active) return;
+        setStrategies(resp.strategies);
+        // Reset selection to "All" so users always see something on account switch.
+        setSelectedStrategy(ALL_STRATEGIES);
+        setPnlHistory([]);
+      })
+      .catch(err => {
+        if (active) setError(err instanceof Error ? err.message : 'Failed to fetch strategies');
+      });
+    return () => { active = false; };
+  }, [selectedAccountId]);
+
   const fetchPnl = useCallback(async () => {
-    if (!selectedAccountId || !selectedStrategy) return;
+    if (!selectedAccountId) return;
     try {
-      const resp = await TenantService.getAccountPnl(selectedAccountId, selectedStrategy);
+      const strategyArg = selectedStrategy === ALL_STRATEGIES ? undefined : selectedStrategy;
+      const resp = await TenantService.getAccountPnl(selectedAccountId, strategyArg);
       setPnl(resp.pnl);
+      setStrategyUnknown(Boolean(resp.strategy_unknown));
       if (resp.pnl) {
         const now = new Date();
         const timeStr = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
@@ -64,11 +88,6 @@ const Pnl: React.FC = () => {
     const timer = setInterval(fetchPnl, REFRESH_MS);
     return () => clearInterval(timer);
   }, [fetchPnl]);
-
-  const strategies = useMemo(() => {
-    const acct = accounts.find(a => a.broker_account_id === selectedAccountId);
-    return acct?.default_strategies || ['default'];
-  }, [accounts, selectedAccountId]);
 
   const totalPnl = (pnl?.realized_pnl ?? 0) + (pnl?.unrealized_pnl ?? 0);
   const drawdown = useMemo(() => {
@@ -91,8 +110,6 @@ const Pnl: React.FC = () => {
             onChange={e => {
               setSelectedAccountId(e.target.value);
               setPnlHistory([]);
-              const acct = accounts.find(a => a.broker_account_id === e.target.value);
-              setSelectedStrategy(acct?.default_strategies[0] || 'default');
             }}
             aria-label="Select broker account"
             style={{ padding: '0.4rem 0.75rem', border: '1px solid #d1d5db', borderRadius: 4 }}
@@ -104,19 +121,24 @@ const Pnl: React.FC = () => {
             ))}
           </select>
         )}
-        {strategies.length > 1 && (
-          <select
-            value={selectedStrategy}
-            onChange={e => { setSelectedStrategy(e.target.value); setPnlHistory([]); }}
-            aria-label="Select strategy"
-            style={{ padding: '0.4rem 0.75rem', border: '1px solid #d1d5db', borderRadius: 4 }}
-          >
-            {strategies.map(s => <option key={s} value={s}>{s}</option>)}
-          </select>
-        )}
+        <select
+          value={selectedStrategy}
+          onChange={e => { setSelectedStrategy(e.target.value); setPnlHistory([]); }}
+          aria-label="Select strategy"
+          style={{ padding: '0.4rem 0.75rem', border: '1px solid #d1d5db', borderRadius: 4 }}
+        >
+          <option value={ALL_STRATEGIES}>All strategies</option>
+          {strategies.map(s => <option key={s} value={s}>{s}</option>)}
+        </select>
       </div>
 
       {error && <StaleBanner message={error} variant="danger" />}
+      {strategyUnknown && (
+        <StaleBanner
+          message={`No PnL snapshot recorded yet for strategy "${selectedStrategy}". Showing live unrealized PnL and exposure from open positions; realized will appear once trades complete.`}
+          variant="warning"
+        />
+      )}
       {loading ? <LoadingSpinner /> : (
         <>
           {/* Summary Cards */}
