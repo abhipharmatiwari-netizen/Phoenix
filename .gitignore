@@ -55,3 +55,6 @@ release/*.zip
 replay_output/
 .backtest_venv/
 debug.log
+
+# OCI log pulls (local diagnostic snapshots, not for commit)
+ops/oci_log_pulls/
