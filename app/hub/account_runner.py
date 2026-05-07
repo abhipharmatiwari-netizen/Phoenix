@@ -331,9 +331,11 @@ class AccountRunner:
                 prev = self._consecutive_balance_failures
                 self._consecutive_balance_failures = 0
                 emit_audit_event(
-                    "balance_sync.recovered",
-                    {
-                        "broker_account_id": self.broker_account_id,
+                    actor="system",
+                    action="balance_sync.recovered",
+                    resource_type="broker_account",
+                    resource_id=self.broker_account_id,
+                    metadata={
                         "tenant_id": self._tenant_id,
                         "previous_consecutive_failures": prev,
                     },
@@ -351,9 +353,11 @@ class AccountRunner:
                     exc,
                 )
                 emit_audit_event(
-                    "balance_sync.persistent_failure",
-                    {
-                        "broker_account_id": self.broker_account_id,
+                    actor="system",
+                    action="balance_sync.persistent_failure",
+                    resource_type="broker_account",
+                    resource_id=self.broker_account_id,
+                    metadata={
                         "tenant_id": self._tenant_id,
                         "consecutive_failures": failures,
                         "last_error": str(exc),
