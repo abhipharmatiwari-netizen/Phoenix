@@ -355,10 +355,17 @@ class StrategySelector:
         regime: Regime,
         allowed: tuple[str, ...],
     ) -> tuple[tuple[str, ...], str]:
+        mapped = self._mapped_selection(underlying=underlying, regime=regime)
         if regime == Regime.NO_TRADE:
+            # An explicit non-empty NO_TRADE mapping is honoured so that strategies
+            # whose own dynamic policy governs entry decisions (e.g. exclusive_nifty_ce_buy)
+            # still receive bar dispatch. An absent or empty mapping clears the selection.
+            if mapped:
+                selection = tuple(s for s in mapped if s in set(allowed))
+                if selection:
+                    return selection[: self.config.max_active_per_underlying], "mapping"
             return (), "no_trade_regime"
 
-        mapped = self._mapped_selection(underlying=underlying, regime=regime)
         if mapped is not None:
             selection = tuple(
                 strategy

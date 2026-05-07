@@ -85,6 +85,81 @@ def test_strategy_selector_honors_hold_window_before_switching():
     assert switched.changed is True
 
 
+def test_no_trade_explicit_mapping_is_honoured():
+    """
+    Strategies listed explicitly in a NO_TRADE mapping are selected and receive bar
+    dispatch — their own dynamic policy gates entries.  This is the production scenario
+    for exclusive_nifty_ce_buy on NIFTY_IDX.
+    """
+    cfg = StrategySelectorConfig.from_raw(
+        {
+            "enabled": True,
+            "max_active_per_underlying": 2,
+            "min_hold_seconds": 0,
+            "mapping": {
+                "NIFTY_IDX": {
+                    "NORMAL": ["ema20_strategy", "exclusive_nifty_ce_buy"],
+                    "NO_TRADE": ["exclusive_nifty_ce_buy"],
+                }
+            },
+        }
+    )
+    selector = StrategySelector(cfg)
+
+    decision = selector.select(
+        underlying="NIFTY_IDX",
+        regime=Regime.NO_TRADE,
+        allowed_strategies=["ema20_strategy", "exclusive_nifty_ce_buy"],
+        now=_ts(0),
+    )
+
+    assert decision.selected_strategies == ("exclusive_nifty_ce_buy",)
+    assert decision.reason == "mapping"
+    assert selector.is_strategy_active(
+        underlying="NIFTY_IDX", strategy_name="exclusive_nifty_ce_buy"
+    )
+    assert not selector.is_strategy_active(
+        underlying="NIFTY_IDX", strategy_name="ema20_strategy"
+    )
+
+
+def test_no_trade_empty_mapping_still_clears_selection():
+    """An explicit but empty NO_TRADE mapping continues to clear the selection."""
+    cfg = StrategySelectorConfig.from_raw(
+        {
+            "enabled": True,
+            "max_active_per_underlying": 1,
+            "min_hold_seconds": 0,
+            "mapping": {
+                "NIFTY_IDX": {
+                    "NORMAL": ["ema20_strategy"],
+                    "NO_TRADE": [],
+                }
+            },
+        }
+    )
+    selector = StrategySelector(cfg)
+
+    selector.select(
+        underlying="NIFTY_IDX",
+        regime=Regime.NORMAL,
+        allowed_strategies=["ema20_strategy"],
+        now=_ts(0),
+    )
+    no_trade = selector.select(
+        underlying="NIFTY_IDX",
+        regime=Regime.NO_TRADE,
+        allowed_strategies=["ema20_strategy"],
+        now=_ts(60),
+    )
+
+    assert no_trade.selected_strategies == ()
+    assert no_trade.reason == "no_trade_regime"
+    assert not selector.is_strategy_active(
+        underlying="NIFTY_IDX", strategy_name="ema20_strategy"
+    )
+
+
 def test_strategy_selector_clears_selection_on_no_trade_regime():
     cfg = StrategySelectorConfig.from_raw(
         {
