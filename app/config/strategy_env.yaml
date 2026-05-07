@@ -748,7 +748,7 @@ strategies:
       expiry_mode: "NEAREST"
       use_volume_filter: false
   - name: "nifty_weekly_credit_spreads"
-    enabled: false
+    enabled: true
     instruments:
       - "NIFTY_IDX"
     params:
@@ -789,7 +789,7 @@ strategies:
 instruments:
   NIFTY_IDX:
     enabled: true
-    allowed_strategies: ["ema20_strategy", "exclusive_nifty_ce_buy", "put_momentum_scalper"]
+    allowed_strategies: ["ema20_strategy", "exclusive_nifty_ce_buy", "put_momentum_scalper", "nifty_weekly_credit_spreads"]
   BANKNIFTY_IDX:
     enabled: true
     allowed_strategies: ["ema20_strategy", "put_momentum_scalper"]
