@@ -44,7 +44,7 @@ Required values:
 - `CONTROL_PLANE_PG_HOST`
 - `CONTROL_PLANE_PG_DB`
 - `CONTROL_PLANE_PG_USER`
-- `HUB_DEFAULT_TENANT_ID`
+- `HUB_DEFAULT_TENANT_ID` — default tenant used by hub routing, strategy_bridge, and trade_records when no tenant is provided by the caller. Must match the production tenant UUID. Required in LIVE (startup validation rejects empty value). The bundled compose example defaults to `tenant-1`; set it explicitly in your `phoenix-deploy.env`.
 - `HUB_DEFAULT_BROKER_ACCOUNT_ID`
 - `CAPITAL_LIMITS_JSON`
 - `RISK_MAX_DAILY_LOSS`

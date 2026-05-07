@@ -369,3 +369,129 @@ def test_linter_accepts_postgres_pnl_backend_in_live(tmp_path):
     errors = lint_env_profile(profile_path)
     redis_errors = [e for e in errors if "PNL_STATE_BACKEND" in e]
     assert redis_errors == [], f"Unexpected PnL backend errors: {redis_errors}"
+
+
+# ---------------------------------------------------------------------------
+# HUB_DEFAULT_TENANT_ID (#193)
+# ---------------------------------------------------------------------------
+
+def test_profile_linter_parses_hub_default_tenant_id(tmp_path):
+    """hub_default_tenant_id is parsed from HUB_DEFAULT_TENANT_ID env var."""
+    from app.config.profile_linter import _build_lint_settings  # type: ignore[attr-defined]
+    settings = _build_lint_settings({"HUB_DEFAULT_TENANT_ID": "my-tenant"})
+    assert settings.hub_default_tenant_id == "my-tenant"
+
+
+def test_profile_linter_hub_default_tenant_id_empty_string(tmp_path):
+    """hub_default_tenant_id is empty string when env var is absent."""
+    from app.config.profile_linter import _build_lint_settings  # type: ignore[attr-defined]
+    settings = _build_lint_settings({})
+    assert settings.hub_default_tenant_id == ""
+
+
+def test_linter_rejects_live_profile_missing_hub_default_tenant_id(tmp_path):
+    """LIVE profile missing HUB_DEFAULT_TENANT_ID must produce a validation error."""
+    profile_path = tmp_path / "no-hub-tenant-live.env"
+    profile_path.write_text(
+        "APP_ENV=production\n"
+        "TRADE_MODE=LIVE\n"
+        "BROKER_SECRET_BACKEND=postgres\n"
+        "ADMIN_API_KEY=test-admin\n"
+        "CONTROL_PLANE_BACKEND=postgres\n"
+        "SWEEP_STATE_BACKEND=postgres\n"
+        "ENABLE_CAPITAL_CHECKS=true\n"
+        "CAPITAL_LIMITS_JSON={\"A1\": {}}\n"
+        "CAPITAL_FAIL_CLOSED_ON_MISSING_STATE=true\n"
+        "CAPITAL_FAIL_CLOSED_ON_MISSING_NOTIONAL_PRICE=true\n"
+        "ENABLE_RISK_CHECKS=true\n"
+        "RISK_ENABLE_DAILY_LOSS=true\n"
+        "RISK_MAX_DAILY_LOSS=2000\n"
+        "RISK_FAIL_OPEN_ON_MISSING_PNL=false\n"
+        "ENABLE_PROFIT_CHECKS=true\n"
+        "PROFIT_ENABLE_DAILY_TARGET=true\n"
+        "PROFIT_DAILY_TARGET=2000\n"
+        "ORDER_ROUTER_ENFORCE_IDEMPOTENCY=true\n"
+        "POSITION_OWNERSHIP_ENABLED=true\n"
+        "POSITION_OWNERSHIP_UNKNOWN_MODE=block_entries\n"
+        "OWNERSHIP_PERSIST_PENDING_LOCKS=true\n"
+        "ORDER_LIFECYCLE_PERSIST_MARKERS_REQUIRED=true\n"
+        "ENABLE_MULTI_HUB=true\n"
+        "USE_HUB_ROUTER=true\n"
+        "DISABLE_STREAM_WORKER=false\n"
+        "ORDER_SUBMISSION_OUTBOX_ENABLED=true\n"
+        "ORDER_SUBMISSION_OUTBOX_REQUIRED=true\n"
+        "ORDER_SUBMISSION_OUTBOX_BACKEND=postgres\n"
+        "EOD_EXIT_TIME=15:20\n"
+        "EOD_CANCEL_OPEN_ORDERS_ENABLED=true\n"
+        "CIRCUIT_BREAKER_PERSIST_STATE=true\n"
+        "HUB_INSTANCE_NAME=phoenix-live-1\n"
+        "LEADER_LEASE_ENABLED=true\n"
+        "LEADER_LEASE_BACKEND=postgres\n"
+        "CLIENT_LOCAL_IP=10.0.0.1\n"
+        "CLIENT_PUBLIC_IP=1.2.3.4\n"
+        "MAC_ADDRESS=aa:bb:cc:dd:ee:ff\n"
+        "POSITION_SYNC_INTERVAL_SECONDS=30\n"
+        "ORDERS_SYNC_INTERVAL_SECONDS=90\n"
+        "APP_RUNTIME_STARTUP_VALIDATE=true\n"
+        "SCHEMA_CHECK_MODE=strict\n",
+        # Note: HUB_DEFAULT_TENANT_ID is intentionally absent
+        encoding="utf-8",
+    )
+
+    errors = lint_env_profile(profile_path)
+    tenant_errors = [e for e in errors if "HUB_DEFAULT_TENANT_ID" in e]
+    assert tenant_errors, f"Expected HUB_DEFAULT_TENANT_ID error, got: {errors}"
+
+
+def test_linter_accepts_live_profile_with_hub_default_tenant_id(tmp_path):
+    """LIVE profile with HUB_DEFAULT_TENANT_ID set must not produce a tenant-ID error."""
+    profile_path = tmp_path / "with-hub-tenant-live.env"
+    profile_path.write_text(
+        "APP_ENV=production\n"
+        "TRADE_MODE=LIVE\n"
+        "BROKER_SECRET_BACKEND=postgres\n"
+        "ADMIN_API_KEY=test-admin\n"
+        "CONTROL_PLANE_BACKEND=postgres\n"
+        "SWEEP_STATE_BACKEND=postgres\n"
+        "ENABLE_CAPITAL_CHECKS=true\n"
+        "CAPITAL_LIMITS_JSON={\"A1\": {}}\n"
+        "CAPITAL_FAIL_CLOSED_ON_MISSING_STATE=true\n"
+        "CAPITAL_FAIL_CLOSED_ON_MISSING_NOTIONAL_PRICE=true\n"
+        "ENABLE_RISK_CHECKS=true\n"
+        "RISK_ENABLE_DAILY_LOSS=true\n"
+        "RISK_MAX_DAILY_LOSS=2000\n"
+        "RISK_FAIL_OPEN_ON_MISSING_PNL=false\n"
+        "ENABLE_PROFIT_CHECKS=true\n"
+        "PROFIT_ENABLE_DAILY_TARGET=true\n"
+        "PROFIT_DAILY_TARGET=2000\n"
+        "ORDER_ROUTER_ENFORCE_IDEMPOTENCY=true\n"
+        "POSITION_OWNERSHIP_ENABLED=true\n"
+        "POSITION_OWNERSHIP_UNKNOWN_MODE=block_entries\n"
+        "OWNERSHIP_PERSIST_PENDING_LOCKS=true\n"
+        "ORDER_LIFECYCLE_PERSIST_MARKERS_REQUIRED=true\n"
+        "ENABLE_MULTI_HUB=true\n"
+        "USE_HUB_ROUTER=true\n"
+        "DISABLE_STREAM_WORKER=false\n"
+        "ORDER_SUBMISSION_OUTBOX_ENABLED=true\n"
+        "ORDER_SUBMISSION_OUTBOX_REQUIRED=true\n"
+        "ORDER_SUBMISSION_OUTBOX_BACKEND=postgres\n"
+        "EOD_EXIT_TIME=15:20\n"
+        "EOD_CANCEL_OPEN_ORDERS_ENABLED=true\n"
+        "CIRCUIT_BREAKER_PERSIST_STATE=true\n"
+        "HUB_INSTANCE_NAME=phoenix-live-1\n"
+        "HUB_DEFAULT_TENANT_ID=tenant-1\n"
+        "LEADER_LEASE_ENABLED=true\n"
+        "LEADER_LEASE_BACKEND=postgres\n"
+        "CLIENT_LOCAL_IP=10.0.0.1\n"
+        "CLIENT_PUBLIC_IP=1.2.3.4\n"
+        "MAC_ADDRESS=aa:bb:cc:dd:ee:ff\n"
+        "POSITION_SYNC_INTERVAL_SECONDS=30\n"
+        "ORDERS_SYNC_INTERVAL_SECONDS=90\n"
+        "APP_RUNTIME_STARTUP_VALIDATE=true\n"
+        "SCHEMA_CHECK_MODE=strict\n",
+        encoding="utf-8",
+    )
+
+    errors = lint_env_profile(profile_path)
+    tenant_errors = [e for e in errors if "HUB_DEFAULT_TENANT_ID" in e]
+    assert tenant_errors == [], f"Unexpected HUB_DEFAULT_TENANT_ID errors: {tenant_errors}"

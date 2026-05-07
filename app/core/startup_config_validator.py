@@ -758,6 +758,23 @@ def validate_runtime_startup_settings(
                 "(prevents state bleed across stacks sharing the same Postgres)"
             )
 
+        # Gate: HUB_DEFAULT_TENANT_ID must be set in LIVE.
+        # It is the default tenant used by strategy_bridge, trade_records, and hub routing
+        # when a caller does not provide a tenant explicitly. An empty value falls through
+        # to "tenant-1" (the settings default), which is correct for the reference single-
+        # tenant OCI compose. However, if the operator explicitly clears it or misconfigures
+        # it, routing silently targets the wrong tenant. Require it to be non-empty and
+        # explicitly configured in LIVE so operators cannot silently inherit the default.
+        hub_default_tenant_id = str(
+            getattr(settings, "hub_default_tenant_id", "") or ""
+        ).strip()
+        if not hub_default_tenant_id:
+            errors.append(
+                "TRADE_MODE=LIVE requires HUB_DEFAULT_TENANT_ID to be set to the operator's "
+                "production tenant identifier. The default 'tenant-1' is acceptable if that is "
+                "the correct tenant, but it must be explicitly set in the env file."
+            )
+
         # Gate: DASHBOARD_AUTH_DISABLED must be false in LIVE
         if dashboard_auth_disabled:
             errors.append(
