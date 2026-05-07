@@ -8,7 +8,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Dict, Optional, Set
+from typing import Any, Dict, Optional, Set
 from app.brokers.factory import create_broker_client
 from app.config.settings import get_settings
 from app.core.identifiers import BrokerAccountId
@@ -74,6 +74,7 @@ class Hub:
         *,
         pnl_engine: Optional[PnLEngine] = None,
         position_ownership_store: Optional[PositionOwnershipStore] = None,
+        external_fill_reconciler: Optional[Any] = None,
     ) -> None:
         self._settings = get_settings()
         self._reconcile_verbose = bool(
@@ -82,6 +83,7 @@ class Hub:
         self._state_store = state_store or StateStore()
         self._pnl_engine = pnl_engine
         self._position_ownership_store = position_ownership_store
+        self._external_fill_reconciler = external_fill_reconciler
         self._account_runners: Dict[BrokerAccountId, AccountRunner] = {}
         self._runner_tasks: Dict[BrokerAccountId, asyncio.Task[None]] = {}
         self._subscription_watchdog_task: Optional[asyncio.Task[None]] = None
@@ -450,6 +452,7 @@ class Hub:
                     state_store=self._state_store,
                     pnl_engine=self._pnl_engine,
                     position_ownership_store=self._position_ownership_store,
+                    external_fill_reconciler=self._external_fill_reconciler,
                 )
                 self._account_runners[broker_account_id] = runner
                 if self._reconcile_verbose:

@@ -84,6 +84,7 @@ class AccountRunner:
         state_store: StateStore,
         pnl_engine: Optional[PnLEngine] = None,
         position_ownership_store: Optional[PositionOwnershipStore] = None,
+        external_fill_reconciler: Optional[Any] = None,
         poll_interval_seconds: float = 15.0,
     ) -> None:
         self._tenant_id = tenant_id
@@ -104,6 +105,7 @@ class AccountRunner:
         self._state_store = state_store
         self._pnl_engine = pnl_engine
         self._position_ownership_store = position_ownership_store
+        self._external_fill_reconciler = external_fill_reconciler
         self._poll_interval = max(1.0, float(poll_interval_seconds))
         self._shadow_heartbeat_interval_seconds = max(
             5.0,
@@ -645,6 +647,25 @@ class AccountRunner:
                 snapshot_count=len(orders),
                 active_count=len(active_orders),
             )
+            # Reconcile external fills (orders Phoenix didn't place via
+            # OrderRouter — manual broker UI exits, broker-side stops, etc.)
+            # into the PnL ledger so pnl_snapshots stays in sync with broker
+            # truth. Skips Phoenix-placed orders (those go through the normal
+            # emit_trade path) and is idempotent across runner restarts via
+            # trade_processed_markers.
+            if self._external_fill_reconciler is not None:
+                try:
+                    self._external_fill_reconciler.reconcile_orders(
+                        tenant_id=self._tenant_id,
+                        broker_account_id=self._broker_account_id,
+                        orders=orders,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "AccountRunner external-fill reconcile failed for %s: %s",
+                        self.broker_account_id,
+                        exc,
+                    )
         except Exception as exc:
             logger.warning(
                 "AccountRunner orders sync failed for %s: %s",

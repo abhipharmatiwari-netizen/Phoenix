@@ -345,9 +345,24 @@ class HubRuntime:
         # Hub + state store
         self.position_ownership_store = build_position_ownership_store()
         self.order_submission_outbox = build_order_submission_outbox()
+        # Single shared processed-trade store: OrderLifecycleService and the
+        # external-fill reconciler both atomically claim_processed against
+        # the same backing store so a fill is booked exactly once regardless
+        # of which path observes it first.
+        from app.orders.trade_processed_store import build_processed_trade_store
+        self.processed_trade_store = build_processed_trade_store()
+        # Reconciler ingests broker-side fills that Phoenix didn't place
+        # (manual UI exits, broker-side stops). Constructed before the Hub
+        # so the Hub can pass it to each AccountRunner at creation time.
+        from app.orders.external_fill_reconciler import ExternalFillReconciler
+        self.external_fill_reconciler = ExternalFillReconciler(
+            pnl_engine=self.pnl_engine,
+            processed_store=self.processed_trade_store,
+        )
         self.hub = Hub(
             pnl_engine=self.pnl_engine,
             position_ownership_store=self.position_ownership_store,
+            external_fill_reconciler=self.external_fill_reconciler,
         )
         self.state_store: StateStore = self.hub.state_store
         self.profit_lock_manager = ProfitLockManager(
@@ -362,6 +377,7 @@ class HubRuntime:
             state_store=self.state_store,
             pnl_engine=self.pnl_engine,
             position_ownership_store=self.position_ownership_store,
+            processed_store=self.processed_trade_store,
             submission_outbox=self.order_submission_outbox,
             clock=self.clock,
         )
