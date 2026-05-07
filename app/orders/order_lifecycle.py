@@ -945,6 +945,32 @@ class OrderLifecycleService:
         record = self._position_records.get(str(scope_key))
         return copy.deepcopy(record) if record is not None else None
 
+    def force_clear_position_record(
+        self,
+        *,
+        scope_key: str,
+        reason: str,
+    ) -> Optional[InternalPosition]:
+        """Forcibly clear a stuck position record by setting it to FLAT.
+
+        Bypasses the state-machine transition table because the typical caller
+        is an operator-driven admin endpoint cleaning up records that the
+        machine cannot drain on its own (e.g. flip-fill RECOVERY_PENDING
+        residue). The caller is responsible for confirming the broker side is
+        actually flat *before* invoking this.
+
+        Returns a deepcopy of the prior record (for audit), or None if no such
+        record exists.
+        """
+        record = self._position_records.get(str(scope_key))
+        if record is None:
+            return None
+        prior = copy.deepcopy(record)
+        record.position_state = PositionState.FLAT
+        record.state_reason = str(reason or "force_cleared_by_admin")
+        record.last_reconciled_at = self._clock.now_utc()
+        return prior
+
     def _transition_order_state(
         self,
         ctx: SubmissionContext,

@@ -134,6 +134,18 @@ class ResolveOrphanReviewRequest(BaseModel):
     reason: str
 
 
+class ClearPositionRecordRequest(BaseModel):
+    """Force-clear a stuck internal_position_records row to FLAT.
+
+    Use ONLY after the broker side has been confirmed flat (manually squared
+    or via reconciliation). The endpoint refuses by default if the broker
+    still reports non-zero qty for the contract; pass force=True to override.
+    """
+    scope_key: str  # full scope key as stored in internal_position_records
+    reason: str
+    force: bool = False  # bypass the broker-flat safety check
+
+
 class AuditEventListResponse(BaseModel):
     count: int
     events: list[dict[str, Any]] = Field(default_factory=list)
@@ -587,6 +599,181 @@ def manual_sweep(
         request_id=_request_id_from_request(request),
     )
     return {"status": "ok", "result": result}
+
+
+# Force-clear a stuck internal_position_records row to FLAT.
+#
+# Designed for the recovery scenario surfaced by the 2026-05-07 A1 incident:
+# a flip-the-trade single fill parked the record in RECOVERY_PENDING and the
+# entire account runner couldn't drain. Operators previously had to do a
+# stop-backend / hand-edit-Postgres / start-backend dance documented in
+# ops/cleanup_a1_stuck_state_20260507.sql; this endpoint replaces that with
+# an audited, rate-limited HTTP action.
+#
+# Safety:
+#  - Requires OPERATOR role.
+#  - Refuses by default if Phoenix's view of broker positions still shows
+#    a non-zero net qty for that contract (operator must square broker side
+#    first). Pass force=True to override; force=True is recorded in audit.
+#  - Mutates only the in-memory record + the matching position_ownership_ledger
+#    row. The record's persisted state will reflect FLAT on the next periodic
+#    save_position_records flush, OR immediately via a parallel UPDATE here.
+@router.post("/state/clear-position-record")
+def clear_position_record(
+    request: Request,
+    payload: ClearPositionRecordRequest,
+    ctx: AdminContext = Depends(get_admin_context),
+):
+    ctx.require_role(AdminRole.OPERATOR)
+    check_rate_limit(request)
+
+    runtime = get_hub_runtime()
+    lifecycle = getattr(runtime, "order_lifecycle", None)
+    if lifecycle is None:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Order lifecycle service not available on this runtime.",
+        )
+
+    # Look up the record so we can derive the broker_account_id for the
+    # safety check and emit a complete audit "before" snapshot.
+    prior = lifecycle.get_position_record(scope_key=payload.scope_key)
+    if prior is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No internal position record for scope_key={payload.scope_key!r}.",
+        )
+
+    broker_account_id = str(prior.account_id or "")
+    contract_key_text = str(prior.contract_key or "")
+
+    # Safety check: broker must be flat for this contract unless force=True.
+    broker_net_qty: float | None = None
+    if not payload.force:
+        try:
+            positions = runtime.state_store.get_positions(broker_account_id) or []
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Could not read broker positions for safety check: {exc}",
+            ) from exc
+        for pos in positions:
+            sym = str(_position_field(pos, "symbol") or "")
+            ctx_text = repr(getattr(pos, "contract_key", None)) if hasattr(pos, "contract_key") else ""
+            if contract_key_text and (contract_key_text in ctx_text or contract_key_text == ctx_text):
+                qty = _position_field(pos, "quantity")
+                try:
+                    broker_net_qty = float(qty or 0)
+                except (TypeError, ValueError):
+                    broker_net_qty = None
+                if broker_net_qty and abs(broker_net_qty) > 0.0001:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=(
+                            f"Broker still reports net_qty={broker_net_qty} for {sym} "
+                            f"under scope {payload.scope_key!r}. Square the broker side "
+                            "first or pass force=true to override."
+                        ),
+                    )
+
+    cleared = lifecycle.force_clear_position_record(
+        scope_key=payload.scope_key,
+        reason=payload.reason or "force_cleared_by_admin",
+    )
+    if cleared is None:
+        # Lost a race: record disappeared between get_position_record() and
+        # force_clear_position_record() — treat as already-cleared.
+        return {"status": "noop", "reason": "record_disappeared_between_lookup_and_clear"}
+
+    # Best-effort: also delete the matching position_ownership_ledger row
+    # so the next reconcile cycle starts from a clean slate. Failures here
+    # are non-fatal — the operator can re-run cleanup if needed.
+    ledger_deleted = 0
+    try:
+        from app.data.postgres import connect_with_retry, get_control_plane_dsn
+
+        with connect_with_retry(get_control_plane_dsn()) as conn:
+            # Persist the FLAT record immediately so a subsequent restart
+            # cannot resurrect the prior state via load_position_records.
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE internal_position_records "
+                    "SET position_state = 'FLAT', "
+                    "    state_reason = %s, "
+                    "    last_reconciled_at = NOW(), "
+                    "    updated_at = NOW() "
+                    "WHERE scope_key = %s",
+                    (payload.reason or "force_cleared_by_admin", payload.scope_key),
+                )
+                # Drop the matching ownership ledger row if we can derive it
+                # from the position record's contract metadata. The contract
+                # key is stored as a tuple repr like "('NG', '2026-05-22',
+                # '255', 'CE', 'INTRADAY')" — we parse it loosely.
+                contract_text = str(prior.contract_key or "").strip()
+                if contract_text.startswith("(") and contract_text.endswith(")"):
+                    try:
+                        parts = [
+                            p.strip().strip("'").strip('"')
+                            for p in contract_text[1:-1].split(",")
+                        ]
+                        if len(parts) >= 5:
+                            cur.execute(
+                                "DELETE FROM position_ownership_ledger "
+                                "WHERE broker_account_id = %s AND underlying = %s "
+                                "AND expiry = %s AND strike = %s "
+                                "AND option_right = %s",
+                                (broker_account_id, parts[0], parts[1], parts[2], parts[3]),
+                            )
+                            ledger_deleted = cur.rowcount or 0
+                    except Exception:  # noqa: BLE001
+                        # Parse failure is non-fatal.
+                        pass
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        # Persistence failure does not roll back the in-memory clear; the
+        # next periodic save_position_records cycle will sync FLAT to DB.
+        # We surface it in the audit event so operators can re-run if needed.
+        emit_audit_event(
+            actor=ctx.caller,
+            action="clear_position_record_persist_failed",
+            resource_type="internal_position_record",
+            resource_id=payload.scope_key,
+            after={"error": repr(exc)},
+            request_id=_request_id_from_request(request),
+        )
+
+    emit_audit_event(
+        actor=ctx.caller,
+        action="clear_position_record",
+        resource_type="internal_position_record",
+        resource_id=payload.scope_key,
+        before={
+            "position_state": prior.position_state.value if hasattr(prior.position_state, "value") else str(prior.position_state),
+            "state_reason": prior.state_reason,
+            "side": prior.side,
+            "net_qty": prior.net_qty,
+            "filled_qty_open": prior.filled_qty_open,
+            "filled_qty_close": prior.filled_qty_close,
+            "broker_account_id": broker_account_id,
+            "tenant_id": prior.tenant_id,
+            "contract_key": prior.contract_key,
+        },
+        after={
+            "position_state": "FLAT",
+            "state_reason": payload.reason or "force_cleared_by_admin",
+            "force": payload.force,
+            "broker_net_qty_at_clear": broker_net_qty,
+            "ledger_rows_deleted": ledger_deleted,
+        },
+        request_id=_request_id_from_request(request),
+    )
+
+    return {
+        "status": "ok",
+        "scope_key": payload.scope_key,
+        "prior_state": prior.position_state.value if hasattr(prior.position_state, "value") else str(prior.position_state),
+        "ledger_rows_deleted": ledger_deleted,
+    }
 
 
 # Trigger manual EOD exit for a given tenant/account (elevated admin only).
