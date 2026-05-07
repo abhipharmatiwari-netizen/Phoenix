@@ -9,6 +9,18 @@ import Card from '../components/shared/Card';
 const REFRESH_MS = 15_000;
 const ALL_STRATEGIES = '__all__';
 
+// Friendly labels for sentinel strategy_ids that escape from the backend
+// pnl_snapshots schema. The wire value (used in API queries) stays as the
+// raw sentinel; only the display text changes.
+const STRATEGY_LABELS: Record<string, string> = {
+  __external__: 'External fills (manual / broker-side)',
+  __account_seed__: 'Account aggregate',
+};
+
+function strategyLabel(strategyId: string): string {
+  return STRATEGY_LABELS[strategyId] ?? strategyId;
+}
+
 const Pnl: React.FC = () => {
   const [accounts, setAccounts] = useState<BrokerAccount[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState('');
@@ -128,14 +140,18 @@ const Pnl: React.FC = () => {
           style={{ padding: '0.4rem 0.75rem', border: '1px solid #d1d5db', borderRadius: 4 }}
         >
           <option value={ALL_STRATEGIES}>All strategies</option>
-          {strategies.map(s => <option key={s} value={s}>{s}</option>)}
+          {strategies.map(s => (
+            <option key={s} value={s}>
+              {strategyLabel(s)}
+            </option>
+          ))}
         </select>
       </div>
 
       {error && <StaleBanner message={error} variant="danger" />}
       {strategyUnknown && (
         <StaleBanner
-          message={`No PnL snapshot recorded yet for strategy "${selectedStrategy}". Showing live unrealized PnL and exposure from open positions; realized will appear once trades complete.`}
+          message={`No PnL snapshot recorded yet for strategy "${strategyLabel(selectedStrategy)}". Showing live unrealized PnL and exposure from open positions; realized will appear once trades complete.`}
           variant="warning"
         />
       )}
