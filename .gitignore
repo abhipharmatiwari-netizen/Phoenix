@@ -39,6 +39,8 @@ Thumbs.db
 *.env.runtime
 *.runtime.env
 .env.runtime
+.env.oci-live
+.env.oci-live.*
 
 # Virtual environments
 .venv/
