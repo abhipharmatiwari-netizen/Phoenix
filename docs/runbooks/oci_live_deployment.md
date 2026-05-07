@@ -59,6 +59,42 @@ Required values:
 
 Secrets are files under `/run/secrets/`, not values committed to env templates.
 
+## Building and Pushing a New Image
+
+Two scripts are available. Use only one per deployment.
+
+### Token-based (operator auth token from OCI Console)
+
+```bash
+OCIR_AUTH_TOKEN=<token> OCIR_USERNAME=<ns>/<domain>/<user> \
+  sh /opt/phoenix/app/scripts/ops/build_and_push_image.sh
+```
+
+### Instance-principal (VM IAM policy, token from OCI Vault)
+
+```bash
+OCIR_NAMESPACE=<ns> OCIR_USERNAME=<ns>/<domain>/<user> \
+  VAULT_SECRET_OCID=<ocid-of-vault-secret-for-ocir-token> \
+  sh /opt/phoenix/app/scripts/ops/build_push_ip.sh
+```
+
+Both scripts:
+- Verify pre-conditions before building
+- Build a `linux/amd64` image tagged with the current git SHA
+- Push to OCIR and update `IMAGE_TAG` in `phoenix-deploy.env`
+- Print the SHA on completion — they do **not** restart the container
+
+After push, **separately** run:
+
+```bash
+sh /opt/phoenix/app/scripts/ops/redeploy_backend.sh
+```
+
+`redeploy_backend.sh` prompts for confirmation, pulls the image pinned in `phoenix-deploy.env`,
+restarts the backend, and polls `/readyz` with a 120-second timeout before returning.
+
+---
+
 ## Secret Refresh
 
 Run on the OCI VM as the operator user with instance-principal OCI access:
@@ -229,3 +265,47 @@ The operator on duty owns:
 - proving Postgres migrations and control-plane rows
 - capturing release evidence
 - holding or rolling back on any readiness or reconciliation blocker
+
+---
+
+## Override File Migration (one-time, from pre-2026-05-07 deployments)
+
+If the VM is running a `phoenix-override.yml` created before 2026-05-07, apply these
+changes before the next deploy. Each change is independent — do not skip any.
+
+| Old value | New value | Why |
+|---|---|---|
+| `LIVE_PG_SSL_SKIP_CHECK: "true"` | Remove the line | Remote Postgres must use SSL |
+| `CONTROL_PLANE_PG_SSLMODE: "prefer"` | `CONTROL_PLANE_PG_SSLMODE: "require"` | Enforce SSL |
+| `REMOTE_DEPLOYMENT: "false"` | `REMOTE_DEPLOYMENT: "true"` | Correct runtime classification |
+| `CONTROL_PLANE_DB_DSN: "postgresql://phoenix_app@phoenix-oci-postgres:5432/phoenix"` | Remove this line (use env-file PG vars instead) | Container-local Postgres is no longer used |
+| `ANGEL_HTTPS_PROXY` / `HTTPS_PROXY` hardcoded to proxy IP | Comment out if Angel One accepts the OCI IP directly; otherwise update to current proxy IP | Config drift |
+| 8 source-code bind mounts under `volumes:` | Remove all of them | Deploy pinned OCIR image; no code overlays |
+| nginx `volumes: /opt/phoenix/nginx-ssl-prerendered.conf.template:/tmp/nginx.conf.template:ro` | Change to `/opt/phoenix/app/nginx/nginx-ssl.conf.template:/tmp/nginx.conf.template:ro` | Use repo-tracked template directly |
+
+After updating the override file, validate that compose config resolves without errors:
+
+```bash
+CONTROL_PLANE_PG_PASSWORD_HOST=dummy \
+docker compose \
+  -f /opt/phoenix/app/docker-compose.oci-live.yml \
+  -f /opt/phoenix/phoenix-override.yml \
+  --env-file /opt/phoenix/phoenix-deploy.env \
+  config --quiet
+```
+
+Then remove `nginx-ssl-prerendered.conf.template` from the VM if it is no longer referenced:
+
+```bash
+ls -la /opt/phoenix/nginx-ssl-prerendered.conf.template
+# Remove only after verifying nginx container uses the repo template
+# sudo rm /opt/phoenix/nginx-ssl-prerendered.conf.template
+```
+
+Test Postgres SSL connectivity before cutting over:
+
+```bash
+PGPASSWORD=$(sudo cat /run/secrets/control_plane_pg_password) \
+  psql "postgresql://phoenix_app@<CONTROL_PLANE_PG_HOST>:5432/phoenix?sslmode=require" \
+  -c "SELECT 1;"
+```
