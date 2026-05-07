@@ -89,7 +89,7 @@ const TopNav: React.FC = () => {
 
   return (
     <div className="top-nav">
-      <div className="logo">Phoenix v9</div>
+      <div className="logo">Phoenix</div>
       <div className="tenant-selector">
         {sortedTenantOptions.length > 0 ? (
           <>

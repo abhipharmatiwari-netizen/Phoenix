@@ -101,7 +101,13 @@ def _int_env(name: str, default: int) -> int:
         return int(default)
 
 
-class _OrderTradeCsvWriter:
+class OrderTradeCsvWriter:
+    """Per-fill orders/trades CSV writer.
+
+    Public so OrderLifecycleService can reuse the same writer in the LIVE
+    fill path (where OrderRouter's own writer is bypassed because terminal
+    fill emission goes through the lifecycle service rather than the router).
+    """
     def __init__(
         self,
         *,
@@ -202,7 +208,7 @@ class _AsyncOrderTradeCsvWriter:
     Keeps file writes off the OrderRouter submit_order critical path.
     """
 
-    def __init__(self, *, writer: _OrderTradeCsvWriter, max_queue_size: int) -> None:
+    def __init__(self, *, writer: OrderTradeCsvWriter, max_queue_size: int) -> None:
         self._writer = writer
         self._queue: "queue.Queue[Optional[tuple[str, dict[str, Any], str]]]" = queue.Queue(
             maxsize=max(1, int(max_queue_size))
@@ -416,7 +422,7 @@ class OrderRouter:
             tz_name = getattr(get_settings(), "default_time_zone", None) or "UTC"
         except Exception:
             tz_name = "UTC"
-        self._csv_writer = _OrderTradeCsvWriter(
+        self._csv_writer = OrderTradeCsvWriter(
             base_dir=base_dir,
             tz_name=tz_name,
             clock=self._clock,
