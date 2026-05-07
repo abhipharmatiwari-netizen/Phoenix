@@ -1,6 +1,6 @@
-﻿# Kill Switch â€” Operational Reference
+# Kill Switch — Operational Reference
 
-**Architecture reference:** Â§12, Â§12.1, P0 rules
+**Architecture reference:** §12, §12.1, P0 rules
 
 ---
 
@@ -21,18 +21,18 @@ Scopes: `GLOBAL`, `TENANT`, `ACCOUNT`, `STRATEGY`.
 In the current hub-authoritative runtime:
 
 - The hub-path `GlobalKillSwitchInterceptor` (`app/orders/interceptors.py`) blocks new entry orders when `GLOBAL_KILL` environment variable is truthy and `order_router_enforce_global_kill_switch=true`.
-- The legacy stream path uses `RiskManager.kill_switch_activated` â€” a boolean that is persisted to `risk_positions.json` in the legacy path.
-- In LIVE hub mode, kill switch durability must use the durable Postgres-backed kill switch state. The `KillSwitchManager` state machine (`app/risk/kill_switch.py`) implements the formal `INACTIVE â†’ TRIPPED â†’ CLEAR_PENDING â†’ CLEARED â†’ INACTIVE` workflow.
+- The legacy stream path uses `RiskManager.kill_switch_activated` — a boolean that is persisted to `risk_positions.json` in the legacy path.
+- In LIVE hub mode, kill switch durability must use the durable Postgres-backed kill switch state. The `KillSwitchManager` state machine (`app/risk/kill_switch.py`) implements the formal `INACTIVE → TRIPPED → CLEAR_PENDING → CLEARED → INACTIVE` workflow.
 
 ---
 
 ## How the kill switch is tripped
 
-### Automatic â€” daily loss threshold
+### Automatic — daily loss threshold
 
 When realized plus unrealized PnL for an account/strategy crosses the configured daily loss threshold, the system automatically activates the kill switch for that scope.
 
-### Manual â€” global kill switch via environment
+### Manual — global kill switch via environment
 
 Setting `GLOBAL_KILL=1` (or `true`) in the backend environment and restarting blocks all new entry orders at the router interceptor level regardless of PnL.
 
@@ -82,17 +82,17 @@ Filter for `resource_type=kill_switch` or `action=kill_switch.trip`.
 The `KillSwitchManager` (`app/risk/kill_switch.py`) implements a formal four-step state machine for clearing:
 
 ```
-TRIPPED â†’ (request_clear + validation) â†’ CLEAR_PENDING â†’ (confirm_clear) â†’ CLEARED â†’ (rearm) â†’ INACTIVE
+TRIPPED → (request_clear + validation) → CLEAR_PENDING → (confirm_clear) → CLEARED → (rearm) → INACTIVE
 ```
 
-Rules enforced before clearing (per ARCHITECTURE.md Â§12.1):
+Rules enforced before clearing (per ARCHITECTURE.md §12.1):
 - Required control inputs must be fresh and available.
 - No unresolved `RECONCILING` or `ORPHAN_REVIEW` positions may exist for the same control scope (unless a separately audited break-glass override is used).
 - Clearing never happens implicitly on restart, on a profitable tick, or on a broker poll.
 
 ### HTTP API (authenticated, requires OPERATOR role)
 
-The following endpoints are now wired and fully operational:
+The following endpoints are wired and fully operational:
 
 ```http
 # Trip a kill switch
@@ -100,20 +100,27 @@ POST /admin/kill-switch/trip
 X-Admin-Key: <ADMIN_API_KEY>
 {"scope": "GLOBAL", "scope_id": "GLOBAL", "reason": "Daily loss threshold exceeded"}
 
-# Request a clear (TRIPPED â†’ CLEAR_PENDING)
+# Request a clear (TRIPPED → CLEAR_PENDING)
 POST /admin/kill-switch/request-clear
 X-Admin-Key: <ADMIN_API_KEY>
 {"scope": "GLOBAL", "scope_id": "GLOBAL", "reason_code": "loss_resolved", "break_glass": false}
 
-# Confirm the clear (CLEAR_PENDING â†’ CLEARED)
+# Confirm the clear (CLEAR_PENDING → CLEARED)
 POST /admin/kill-switch/confirm-clear
 X-Admin-Key: <ADMIN_API_KEY>
 {"scope": "GLOBAL", "scope_id": "GLOBAL"}
 
-# Re-arm (CLEARED â†’ INACTIVE â€” trading resumes)
+# STEP 1 of rearm — issue a step-up token (LIVE only, 5-minute TTL)
+POST /admin/step-up/issue
+X-Admin-Key: <ADMIN_API_KEY>
+{"action_class": "kill_switch_rearm", "resource_id": "GLOBAL"}
+# → returns {"token_id": "<TOKEN_ID>", "expires_at": ...}
+
+# STEP 2 of rearm — Re-arm (CLEARED → INACTIVE — trading resumes)
+# In LIVE mode step_up_token is mandatory; in PAPER/SHADOW it is optional.
 POST /admin/kill-switch/rearm
 X-Admin-Key: <ADMIN_API_KEY>
-{"scope": "GLOBAL", "scope_id": "GLOBAL"}
+{"scope": "GLOBAL", "scope_id": "GLOBAL", "step_up_token": "<TOKEN_ID>"}
 
 # Query current state
 GET /admin/kill-switch/state
@@ -121,22 +128,23 @@ X-Admin-Key: <ADMIN_API_KEY>
 ```
 
 All mutations are audited (resource_type=kill_switch) and persisted to Postgres immediately.
+Step-up token issuance and consumption are also audited (resource_type=step_up_token).
 
-> **Important (Â§132):** `CLEARED` does **not** restore entry eligibility.
+> **Important (§132):** `CLEARED` does **not** restore entry eligibility.
 > After `confirm_clear` succeeds, the state is `CLEARED` but new entries are
 > still blocked until the operator explicitly calls `rearm` to transition to
-> `INACTIVE`.  Failing to call `rearm` will leave the system in `CLEARED`
-> state indefinitely â€” strategy signals will fire but orders will be blocked.
-> Current implementation note: `rearm` requires OPERATOR role authentication but
-> does not currently require a step-up token. Treat re-arm as a maker-checker
-> operational action outside the app until step-up enforcement is wired for this
-> endpoint.
+> `INACTIVE`. Failing to call `rearm` will leave the system in `CLEARED`
+> state indefinitely — strategy signals will fire but orders will be blocked.
+>
+> **In LIVE mode, `rearm` requires a valid `kill_switch_rearm` step-up token
+> (Architecture §15.4). Issue the token immediately before calling rearm — the
+> TTL is 5 minutes and tokens are single-use.**
 
 ---
 
 ## Practical clear procedures
 
-### Hub path â€” global kill switch via environment variable
+### Hub path — global kill switch via environment variable
 
 If the kill switch was activated by setting `GLOBAL_KILL=1`:
 
@@ -149,9 +157,9 @@ If the kill switch was activated by setting `GLOBAL_KILL=1`:
 4. Verify in logs that startup validation passes and no kill switch activation is logged.
 5. Confirm fresh entries are flowing through the order router without `ORDER_REJECTED_GLOBAL_KILL` blocks.
 
-### Legacy path â€” in-memory kill switch
+### Legacy path — in-memory kill switch
 
-The legacy `RiskManager.kill_switch_activated` is reset on restart because it is in-memory. In LIVE hub mode, do not rely on restart alone to clear a durable kill switch â€” verify via logs and audit trail that the activating condition is resolved first.
+The legacy `RiskManager.kill_switch_activated` is reset on restart because it is in-memory. In LIVE hub mode, do not rely on restart alone to clear a durable kill switch — verify via logs and audit trail that the activating condition is resolved first.
 
 ### Postgres-backed kill switch
 
@@ -198,4 +206,4 @@ If a clear or rearm was issued incorrectly, immediately trip the same scope agai
 
 - [Break-Glass Flatten](break_glass_flatten.md)
 - [Orphan Review](resolve_orphan_review.md)
-- `ARCHITECTURE.md` Â§12, Â§12.1
+- `ARCHITECTURE.md` §12, §12.1

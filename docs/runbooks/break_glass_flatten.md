@@ -4,7 +4,13 @@
 
 Use this runbook when a live position must be forcibly exited through an audited operator action, bypassing normal strategy-driven exit logic. This is an emergency path. Use it only when automated exits are unavailable or blocked.
 
-> **Current LIVE approval note:** the endpoint requires `step_up_token` in `TRADE_MODE=LIVE`. The repo contains the token service (`app/security/step_up.py`) but no HTTP issuer route. This runbook is **not approved for LIVE use** unless a valid BREAK_GLASS token has been issued through an approved operator process before the request.
+> **LIVE pre-requisite:** `POST /admin/break-glass/flatten` requires a valid `step_up_token` in `TRADE_MODE=LIVE`. Issue one immediately before calling this endpoint (5-minute TTL, single-use):
+> ```http
+> POST /admin/step-up/issue
+> X-Admin-Key: <ADMIN_API_KEY>
+> {"action_class": "break_glass", "resource_id": "<contract-key>"}
+> ```
+> Use the returned `token_id` as `step_up_token` in the flatten request below.
 
 ## Purpose
 
@@ -53,7 +59,7 @@ Before calling this endpoint:
 - An active `AccountRunner` is running for the target `broker_account_id`.
 - An authoritative live position for the contract exists in the runtime `StateStore`.
 - You have `ADMIN` credentials (`ADMIN_API_KEY` via `X-Admin-Key`, or an authenticated admin JWT).
-- In LIVE, you have a valid single-use BREAK_GLASS `step_up_token` issued by an approved operator process.
+- In LIVE, you have a valid single-use BREAK_GLASS `step_up_token` obtained from `POST /admin/step-up/issue` (see header note above).
 
 ---
 

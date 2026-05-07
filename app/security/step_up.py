@@ -254,12 +254,13 @@ def issue_step_up_token(
     with _STORE_LOCK:
         _STORE[token_id] = tok
     emit_audit_event(
-        "step_up_issued",
-        {
-            "actor": actor,
+        actor=actor,
+        action="step_up_issued",
+        resource_type="step_up_token",
+        resource_id=token_id,
+        metadata={
             "action_class": action_class.value,
             "resource_id": resource_id,
-            "token_id": token_id,
             "expires_at": tok.expires_at,
         },
     )
@@ -317,12 +318,13 @@ def consume_step_up_token(
     # Persist consumed state to Postgres (best-effort; already marked in-memory). (#110)
     _persist_consumed(token_id)
     emit_audit_event(
-        "step_up_consumed",
-        {
-            "actor": actor,
+        actor=actor,
+        action="step_up_consumed",
+        resource_type="step_up_token",
+        resource_id=token_id,
+        metadata={
             "action_class": action_class.value,
             "resource_id": resource_id,
-            "token_id": token_id,
         },
     )
     logger.info(
@@ -348,12 +350,13 @@ def approve_step_up_token(
         tok.approver = approver
     _persist_approved(token_id, approver)  # (#110)
     emit_audit_event(
-        "step_up_approved",
-        {
-            "approver": approver,
+        actor=approver,
+        action="step_up_approved",
+        resource_type="step_up_token",
+        resource_id=token_id,
+        metadata={
             "approved_for": tok.actor,
             "action_class": tok.action_class.value,
-            "token_id": token_id,
         },
     )
     return True

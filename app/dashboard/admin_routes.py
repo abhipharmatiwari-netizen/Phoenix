@@ -1100,6 +1100,29 @@ class KillSwitchClearRequestPayload(BaseModel):
 class KillSwitchRearmRequest(BaseModel):
     scope: str
     scope_id: str
+    step_up_token: Optional[str] = Field(
+        None,
+        description=(
+            "Required in LIVE mode. Obtain via POST /admin/step-up/issue "
+            "with action_class=kill_switch_rearm before calling this endpoint."
+        ),
+    )
+
+
+class StepUpIssueRequest(BaseModel):
+    action_class: str = Field(
+        ...,
+        description=(
+            "Dangerous action class for which the token is issued. "
+            "Allowed values: kill_switch_rearm, kill_switch_clear, "
+            "break_glass, strategy_enable, strategy_disable, "
+            "capital_limit_change, user_promote, config_change."
+        ),
+    )
+    resource_id: str = Field(
+        "",
+        description="Optional resource scoping (e.g. scope_id for kill switch, contract for break-glass).",
+    )
 
 
 @router.post("/kill-switch/trip")
@@ -1227,8 +1250,41 @@ def kill_switch_rearm(
     payload: KillSwitchRearmRequest,
     ctx: AdminContext = Depends(get_admin_context),
 ) -> dict:
-    """Rearm a kill switch (CLEARED → INACTIVE). Requires OPERATOR role."""
+    """Rearm a kill switch (CLEARED → INACTIVE). Requires OPERATOR role.
+
+    In LIVE mode, a valid step_up_token with action_class=kill_switch_rearm
+    is mandatory (Architecture §15.4). Obtain one first via
+    POST /admin/step-up/issue with action_class=kill_switch_rearm.
+    """
     ctx.require_role(AdminRole.OPERATOR)
+
+    # §15.4: Require step-up token in LIVE mode before restoring entry eligibility.
+    import os as _os
+    if str(_os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper() == "LIVE":
+        if not payload.step_up_token:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "step_up_token is required to rearm a kill switch in LIVE mode. "
+                    "Issue one first: POST /admin/step-up/issue "
+                    "{\"action_class\": \"kill_switch_rearm\", \"resource_id\": \"<scope_id>\"}."
+                ),
+            )
+        from app.security.step_up import DangerousActionClass, consume_step_up_token
+        if not consume_step_up_token(
+            token_id=payload.step_up_token,
+            actor=ctx.caller,
+            action_class=DangerousActionClass.KILL_SWITCH_REARM,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "step_up_token is invalid, expired, already used, or was not issued "
+                    "to the current actor for kill_switch_rearm. "
+                    "Issue a new token via POST /admin/step-up/issue and retry."
+                ),
+            )
+
     from app.risk.kill_switch import KillSwitchScope
     try:
         scope = KillSwitchScope(payload.scope.upper())
@@ -1283,10 +1339,61 @@ def get_release_evidence(ctx: AdminContext = Depends(get_admin_context)) -> dict
     return evidence
 
 
+@router.post("/step-up/issue")
+def step_up_issue(
+    payload: StepUpIssueRequest,
+    ctx: AdminContext = Depends(get_admin_context),
+) -> dict:
+    """Issue a short-lived step-up token for a dangerous action class.
+
+    Tokens are single-use, 5-minute TTL, actor-bound, and Postgres-persisted
+    in LIVE mode (Architecture §15.4 / issue #110). Requires OPERATOR role.
+
+    Use the returned token_id in the corresponding dangerous operation within
+    the TTL window. Examples:
+    - break-glass flatten  → POST /admin/break-glass/flatten {step_up_token: ...}
+    - kill switch rearm    → POST /admin/kill-switch/rearm   {step_up_token: ...}
+    """
+    ctx.require_role(AdminRole.OPERATOR)
+
+    from app.security.step_up import DangerousActionClass, issue_step_up_token
+
+    try:
+        action_class = DangerousActionClass(payload.action_class.strip().lower())
+    except ValueError:
+        allowed = ", ".join(v.value for v in DangerousActionClass)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unknown action_class {payload.action_class!r}. Allowed: {allowed}.",
+        )
+
+    try:
+        tok = issue_step_up_token(
+            actor=ctx.caller,
+            action_class=action_class,
+            resource_id=payload.resource_id or "",
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    return {
+        "token_id": tok.token_id,
+        "action_class": tok.action_class.value,
+        "resource_id": tok.resource_id,
+        "actor": tok.actor,
+        "expires_at": tok.expires_at,
+        "ttl_seconds": int(tok.expires_at - tok.issued_at),
+    }
+
+
 __all__ = [
     "AdminTestOrderRequest",
     "BreakGlassFlattenRequest",
     "BrokerAccountUpsertRequest",
+    "StepUpIssueRequest",
     "SubscriptionUpsertRequest",
     "TenantUpsertRequest",
     "admin_test_order",
@@ -1296,6 +1403,7 @@ __all__ = [
     "create_or_update_tenant",
     "list_broker_accounts",
     "list_runners",
+    "kill_switch_rearm",
     "list_tenants",
     "manual_eod_exit",
     "manual_sweep",
@@ -1304,4 +1412,5 @@ __all__ = [
     "ResolveOrphanReviewRequest",
     "resolve_orphan_review",
     "router",
+    "step_up_issue",
 ]
