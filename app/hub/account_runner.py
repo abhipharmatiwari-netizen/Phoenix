@@ -330,16 +330,26 @@ class AccountRunner:
             if self._consecutive_balance_failures > 0:
                 prev = self._consecutive_balance_failures
                 self._consecutive_balance_failures = 0
-                emit_audit_event(
-                    actor="system",
-                    action="balance_sync.recovered",
-                    resource_type="broker_account",
-                    resource_id=self.broker_account_id,
-                    metadata={
-                        "tenant_id": self._tenant_id,
-                        "previous_consecutive_failures": prev,
-                    },
-                )
+                # Audit emission is a side-effect, not a correctness invariant;
+                # never let it propagate back into the balance try/except and
+                # poison the recovery path into a self-perpetuating loop.
+                try:
+                    emit_audit_event(
+                        actor="system",
+                        action="balance_sync.recovered",
+                        resource_type="broker_account",
+                        resource_id=self.broker_account_id,
+                        metadata={
+                            "tenant_id": self._tenant_id,
+                            "previous_consecutive_failures": prev,
+                        },
+                    )
+                except Exception:
+                    logger.warning(
+                        "balance_sync.recovered audit emit failed for %s",
+                        self.broker_account_id,
+                        exc_info=True,
+                    )
         except Exception as exc:
             self._consecutive_balance_failures += 1
             failures = self._consecutive_balance_failures
@@ -351,23 +361,32 @@ class AccountRunner:
                     self.broker_account_id,
                     failures,
                     exc,
+                    exc_info=True,
                 )
-                emit_audit_event(
-                    actor="system",
-                    action="balance_sync.persistent_failure",
-                    resource_type="broker_account",
-                    resource_id=self.broker_account_id,
-                    metadata={
-                        "tenant_id": self._tenant_id,
-                        "consecutive_failures": failures,
-                        "last_error": str(exc),
-                    },
-                )
+                try:
+                    emit_audit_event(
+                        actor="system",
+                        action="balance_sync.persistent_failure",
+                        resource_type="broker_account",
+                        resource_id=self.broker_account_id,
+                        metadata={
+                            "tenant_id": self._tenant_id,
+                            "consecutive_failures": failures,
+                            "last_error": str(exc),
+                        },
+                    )
+                except Exception:
+                    logger.warning(
+                        "balance_sync.persistent_failure audit emit failed for %s",
+                        self.broker_account_id,
+                        exc_info=True,
+                    )
             else:
                 logger.warning(
                     "AccountRunner balance sync failed for %s: %s",
                     self.broker_account_id,
                     exc,
+                    exc_info=True,
                 )
 
     # Sync positions into state store with backoff handling.
