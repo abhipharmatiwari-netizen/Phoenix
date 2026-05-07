@@ -60,3 +60,10 @@ debug.log
 
 # OCI log pulls (local diagnostic snapshots, not for commit)
 ops/oci_log_pulls/
+
+# Node.js dependency installs (rebuilt from package-lock.json by Dockerfile/CI;
+# also created locally when running tsc / npm install for typecheck).
+node_modules/
+
+# Frontend build output (produced by the nginx Docker stage; not source).
+frontend/build/
