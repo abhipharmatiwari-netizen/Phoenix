@@ -22,6 +22,10 @@ from app.data.state_store import StateStore
 from app.pnl.pnl_engine import PnLEngine
 from app.pnl.profit_engine import ProfitEngine as SweepProfitEngine
 from app.pnl.profit_lock import ProfitLockManager
+from app.pnl.position_trailing_lock import (
+    PositionTrailingLockDecision,
+    PositionTrailingLockManager,
+)
 from app.orders.router import OrderRouter
 from app.orders.position_ownership import (
     ContractKey,
@@ -1960,9 +1964,207 @@ class EODExitEngine:
                     excluded_exchanges=sorted(self._exclude_exchanges) if self._exclude_exchanges else None,
                 )
 
+# --- Per-position trailing profit lock engine ---------------------------
+# Independent of HubProfitSweepEngine. Iterates each runner's open positions,
+# tracks per-(account, symbol) peak unrealized P&L via PositionTrailingLockManager,
+# and emits a single-position exit when current unrealized P&L falls below
+# peak * (1 - giveback_pct).
+@dataclass
+class PositionTrailingLockEngine:
+    settings: Settings
+    state_store: StateStore
+    order_router: OrderRouter
+    manager: PositionTrailingLockManager
+    clock: IClock = field(default_factory=SystemClock)
+
+    def _enabled(self) -> bool:
+        return bool(getattr(self.settings, "position_trailing_lock_enabled", False))
+
+    @staticmethod
+    def _compute_unrealized_pnl(pos: Any, symbol: str) -> Optional[float]:
+        """Compute live unrealized PnL using the LTP cache + position avg_price.
+
+        Returns None if LTP is unavailable (skip evaluation rather than treat as 0).
+        """
+        try:
+            qty = int(_position_value(pos, "quantity") or 0)
+        except (TypeError, ValueError):
+            return None
+        if qty == 0:
+            return None
+        avg_price = _position_value(pos, "avg_price")
+        if avg_price is None:
+            avg_price = _position_value(pos, "average_price")
+        if avg_price is None:
+            return None
+        try:
+            avg_f = float(avg_price)
+        except (TypeError, ValueError):
+            return None
+        token = _position_symbol_token(pos)
+        ltp = dashboard_bus.get_last_price_for_instrument(symbol=symbol, token=token)
+        if ltp is None and symbol:
+            ltp = dashboard_bus.get_last_price(symbol)
+        if ltp is None:
+            return None
+        return float((float(ltp) - avg_f) * qty)
+
+    async def evaluate_runners(self, runners: Iterable[AccountRunner]) -> None:
+        if not self._enabled():
+            return
+        giveback_pct = float(getattr(self.settings, "position_trailing_lock_giveback_pct", 0.10))
+        floor_inr = float(getattr(self.settings, "position_trailing_lock_floor_inr", 500.0))
+        cooldown = float(
+            getattr(self.settings, "position_trailing_lock_exit_cooldown_seconds", 30.0)
+        )
+        for runner in runners:
+            try:
+                await self._evaluate_runner(
+                    runner,
+                    giveback_pct=giveback_pct,
+                    floor_inr=floor_inr,
+                    cooldown=cooldown,
+                )
+            except Exception as exc:
+                log_event(
+                    logger,
+                    event_type="POSITION_TRAILING_LOCK_RUNNER_ERROR",
+                    message="PositionTrailingLockEngine runner evaluation failed",
+                    level=logging.ERROR,
+                    tenant_id=getattr(runner, "tenant_id", None),
+                    broker_account_id=getattr(runner, "broker_account_id", None),
+                    error=repr(exc),
+                )
+
+    async def _evaluate_runner(
+        self,
+        runner: AccountRunner,
+        *,
+        giveback_pct: float,
+        floor_inr: float,
+        cooldown: float,
+    ) -> None:
+        tenant_id = getattr(runner, "tenant_id", None)
+        broker_account_id = getattr(runner, "broker_account_id", None)
+        if tenant_id is None or broker_account_id is None:
+            return
+        positions = self.state_store.get_positions(broker_account_id) or []
+        live_symbols: set[str] = set()
+        for pos in positions:
+            symbol = str(_position_value(pos, "symbol", "") or "").strip()
+            if not symbol:
+                continue
+            try:
+                qty = int(_position_value(pos, "quantity") or 0)
+            except (TypeError, ValueError):
+                qty = 0
+            if qty == 0:
+                # Position closed since last cycle — clear any persisted state.
+                self.manager.reset_position(tenant_id, broker_account_id, symbol)
+                continue
+            live_symbols.add(symbol)
+            unrealized = self._compute_unrealized_pnl(pos, symbol)
+            if unrealized is None:
+                # No LTP yet — skip; will reattempt next cycle.
+                continue
+            decision = self.manager.evaluate(
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=symbol,
+                current_unrealized_pnl=unrealized,
+                floor_inr=floor_inr,
+                giveback_pct=giveback_pct,
+                exit_cooldown_seconds=cooldown,
+            )
+            if decision.exit_required:
+                await self._emit_exit(runner, pos, decision)
+
+    async def _emit_exit(
+        self,
+        runner: AccountRunner,
+        pos: Any,
+        decision: PositionTrailingLockDecision,
+    ) -> None:
+        tenant_id = runner.tenant_id
+        broker_account_id = runner.broker_account_id
+        reason = decision.exit_reason or "position_giveback_breach"
+        # M3: degraded scope manager check, mirroring _exit_all_positions.
+        from app.core.degraded_scope_manager import degraded_scope_manager
+
+        scope_key = f"{broker_account_id}:{decision.symbol}"
+        if degraded_scope_manager.is_exit_restricted(scope_key):
+            log_event(
+                logger,
+                event_type="POSITION_TRAILING_LOCK_EXIT_RESTRICTED",
+                message="position trailing exit blocked by DegradedScopeManager",
+                level=logging.WARNING,
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=decision.symbol,
+                scope_key=scope_key,
+            )
+            return
+
+        exit_plan = build_position_exit_plan(
+            pos,
+            tag=reason,
+            position_ownership_bypass=True,
+            exit_reason=reason,
+            account_id=str(broker_account_id),
+            strategy_id="system::position_trailing_lock",
+        )
+        if not exit_plan.ok or exit_plan.order_req is None:
+            log_event(
+                logger,
+                event_type="POSITION_TRAILING_LOCK_EXIT_SKIPPED",
+                message="position trailing exit skipped: invalid exit plan",
+                level=logging.WARNING,
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=decision.symbol,
+                peak=decision.peak_unrealized_pnl,
+                current=decision.current_unrealized_pnl,
+                lock_floor=decision.lock_floor,
+                reason=exit_plan.reason,
+            )
+            return
+        try:
+            await self.order_router.submit_order(
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                strategy_id=StrategyId("system::position_trailing_lock"),
+                order_req=exit_plan.order_req,
+            )
+            log_event(
+                logger,
+                event_type="POSITION_TRAILING_LOCK_EXIT_SUBMITTED",
+                message="position trailing exit submitted",
+                level=logging.WARNING,
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=decision.symbol,
+                peak_unrealized_pnl=round(decision.peak_unrealized_pnl, 2),
+                current_unrealized_pnl=round(decision.current_unrealized_pnl, 2),
+                lock_floor=round(decision.lock_floor, 2) if decision.lock_floor is not None else None,
+                exit_reason=reason,
+            )
+        except Exception as exc:
+            log_event(
+                logger,
+                event_type="POSITION_TRAILING_LOCK_EXIT_ERROR",
+                message="position trailing exit submission failed",
+                level=logging.ERROR,
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=decision.symbol,
+                error=repr(exc),
+            )
+
+
 __all__ = [
     "PositionExitPlan",
     "build_position_exit_plan",
     "ProfitSweepEngine",
     "EODExitEngine",
+    "PositionTrailingLockEngine",
 ]

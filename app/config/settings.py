@@ -403,6 +403,39 @@ class Settings(BaseSettings):
         validation_alias="PROFIT_LOCK_REQUIRE_SIGNAL",
         description="Exit if strategy signal becomes invalid after lock.",
     )
+    # --- Per-position trailing profit lock ---
+    # Independent of the account-level profit_lock_*. Tracks peak unrealized
+    # P&L per (account, symbol) and exits a single position when its current
+    # unrealized P&L falls below peak * (1 - giveback_pct), provided the peak
+    # has crossed the arming floor.
+    position_trailing_lock_enabled: bool = Field(
+        default=False,
+        validation_alias="POSITION_TRAILING_LOCK_ENABLED",
+        description=(
+            "Enable per-position trailing profit lock. Each open position "
+            "tracks its own peak unrealized P&L; the position is exited when "
+            "current P&L falls below peak * (1 - giveback_pct)."
+        ),
+    )
+    position_trailing_lock_giveback_pct: float = Field(
+        default=0.10,
+        validation_alias="POSITION_TRAILING_LOCK_GIVEBACK_PCT",
+        description="Allowed giveback from a position's peak unrealized P&L (0.0-1.0).",
+    )
+    position_trailing_lock_floor_inr: float = Field(
+        default=500.0,
+        validation_alias="POSITION_TRAILING_LOCK_FLOOR_INR",
+        description=(
+            "Minimum peak unrealized P&L (INR) before per-position trailing "
+            "arms. Below this peak the lock will not fire — prevents churn on "
+            "tiny P&L wiggles."
+        ),
+    )
+    position_trailing_lock_exit_cooldown_seconds: float = Field(
+        default=30.0,
+        validation_alias="POSITION_TRAILING_LOCK_EXIT_COOLDOWN_SECONDS",
+        description="Cooldown between per-position trailing-lock exit attempts for the same symbol.",
+    )
     enable_eod_exit: bool = Field(
         default=False,
         validation_alias="ENABLE_EOD_EXIT",

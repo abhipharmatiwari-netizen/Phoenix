@@ -155,6 +155,16 @@ x-live-backend-env: &live-backend-env
   PROFIT_SWEEP_COOLDOWN_MINUTES: "${PROFIT_SWEEP_COOLDOWN_MINUTES:-30}"
   PROFIT_MAX_SWEEPS_PER_DAY: "${PROFIT_MAX_SWEEPS_PER_DAY:-5}"
 
+  # Per-position trailing profit lock — exits an individual position when its
+  # unrealized P&L drops POSITION_TRAILING_LOCK_GIVEBACK_PCT below the peak
+  # unrealized P&L recorded since entry. Independent of the account-level
+  # PROFIT_LOCK_*. Arms only after peak crosses POSITION_TRAILING_LOCK_FLOOR_INR
+  # to avoid churning on tiny wiggles.
+  POSITION_TRAILING_LOCK_ENABLED: "${POSITION_TRAILING_LOCK_ENABLED:-true}"
+  POSITION_TRAILING_LOCK_GIVEBACK_PCT: "${POSITION_TRAILING_LOCK_GIVEBACK_PCT:-0.10}"
+  POSITION_TRAILING_LOCK_FLOOR_INR: "${POSITION_TRAILING_LOCK_FLOOR_INR:-500}"
+  POSITION_TRAILING_LOCK_EXIT_COOLDOWN_SECONDS: "${POSITION_TRAILING_LOCK_EXIT_COOLDOWN_SECONDS:-30}"
+
   INDICATOR_CSV_ENABLED: "true"
   INDICATOR_CSV_PATH: "/app/logs/indicator_bars.csv"
   EXECUTED_TOKENS_STATE_PATH: "/app/logs/executed_tokens_state.json"
@@ -311,7 +321,8 @@ services:
                   FROM (VALUES
                       ('tenants'), ('broker_accounts'), ('subscriptions'),
                       ('strategy_configs'), ('broker_credentials'),
-                      ('circuit_breaker_state'), ('pnl_snapshots'), ('profit_lock_state')
+                      ('circuit_breaker_state'), ('pnl_snapshots'), ('profit_lock_state'),
+                      ('position_trailing_lock_state')
                   ) AS req(required_table)
                   WHERE NOT EXISTS (
                       SELECT 1 FROM information_schema.tables t

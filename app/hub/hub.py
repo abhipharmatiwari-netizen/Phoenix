@@ -757,6 +757,24 @@ class Hub:
                                 error=repr(exc),
                             )
 
+                    # Per-position trailing profit lock: locks in gains by
+                    # exiting individual positions whose unrealized P&L drops
+                    # giveback_pct below their peak. Independent of the
+                    # account-level sweep above.
+                    if getattr(runtime, "position_trailing_lock_engine", None) is not None:
+                        try:
+                            await runtime.position_trailing_lock_engine.evaluate_runners(
+                                runners
+                            )
+                        except Exception as exc:
+                            log_event(
+                                logger,
+                                event_type="POSITION_TRAILING_LOCK_ERROR",
+                                message="PositionTrailingLockEngine encountered an error",
+                                level=logging.ERROR,
+                                error=repr(exc),
+                            )
+
                     if getattr(runtime, "eod_exit_engine", None) is not None:
                         try:
                             await runtime.eod_exit_engine.maybe_force_exit_all(runners)

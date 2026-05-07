@@ -33,6 +33,10 @@ from app.pnl.pnl_engine import PnLEngine
 from app.pnl.state_store import build_pnl_state_store
 from app.pnl.profit_engine import ProfitEngine as SweepProfitEngine
 from app.pnl.profit_lock import ProfitLockManager
+from app.pnl.position_trailing_lock import (
+    PositionTrailingLockManager,
+    PostgresPositionTrailingLockBackend,
+)
 from app.orders.order_lifecycle import OrderLifecycleService
 from app.orders.order_outbox import build_order_submission_outbox
 from app.orders.position_ownership import build_position_ownership_store
@@ -46,6 +50,7 @@ from app.observability.auto_mitigation import (
 from app.hub.exit_engines import (
     ProfitSweepEngine as HubProfitSweepEngine,
     EODExitEngine,
+    PositionTrailingLockEngine,
 )
 from app.hub.sweep_state import SweepStateStore, SweepStateManager, PostgresSweepStateStore
 from app.hub.eod_state import EODStateStore, EODStateManager, PostgresEODStateStore
@@ -450,6 +455,35 @@ class HubRuntime:
             state_store=self.state_store,
             order_router=self.order_router,
             eod_state_manager=self.eod_state_manager,
+            clock=self.clock,
+        )
+
+        # Per-position trailing profit lock (independent of account-level lock).
+        # Postgres-backed in LIVE so peaks survive restarts; no-op backend
+        # otherwise. Engine is instantiated unconditionally; the engine's own
+        # `_enabled()` check (driven by POSITION_TRAILING_LOCK_ENABLED) gates
+        # whether it actually evaluates anything.
+        position_trailing_backend = None
+        if _runtime_trade_mode() == "LIVE":
+            try:
+                position_trailing_backend = PostgresPositionTrailingLockBackend(
+                    dsn=get_sweep_state_dsn(self.settings)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "position_trailing_lock: Postgres backend init failed; "
+                    "trailing lock will run with in-memory state only: %s",
+                    exc,
+                )
+        self.position_trailing_lock_manager = PositionTrailingLockManager(
+            default_time_zone=self.settings.default_time_zone,
+            backend=position_trailing_backend,
+        )
+        self.position_trailing_lock_engine = PositionTrailingLockEngine(
+            settings=self.settings,
+            state_store=self.state_store,
+            order_router=self.order_router,
+            manager=self.position_trailing_lock_manager,
             clock=self.clock,
         )
 
