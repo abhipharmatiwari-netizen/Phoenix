@@ -808,7 +808,7 @@ instruments:
 
 strategy_selection:
   enabled: true
-  max_active_per_underlying: 2
+  max_active_per_underlying: 3
   min_hold_seconds: 180
   # Authority rule (EMA20-5): EMA20 dynamic policy is the authoritative layer for
   # EMA20 entry permissibility. When ema20_is_authoritative=true, ema20_strategy
