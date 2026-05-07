@@ -2,13 +2,15 @@
 
 **Architecture reference:** deployment and cutover policy in `ARCHITECTURE.md`
 
+## Purpose
+
 This playbook covers controlled blue/green cutover for the current hub-authoritative LIVE path.
 
 Only one active writer may control a given live scope at a time.
 
 ---
 
-## Scope of this playbook
+## Scope
 
 This playbook assumes:
 
@@ -18,6 +20,8 @@ This playbook assumes:
 - the incoming environment will start, restore durable state, reconcile, and prove market-data/strategy readiness before taking live write authority for automated LIVE
 
 This playbook does **not** approve legacy-authoritative cutover.
+
+It also does not approve Cloud Run go-live, Firestore authority, or simultaneous active writers. For LIVE, cutover is allowed only when both environments can produce release evidence for the current runtime contract.
 
 ---
 

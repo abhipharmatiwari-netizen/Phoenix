@@ -12,6 +12,23 @@ Use this runbook when a SmartAPI credential changes for an existing `broker_acco
 
 ---
 
+## Purpose
+
+Rotate broker login material in Postgres without moving platform secrets into repo env files.
+
+## Scope
+
+This runbook applies only to deployments using `BROKER_SECRET_BACKEND=postgres`.
+
+## Preconditions
+
+- You can connect to the Phoenix control-plane Postgres database.
+- You know the target `broker_account_id`.
+- You have the replacement SmartAPI values from the approved operator secrets store.
+- You have a rollback copy of the existing row before making changes.
+
+---
+
 ## What this runbook changes
 
 This runbook updates only the broker login material stored in the `broker_credentials` table.
@@ -101,9 +118,9 @@ INSERT INTO broker_credentials (
     'YOUR_CLIENT_CODE',
     'YOUR_4_DIGIT_PIN',
     'YOUR_TOTP_SECRET_BASE32',
-    '223.181.60.56',
-    '223.181.60.56',
-    '00-15-5D-1E-B5-C0',
+    'YOUR_CLIENT_LOCAL_IP',
+    'YOUR_CLIENT_PUBLIC_IP',
+    'YOUR_MAC_ADDRESS',
     NOW()
 );
 ```
@@ -176,6 +193,14 @@ WHERE broker_account_id = 'A1';
 
 Confirm that `updated_at` reflects the change you just made.
 
+Before changing a row, capture a rollback copy:
+
+```sql
+SELECT *
+FROM broker_credentials
+WHERE broker_account_id = 'A1';
+```
+
 ---
 
 ## Step 6 — Restart Phoenix
@@ -193,6 +218,19 @@ If you changed multiple control-plane inputs and want a clean restart of the who
 ```powershell
 docker compose -f .\docker-compose.live.single.yml up -d --build --force-recreate
 ```
+
+## Validation
+
+After restart:
+
+- `/readyz` returns 200
+- backend logs show broker login success
+- no repeated `BROKER_SECRET_BACKEND=postgres` credential errors appear
+- `balance_sync_ready=true` after the account runner completes its first balance sync
+
+## Rollback / recovery
+
+If login fails after rotation, restore the saved prior row, restart the backend, and capture the failed credential error plus the rollback SQL in the deployment record. Do not switch to env-file broker secrets in LIVE.
 
 ---
 

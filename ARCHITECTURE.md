@@ -22,6 +22,13 @@ In this profile, the stream worker is not the authoritative execution plane. It 
 
 `DISABLE_STREAM_WORKER=true` is not the default automated LIVE baseline. It is valid only for operator/control-plane, reconciliation, or manual-supervision mode unless an approved replacement market-data plane exists and is wired end to end.
 
+Current repo-tracked deployment surfaces that must implement this same contract:
+- `docker-compose.live.single.yml` is the bundled Docker/Desktop LIVE implementation.
+- `docker-compose.oci-live.yml` is the repo-tracked OCI Compose implementation. It expects OCIR images, OCI Vault/file secrets, and an explicitly configured Postgres endpoint.
+- `cloudrun.env` and `docs/runbooks/cloud_run_live_deployment.md` are Cloud Run reference/roadmap material only. They are not an approved production path until release evidence proves the same contract in Cloud Run and this architecture is updated to approve it.
+
+No deployment path may claim automated LIVE readiness only because a manifest exists. Readiness requires the running backend container to prove the effective runtime tuple, durable stores, startup validation, readiness gates, reconciliation state, and release evidence.
+
 ---
 
 ## 1. Operating Modes & Ownership Boundaries
@@ -70,12 +77,14 @@ Phoenix runs in one of two mutually exclusive operating modes. Only one mode may
 | Trades / audit facts | Postgres or structured trade ledger | CSV, BigQuery, dashboard | CSV/BQ are analytics and reporting, not control authority |
 | Sweep / EOD state | Postgres preferred and required for LIVE automation | dashboard, BigQuery | Must be idempotent, replay-safe, and durable across restarts |
 | Dashboard payloads | none | `DashboardBus` | Dashboard is always derived, never authoritative |
-| Control-plane credentials and secrets | Secret Manager or Postgres in LIVE | short-lived injected env only | Repo files and long-lived plaintext env are forbidden for LIVE |
+| Control-plane credentials and secrets | Approved platform secret store in LIVE; Postgres is allowed for broker credentials | short-lived injected env/file mounts only | Repo files and long-lived plaintext env are forbidden for LIVE |
 | Hub routing table | Postgres (`CONTROL_PLANE_BACKEND=postgres`) | in-memory cache refreshed from Postgres | Firestore was a prior implementation; current LIVE stack uses Postgres exclusively. If `CONTROL_PLANE_BACKEND=firestore`, Google ADC credentials (`GOOGLE_APPLICATION_CREDENTIALS`) are required — see compose comment |
+
+Clarification: "current LIVE stack" in the matrix means the repo-tracked LIVE manifests listed in section 0.1. Those manifests use Postgres for authoritative routing; Firestore-capable code remains compatibility/reference only unless this contract is revised.
 
 ### Firestore dependency status
 
-Firestore is **not active** in the current LIVE stack (`docker-compose.live.single.yml`). All authoritative backends use Postgres:
+Firestore is **not active** in the current repo-tracked LIVE manifests (`docker-compose.live.single.yml` and `docker-compose.oci-live.yml`). All authoritative backends use Postgres:
 - Control plane / routing table: `CONTROL_PLANE_BACKEND=postgres`
 - Sweep / EOD state: `SWEEP_STATE_BACKEND=postgres`
 - Leader lease: `LEADER_LEASE_BACKEND=postgres`
@@ -288,7 +297,7 @@ Stored against the `OwnershipKey`, but not part of the key:
 ```mermaid
 flowchart TD
     START([python -m app.main]) --> LOAD_ENV[Load env + runtime config]
-    LOAD_ENV --> RESOLVE_SECRETS[Resolve secrets from Secret Manager or Postgres]
+    LOAD_ENV --> RESOLVE_SECRETS[Resolve secrets from approved platform store or Postgres]
     RESOLVE_SECRETS --> CONFIG_LOG[Configure logging + audit logging]
     CONFIG_LOG --> PORT_CHECK{Port available?}
     PORT_CHECK -- No --> EXIT_FAIL([sys.exit 1])
@@ -374,9 +383,9 @@ LIVE startup must hard-fail unless each control resolves to a safe, explicit sta
 | Profit controls | Explicit daily target / profit-lock policy configured per live strategy-account pair | Fail startup |
 | EOD policy | Intraday strategies require EOD exit and open-order cancel policy, or a documented approved exemption | Fail startup |
 | Kill switch durability | Persisted kill-switch backend available | Fail startup |
-| Control-plane auth | Dashboard auth enabled; admin auth backed by secret manager or Postgres | Fail startup |
+| Control-plane auth | Dashboard auth enabled; admin auth backed by an approved platform secret store | Fail startup |
 | Demo/local auth | Demo auth and dev-only shortcuts disabled | Fail startup |
-| Secret backend | Broker, admin, DB, HMAC, and runtime override secrets loaded from Secret Manager or Postgres | Fail startup |
+| Secret backend | Broker credentials loaded from Postgres or approved secret manager; platform/admin/DB/HMAC/runtime secrets injected from an approved platform secret store | Fail startup |
 | In-memory authority | In-memory authoritative fallbacks disabled | Fail startup |
 | Authority path | Exactly one authoritative mode resolved for each live contract/account scope | Fail startup |
 
@@ -979,11 +988,11 @@ The following endpoints require authentication, role-based authorization, and au
 - `dashboard_auth_disabled=true` is forbidden in LIVE.
 - Demo auth routes, local test users, and developer shortcuts must be disabled in LIVE.
 - Break-glass and manual exit routes require elevated role checks, reason codes, and audit trails.
-- Control-plane secrets must come from Secret Manager or Postgres; repo/env-file fallback is forbidden in LIVE.
+- Control-plane secrets must come from an approved platform secret store; repo/env-file fallback is forbidden in LIVE. Broker credentials may use Postgres `broker_credentials`.
 
 ### 15.4 Step-up authorization
 
-Dangerous privileged actions require a step-up token (`app/security/step_up.py`) in addition to normal RBAC:
+Production contract: dangerous privileged actions require a step-up token (`app/security/step_up.py`) in addition to normal RBAC:
 
 **Covered action classes** (from `DangerousActionClass` enum):
 - `KILL_SWITCH_CLEAR` / `KILL_SWITCH_REARM`
@@ -994,13 +1003,15 @@ Dangerous privileged actions require a step-up token (`app/security/step_up.py`)
 
 Step-up tokens are short-lived (5-minute TTL), single-use, and bound to a specific action class. They are issued by re-authentication and stored in-memory with optional Postgres persistence. Alternatively, a **maker-checker** approval record (`ApprovalWorkflow`, §22.3) signed by a second admin may substitute for a step-up token.
 
+Current implementation evidence: `break-glass/flatten` enforces `step_up_token` in LIVE, but the repo contains no HTTP endpoint that issues the token. `kill-switch/rearm` currently requires OPERATOR role only and does not enforce step-up. These are production readiness gaps against this contract, not approved alternate behavior.
+
 The `Entitlements` module (`app/security/entitlements.py`) gates fine-grained action permissions by role, tenant, and account scope, independent of the coarse RBAC layer in §15.
 
 ---
 
 ### 15.1 Secret Management and Credential Hygiene
 
-- All broker, admin, database, HMAC, and runtime-override secrets must be sourced from Secret Manager or Postgres in LIVE.
+- All broker, admin, database, HMAC, and runtime-override secrets must be sourced from an approved platform secret store in LIVE; broker credentials may also be sourced from Postgres.
 - Any secret ever committed to the repository or otherwise exposed must be treated as compromised and rotated before deployment.
 - Secrets must be environment-scoped and role-scoped. Shared cross-environment credentials are forbidden.
 - Short-lived injected environment variables may transport secret values at runtime, but local env files are dev-only and forbidden in live deployment artifacts.
@@ -1299,7 +1310,7 @@ The following are forbidden in production unless a narrowly scoped emergency fla
 11. LIVE startup must hard-fail on insecure auth mode, missing secrets, missing durable backends, or disabled mandatory controls.
 12. Hub-authoritative LIVE mode forbids legacy automated exits except audited break-glass.
 13. New entries fail closed on stale or missing price, capital, margin, or PnL state.
-14. Secret Manager or Postgres is mandatory in LIVE; committed or env-file secrets are forbidden.
+14. Approved platform secret storage is mandatory in LIVE; Postgres is allowed for broker credentials. Committed or env-file secrets are forbidden.
 15. Durable idempotency, lifecycle, ownership, kill-switch, and processed-trade markers are mandatory in LIVE.
 16. Observability, alerts, restore drills, and failure-path testing are part of production readiness, not optional operations work.
 17. Internal position states must be explicit and durable; narrative-only position handling is not sufficient.

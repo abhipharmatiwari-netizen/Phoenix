@@ -1,9 +1,14 @@
 # Phoenix v9 -- Complete Application Flow
 
-> **Backend note:** The bundled Docker/Desktop LIVE path uses Postgres for all durable backends
-> (leader lease, sweep state, control plane, PnL). Firestore references in this diagram apply
-> to the Cloud Run / GCP deployment path only. Both paths share the same application code;
-> the backend is selected by `LEADER_LEASE_BACKEND`, `CONTROL_PLANE_BACKEND`, etc.
+> **Status:** Reference diagram only. [ARCHITECTURE.md](../ARCHITECTURE.md) is
+> the authoritative production contract. Do not use this diagram as go-live
+> guidance or as proof that Cloud Run, Firestore, or BigQuery are authoritative
+> runtime stores.
+>
+> **Backend note:** The bundled Docker/Desktop and OCI Compose LIVE paths use
+> Postgres for all durable backends (leader lease, sweep state, control plane,
+> PnL). Firestore references in this diagram are compatibility/future-path
+> references only, not current go-live guidance.
 >
 > **BigQuery note:** The BigQuery async writer (`BQ_START`, `bq-async-writer` thread, and all
 > `BQ`/`BigQuery` nodes in this diagram) is attempted in **all** deployment modes, including

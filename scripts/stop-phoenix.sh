@@ -63,7 +63,7 @@ if [ "$IS_HOLIDAY" = "1" ]; then
         -f "$COMPOSE_FILE" \
         -f "$OVERRIDE_FILE" \
         --env-file "$ENV_FILE" \
-        stop web
+        stop nginx
     log "Full shutdown complete. All Phoenix containers stopped for the holiday."
 else
     log "Next trading day ($TODAY_IST) is a working day — nginx remains up."

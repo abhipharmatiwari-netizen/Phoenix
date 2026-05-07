@@ -2,7 +2,20 @@
 
 **Architecture reference:** restore, recovery, and failure-drill policy in `ARCHITECTURE.md`
 
+## Purpose
+
 This runbook defines how to test Phoenix backup and restore readiness. The goal is to prove that Phoenix can restart from durable state, reconcile correctly, and re-establish the automated LIVE runtime without guessing or silently losing authoritative state.
+
+## Scope
+
+Use this for controlled restore drills and recovery-environment validation. It does not approve restoring directly over an active LIVE database, Cloud Run go-live, Firestore authority, or CSV/local-file recovery as authoritative state.
+
+## Preconditions
+
+- You have a backup or PITR target for the authoritative Postgres database.
+- You can stop Phoenix before restoring into the target database.
+- You have the same runtime secret process used by the deployment path.
+- You can capture SQL counts, container logs, `/readyz`, and release evidence after startup.
 
 ---
 
@@ -46,7 +59,7 @@ Use your database platform's production backup mechanism. At minimum, maintain:
 
 **RPO by deployment platform:**
 - **Local Docker Desktop** (host-local Postgres): backup cadence is limited to scheduled `pg_dump`. WAL archiving / point-in-time recovery (PITR) is not available without additional configuration. RPO is bounded by the `pg_dump` schedule (e.g. daily = up to one trading session of data loss).
-- **Cloud Run + Cloud SQL**: Cloud SQL provides automated WAL-based PITR with configurable retention. RPO can be reduced to minutes. PITR is the recommended backup strategy for cloud deployments.
+- **Cloud Run + Cloud SQL**: roadmap/reference only in this repo. Cloud SQL can provide WAL-based PITR, but Cloud Run is not the current approved go-live path.
 
 ### Manual backup example
 
@@ -106,11 +119,13 @@ WHERE status = 'SUBMITTING'
 
 ### Step 4 — Start Phoenix against the restored database
 
-Use the bundled LIVE manifest and the same runtime secret process you use in production.
+Use the bundled LIVE manifest for the active deployment path and the same runtime secret process you use in production.
 
 ```powershell
 docker compose -f .\docker-compose.live.single.yml up -d --build --force-recreate
 ```
+
+OCI Compose uses the equivalent `docker compose -f docker-compose.oci-live.yml -f /opt/phoenix/phoenix-override.yml --env-file /opt/phoenix/phoenix-deploy.env up -d --no-deps backend nginx` command after the database restore and secret refresh.
 
 ### Step 5 — Validate startup, reconciliation, and market-data readiness
 
@@ -158,6 +173,10 @@ Record all of the following:
 9. corrective actions, if any
 
 A restore drill is complete only when Phoenix has restarted on the restored data, re-established the required LIVE runtime, and passed the post-restore validation checks.
+
+## Failure handling and rollback
+
+If restore validation fails, keep the restored stack stopped or isolated. Do not point LIVE traffic at it. Restore the last known-good database target or keep the current production stack active, capture the failing SQL/log evidence, and open an incident follow-up before retrying.
 
 ---
 

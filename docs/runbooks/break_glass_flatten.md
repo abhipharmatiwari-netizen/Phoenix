@@ -4,6 +4,16 @@
 
 Use this runbook when a live position must be forcibly exited through an audited operator action, bypassing normal strategy-driven exit logic. This is an emergency path. Use it only when automated exits are unavailable or blocked.
 
+> **Current LIVE approval note:** the endpoint requires `step_up_token` in `TRADE_MODE=LIVE`. The repo contains the token service (`app/security/step_up.py`) but no HTTP issuer route. This runbook is **not approved for LIVE use** unless a valid BREAK_GLASS token has been issued through an approved operator process before the request.
+
+## Purpose
+
+Submit one emergency exposure-reducing exit for one known contract through the hub order router.
+
+## Scope
+
+This runbook applies to hub-authoritative Phoenix deployments with an active `AccountRunner`. It is not a routine exit path and is not a replacement for the kill switch, EOD exit, or orphan-review workflow.
+
 ---
 
 ## What break-glass flatten does
@@ -42,7 +52,8 @@ Before calling this endpoint:
 - You know the `tenant_id` and `broker_account_id`.
 - An active `AccountRunner` is running for the target `broker_account_id`.
 - An authoritative live position for the contract exists in the runtime `StateStore`.
-- You have `ADMIN` credentials (`ADMIN_API_KEY` or equivalent).
+- You have `ADMIN` credentials (`ADMIN_API_KEY` via `X-Admin-Key`, or an authenticated admin JWT).
+- In LIVE, you have a valid single-use BREAK_GLASS `step_up_token` issued by an approved operator process.
 
 ---
 
@@ -50,7 +61,7 @@ Before calling this endpoint:
 
 ```http
 POST /admin/break-glass/flatten
-Authorization: Bearer <ADMIN_API_KEY>
+X-Admin-Key: <ADMIN_API_KEY>
 Content-Type: application/json
 X-Request-Id: <unique-id-for-idempotency-tracking>
 
@@ -62,7 +73,8 @@ X-Request-Id: <unique-id-for-idempotency-tracking>
   "strike": "22500",
   "option_right": "CE",
   "product_type": "INTRADAY",
-  "reason": "<required: brief reason for the emergency exit>"
+  "reason": "<required: brief reason for the emergency exit>",
+  "step_up_token": "<required in LIVE>"
 }
 ```
 
@@ -78,6 +90,7 @@ X-Request-Id: <unique-id-for-idempotency-tracking>
 | `option_right` | `CE` or `PE` |
 | `product_type` | `INTRADAY` or `DELIVERY` |
 | `reason` | Mandatory free-text reason; recorded in audit trail |
+| `step_up_token` | Required in LIVE; token must be valid for BREAK_GLASS |
 
 ---
 
@@ -119,6 +132,10 @@ HTTP 404: No active `AccountRunner` for the specified `broker_account_id`. The r
 
 HTTP 409: The order was rejected by the broker or a router interceptor. Review the `order` field in the response for the rejection reason. The ownership record will have been updated with the `break_glass_override_id`.
 
+### Failure - missing or invalid step-up token
+
+HTTP 403 in LIVE means the endpoint did not receive a usable `step_up_token`. Do not bypass this in production docs or env files. Hold the position under manual supervision and escalate to the operator process that can issue or approve a BREAK_GLASS token.
+
 ---
 
 ## After the call
@@ -140,6 +157,16 @@ HTTP 409: The order was rejected by the broker or a router interceptor. Review t
 4. **If the order is pending** — monitor lifecycle polling. Do not re-issue break-glass immediately; allow the lifecycle service to converge.
 
 5. **If the order is rejected or failed** — check broker logs and the order response detail. The ownership record will remain in `RELEASING` state with the break-glass override recorded. Manual DB review or a second break-glass attempt may be required depending on the rejection cause.
+
+---
+
+## Rollback / recovery
+
+Break-glass is a real broker exit and cannot be rolled back after submission. Recovery is operational:
+
+- if no order was submitted, fix the request or token and retry only after revalidating broker state
+- if an order was submitted but not terminal, wait for lifecycle convergence before sending another exit
+- if the order was rejected, keep the scope blocked, capture evidence, and use orphan-review or manual broker action under incident control
 
 ---
 

@@ -59,7 +59,7 @@ if ! docker ps --filter name=phoenix-oci-web --filter status=running -q | grep -
         -f "$COMPOSE_FILE" \
         -f "$OVERRIDE_FILE" \
         --env-file "$ENV_FILE" \
-        up -d --no-deps web
+        up -d --no-deps nginx
     sleep 5
 fi
 
@@ -71,12 +71,6 @@ if docker ps --filter name=phoenix-oci-backend --filter status=running -q | grep
 fi
 
 log "Starting Phoenix backend for trading day $TODAY_IST"
-
-# Git pull to pick up any overnight code pushes.
-if [ -d /opt/phoenix/app/.git ]; then
-    git -C /opt/phoenix/app config --global --add safe.directory /opt/phoenix/app 2>/dev/null || true
-    git -C /opt/phoenix/app pull origin main 2>&1 | tail -3 || log "WARNING: git pull failed — continuing with existing code"
-fi
 
 CONTROL_PLANE_PG_PASSWORD_HOST=dummy \
   docker compose \

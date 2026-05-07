@@ -31,6 +31,8 @@ Phoenix is **not** any of the following in the current recommended automated LIV
 
 The repository may still contain local development assets and compatibility paths. Those are not the automated LIVE baseline.
 
+The repo also contains an OCI Compose deployment surface. It must prove the same runtime contract as Docker/Desktop from the running backend container; it is not automatically approved just because the manifest exists.
+
 ---
 
 ## Current recommended automated LIVE contract
@@ -42,7 +44,7 @@ The current recommended automated LIVE runtime is exact:
 - the stream worker provides broker market data, bars, indicators, live marks, and strategy signal generation
 - the hub/router/lifecycle/account-runner path remains authoritative for order submission, reconciliation, ownership, lifecycle, and durable control state
 - Postgres is authoritative for control-plane state, ownership, lifecycle, outbox, kill-switch durability, sweep state, and EOD state
-- LIVE secrets must be sourced from Secret Manager or Postgres; short-lived injected environment variables may carry those values into the runtime, but repo env files are not secret sources
+- LIVE secrets must be sourced from an approved platform secret store; broker credentials may use Postgres. Short-lived injected environment variables or secret file mounts may carry those values into the runtime, but repo env files are not secret sources
 - release readiness is judged from the backend container's effective runtime environment and its observed startup/reconciliation behavior, not from the launching shell alone
 
 That distinction matters. A PowerShell session can contain the right values while the backend container still starts with the wrong defaults. Phoenix is ready for automated LIVE only when the container itself resolves the required LIVE tuple and the runtime proves the expected startup guarantees.
@@ -108,14 +110,16 @@ Read the docs in this order when making a production decision:
 
 1. [`ARCHITECTURE.md`](ARCHITECTURE.md)
 2. [Docker Desktop LIVE Deployment](docs/runbooks/docker_desktop_live_deployment.md)
-3. [Broker credential update runbook](docs/runbooks/update_broker_credentials.md)
-4. [Blue/Green cutover](docs/runbooks/blue_green_cutover.md)
-5. [Restore drill](docs/runbooks/restore_drill.md)
+3. [OCI LIVE Deployment](docs/runbooks/oci_live_deployment.md), when operating the OCI Compose path
+4. [LIVE Release Evidence](docs/runbooks/release_evidence.md)
+5. [Broker credential update runbook](docs/runbooks/update_broker_credentials.md)
+6. [Blue/Green cutover](docs/runbooks/blue_green_cutover.md)
+7. [Restore drill](docs/runbooks/restore_drill.md)
 
 For emergency operator actions:
 
-6. [Break-glass flatten](docs/runbooks/break_glass_flatten.md)
-7. [Orphan review resolution](docs/runbooks/resolve_orphan_review.md)
 8. [Kill switch reference](docs/runbooks/kill_switch.md)
+9. [Orphan review resolution](docs/runbooks/resolve_orphan_review.md)
+10. [Break-glass flatten](docs/runbooks/break_glass_flatten.md)
 
 The Cloud Run material remains reference and roadmap material until it is explicitly approved in the production contract.

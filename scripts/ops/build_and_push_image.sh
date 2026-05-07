@@ -1,7 +1,9 @@
 #!/bin/sh
 # Build a new OCIR backend image on the VM and push it.
-# Requires OCIR_AUTH_TOKEN to be passed as env var.
-# Usage: OCIR_AUTH_TOKEN=xxx sh build_and_push_image.sh
+# Required env vars:
+#   OCIR_AUTH_TOKEN   OCIR auth token from the operator secret store
+#   OCIR_USERNAME     OCIR login username, usually <namespace>/<identity-domain>/<user>
+# Usage: OCIR_AUTH_TOKEN=xxx OCIR_USERNAME=xxx sh build_and_push_image.sh
 set -eu
 
 OCIR_REGION="ap-mumbai-1"
@@ -26,11 +28,15 @@ if [ -z "${OCIR_AUTH_TOKEN:-}" ]; then
     echo "Get it from: OCI Console → User → Auth Tokens → Generate Token"
     exit 1
 fi
+if [ -z "${OCIR_USERNAME:-}" ]; then
+    echo "ERROR: OCIR_USERNAME env var required. Set it from the operator secret store."
+    exit 1
+fi
 
 echo
 echo "=== Login to OCIR ==="
 echo "${OCIR_AUTH_TOKEN}" | docker login "${OCIR_REGISTRY}" \
-    -u "${OCIR_NAMESPACE}/oracleidentitycloudservice/abhipharma.tiwari@gmail.com" \
+    -u "${OCIR_USERNAME}" \
     --password-stdin
 
 echo

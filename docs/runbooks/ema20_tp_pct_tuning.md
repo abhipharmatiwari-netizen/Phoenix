@@ -1,6 +1,7 @@
 # EMA20 `tp_pct` tuning from PHX#186 telemetry
 
 **Status:** Pending data accumulation
+**Approval:** Research/tuning only. Not approved for LIVE parameter changes without release evidence and operator sign-off.
 **Earliest viable run:** ~early July 2026 (when ~30 trading days of LIVE attribution data exist)
 **Tracks:** [#185](https://github.com/abhipharmatiwari-netizen/Phoenix/issues/185)
 
@@ -77,7 +78,7 @@ When the pre-requisites pass:
 # On OCI VM
 docker cp phoenix-oci-backend:/app/logs/exit_attribution.jsonl /tmp/exit_attribution.jsonl
 # From laptop
-scp -i <key> -o ProxyCommand=... opc@10.0.2.83:/tmp/exit_attribution.jsonl ./
+scp -i <key> -o ProxyCommand=... opc@<OCI_VM_PRIVATE_IP>:/tmp/exit_attribution.jsonl ./
 ```
 
 ### 2. Run the analysis

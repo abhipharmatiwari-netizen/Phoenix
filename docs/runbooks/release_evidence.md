@@ -10,12 +10,22 @@ Before approving a new LIVE backend release, the operator on duty must collect a
 review a release-evidence bundle that proves the container started safely. Releasing
 without this evidence is explicitly forbidden.
 
+## Scope
+
+This runbook applies to Docker Desktop LIVE and OCI Compose LIVE. It does not approve Cloud Run or any deployment whose `/admin/release-evidence` output cannot be captured from the deployed backend.
+
+## Preconditions
+
+- The backend is deployed through a current runbook.
+- `ADMIN_API_KEY` is available from the approved operator secret process, not from a repo env file.
+- `/readyz` is reachable through the deployment endpoint.
+
 ---
 
 ## Collecting the bundle
 
 ```powershell
-curl.exe -s -H "Authorization: Bearer $env:ADMIN_API_KEY" `
+curl.exe -s -H "X-Admin-Key: $env:ADMIN_API_KEY" `
     http://localhost/admin/release-evidence | python -m json.tool
 ```
 
@@ -31,7 +41,7 @@ deployment log or PR.
 | `trade_mode` | `"LIVE"` |
 | `runtime_ready` | `true` |
 | `is_leader` | `true` |
-| `position_authority_restored` | `true` (at least 1 position record loaded) — see note below |
+| `position_authority_restored` | `true` when `startup_recovery.summary.position_records_loaded > 0`; `false` is allowed only for a fresh database with zero non-terminal position records and green `/readyz` effective authority |
 | `schema_guard.status` | `"ok"` or empty missing lists |
 | `startup_recovery.status` | `"ok"` or `"skipped"` — never `"failed"` |
 | `stream_worker.running` | `true` |
@@ -58,17 +68,25 @@ until every item passes.
 
 ## Evidence collection procedure
 
-1. Deploy the new backend image via `start-docker-secretstore.ps1`.
+1. Deploy the new backend image via the active deployment runbook.
 2. Wait for the health check to pass (`docker compose ps` → `healthy`).
 3. Collect the evidence bundle:
    ```powershell
-   $bundle = curl.exe -s -H "Authorization: Bearer $env:ADMIN_API_KEY" `
+   $bundle = curl.exe -s -H "X-Admin-Key: $env:ADMIN_API_KEY" `
        http://localhost/admin/release-evidence | ConvertFrom-Json
    $bundle | ConvertTo-Json -Depth 10
    ```
 4. Review each field against the pass criteria table above.
 5. If all criteria pass, record the `generated_at` timestamp in the deployment log.
-6. If any criterion fails, roll back and investigate before re-attempting.
+6. If any criterion fails, roll back or hold the stack stopped and investigate before re-attempting.
+
+OCI equivalent:
+
+```bash
+ADMIN_KEY="$(sudo cat /run/secrets/admin_api_key)"
+curl -sk -H "X-Admin-Key: ${ADMIN_KEY}" \
+  https://127.0.0.1:8443/admin/release-evidence
+```
 
 ---
 
@@ -94,5 +112,6 @@ timestamp.
 ## Related
 
 - [Docker Desktop LIVE Deployment](docker_desktop_live_deployment.md)
+- [OCI LIVE Deployment](oci_live_deployment.md)
 - [Kill Switch](kill_switch.md)
 - [Break-Glass Flatten](break_glass_flatten.md)

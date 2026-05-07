@@ -5,12 +5,12 @@
 # Architect agent can review them.
 #
 # PREREQ: an active OCI bastion managed-ssh session whose ID is set below.
-# PREREQ: SSH key at C:\Users\abhis\.oci\phoenix-vm.key (per user message).
+# PREREQ: SSH key available to the operator.
 #
 # USAGE:
 #   pwsh -ExecutionPolicy Bypass -File .\scripts\ops\pull_oci_logs.ps1 `
 #        -BastionSessionOcid 'ocid1.bastionsession.oc1.ap-mumbai-1.<ID>' `
-#        [-VmIp '10.0.2.83'] [-Hours 24]
+#        -VmIp '<OCI_VM_PRIVATE_IP>' [-Hours 24]
 #
 # After it finishes it prints the dump folder path.  Paste that path back
 # into the Cowork chat and the agent will read every file and produce the
@@ -23,7 +23,8 @@ param(
   [string]$BastionSessionOcid,
 
   [string]$KeyPath          = "$env:USERPROFILE\.oci\phoenix-vm.key",
-  [string]$VmIp             = '10.0.2.83',
+  [Parameter(Mandatory = $true)]
+  [string]$VmIp,
   [string]$VmUser           = 'opc',
   [string]$BastionHost      = 'host.bastion.ap-mumbai-1.oci.oraclecloud.com',
   [int]   $Hours            = 24,
@@ -71,7 +72,6 @@ $since = "${Hours}h"
 Write-Host "Pulling docker container logs (last $since) ..." -ForegroundColor Yellow
 Invoke-VmCommand "sudo docker logs --since $since phoenix-oci-backend  2>&1 | tail -n 5000" 'docker_backend.log'
 Invoke-VmCommand "sudo docker logs --since $since phoenix-oci-web      2>&1 | tail -n 2000" 'docker_web.log'
-Invoke-VmCommand "sudo docker logs --since $since phoenix-oci-postgres 2>&1 | tail -n 2000" 'docker_postgres.log'
 
 Write-Host "Pulling app file logs from /opt/phoenix/logs ..." -ForegroundColor Yellow
 Invoke-VmCommand "sudo ls -la /opt/phoenix/logs/ 2>&1"                                                  'fs_logs_listing.txt'

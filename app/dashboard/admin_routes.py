@@ -107,8 +107,9 @@ class BreakGlassFlattenRequest(BaseModel):
     """Payload for break-glass manual flatten (Architecture S1 rule 3-4).
 
     step_up_token is required in LIVE mode (ARCHITECTURE §15.4 / issue #113).
-    Obtain it first via POST /admin/step-up/issue with action_class=break_glass,
-    then include the returned token_id here.  The token is single-use, 5-minute TTL.
+    The current repo contains the step-up token service but does not expose an
+    HTTP issuer route. Operators must not use this endpoint for LIVE unless a
+    valid token has been issued through an approved operator process.
     """
     tenant_id: str
     broker_account_id: str
@@ -680,8 +681,8 @@ def break_glass_flatten(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
                     "step_up_token is required for break-glass operations in LIVE mode. "
-                    "Obtain a token via POST /admin/step-up/issue with "
-                    "action_class=break_glass, then include the token_id here."
+                    "The current repo contains the step-up token service but no HTTP "
+                    "issuer route; use only an approved operator-issued BREAK_GLASS token."
                 ),
             )
         from app.security.step_up import DangerousActionClass, consume_step_up_token
@@ -695,7 +696,8 @@ def break_glass_flatten(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
                     "step_up_token is invalid, expired, already used, or was not issued "
-                    "to the current actor. Issue a new BREAK_GLASS step-up token and retry."
+                    "to the current actor. Obtain a new approved BREAK_GLASS step-up token "
+                    "before retrying."
                 ),
             )
 

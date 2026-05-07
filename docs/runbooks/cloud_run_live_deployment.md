@@ -1,12 +1,12 @@
 # Phoenix v9 Cloud Run Deployment Reference
 
-> **Status:** Reference and roadmap material only. This is not the current bundled go-live path.
+> **Status:** ROADMAP_ONLY / NOT APPROVED FOR LIVE. This is reference material, not a go-live procedure.
 
 This document describes a possible Cloud Run target profile for Phoenix v9. It exists for planning, design review, and future implementation work.
 
 Do **not** treat this document as the current go-live procedure.
 
-The bundled implementation path in this aligned set remains the Docker/Desktop runbook using [`docker-compose.live.single.yml`](../../docker-compose.live.single.yml).
+The current repo-tracked implementation paths are Docker/Desktop (`docker-compose.live.single.yml`) and OCI Compose (`docker-compose.oci-live.yml`). Cloud Run is not approved until `ARCHITECTURE.md` is revised and release evidence proves the same runtime contract in Cloud Run.
 
 ---
 
@@ -62,7 +62,7 @@ A future approved Cloud Run path should still preserve the current automated LIV
 - `USE_HUB_ROUTER=true`
 - `DISABLE_STREAM_WORKER=false` **unless** an approved replacement market-data/bar/indicator/strategy plane exists
 - Postgres remains the authoritative operational store
-- secrets come from Secret Manager or Postgres
+- secrets come from Secret Manager or another approved platform secret store, with Postgres allowed for broker credentials
 - dashboard auth remains enabled
 - demo shortcuts remain disabled
 
@@ -81,7 +81,7 @@ Broker position/order polling alone is not enough for the automated LIVE contrac
 
 ## Reference environment sketch
 
-The example `cloudrun.env` in this bundle is reference material only. It now mirrors the stream-enabled automated LIVE tuple so the target profile matches the architecture more closely.
+The root `cloudrun.env` file is a non-secret local reference template and intentionally does not set `TRADE_MODE=LIVE`. `docs/runbooks/cloudrun-live.env.example` is also reference material; it is not an approved deployment manifest.
 
 Typical Cloud Run configuration would still include:
 

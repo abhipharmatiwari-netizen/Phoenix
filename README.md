@@ -1,171 +1,95 @@
 # Phoenix v9
 
-Phoenix v9 is an operator-run trading system. This README reflects the **current recommended automated LIVE runtime** defined in [`ARCHITECTURE.md`](ARCHITECTURE.md) and the Docker/Desktop implementation assets bundled here.
+Phoenix v9 is an operator-run trading system. `ARCHITECTURE.md` is the production contract; this README is the short operator index for the current repo.
 
-If any repo asset, runbook, or helper script conflicts with `ARCHITECTURE.md`, the architecture document is authoritative.
+If any repo asset, runbook, helper script, or deployment note conflicts with `ARCHITECTURE.md`, treat the architecture document as authoritative and fix the conflicting asset before using it.
 
----
+## Current Automated LIVE Contract
 
-## Current recommended automated LIVE runtime
-
-The current recommended automated LIVE runtime is the following exact operating model:
+The recommended automated LIVE runtime is exact:
 
 - `TRADE_MODE=LIVE`
 - `ENABLE_MULTI_HUB=true`
 - `USE_HUB_ROUTER=true`
 - `DISABLE_STREAM_WORKER=false`
-- **stream worker** handles broker market-data session, ticks, bar building, indicator updates, live marks, and strategy signal generation
-- **hub/router/lifecycle/account runners** remain authoritative for order submission, idempotency, ownership, broker sync, reconciliation, lifecycle polling, and durable control-plane enforcement
-- Postgres is the authoritative operational store for outbox, lifecycle state, ownership, kill-switch durability, sweep state, EOD state, control-plane configuration, and the current bundled broker-credential path
-- LIVE secrets must be sourced from **Secret Manager or Postgres**; short-lived injected environment variables may transport those values at runtime, but repo env files are not approved secret sources
-- release readiness is judged from the **backend container's effective runtime state**, health, and reconciliation evidence, not from the launching shell alone
+- stream worker: broker market data, ticks, bars, indicators, live marks, and strategy signal generation
+- hub/router/lifecycle/account runners: order authority, idempotency, ownership, broker sync, reconciliation, lifecycle polling, and durable control-plane enforcement
+- Postgres: authoritative operational store for outbox, lifecycle state, ownership, kill-switch durability, sweep/EOD state, control-plane rows, and the bundled broker-credential path
+- LIVE secrets: Secret Manager, OCI Vault/Docker secrets, or Postgres-backed broker credentials; repo env files are templates only
 
-### Why `DISABLE_STREAM_WORKER=false` matters
+`DISABLE_STREAM_WORKER=true` is not an automated LIVE profile unless an approved replacement market-data/bar/indicator/strategy plane exists and is wired end to end.
 
-In the current recommended automated LIVE profile, fresh ticks, bars, indicators, and open mark-to-market depend on the stream-worker market-data path. Broker position/order polling is still required, but broker sync alone does not satisfy the automated LIVE baseline for signal generation or fresh open PnL.
+## Current Deployment Surfaces
 
-`DISABLE_STREAM_WORKER=true` is valid only for operator/control-plane, reconciliation, or manual-supervision mode unless an approved replacement market-data plane exists and is wired end to end.
+| Surface | Status | Canonical doc |
+|---|---|---|
+| Docker Desktop single-stack Compose | Bundled local LIVE implementation | [Docker Desktop LIVE Deployment](docs/runbooks/docker_desktop_live_deployment.md) |
+| OCI Compose | Repo-tracked cloud Compose implementation; requires deployment-specific evidence | [OCI LIVE Deployment](docs/runbooks/oci_live_deployment.md) |
+| Cloud Run | Roadmap/reference only; not approved for go-live | [Cloud Run reference](docs/runbooks/cloud_run_live_deployment.md) |
+| `docker.env` and `cloudrun.env` | Local/reference templates only | This README and file comments |
 
----
+No manifest is proof of LIVE readiness by itself. Approval depends on the backend container's effective environment, `/readyz`, startup/reconciliation logs, and release evidence.
 
-## What this aligned bundle contains
+## Required Operator Evidence
 
-This bundle includes a Docker/Desktop implementation example of the current recommended automated LIVE runtime:
+Before any LIVE approval, capture and review:
 
-- [`docker-compose.live.single.yml`](docker-compose.live.single.yml) — single-file Docker manifest updated to the stream-enabled recommended LIVE runtime
-- [`docs/runbooks/docker_desktop_live_deployment.md`](docs/runbooks/docker_desktop_live_deployment.md) — operator runbook for that manifest
-- [`start-docker-secretstore.ps1`](start-docker-secretstore.ps1) — optional helper that exports runtime variables into the current PowerShell session before Compose starts
+- rendered Compose or deployment spec
+- `docker compose ps` or platform equivalent
+- effective backend environment proving the LIVE tuple
+- `/health/summary` and `/readyz`
+- `/admin/release-evidence` using `X-Admin-Key`
+- backend logs showing startup validation, schema guard, leader lease, recovery/reconciliation, runner startup, stream-worker startup, and balance sync readiness
 
-### Secret-source rule
+See [LIVE Release Evidence](docs/runbooks/release_evidence.md).
 
-The helper script above is an operator convenience only. It must not be read as a change to the architecture rule that LIVE secrets come from **Secret Manager or Postgres**. If you use a local host-side vault or PowerShell helper, treat it as a transport step for values that remain governed by the approved LIVE secret-management process.
-
----
-
-## What is not the current automated LIVE baseline
-
-The following are **not** the current recommended automated LIVE baseline:
-
-- legacy-authoritative LIVE mode
-- `DISABLE_STREAM_WORKER=true` for automated LIVE without an approved replacement market-data/bar/indicator plane
-- repo-managed secret values committed to git or placed in `.env`
-- treating CSV, BigQuery, dashboard state, JSON helpers, or in-memory state as authoritative live control state
-- Cloud Run as the current default production path
-- Firestore-backed broker secrets as the current default production path
-- BigQuery as an authoritative operational store
-
-Those items may exist as reference material, compatibility assets, or roadmap work, but they are not the current recommended automated LIVE contract.
-
----
-
-## Bundled Docker/Desktop implementation path
-
-Use the bundled runbook:
-
-- [Docker Desktop LIVE Deployment](docs/runbooks/docker_desktop_live_deployment.md)
-
-Required control-plane data before go-live:
-
-- tenant row exists for the target tenant
-- broker account row exists for the target `broker_account_id`
-- subscription / strategy configuration rows exist for the target tenant and broker account
-- `broker_credentials` row exists for the target `broker_account_id` when using the bundled Postgres-backed broker-secret path
-
-The bundled Docker/Desktop path builds and starts Phoenix in LIVE mode with the stream-enabled recommended runtime. Use the runbook for the exact command, verification steps, and release evidence.
-
----
-
-## Primary surfaces
-
-| Surface | Purpose |
-|---|---|
-| `http://localhost` | Browser-facing operations console through nginx |
-| `http://localhost/health` | Liveness probe |
-| `http://localhost/health/summary` | Startup and dependency summary |
-
-### Exposure rule
-
-For the bundled Docker/Desktop path, nginx is the browser-facing entrypoint. Direct public exposure of the backend container is not part of this runbook.
-
----
-
-## Documentation map
+## Documentation Map
 
 | Document | Role |
 |---|---|
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Authoritative production contract |
-| [`ABOUTME.md`](ABOUTME.md) | Plain-language operational summary |
-| [Docker Desktop LIVE Deployment](docs/runbooks/docker_desktop_live_deployment.md) | Bundled Docker/Desktop implementation runbook |
-| [Capital limits configuration](docs/runbooks/capital_limits_configuration.md) | Per-account notional/margin limits and `CAPITAL_LIMITS_JSON` format |
-| [Broker credential update runbook](docs/runbooks/update_broker_credentials.md) | How to rotate SmartAPI credentials in Postgres |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Authoritative production contract |
+| [ABOUTME.md](ABOUTME.md) | Plain-language, non-authoritative summary |
+| [Docker Desktop LIVE Deployment](docs/runbooks/docker_desktop_live_deployment.md) | Local Compose operator runbook |
+| [OCI LIVE Deployment](docs/runbooks/oci_live_deployment.md) | OCI Compose operator runbook |
+| [LIVE Release Evidence](docs/runbooks/release_evidence.md) | Approval evidence standard |
+| [Capital limits configuration](docs/runbooks/capital_limits_configuration.md) | `CAPITAL_LIMITS_JSON` and margin policy |
+| [Broker credential update](docs/runbooks/update_broker_credentials.md) | Postgres `broker_credentials` rotation |
 | [Blue/Green cutover](docs/runbooks/blue_green_cutover.md) | Controlled writer handoff |
-| [Restore drill](docs/runbooks/restore_drill.md) | Backup / restore validation |
-| [Break-glass flatten](docs/runbooks/break_glass_flatten.md) | Emergency contract exit via admin route |
-| [Orphan review resolution](docs/runbooks/resolve_orphan_review.md) | How to resolve ORPHAN_REVIEW position states |
-| [Kill switch reference](docs/runbooks/kill_switch.md) | Kill switch detection and clear procedures |
-| [Runtime KPIs and SLO targets](docs/kpis_slos.md) | Day-1 monitor set, alert thresholds, cutover evidence requirements |
-| [Strategy runtime diagnostics](docs/runbooks/strategy_runtime_diagnostics.md) | `STRATEGY_BAR_SKIP` event reference and startup snapshot artifact |
-| [Cloud Run deployment reference](docs/runbooks/cloud_run_live_deployment.md) | Reference / roadmap material only |
+| [Restore drill](docs/runbooks/restore_drill.md) | Backup/restore validation |
+| [Break-glass flatten](docs/runbooks/break_glass_flatten.md) | Emergency exit path; not approved for LIVE unless step-up token issuance is available |
+| [Orphan review resolution](docs/runbooks/resolve_orphan_review.md) | `ORPHAN_REVIEW` operator workflow |
+| [Kill switch](docs/runbooks/kill_switch.md) | Trip, clear, and rearm workflow |
+| [Runtime KPIs and SLO targets](docs/kpis_slos.md) | Day-1 monitor set and alert thresholds |
+| [Strategy runtime diagnostics](docs/runbooks/strategy_runtime_diagnostics.md) | Stream/strategy startup diagnostics |
 
----
-
-## Repository layout
+## Repository Layout
 
 ```text
 app/                              Backend service and trading runtime
 frontend/                         React operations console
 nginx/                            Reverse proxy and frontend image config
 migrations/                       SQL migrations and bootstrap assets
-scripts/                          Operator utility scripts (generate_sbom.py, replay engine, etc.)
-scripts/replay/                   Bar-by-bar deterministic replay harness and optimizer
-tests/                            Test suite (1714+ tests)
-docs/runbooks/                    Operator procedures
-.github/workflows/                CI — security scan (gitleaks, pip-audit, SBOM generation)
-Dockerfile                        Backend image build (multi-stage, non-root, healthcheck built in)
-docker.env                        Local SHADOW/dev profile only — not used by production compose
-docker-compose.live.single.yml    Bundled Docker/Desktop LIVE manifest
-start-docker-secretstore.ps1      PowerShell helper — loads SecretStore secrets into session before Compose
-start-docker-secretstore.cmd      Convenience launcher for the PowerShell helper from Windows Explorer
+scripts/                          Operator and release utility scripts
+scripts/replay/                   Deterministic replay harness and optimizer
+tests/                            Pytest suite
+docs/runbooks/                    Current operator procedures and references
+Dockerfile                        Backend image build
+docker-compose.live.single.yml    Docker/Desktop LIVE manifest
+docker-compose.oci-live.yml       OCI Compose manifest
+phoenix-override.yml.example      OCI override template
+docker.env                        Local SHADOW/dev template only
+cloudrun.env                      Cloud Run reference template only
 ```
 
----
+## Not Current LIVE Authority
 
-## Production hardening guards
+The following are not authoritative LIVE stores or current go-live paths:
 
-The following guards are wired directly into [`docker-compose.live.single.yml`](docker-compose.live.single.yml) and enforced at startup. They cannot be accidentally bypassed by the host shell environment.
+- Firestore-backed control-plane or broker-secret authority
+- BigQuery or CSV as live operational authority
+- root env files as LIVE secret sources
+- legacy-authoritative LIVE mode
+- Cloud Run deployment
+- stale multi-file Docker Compose profiles not present in this repo
 
-| Guard | Env var | What it enforces |
-|---|---|---|
-| Stack-lock | `REQUIRE_LIVE_TRADE_MODE=true` | Startup validator hard-fails if `TRADE_MODE != LIVE`; prevents SHADOW/PAPER deployment of the LIVE manifest |
-| Broker schema check | `BROKER_SCHEMA_CHECK_MODE=strict` | Angel One balance/order/position API responses validated at every sync cycle; malformed shapes rejected at the integration boundary |
-| Risk state isolation | `RISK_STATE_PATH=/app/state/risk_positions.json` | Risk restart-helper stored on the `/app/state` volume (separate from logs); survives log rotation |
-| Selector staleness | IST-date guard in `StrategySelector` | Prior-day selection state evicted on first bar after IST midnight; prevents regime/strategy state carrying over between trading days |
-| Sync freshness | `/readyz` sync-age gate | Returns 503 when position or orders sync age exceeds 2× the configured sync interval |
-| Unroutable exclusion | Runtime route validation at stream startup | Attached strategies with no routing entry are dropped before dispatch; a clean Docker/Desktop LIVE start should not emit `strategy.unroutable` |
-
-## Capital risk configuration
-
-Production limits are pinned explicitly in [`docker-compose.live.single.yml`](docker-compose.live.single.yml):
-
-| Env var | Production value | What it controls |
-|---|---|---|
-| `CAPITAL_MARGIN_CHECK_MODE` | `enforce` | Blocks orders when estimated margin > available balance |
-| `CAPITAL_MARGIN_SHORT_OPTION_PER_LOT` | 2,00,000 | Per-lot margin floor for short CE/PE SELL orders |
-| `CAPITAL_MARGIN_FUTURES_PER_LOT` | 2,00,000 | Per-lot margin floor for futures orders |
-| `CAPITAL_MARGIN_FUTURES_RATE` | 0.12 | Fraction of futures notional used as margin estimate |
-| `CAPITAL_LIMITS_JSON` | required per account | Per-account notional/exposure limits; `TRADE_MODE=LIVE` rejects empty `{}` unless an explicit audited exception is set |
-
-The Docker/Desktop helper derives a `tenant_id:broker_account_id` entry at the 5L/10L baseline when no operator override is supplied.
-Set `CAPITAL_LIMITS_JSON` explicitly for funded accounts before LIVE use.
-See the [capital limits runbook](docs/runbooks/capital_limits_configuration.md) for the full override format.
-
-> `CAPITAL_MARGIN_CHECK_MODE=off` is auto-upgraded to `enforce` whenever `TRADE_MODE=LIVE`
-> even if not explicitly set — but the compose file sets it explicitly for full auditability.
-
----
-
-## Non-LIVE usage
-
-The repo may still contain local or compatibility assets such as `docker.env`, `docker-compose.live.yml`, `docker-compose.postgres.override.yml`, and `cloudrun.env`. Those assets are not proof of LIVE readiness by themselves. LIVE approval depends on conformance to [`ARCHITECTURE.md`](ARCHITECTURE.md), the effective runtime environment, and release evidence.
-
-Clean promotion artifacts should be produced with `scripts/build_release_artifact.py`. The builder now works even from a source snapshot without `.git`, and it excludes runtime injection files such as `*.env.runtime`, logs, caches, and tests from the release zip.
+Build clean promotion artifacts with `python scripts/build_release_artifact.py --output release/phoenix-live-source.zip`.

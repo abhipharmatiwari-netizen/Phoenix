@@ -1,12 +1,19 @@
 #!/bin/sh
-# Build and push OCIR image using OCI instance principal auth.
+# Build and push an OCIR backend image using OCI instance-principal auth.
+#
+# Required env vars:
+#   OCIR_NAMESPACE   OCI tenancy namespace
+#   OCIR_USERNAME    OCIR login username, usually <namespace>/<identity-domain>/<user>
+#
+# This script is for the OCI Compose path only. Do not hard-code tenancy,
+# username, token, or registry values in this repo.
 set -eu
 
 OCI_CLI=/home/opc/bin/oci
-OCIR_REGION="ap-mumbai-1"
+OCIR_REGION="${OCIR_REGION:-ap-mumbai-1}"
 OCIR_REGISTRY="${OCIR_REGION}.ocir.io"
-OCIR_NAMESPACE="bmfve1wf5neh"
-OCIR_USERNAME="${OCIR_NAMESPACE}/oracleidentitycloudservice/abhipharma.tiwari@gmail.com"
+OCIR_NAMESPACE="${OCIR_NAMESPACE:?Set OCIR_NAMESPACE from the ops secrets store}"
+OCIR_USERNAME="${OCIR_USERNAME:?Set OCIR_USERNAME from the ops secrets store}"
 APP_DIR="/opt/phoenix/app"
 
 GIT_SHA=$(git -C "$APP_DIR" rev-parse HEAD)

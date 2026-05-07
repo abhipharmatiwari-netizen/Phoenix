@@ -2,10 +2,10 @@
   "evidence_requirements": {
     "description": "Minimum evidence required for LIVE promotion approval. All items must be satisfied and attached to the promotion record before go-live sign-off.",
     "required": [
-      "release_evidence_snapshot: GET /admin/release-evidence (requires ADMIN_API_KEY) — must show runtime_ready=true, position_authority_restored, schema_guard.status=ok, startup_recovery.status=ok, and no synthetic_contamination.",
+      "release_evidence_snapshot: GET /admin/release-evidence (requires ADMIN_API_KEY via X-Admin-Key or an approved admin token) must show runtime_ready=true, schema_guard.status=ok, startup_recovery.status=ok, and no synthetic_contamination. position_authority_restored must be true when existing position records were restored; a fresh database with zero records is acceptable only if /readyz is otherwise healthy and the empty-state evidence is attached.",
       "test_run_summary: pytest exit-code 0 with no newly-introduced failures. Attach output or CI artefact link.",
       "commit_hash: The exact git commit SHA deployed, traceable to the build artefact.",
-      "operator_checklist: Confirm CAPITAL_LIMITS_JSON contains funded-account-specific limits (not helper-derived generic defaults), TRADE_MODE=LIVE, secrets injected via SecretStore / Secret Manager, and LIVE_PG_SSL_SKIP_CHECK removed for remote Postgres."
+      "operator_checklist: Confirm CAPITAL_LIMITS_JSON contains funded-account-specific limits (not helper-derived generic defaults), TRADE_MODE=LIVE, broker secrets injected via Postgres broker_credentials or an approved secret manager, platform secrets injected from the operator secret store, and LIVE_PG_SSL_SKIP_CHECK absent for remote Postgres."
     ],
     "note": "Tests are excluded from the promotion bundle (see excluded_prefixes). Validation evidence must be attached as a separate companion artefact or CI record."
   },
@@ -24,8 +24,11 @@
     "Dockerfile",
     "README.md",
     "cloudrun.env",
+    "docker-compose.oci-live.yml",
     "docker-compose.live.single.yml",
     "docker.env",
+    "phoenix-override.yml.example",
+    "release-manifest.json",
     "requirements.txt",
     "start-docker-secretstore.cmd",
     "start-docker-secretstore.ps1",

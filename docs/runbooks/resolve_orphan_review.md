@@ -4,6 +4,14 @@
 
 A contract enters `ORPHAN_REVIEW` when reconciliation cannot determine ownership conclusively and the scope has exceeded the ambiguity threshold. This state blocks fresh entries for the affected `OwnershipKey` until an operator makes an explicit decision.
 
+## Purpose
+
+Resolve one blocked ownership scope using broker evidence, audit evidence, and an explicit operator decision.
+
+## Scope
+
+This runbook applies to hub-authoritative deployments where reconciliation has placed a scope in `ORPHAN_REVIEW`. It is not a general manual-trading workflow.
+
 ---
 
 ## What `ORPHAN_REVIEW` means
@@ -44,7 +52,7 @@ The runtime holds an ownership record for a contract/account scope, but broker e
 
 ```http
 POST /admin/resolve-orphan-review
-Authorization: Bearer <ADMIN_API_KEY>
+X-Admin-Key: <ADMIN_API_KEY>
 Content-Type: application/json
 X-Request-Id: <unique-id>
 
@@ -150,6 +158,10 @@ For any orphan review resolution, record:
 - decision and reason
 - audit log excerpt confirming the resolution event
 - any lifecycle confirmation (for ADOPT and FLATTEN decisions)
+
+## Rollback / recovery
+
+`ADOPT`, `FLATTEN`, and `SUPPRESS` are state-changing decisions. If the wrong decision was submitted, stop new entries for the affected scope, preserve the request/response/audit evidence, and escalate to manual reconciliation. Do not issue a second contradictory decision until broker state and internal lifecycle state are reviewed together.
 
 ---
 

@@ -1,5 +1,19 @@
 # Capital Limits Configuration
 
+## Purpose
+
+Configure `CAPITAL_LIMITS_JSON` and related margin controls without weakening LIVE fail-closed behavior.
+
+## Scope
+
+This guide applies to the current Docker Desktop and OCI Compose LIVE paths. It does not approve helper-derived generic limits for funded LIVE accounts, repo-stored secrets, or disabling capital/risk checks.
+
+## Preconditions
+
+- You know the funded tenant and broker account IDs.
+- You have operator approval for the exposure and per-order limits.
+- The deployment path injects values from the operator environment or platform secret store, not from a committed env file.
+
 Phoenix enforces per-order notional and per-account gross-exposure limits via the `CapitalEngine`.
 All limits can be tuned per-tenant, per-account, or globally through the `CAPITAL_LIMITS_JSON`
 environment variable without touching code.
@@ -92,12 +106,13 @@ Futures required margin = `max(notional × rate, lots × per_lot)`.
 
 ---
 
-## How to update in production
+## How to update
 
 For funded LIVE accounts, prefer a specific `tenant_id:broker_account_id` key. Set
-`CAPITAL_LIMITS_JSON` in the PowerShell session before running
-`start-docker-secretstore.cmd`, or store it as a SecretStore secret named
-`CAPITAL_LIMITS_JSON` so the launch script picks it up automatically:
+`CAPITAL_LIMITS_JSON` in the operator environment before deployment, or store it
+in the approved platform secret process for your deployment path.
+
+Docker Desktop example:
 
 ```powershell
 $env:CAPITAL_LIMITS_JSON = '{"tenant-1:A1": {"max_notional_per_order": 500000, "max_gross_exposure": 1000000}}'
@@ -108,12 +123,30 @@ Or via SecretStore:
 Set-Secret -Name "CAPITAL_LIMITS_JSON" -Secret '{"tenant-1:A1": {"max_notional_per_order": 500000, "max_gross_exposure": 1000000}}'
 ```
 
-The compose file requires this value at container start time. The bundled
-`start-docker-secretstore.ps1` helper derives a `tenant_id:broker_account_id`
-entry at the 5L/10L baseline if neither the current session nor SecretStore
-provides one. Empty `{}` is rejected in `TRADE_MODE=LIVE` unless
-`ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true` is deliberately set as an audited
-exception.
+OCI Compose example: set `CAPITAL_LIMITS_JSON` in `/opt/phoenix/phoenix-deploy.env`
+from the operator secret store before running the OCI deployment runbook.
+
+The compose file requires this value at container start time. Empty `{}` is
+rejected in `TRADE_MODE=LIVE` unless `ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true`
+is deliberately set as an audited exception. Do not use the helper-derived
+5L/10L fallback as funded-account go-live evidence.
+
+## Validation
+
+```powershell
+docker compose -f .\docker-compose.live.single.yml exec backend printenv CAPITAL_LIMITS_JSON
+curl.exe http://localhost/readyz
+```
+
+Expected success evidence:
+
+- `CAPITAL_LIMITS_JSON` contains the approved funded-account key.
+- `/readyz` is healthy.
+- Startup logs do not contain `startup.capital_limits_override` unless an audited exception was approved.
+
+## Failure handling and rollback
+
+If startup rejects the limit payload, stop the stack, restore the last approved `CAPITAL_LIMITS_JSON`, redeploy, and capture the failed payload plus startup error in the release record. Do not disable capital checks to recover a LIVE deployment.
 
 ---
 

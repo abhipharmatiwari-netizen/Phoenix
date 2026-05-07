@@ -1,5 +1,10 @@
 # Optimized Strategy Parameters
 
+> **Status:** Research/reference, not authoritative LIVE configuration.
+> Current runnable values come from `app/config/strategy_env.yaml`, database-backed
+> strategy config, and runtime overrides. Do not apply parameter changes from this
+> file directly to LIVE without release evidence and operator sign-off.
+
 **Backtest period:** 2026-02-23 to 2026-03-20 (19 trading days)
 **Data source:** `indicator_bars` table (PostgreSQL)
 **Generated:** 2026-03-21

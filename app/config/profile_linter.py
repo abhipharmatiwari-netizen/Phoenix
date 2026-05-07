@@ -140,6 +140,7 @@ def _build_lint_settings(env: dict[str, str]) -> SimpleNamespace:
             default=False,
         ),
         hub_instance_name=str(env.get("HUB_INSTANCE_NAME", "") or ""),
+        hub_default_tenant_id=str(env.get("HUB_DEFAULT_TENANT_ID", "") or ""),
         dashboard_auth_disabled=_parse_bool(
             env.get("DASHBOARD_AUTH_DISABLED"),
             default=False,

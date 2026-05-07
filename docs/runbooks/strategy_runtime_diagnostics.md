@@ -1,5 +1,19 @@
 # Strategy Runtime Diagnostics
 
+## Purpose
+
+Diagnose stream-worker, bar dispatch, selector, and strategy attachment issues without changing LIVE runtime authority.
+
+## Scope
+
+This guide is read-only unless it explicitly tells the operator to redeploy through a current runbook. It applies to the current hub-authoritative stream-worker path. It does not approve source-code bind mounts, legacy-authoritative mode, or `DISABLE_STREAM_WORKER=true` in LIVE.
+
+## Preconditions
+
+- You have log access for the backend container or host log volume.
+- You know which deployment path is active: Docker Desktop or OCI Compose.
+- You can capture `/readyz`, backend logs, and the startup snapshot artifact before making changes.
+
 ## `STRATEGY_BAR_SKIP` events
 
 `app/runners/multi_instrument_stream.py` now emits structured `STRATEGY_BAR_SKIP` logs before a strategy bar callback is skipped for:
@@ -42,7 +56,7 @@ After the universe build completes, the stream worker initialises the WebSocket 
 On a healthy OCI deployment the logs should show in order:
 
 ```
-[INFO] app.core.ws_runner: WebSocket proxy configured: 65.20.69.50:8888
+[INFO] app.core.ws_runner: WebSocket proxy configured: <PROXY_HOST>:8888
 [INFO] app.core.ws_runner: Connecting WebSocket 2.0 for multi-instrument universe...
 [INFO] app.core.ws_runner: WebSocket opened, subscribing to multiuniv1 (mode=2) with N tokens...
 [INFO] app.core.ws_runner: Subscribed N tokens across M batches
@@ -64,7 +78,7 @@ docker exec phoenix-oci-backend env | grep ANGEL_HTTPS_PROXY
 docker exec phoenix-oci-backend grep -c 'proxy_type' /app/app/core/ws_runner.py
 ```
 
-Both must return a value. If not, the bind mount is missing — redeploy with the override.
+Both must return a value. If not, redeploy the pinned image and current OCI override template. Do not restore old source-code bind mounts as a LIVE fix.
 
 ### `Only http, socks4, socks5 proxy protocols are supported`
 
@@ -88,7 +102,7 @@ failed restart attempts the integer exceeds Python float max and `float(int)` ra
 **Fix (already applied):** `app_runtime.py` uses `2.0 ** attempts` (float base), which
 naturally clamps to `float('inf')` for large exponents. `min(300.0, inf) == 300.0`.
 
-If this error reappears, the `app_runtime.py` bind mount has been lost. Redeploy.
+If this error reappears, the running image is stale. Redeploy a pinned image through the current deployment runbook.
 
 ### Watchdog suppresses restart: `non-retryable worker error`
 
@@ -100,3 +114,22 @@ If this error reappears, the `app_runtime.py` bind mount has been lost. Redeploy
 correctly stops retrying because retrying cannot fix a missing database row.
 
 **Fix:** Seed the `strategy_configs` table. See [oci_live_deployment.md](oci_live_deployment.md).
+
+## Validation
+
+Capture these after any diagnostic action:
+
+```bash
+docker logs --tail 300 phoenix-oci-backend
+docker exec phoenix-oci-backend wget -qO- http://localhost:8080/readyz
+```
+
+Expected success evidence:
+
+- `/readyz` reports stream-worker and balance-sync readiness for automated LIVE.
+- backend logs show universe build, WebSocket subscription, and strategy attachment without fatal restart loops.
+- the latest startup snapshot exists under the mounted log path.
+
+## Failure handling and rollback
+
+If diagnostics show stale code, missing strategy config, or broken market-data, keep automated entries disabled or stop the stack. Roll back to the last known-good image/config through the deployment runbook and repeat `/readyz` plus log validation before allowing automated LIVE entries.

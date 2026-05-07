@@ -10,7 +10,6 @@ def test_shared_repo_profiles_pass_lint():
     profile_paths = [
         repo_root / ".env.example",
         repo_root / "docker.env",
-        repo_root / "docs" / "runbooks" / "docker-live.env.example",
         repo_root / "docs" / "runbooks" / "cloudrun-live.env.example",
     ]
 

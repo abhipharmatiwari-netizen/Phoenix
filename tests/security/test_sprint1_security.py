@@ -216,14 +216,20 @@ class TestEnvTemplates:
     def test_committed_env_templates_exist(self):
         repo_root = Path(__file__).resolve().parents[2]
         assert (repo_root / "docker.env").is_file()
-        assert (repo_root / "docs" / "runbooks" / "docker-live.env.example").is_file()
+        assert (
+            repo_root / "docs" / "runbooks" / "cloudrun-live.env.example"
+        ).is_file()
+        assert (repo_root / "docs" / "runbooks" / "oci-live.env.example").is_file()
 
     def test_committed_env_templates_have_no_real_secrets(self):
         repo_root = Path(__file__).resolve().parents[2]
         contents = [
             (repo_root / "docker.env").read_text(encoding="utf-8"),
             (
-                repo_root / "docs" / "runbooks" / "docker-live.env.example"
+                repo_root / "docs" / "runbooks" / "cloudrun-live.env.example"
+            ).read_text(encoding="utf-8"),
+            (
+                repo_root / "docs" / "runbooks" / "oci-live.env.example"
             ).read_text(encoding="utf-8"),
         ]
         for content in contents:
@@ -232,12 +238,16 @@ class TestEnvTemplates:
 
     def test_committed_env_templates_have_key_sections(self):
         repo_root = Path(__file__).resolve().parents[2]
-        live_template = (
-            repo_root / "docs" / "runbooks" / "docker-live.env.example"
+        cloudrun_template = (
+            repo_root / "docs" / "runbooks" / "cloudrun-live.env.example"
         ).read_text(encoding="utf-8")
-        assert "ADMIN_API_KEY" in live_template
-        assert "CONTROL_PLANE_PG_PASSWORD" in live_template
-        assert "TRADE_MODE=LIVE" in live_template
+        oci_template = (
+            repo_root / "docs" / "runbooks" / "oci-live.env.example"
+        ).read_text(encoding="utf-8")
+        assert "ADMIN_API_KEY_SECRET" in cloudrun_template
+        assert "TRADE_MODE=LIVE" in cloudrun_template
+        assert "CONTROL_PLANE_PG_HOST" in oci_template
+        assert "CAPITAL_LIMITS_JSON" in oci_template
 
 
 class TestSupplyChain:

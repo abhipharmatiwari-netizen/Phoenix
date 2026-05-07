@@ -5,7 +5,9 @@
 > **Cloud deployment?** For the production OCI deployment (Oracle Cloud, Vultr proxy, OCIR images),
 > see [oci_live_deployment.md](oci_live_deployment.md) instead.
 
-This runbook describes the Docker Desktop / Windows path bundled with this document set.
+## Purpose
+
+This runbook describes the Docker Desktop / Windows path bundled with this repo.
 
 It uses:
 
@@ -14,7 +16,7 @@ It uses:
 - Postgres `broker_credentials` as the broker-secret path used by the bundled manifest
 - runtime-injected platform secrets for values such as `ADMIN_API_KEY`, auth token secret, and database password
 
-The older multi-file Compose path (`docker-compose.live.yml` + `docker-compose.postgres.override.yml`) is not a bundled go-live path unless you separately audit it and prove that the backend container resolves the full automated LIVE contract.
+The older multi-file Compose path (`docker-compose.live.yml` + `docker-compose.postgres.override.yml`) is obsolete in this repo. Those files are not present and must not be used as current LIVE guidance.
 
 ---
 
@@ -31,9 +33,13 @@ This runbook is correct only for the following deployment model:
 - Postgres authoritative for operational state
 - `BROKER_SECRET_BACKEND=postgres` in the bundled manifest
 
+## Scope
+
+This runbook covers only `docker-compose.live.single.yml` launched from a Windows PowerShell session. It does not cover OCI, Cloud Run, legacy multi-file Compose profiles, Firestore-backed authority, or env-file secret sourcing.
+
 ### Secret boundary
 
-`ARCHITECTURE.md` requires LIVE secrets to come from **Secret Manager or Postgres**. Short-lived injected environment variables may transport those values into the runtime. Repo env files are not approved secret sources.
+`ARCHITECTURE.md` requires LIVE secrets to come from an approved platform secret store; broker credentials may use Postgres. Short-lived injected environment variables and Docker secret files may transport those values into the runtime. Repo env files are not approved secret sources.
 
 This aligned bundle still includes a Windows PowerShell helper for convenience. Treat that helper as a host-side export step only, not as a change to the architecture's source-of-truth rule for secrets.
 
@@ -328,6 +334,12 @@ docker compose -f .\docker-compose.live.single.yml up -d --build --force-recreat
 ```powershell
 docker compose -f .\docker-compose.live.single.yml down --remove-orphans
 ```
+
+### Rollback / recovery
+
+If a rebuilt backend is unhealthy, restore the last known-good git revision or image, rerun the same `start-docker-secretstore.ps1` deployment, and repeat the verification steps. Do not resume automated LIVE until `/readyz`, stream-worker evidence, balance sync readiness, and release evidence pass again.
+
+The operator owns the decision to hold, roll back, or keep the stack stopped when validation fails.
 
 ---
 

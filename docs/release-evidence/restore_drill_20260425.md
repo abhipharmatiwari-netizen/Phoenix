@@ -51,8 +51,7 @@
 
 1. Backup schedule is manual (daily pg_dump via cron); automated point-in-time recovery
    (WAL archiving) is not configured for the local Docker Desktop deployment.
-   **Action**: document that PITR is only available on Cloud Run with Cloud SQL; local
-   deployments are limited to daily pg_dump RPO.
+   **Action**: document that PITR requires a separately approved Postgres platform with WAL/PITR; local deployments are limited to daily pg_dump RPO. Cloud Run is roadmap/reference in this repo, not the current approved go-live path.
 
 2. `internal_position_records` table had 2 stale non-terminal rows from the 09:58 IST
    session that required manual investigation. These were confirmed flat by broker
@@ -67,8 +66,8 @@
    row count matches expected open positions before declaring PASS.
 
 2. `docs/runbooks/restore_drill.md`: clarify that for local Docker Desktop, RPO is
-   bounded by daily pg_dump cadence, not PITR. Add note on Cloud SQL PITR for cloud
-   deployments.
+   bounded by daily pg_dump cadence, not PITR. Add note that PITR depends on the
+   chosen Postgres platform and is not provided by the repo-local Docker path.
 
 ---
 

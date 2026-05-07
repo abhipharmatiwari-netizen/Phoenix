@@ -18,7 +18,7 @@ attach them to the PR or deployment record per `docs/runbooks/release_evidence.m
 
 ```powershell
 # Collect the structured JSON bundle from a running LIVE stack
-$bundle = curl.exe -s -H "Authorization: Bearer $env:ADMIN_API_KEY" `
+$bundle = curl.exe -s -H "X-Admin-Key: $env:ADMIN_API_KEY" `
     http://localhost/admin/release-evidence | ConvertFrom-Json
 $bundle | ConvertTo-Json -Depth 10
 ```
