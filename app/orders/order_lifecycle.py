@@ -1159,6 +1159,79 @@ class OrderLifecycleService:
         signed_qty = float(filled_qty if ctx.side == "BUY" else -filled_qty)
         record.last_evidence_at = trade_time
         if self._is_exit_like(ctx):
+            # Flip detection: an exit fill whose signed qty would carry net_qty
+            # from one sign through zero to the other (e.g. SELL -1250 plus a
+            # BUY +2500 closing fill -> +1250) violates the partial-exit
+            # invariant filled_close <= filled_open. Auto-splitting the fill
+            # into a close leg + a fresh entry leg is correct but requires
+            # spawning a new position_id with the opposite side, which is a
+            # design change deserving its own PR.  For now we surface the
+            # situation safely: park the record in RECONCILING with a
+            # structured reason so the operator can square the broker leg
+            # manually and clear state via the admin endpoint, and record an
+            # audit event with both legs' implied quantities for follow-up.
+            prior_net_qty = float(record.net_qty)
+            new_net_qty = prior_net_qty + signed_qty
+            if (
+                abs(prior_net_qty) > 0.0001
+                and (
+                    (prior_net_qty > 0 and new_net_qty < -0.0001)
+                    or (prior_net_qty < 0 and new_net_qty > 0.0001)
+                )
+            ):
+                close_leg_qty = abs(prior_net_qty)
+                open_leg_qty = abs(float(filled_qty)) - close_leg_qty
+                logger.warning(
+                    "OrderLifecycleService: flip-fill detected — exit fill "
+                    "would carry net_qty=%.2f through zero to %.2f. Routing "
+                    "position %s to RECONCILING for operator action; record "
+                    "is NOT mutated by this fill (close_leg=%.2f open_leg=%.2f).",
+                    prior_net_qty,
+                    new_net_qty,
+                    record.position_id,
+                    close_leg_qty,
+                    open_leg_qty,
+                )
+                log_event(
+                    logger,
+                    event_type="POSITION_FLIP_FILL_DETECTED",
+                    message=(
+                        "Single exit fill exceeds open quantity (flip-the-trade); "
+                        "record routed to RECONCILING."
+                    ),
+                    level=logging.WARNING,
+                    tenant_id=ctx.tenant_id,
+                    broker_account_id=ctx.broker_account_id,
+                    strategy_id=ctx.strategy_id,
+                    instrument=ctx.symbol,
+                    broker_order_id=ctx.broker_order_id,
+                    position_id=record.position_id,
+                    scope_key=record.ownership_key,
+                    prior_net_qty=prior_net_qty,
+                    fill_signed_qty=signed_qty,
+                    close_leg_qty=close_leg_qty,
+                    open_leg_qty=open_leg_qty,
+                    fill_price=float(price),
+                )
+                self._transition_position_state(
+                    record,
+                    PositionState.RECONCILING,
+                    reason=(
+                        f"flip_fill_blocked:close_leg={close_leg_qty:.0f}:"
+                        f"open_leg={open_leg_qty:.0f}:awaiting_operator_action"
+                    ),
+                )
+                # Project the LAST KNOWN good state to state_store so downstream
+                # readers (sweep/EOD/trailing-lock) see the pre-fill view, not
+                # half-updated counters.
+                self._project_state_store_position(
+                    ctx,
+                    net_qty=prior_net_qty,
+                    avg_open_price=record.avg_open_price,
+                    trade_time=trade_time,
+                )
+                return
+
             if record.position_state == PositionState.NONE:
                 self._transition_position_state(
                     record,
