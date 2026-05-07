@@ -3,6 +3,8 @@ import types
 
 import pytest
 
+pytestmark = pytest.mark.smoke
+
 MODULE_PATHS = [
     "app",
     "app.brokers",

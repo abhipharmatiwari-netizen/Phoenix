@@ -66,19 +66,41 @@ until every item passes.
 
 ---
 
+## Pre-deploy smoke test
+
+Before deploying, run the lightweight smoke suite to verify import integrity and config lint:
+
+```bash
+pytest -m smoke -q
+# Expected: all tests pass in < 30 seconds
+# This replaces the deleted backtest_smoke.sh
+```
+
+The smoke suite covers:
+- All critical module imports succeed
+- Settings instantiate without error
+- Config profiles pass the profile linter
+- `/readyz` and `/health` endpoint schemas are stable
+- Startup validator rejects known-bad configurations
+
+A smoke failure is a deployment blocker: fix the root cause before proceeding.
+
+---
+
 ## Evidence collection procedure
 
-1. Deploy the new backend image via the active deployment runbook.
-2. Wait for the health check to pass (`docker compose ps` → `healthy`).
-3. Collect the evidence bundle:
+1. Run `pytest -m smoke -q` — must pass.
+2. Deploy the new backend image via the active deployment runbook.
+3. Wait for the health check to pass (`docker compose ps` → `healthy`).
+4. Collect the evidence bundle:
    ```powershell
    $bundle = curl.exe -s -H "X-Admin-Key: $env:ADMIN_API_KEY" `
        http://localhost/admin/release-evidence | ConvertFrom-Json
    $bundle | ConvertTo-Json -Depth 10
    ```
-4. Review each field against the pass criteria table above.
-5. If all criteria pass, record the `generated_at` timestamp in the deployment log.
-6. If any criterion fails, roll back or hold the stack stopped and investigate before re-attempting.
+5. Review each field against the pass criteria table above.
+6. If all criteria pass, record the `generated_at` timestamp in the deployment log.
+7. If any criterion fails, roll back or hold the stack stopped and investigate before re-attempting.
 
 OCI equivalent:
 

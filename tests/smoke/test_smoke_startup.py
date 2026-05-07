@@ -15,6 +15,8 @@ import importlib
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
+pytestmark = pytest.mark.smoke
+
 
 @pytest.fixture(autouse=True)
 def _isolate_env(monkeypatch):
