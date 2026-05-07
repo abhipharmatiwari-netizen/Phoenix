@@ -322,7 +322,7 @@ services:
                       ('tenants'), ('broker_accounts'), ('subscriptions'),
                       ('strategy_configs'), ('broker_credentials'),
                       ('circuit_breaker_state'), ('pnl_snapshots'), ('profit_lock_state'),
-                      ('position_trailing_lock_state')
+                      ('position_trailing_lock_state'), ('trades')
                   ) AS req(required_table)
                   WHERE NOT EXISTS (
                       SELECT 1 FROM information_schema.tables t

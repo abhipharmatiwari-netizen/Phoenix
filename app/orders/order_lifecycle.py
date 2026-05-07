@@ -31,8 +31,6 @@ from app.core.identifiers import (
 )
 from app.core.logging_utils import log_event
 from app.core.position_state import InternalPosition, PositionState
-from pathlib import Path
-
 from app.data.bq_persister import insert_trade_record
 from app.data.state_store import StateStore
 from app.data.trade_records import build_trade_record_from_fill, trade_record_to_bq_row
@@ -177,11 +175,6 @@ class OrderLifecycleService:
         self._position_records: Dict[str, InternalPosition] = {}
         self._position_persist_interval_ticks = self._resolve_position_persist_interval()
         self._position_persist_tick_counter = 0
-        # Per-fill trades.csv writer. In LIVE mode, OrderRouter's writer never
-        # fires for terminal fills (those are emitted via this lifecycle
-        # service, not directly from the router), so the lifecycle owns its
-        # own writer. Date-partitioned, governed by TRADE_CSV_ENABLED env.
-        self._trade_csv_writer = self._build_trade_csv_writer()
 
     @staticmethod
     def _resolve_position_persist_interval() -> int:
@@ -191,40 +184,6 @@ class OrderLifecycleService:
             return max(1, int(raw))
         except (TypeError, ValueError):
             return 20
-
-    def _build_trade_csv_writer(self):
-        """Return an OrderTradeCsvWriter configured from env, or None on error.
-
-        Lazy import avoids any circular dependency with app.orders.router.
-        """
-        try:
-            from app.orders.router import OrderTradeCsvWriter
-            from app.config.settings import get_settings
-
-            # Resolve base_dir from TRADE_CSV_PATH if set (extract parent dir
-            # for partitioning), else default to the repo's logs/ directory.
-            configured = str(os.getenv("TRADE_CSV_PATH", "") or "").strip()
-            if configured:
-                p = Path(configured)
-                base_dir = p.parent if p.suffix.lower() == ".csv" else p
-            else:
-                base_dir = Path(__file__).resolve().parents[2] / "logs"
-            try:
-                tz_name = getattr(get_settings(), "default_time_zone", None) or "UTC"
-            except Exception:
-                tz_name = "UTC"
-            return OrderTradeCsvWriter(
-                base_dir=base_dir,
-                tz_name=tz_name,
-                clock=self._clock,
-            )
-        except Exception as exc:
-            logger.warning(
-                "OrderLifecycleService: trade CSV writer init failed; "
-                "per-fill trade rows will not be persisted: %s",
-                exc,
-            )
-            return None
 
     @staticmethod
     def _resolve_poll_seconds() -> float:
@@ -1832,21 +1791,22 @@ class OrderLifecycleService:
                 broker_order_id,
             )
 
-        # Per-fill trades.csv write. The /me/trades endpoint reads CSV when
-        # BigQuery is not configured (the case for the OCI-only deployment),
-        # so without this write the trades page is permanently empty even
-        # though pnl_snapshots.realized_pnl accumulates correctly via on_trade.
-        if self._trade_csv_writer is not None:
-            try:
-                trade_row_csv = dict(bq_row)
-                trade_row_csv.setdefault("execution_mode", "LIVE")
-                trade_row_csv.setdefault("virtual", False)
-                self._trade_csv_writer.write_trade(trade_row_csv)
-            except Exception:
-                logger.exception(
-                    "OrderLifecycleService: trade CSV write failed for broker_order_id=%s",
-                    broker_order_id,
-                )
+        # Per-fill Postgres trade ledger. The /me/trades endpoint reads from
+        # this table when BigQuery is not configured (the OCI-only deploy).
+        # Without this write, /me/trades is permanently empty even though
+        # pnl_snapshots.realized_pnl accumulates correctly via on_trade.
+        # ON CONFLICT DO NOTHING handles duplicate fill notifications.
+        try:
+            from app.data.trade_store_postgres import insert_trade_postgres
+            pg_record = dict(bq_row)
+            pg_record.setdefault("execution_mode", "LIVE")
+            pg_record.setdefault("virtual", False)
+            insert_trade_postgres(pg_record)
+        except Exception:
+            logger.exception(
+                "OrderLifecycleService: Postgres trade insert failed for broker_order_id=%s",
+                broker_order_id,
+            )
 
         if self._pnl_engine is not None:
             signed_qty = filled_qty if ctx.side == "BUY" else -filled_qty

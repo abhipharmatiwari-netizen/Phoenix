@@ -369,6 +369,23 @@ def fetch_trades_for_tenant(
     """
     table = _trades_table_id()
     if not table:
+        # Postgres is the source of truth when BQ is not configured (the
+        # OCI-only deployment). The legacy CSV fallback is consulted only
+        # when Postgres is unreachable AND no rows are returned.
+        try:
+            from app.data.trade_store_postgres import fetch_trades_postgres
+            pg_rows = fetch_trades_postgres(
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                start_time=start_time,
+                end_time=end_time,
+                limit=limit,
+            )
+        except Exception as exc:
+            logger.debug("fetch_trades_for_tenant: Postgres path failed: %s", exc)
+            pg_rows = None
+        if pg_rows is not None:
+            return pg_rows
         return _load_trade_rows_from_csv(
             tenant_id=tenant_id,
             broker_account_id=broker_account_id,
