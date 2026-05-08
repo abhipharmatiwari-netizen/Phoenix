@@ -55,6 +55,34 @@ def _coerce_float(value: Any) -> float:
         return 0.0
 
 
+_PRESENT_SENTINEL = object()
+
+
+def _first_present(obj: Any, *keys: str) -> Any:
+    """Return the value of the first key that is present (not missing and not
+    None) on ``obj``. Crucially, an explicit numeric zero counts as "present"
+    -- unlike ``a or b`` which skips falsy zeros and silently falls through to
+    the next key.
+
+    Issue #204 (Codex #3): the avg_price normalization used to be
+    ``row.get('avg_price') or ... or row.get('entry_price')``. A row that
+    explicitly contained the corrupt ``avg_price=0`` plus a non-zero
+    ``entry_price`` then fell through to entry_price, hiding the corrupt
+    avg_price from the avg_price=0 dashboard defence below. This helper
+    preserves the explicit zero.
+    """
+    if isinstance(obj, dict):
+        for key in keys:
+            if key in obj and obj[key] is not None:
+                return obj[key]
+        return None
+    for key in keys:
+        val = getattr(obj, key, _PRESENT_SENTINEL)
+        if val is not _PRESENT_SENTINEL and val is not None:
+            return val
+    return None
+
+
 def _normalize_position_view(pos: Any) -> dict[str, Any]:
     if isinstance(pos, dict):
         row = dict(pos)
@@ -73,19 +101,25 @@ def _normalize_position_view(pos: Any) -> dict[str, Any]:
             row.get("quantity", row.get("qty", row.get("net_qty", row.get("netqty"))))
         )
         avg_price = _coerce_float(
-            row.get("avg_price")
-            or row.get("avgPrice")
-            or row.get("average_price")
-            or row.get("avgprice")
-            or row.get("entry_price")
+            _first_present(
+                row,
+                "avg_price",
+                "avgPrice",
+                "average_price",
+                "avgprice",
+                "entry_price",
+            )
         )
         entry_price = _coerce_float(
-            row.get("entry_price")
-            or row.get("entryPrice")
-            or row.get("avg_price")
-            or row.get("avgPrice")
-            or row.get("average_price")
-            or row.get("avgprice")
+            _first_present(
+                row,
+                "entry_price",
+                "entryPrice",
+                "avg_price",
+                "avgPrice",
+                "average_price",
+                "avgprice",
+            )
         )
         entry_ts = row.get("entry_ts") or row.get("entryTs") or row.get("entry_ts_utc")
         product_type = (
@@ -113,19 +147,25 @@ def _normalize_position_view(pos: Any) -> dict[str, Any]:
             or getattr(pos, "net_qty", None)
         )
         avg_price = _coerce_float(
-            getattr(pos, "avg_price", None)
-            or getattr(pos, "avgPrice", None)
-            or getattr(pos, "average_price", None)
-            or getattr(pos, "avgprice", None)
-            or getattr(pos, "entry_price", None)
+            _first_present(
+                pos,
+                "avg_price",
+                "avgPrice",
+                "average_price",
+                "avgprice",
+                "entry_price",
+            )
         )
         entry_price = _coerce_float(
-            getattr(pos, "entry_price", None)
-            or getattr(pos, "entryPrice", None)
-            or getattr(pos, "avg_price", None)
-            or getattr(pos, "avgPrice", None)
-            or getattr(pos, "average_price", None)
-            or getattr(pos, "avgprice", None)
+            _first_present(
+                pos,
+                "entry_price",
+                "entryPrice",
+                "avg_price",
+                "avgPrice",
+                "average_price",
+                "avgprice",
+            )
         )
         entry_ts = (
             getattr(pos, "entry_ts", None)
@@ -194,23 +234,43 @@ def _normalize_position_view(pos: Any) -> dict[str, Any]:
     }
 
 
-def _build_live_account_mark_snapshot(positions: list[Any]) -> dict[str, float]:
+def _build_live_account_mark_snapshot(positions: list[Any]) -> dict[str, Any]:
+    """Aggregate per-position marks into account-level totals.
+
+    Issue #204 Codex P2 #1: when a row has qty != 0 + LTP known + avg_price
+    invalid, ``_normalize_position_view`` correctly returns
+    ``unrealized_pnl=None`` to suppress the fake-profit display. The caller
+    of this snapshot must NOT silently coalesce that None to 0 in the
+    aggregate -- that would hide the desync at the account/strategy total.
+    Instead we count those rows in ``invalid_marks_count`` and skip them
+    from the unrealised total, so the PnL endpoint can surface the count
+    to operators.
+    """
     unrealized_total = 0.0
     gross_exposure = 0.0
+    invalid_marks_count = 0
     for pos in positions:
         view = _normalize_position_view(pos)
         qty = int(view["quantity"] or 0)
         if qty == 0:
             continue
         mark_price = view["ltp"]
+        unrealized = view["unrealized_pnl"]
         if mark_price is not None:
-            unrealized_total += float(view["unrealized_pnl"] or 0.0)
+            if unrealized is None:
+                # avg_price<=0 defence already fired (POSITION_VIEW_AVG_PRICE_INVALID
+                # WARNING was emitted). Surface the count here so the API
+                # response can flag the desync rather than silently zero it.
+                invalid_marks_count += 1
+            else:
+                unrealized_total += float(unrealized)
         gross_exposure += abs(qty) * float(
             mark_price if mark_price is not None else view["avg_price"]
         )
     return {
         "unrealized_pnl": round(unrealized_total, 2),
         "gross_exposure": round(gross_exposure, 2),
+        "invalid_marks_count": invalid_marks_count,
     }
 
 
@@ -404,6 +464,9 @@ async def get_account_pnl(
                         if snapshot.session_date is not None
                         else None
                     ),
+                    "invalid_marks_count": int(
+                        live_mark.get("invalid_marks_count", 0)
+                    ),
                 },
                 "strategy_unknown": False,
             }
@@ -422,6 +485,9 @@ async def get_account_pnl(
                 "gross_exposure": float(live_mark["gross_exposure"]),
                 "as_of": now.isoformat(),
                 "session_date": None,
+                "invalid_marks_count": int(
+                    live_mark.get("invalid_marks_count", 0)
+                ),
             },
             "strategy_unknown": True,
         }
@@ -444,6 +510,9 @@ async def get_account_pnl(
             "gross_exposure": float(live_mark["gross_exposure"]),
             "as_of": now.isoformat(),
             "session_date": None,
+            "invalid_marks_count": int(
+                live_mark.get("invalid_marks_count", 0)
+            ),
         },
         "strategy_unknown": False,
     }

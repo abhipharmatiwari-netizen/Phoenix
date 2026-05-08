@@ -884,6 +884,90 @@ class OrderLifecycleService:
         purpose = str(ctx.purpose or "").strip().upper()
         return purpose in {"EXIT", "ADJUST"}
 
+    def _maybe_infer_exit_from_sign(
+        self,
+        ctx: SubmissionContext,
+        *,
+        fill_qty_hint: Optional[int] = None,
+    ) -> bool:
+        """Issue #204 Layer 2: if the fill direction reduces |record.net_qty|
+        but ``ctx.purpose`` is not EXIT/ADJUST, reclassify the fill as exit by
+        mutating ``ctx.purpose = "EXIT"`` so every downstream consumer
+        (``_record_observed_fill_progress``, ``_apply_position_fill``,
+        ``_emit_trade``'s control-PnL routing) sees the corrected purpose
+        without needing per-callsite plumbing.
+
+        Idempotent: a second call after ``ctx.purpose`` has been corrected is
+        a no-op. Returns True iff the inference was applied on this call.
+        """
+        if self._is_exit_like(ctx):
+            return False
+        scope = self._position_scope_key(ctx)
+        if not scope:
+            return False
+        record = self._position_records.get(scope)
+        if record is None:
+            return False
+        prior_net_qty = float(record.net_qty)
+        if abs(prior_net_qty) <= 0.0001:
+            return False
+        side = str(ctx.side or "").upper()
+        if side not in ("BUY", "SELL"):
+            return False
+        fill_qty = int(
+            fill_qty_hint if fill_qty_hint is not None
+            else ctx.observed_filled_qty or ctx.fallback_qty or 0
+        )
+        if fill_qty <= 0:
+            return False
+        signed_qty = float(fill_qty if side == "BUY" else -fill_qty)
+        opposes = (
+            (prior_net_qty > 0.0 and signed_qty < 0.0)
+            or (prior_net_qty < 0.0 and signed_qty > 0.0)
+        )
+        if not opposes:
+            return False
+
+        prior_purpose = str(ctx.purpose or "")
+        logger.warning(
+            "position_fill_exit_inferred_from_sign — fill reduces "
+            "|net_qty|; reclassifying as EXIT despite ctx.purpose=%r. "
+            "broker_order_id=%s symbol=%s side=%s prior_net_qty=%.2f "
+            "signed_qty=%.2f",
+            prior_purpose,
+            ctx.broker_order_id,
+            ctx.symbol,
+            side,
+            prior_net_qty,
+            signed_qty,
+        )
+        log_event(
+            logger,
+            event_type="POSITION_FILL_EXIT_INFERRED_FROM_SIGN",
+            message=(
+                "Fill direction opposes existing net_qty; reclassified "
+                "as exit despite missing/incorrect ctx.purpose."
+            ),
+            level=logging.WARNING,
+            tenant_id=ctx.tenant_id,
+            broker_account_id=ctx.broker_account_id,
+            strategy_id=ctx.strategy_id,
+            instrument=ctx.symbol,
+            broker_order_id=ctx.broker_order_id,
+            position_id=record.position_id,
+            scope_key=record.ownership_key,
+            prior_purpose=prior_purpose,
+            inferred_purpose="EXIT",
+            prior_net_qty=prior_net_qty,
+            fill_signed_qty=signed_qty,
+        )
+        # Mutate ctx so every downstream consumer of `ctx.purpose` -- the
+        # ownership-store partial-fill observer, the position-state machine
+        # transition, the control-PnL routing in _emit_trade -- sees EXIT.
+        # Codex P2 #2 + #4 (PR #207).
+        ctx.purpose = "EXIT"
+        return True
+
     def _position_scope_key(self, ctx: SubmissionContext) -> Optional[str]:
         if ctx.position_scope_key:
             return ctx.position_scope_key
@@ -1143,6 +1227,13 @@ class OrderLifecycleService:
         if filled_qty <= int(ctx.observed_filled_qty or 0):
             return
         ctx.observed_filled_qty = filled_qty
+        # Issue #204 Codex P2 #2: run sign-aware exit inference *before* this
+        # method classifies the fill (and especially before it transitions
+        # OPEN -> OPENING via the entry path), so a mis-tagged BUY closing a
+        # SHORT does not get briefly mis-routed and then "fixed" only on the
+        # terminal-fill path. The helper mutates ctx.purpose so the
+        # _is_exit_like checks below see the corrected value.
+        self._maybe_infer_exit_from_sign(ctx, fill_qty_hint=filled_qty)
         if self._position_ownership_store is not None:
             try:
                 self._position_ownership_store.observe_fill_progress(
@@ -1184,56 +1275,14 @@ class OrderLifecycleService:
             return
         signed_qty = float(filled_qty if ctx.side == "BUY" else -filled_qty)
         record.last_evidence_at = trade_time
-        # Issue #204 Layer 2: sign-aware exit fallback. If the fill direction
-        # reduces |record.net_qty| but ctx.purpose was not flagged EXIT/ADJUST,
-        # treat the fill as exit-like anyway. Protects against external fills,
-        # ADMIN replays, cross-strategy covers, and any future code path that
-        # forgets to tag ctx.purpose. Without this guard, a BUY against an
-        # existing SHORT record reaches the entry path and produces the
-        # canonical 2026-05-08 NIFTY symptom: avg_open_price=0 on a row that
-        # should be FLAT.
-        is_exit_like = self._is_exit_like(ctx)
-        if not is_exit_like:
-            prior_net_qty = float(record.net_qty)
-            if abs(prior_net_qty) > 0.0001 and (
-                (prior_net_qty > 0.0 and signed_qty < 0.0)
-                or (prior_net_qty < 0.0 and signed_qty > 0.0)
-            ):
-                logger.warning(
-                    "position_fill_exit_inferred_from_sign — fill reduces "
-                    "|net_qty|; reclassifying as EXIT despite ctx.purpose=%r. "
-                    "broker_order_id=%s symbol=%s side=%s prior_net_qty=%.2f "
-                    "signed_qty=%.2f",
-                    ctx.purpose,
-                    ctx.broker_order_id,
-                    ctx.symbol,
-                    ctx.side,
-                    prior_net_qty,
-                    signed_qty,
-                )
-                log_event(
-                    logger,
-                    event_type="POSITION_FILL_EXIT_INFERRED_FROM_SIGN",
-                    message=(
-                        "Fill direction opposes existing net_qty; reclassified "
-                        "as exit despite missing/incorrect ctx.purpose."
-                    ),
-                    level=logging.WARNING,
-                    tenant_id=ctx.tenant_id,
-                    broker_account_id=ctx.broker_account_id,
-                    strategy_id=ctx.strategy_id,
-                    instrument=ctx.symbol,
-                    broker_order_id=ctx.broker_order_id,
-                    position_id=record.position_id,
-                    scope_key=record.ownership_key,
-                    prior_purpose=str(ctx.purpose or ""),
-                    inferred_purpose="EXIT",
-                    prior_net_qty=prior_net_qty,
-                    fill_signed_qty=signed_qty,
-                    fill_price=float(price),
-                )
-                is_exit_like = True
-        if is_exit_like:
+        # Issue #204 Layer 2: run sign-aware exit inference. The helper
+        # mutates ``ctx.purpose`` to "EXIT" when the fill direction reduces
+        # |record.net_qty|, so this branch (and downstream control-PnL
+        # routing in ``_emit_trade``) reads the corrected purpose. Idempotent
+        # if ``_record_observed_fill_progress`` already reclassified earlier
+        # in the lifecycle.
+        self._maybe_infer_exit_from_sign(ctx, fill_qty_hint=int(filled_qty))
+        if self._is_exit_like(ctx):
             # Flip detection: an exit fill whose signed qty would carry net_qty
             # from one sign through zero to the other (e.g. SELL -1250 plus a
             # BUY +2500 closing fill -> +1250) violates the partial-exit

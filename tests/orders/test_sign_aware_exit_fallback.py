@@ -209,6 +209,57 @@ def test_fill_against_zero_position_is_not_reclassified():
     assert record.avg_open_price == pytest.approx(14.30)
 
 
+def test_inferred_exit_mutates_ctx_purpose_for_downstream_pnl_wiring():
+    """Codex P2 #4: when the helper infers exit from sign, it must mutate
+    ctx.purpose = "EXIT" so the control-PnL wiring in _emit_trade (which
+    reads ctx.purpose, not a local flag) routes the fill through
+    on_close_position, not on_open_position."""
+    svc = _mk_service()
+    _seed_open_short(svc, qty=65, avg_price=160.00)
+
+    cover_ctx = _mk_ctx(side="BUY", purpose="ENTRY", qty=65)
+    assert cover_ctx.purpose == "ENTRY"
+    svc._apply_position_fill(
+        cover_ctx,
+        filled_qty=65,
+        price=150.20,
+        trade_time=datetime(2026, 5, 8, 10, 58, 23, tzinfo=timezone.utc),
+    )
+    # ctx.purpose is mutated in-place so downstream readers see EXIT.
+    assert cover_ctx.purpose == "EXIT", (
+        "ctx.purpose must be mutated to 'EXIT' so _emit_trade's control-PnL "
+        "routing reads the corrected classification (Codex P2 #4)."
+    )
+
+
+def test_inference_helper_runs_on_partial_fill_progress_path(caplog):
+    """Codex P2 #2: _record_observed_fill_progress must run the sign-aware
+    inference too, not just the terminal-fill path. Otherwise a mis-tagged
+    BUY closing a SHORT would briefly transition OPEN -> OPENING via the
+    entry path before _apply_position_fill later corrects it.
+    """
+    svc = _mk_service()
+    record = _seed_open_short(svc, qty=65, avg_price=160.00)
+
+    cover_ctx = _mk_ctx(side="BUY", purpose="ENTRY", qty=65)
+    with caplog.at_level("WARNING"):
+        # Simulate broker reporting a partial fill of 30/65 BEFORE terminal.
+        svc._record_observed_fill_progress(
+            cover_ctx,
+            cumulative_filled_qty=30,
+            transition_source="broker_status_partial",
+        )
+
+    # Helper fired here, BEFORE _apply_position_fill (which would otherwise
+    # be the only place to catch the mis-classification).
+    assert cover_ctx.purpose == "EXIT"
+    # Position state is PARTIALLY_EXITED (exit branch), NOT OPENING (entry).
+    assert record.position_state == PositionState.PARTIALLY_EXITED, (
+        "Partial-fill path must classify as exit immediately when sign "
+        "opposes prior net_qty; would have been OPENING without Codex P2 #2."
+    )
+
+
 def test_flip_fill_detection_still_runs_via_inferred_exit_path():
     """When the fallback reclassifies the fill as exit AND the fill is a
     flip-the-trade (qty exceeds open), the existing flip-fill RECONCILING
