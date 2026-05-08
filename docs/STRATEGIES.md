@@ -131,6 +131,69 @@ A bar closes below `EMA(period)` with sufficient volatility and downward momentu
 - **Authoritative-entry mode:** `ema20_is_authoritative=true` makes ema20 bypass selector regime gating — required to keep entries firing when the central regime selector says CHOPPY.
 - **Per-label pending-exit guard active (PR #201).** Duplicate SL exits within 60s are silently suppressed.
 
+### Entry decision tree (5-minute bar close)
+
+The strategy evaluates 11 ordered gates per bar inside `on_bar` ([app/strategies/ema20_strategy.py:1086-1307](../app/strategies/ema20_strategy.py)). Any failed gate aborts that bar's entry attempt; passing all gates submits one short-CE order via `_short_call_once_per_bar` (line 1561-1743).
+
+| # | Gate | Pass condition | Default / source | On fail |
+|---|---|---|---|---|
+| 1 | Dispatch | `label == underlying_label` AND `tf == signal_timeframe (300s)` | constructor | return |
+| 2 | Square-off time | `now < square_off_time` | NIFTY 15:00 (yaml:282), NG 23:30 | force-exit-all + return |
+| 3 | First-entry window | `now ≥ first_entry_time` | NIFTY 09:30 (yaml:281) | return |
+| 4 | Regime entry-delay | `now ≥ first_entry_time + first_entry_delay_minutes` | dynamic 0–15 (yaml:343, 423) | return |
+| 5 | EMA available | `ema_val ≠ None` AND `not isnan(ema_val)` | `ema_period=20` (yaml:272) | return (`missing_ema`) |
+| 6 | Regime gate | `disable_entries == false` for current regime | dynamic policy | return (`policy_disable_entries`) |
+| 7 | ATR floor | `ATR ≥ min_atr` | NIFTY 25.0, regime-overridable to 18.0 / 24.0 | return (`atr_too_low`) |
+| 8 | RSI falling | `rsi_prev_prev > rsi_prev > rsi_current` | enforced when `require_rsi_falling=true` (yaml:275) | return (`rsi_not_falling`) |
+| 9 | ADX/DI filter | `ADX ≥ min_adx` AND `(if require_bearish_di) -DI > +DI` AND `-DI − +DI ≥ min_di_spread` | only when `use_adx_filter=true` (yaml:276; on by default in NORMAL/CHOPPY/HIGH_VOL profiles) | return (`adx_filter_blocked`) |
+| 10 | Trend confirmation | `close < ema_val` | tick close vs EMA20 | return (`close_not_below_ema`) |
+| 11 | Submit | resolve qty (× `qty_mult`), build OrderRequest, route via `place_order_via_bridge`, freeze SL/TP/trail/decay/giveback params on the new `Ema20Position` | line 1561-1743 | — |
+
+### Regime profiles (deep)
+
+EMA20 reads its regime classification from `RegimeClassifier.update()` (line 1335-1399) using thresholds defined in `strategy_env.yaml`. The resulting regime overlays parameters via `DynamicPolicyEngine.apply()` (line 1382-1387).
+
+**Authority — `ema20_is_authoritative: true` (yaml:821):** the central regime selector cannot block EMA20 entries — only EMA20's own per-regime `disable_entries` can. This was a fix from a March 2026 incident where the selector regime was blocking EMA20 even when its own NO_TRADE profile would have allowed reduced-size entries.
+
+**NIFTY classifier thresholds (`ema20_nifty_v1`, yaml:293-304):**
+
+| Threshold | Value | Used for |
+|---|---|---|
+| `adx_trend` | 24 | ADX line above which TRENDING is candidate |
+| `di_spread_trend` | 4 | minimum +DI − -DI to confirm trend |
+| `ema_slope_trend_min` | 0.0005 | EMA slope cutoff for trend |
+| `atr_norm_high` | 1.45 | normalised ATR ⇒ HIGH_VOL |
+| `atr_norm_secondary` | 1.2 | secondary high-vol breakpoint |
+| `gap_ratio_spike` | 0.8 | gap-vs-ATR ratio for vol spikes |
+| `atr_norm_low` | 0.7 | low-vol cutoff |
+| `adx_normal_low / high` | 16 / 24 | ADX band defining NORMAL |
+| `chop_adx_max` | 15 | ADX upper bound for CHOPPY |
+| `chop_di_spread_max` | 2.5 | DI spread upper bound for CHOPPY |
+
+**NIFTY per-regime overrides (yaml:305-356):**
+
+| Param | TRENDING | NORMAL | CHOPPY | HIGH_VOL | NO_TRADE |
+|---|---|---|---|---|---|
+| `ema_period` | 20 | 20 | **30** | 20 | 20 |
+| `use_adx_filter` | false | **true** | **true** | **true** | **true** |
+| `min_adx` | 18 | 20 | **24** | **24** | 22 |
+| `min_di_spread` | 0 | 0 | **8** | 0 | **5** |
+| `require_rsi_falling` | true | true | true | true | true |
+| `sl_pct` | 0.20 | 0.20 | 0.20 | 0.20 | 0.20 |
+| `tp_pct` | 0.30 | 0.30 | 0.30 | 0.30 | 0.30 |
+| `trail_trigger_pct` | **0.15** | 0.12 | **0.0** | **0.16** | 0.12 |
+| `trail_buffer_pct` | 0.05 | 0.05 | **0.0** | **0.07** | 0.05 |
+| `qty_mult` | 1.0 | 1.0 | **0.6** | **0.6** | **0.4** |
+| `min_atr` | **24.0** | 21.0 | **18.0** | 24.0 | 24.0 |
+| `first_entry_delay_minutes` | 0 | 0 | 0 | **10** | **15** |
+| `disable_entries` | false | false | false | false | **false** (NIFTY) |
+
+**Bold** = differs from NORMAL baseline.
+
+**BANKNIFTY differences (`ema20_banknifty_v1`, yaml:375-435):**
+- Stricter classifier: `adx_trend: 25, di_spread_trend: 5, atr_norm_high: 1.6, atr_norm_secondary: 1.3, gap_ratio_spike: 1.0, atr_norm_low: 0.8, adx_normal_low: 18, adx_normal_high: 25, chop_adx_max: 17, chop_di_spread_max: 3`.
+- **`NO_TRADE.disable_entries: true`** (hard block) — unlike NIFTY which keeps `false` and just shrinks `qty_mult` to 0.4. BANKNIFTY refuses to fire in NO_TRADE; NIFTY can still attempt with reduced size.
+
 ### Tests
 `tests/strategies/test_ema20_strategy.py`, `test_ema20_profit_booking.py`, `test_ema20_qty_resolution.py`, `test_ema20_pending_exit_guard.py`.
 
@@ -189,6 +252,80 @@ Bullish pullback to EMA20 with momentum alignment:
 ### Known caveats
 - One trade/day per symbol — does not re-enter after a TP, only a stop.
 - Late-session TP cap mitigates expiry-day squeezes near 15:00.
+
+### Entry decision tree (two-stage: bar + tick)
+
+The strategy splits decision-making across two stages:
+- **Stage 1 — bar-level signal** (30-second bars): evaluates all conditions and either sets `pending_entry_at` or returns.
+- **Stage 2 — tick-level execution**: when a tick arrives at/after `pending_entry_at`, the position is opened on that tick's underlying price.
+
+This separation lets entries fire on any tick within the next bar window, instead of waiting for the next bar close.
+
+**Stage 1: bar gates** (`on_bar`, [line 1226-1381](../app/strategies/exclusive_nifty_ce_buy.py))
+
+| # | Gate | Pass condition | Default / source | On fail |
+|---|---|---|---|---|
+| 1 | Dispatch | `label == underlying_label` AND `tf == 30` | yaml:592 | return |
+| 2 | Daily reset & warm start | rotate session state at IST 00:00; load prior EMA / vol from PG / CSV | line 839-888 | continue |
+| 3 | Regime — disable | `live_disable_entries == false` | dynamic policy | return (`policy_disable_entries`) |
+| 4 | Daily trade cap | `trades_today < max_trades_per_day` | 1 (yaml:605) | return (`max_trades_reached`) |
+| 5 | ATR floor | `ATR ≥ min_atr` | dynamic; default 0.0 | return (`min_atr_not_met`) |
+| 6 | Buy signal | composite — see sub-table below | `_compute_buy_signal` line 1052-1196 | return (`no_buy_signal`) |
+| 7 | Entry window | `session_start ≤ next_bar_start ≤ last_entry_time` AND `next_bar_start < squareoff_time` | 10:15 / 14:45 / 15:15 (yaml:611-613) | return (`outside_entry_window`) |
+| 8 | Cooldown | `cooldown_bars == 0` | 2 (yaml:610) post-exit | return (`cooldown_active`) |
+| 9 | Set pending entry | record `pending_entry_at = next_bar_start` | line 1370-1372 | — |
+
+**Stage 1 gate 6 — composite buy signal (every sub-condition must hold):**
+
+| Sub-gate | Condition | Default |
+|---|---|---|
+| vol_ok | `vol_20 ≥ vol_threshold` (rolling quantile) | quantile 0.45 (yaml:593) |
+| trend_ok | `ema20 > ema50` (or `ema20 > ema50 > ema200` if `strict_trend`) | strict false (yaml:600) |
+| rsi_rising | last 3 RSI strictly increasing | bar history |
+| rsi_ok | `rsi_min < rsi < rsi_max` | 52–72 (yaml:595-596) |
+| above_ema20 | `close > ema20 + ema_atr_buffer × atr` | buffer 0.05 (yaml:594) |
+| macd_ok | `macd_cross_up AND hist ≥ macd_hist_min` OR `allow_near_macd AND macd_near_cross_up` | 0.0 / true (yaml:597-599) |
+| mom_ok | `ret_1 > 0 AND ret_5 > 0` | log-returns |
+| adx_ok | `adx ≥ min_adx` | 14.0 (yaml:601) |
+| di_ok | `\|+DI − -DI\| ≥ min_di_spread` AND `+DI > -DI` | 0.0 (yaml:602) |
+
+**Stage 2: tick execution** (`on_tick`, line 1201-1223)
+
+| # | Gate | Pass condition | On fail |
+|---|---|---|---|
+| 10 | Pending entry trigger | `pending_entry_at ≠ None` AND `now ≥ pending_entry_at` | wait for next tick |
+| 11 | Re-check entry window | `now` still inside session window | clear pending, return |
+| 12 | Open position | select ATM CE → resolve qty (× `qty_mult`) → SL = `entry − sl_atr × atr` → TP = `entry + min(tp_atr, late_tp_cap_atr if after 14:45) × atr` → MARKET BUY via `place_order_via_bridge` | — |
+
+### Regime profiles (deep)
+
+Policy ID `exclusive_nifty_ce_v1` (yaml:624). Regime is classified by `AdaptivePolicyAdapter` ([line 172-207](../app/strategies/exclusive_nifty_ce_buy.py)) using thresholds at yaml:628-632 and applied at the start of every bar evaluation (line 1240-1249).
+
+**Classifier thresholds (yaml:628-632):**
+
+| Threshold | Value | Used for |
+|---|---|---|
+| `adx_trend` | 25 | ADX cutoff for TRENDING |
+| `di_spread_trend` | 6 | DI confirmation for trend |
+| `atr_norm_high` | 1.5 | normalised ATR ⇒ HIGH_VOL |
+| `chop_adx_max` | 20 | upper-bound ADX for CHOPPY |
+
+**Per-regime overrides (yaml:633-659):**
+
+| Param | TRENDING | NORMAL | CHOPPY | HIGH_VOL | NO_TRADE |
+|---|---|---|---|---|---|
+| `disable_entries` | false | false | **true** | false | **true** |
+| `min_adx` | **12.0** | 14.0 | — | **20.0** | — |
+| `min_di_spread` | 0.0 | 0.0 | — | 0.0 | — |
+| `sl_atr` | 2.0 | 2.0 | — | **2.5** | — |
+| `tp_atr` | 2.5 | 2.5 | — | **2.0** | — |
+| `qty_mult` | 1.0 | 1.0 | — | **0.6** | — |
+| `rsi_min` | **50.0** | 52.0 | — | **55.0** | — |
+| `rsi_max` | 72.0 | 72.0 | — | **68.0** | — |
+
+**Bold** = differs from NORMAL. "—" = not overridden (regime is hard-blocked, so other params are irrelevant).
+
+**Authority:** Uses its own dynamic policy. CHOPPY and NO_TRADE both set `disable_entries: true` — hard block at gate 3 above (no entry attempt at all). HIGH_VOL widens SL, narrows TP, halves position size, and tightens RSI band — entries only on stronger momentum during volatile sessions.
 
 ### Tests
 `tests/strategies/test_exclusive_nifty_ce_buy.py`.
@@ -250,6 +387,57 @@ Bullish pullback to EMA20 with momentum alignment:
 - **No trailing logic** — relies on hard TP/SL/structural invalidation. Worth considering a trailing layer if win-rate is high but average win is small.
 - **Volume filter not wired:** `volume_mult` parameter exists but is currently ignored.
 - **VWAP is close-only** (lightweight proxy — no per-tick volume integration).
+
+### Entry decision tree (15m → 5m two-timeframe)
+
+The strategy uses 15-minute bars for trend confirmation and 5-minute bars for entry timing. Both timeframes are subscribed; each has its own bar handler.
+
+**15m handler** (`_handle_15m_bar`, [line 914-960](../app/strategies/put_momentum_scalper.py)) — sets one boolean read by the 5m handler.
+
+| # | Step | Pass condition | Default | Effect |
+|---|---|---|---|---|
+| 1 | EMA20 available | `ema_20 ≠ None` | indicator | else `state.trend_15m_down = false`, return |
+| 2 | Compute trend | `state.trend_15m_down = (close ≤ ema20 × (1 + trend_ema_tolerance_ratio))` | tolerance 0.0015 (yaml:680) | stored on `InstrumentState` for the 5m gate to read |
+
+**5m handler** (`_handle_5m_bar`, line 963-1215) — 14 ordered gates plus order submit:
+
+| # | Gate | Pass condition | Default / source | On fail |
+|---|---|---|---|---|
+| 1 | Position-already-open | `state.position is None` | per-instrument | manage exits + return |
+| 2 | Regime — disable | `live_disable_entries == false` | dynamic policy | return (`policy_disable_entries`) |
+| 3 | Entry window | `now ∈ [morning_start, morning_end] ∪ [afternoon_start, afternoon_end]` | NIFTY 09:20–11:00, 13:30–14:45 (yaml:692-695) | return (`outside_entry_window`) |
+| 4 | 15m downtrend | `state.trend_15m_down == true` | from 15m handler | return (`trend_15m_not_down`) |
+| 5 | EMA20 / EMA50 available | both not None | indicators | return (`missing_indicator`) |
+| 6 | Below both EMAs | `close < ema20 AND close < ema50` | 5m close | return (`close_not_below_ema20_ema50`) |
+| 7 | VWAP filter | `close < vwap` (rolling-mean proxy) | line 999-1002 | return (`close_not_below_vwap`) |
+| 8 | RSI in range | `rsi_min ≤ rsi ≤ rsi_max` | 20–45 (yaml:681-682) | return (`rsi_out_of_range`) |
+| 9 | RSI falling | last `rsi_falling_bars_required` bars strictly decreasing | 1 (yaml:686, default 2) | return (`rsi_not_falling`) |
+| 10 | MACD available | `macd, macd_signal, macd_hist` all not None | indicators | return (`missing_indicator`) |
+| 11 | MACD bearish | `macd < macd_signal AND macd_hist < 0` | indicators | return (`macd_not_bearish`) |
+| 12 | Fresh negative cross | prev-bar `hist ≥ 0` AND current-bar `hist < 0` | line 516-518 | return (`macd_no_fresh_negative_cross`) |
+| 13 | ATR ratio floor | `atr / close ≥ min_atr_ratio` | 0.0008 (yaml:679) | return (`atr_below_threshold`) |
+| 14 | Breakdown bar | lowest close in last `lookback_breakdown_bars` AND lower-wick / range ≤ 0.30 | 8 bars (yaml:687) | return (`breakdown_not_confirmed`) |
+| 15 | Submit | select ATM PE → resolve qty → SL/TP from `option_sl_pct`, `partial_tp_r`, `final_tp_r` (yaml:683-685) → MARKET BUY via `place_order_via_bridge` | line 1236-1355 | — |
+
+### Regime profiles (deep)
+
+Policy ID `put_momentum_nifty_banknifty_v1` (yaml:698). The strategy DOES classify regime (via `_adaptive_policy.refresh`, line 893-897) for observability and logging, but **`profiles: {}`** in YAML at line 707 — meaning **no regime-specific parameter overrides** are applied. All entry parameters are static.
+
+**Classifier thresholds (yaml:702-706, used for logging / selector routing only):**
+
+| Threshold | Value |
+|---|---|
+| `adx_trend` | 22 |
+| `di_spread_trend` | 8 |
+| `atr_norm_high` | 1.5 |
+| `chop_adx_max` | 18 |
+
+**Routing-level regime gating (central selector, yaml:827-833):** the selector dispatches put_momentum_scalper bars to this strategy ONLY when regime ∈ `{TRENDING, HIGH_VOL}` for both NIFTY and BANKNIFTY. In CHOPPY / NO_TRADE the selector silently routes elsewhere — the strategy's `on_bar` is never called. So the regime gate, although not implemented inside the strategy, is enforced one layer above it.
+
+**Entry-freeze keys** (captured at entry time, immune to mid-trade regime drift, line 163-168):
+`min_atr_ratio, rsi_min, rsi_max, lookback_breakdown_bars` — once an entry fires, the regime that admitted it is locked for the trade's lifetime. Subsequent regime drift cannot re-tighten or re-loosen these gates mid-position.
+
+**Why no per-regime overrides?** Per-regime parameter tuning was deferred. The current design relies entirely on the selector's routing decision (which regimes admit the strategy at all) plus static parameters. Adding regime profiles is on the backlog as a future enhancement.
 
 ### Tests
 `tests/strategies/test_put_momentum_scalper.py`.
