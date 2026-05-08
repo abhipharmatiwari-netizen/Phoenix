@@ -298,6 +298,58 @@ def test_open_vertical_risk_disallowed_logs_reason(monkeypatch, caplog):
     assert any("max_loss_rupees=200" in m for m in msgs)
 
 
+def test_atm_quote_unavailable_distinct_from_out_of_range(monkeypatch, caplog):
+    """Codex round-3 #3: when _latest_price returns None for either ATM
+    leg, the reason is atm_quote_unavailable -- NOT
+    atm_straddle_pct_out_of_range with a phantom 0.0 leg price.
+    Otherwise ops would tune the ratio bands when the real blocker is
+    the LTP feed."""
+    mod, strategy = _make_strategy(monkeypatch)
+    _patch_chain(strategy, expiry=date(2026, 5, 12))
+    # Override _latest_price to return None (data unavailable).
+    strategy._latest_price = lambda _label: None  # type: ignore[assignment]
+    candle = _candle(ist_dt=datetime(2026, 5, 8, 11, 0, tzinfo=IST), close=24000.0)
+    # Bullish-eligible setup.
+    indicators = _ind(ema_20=23900.0, rsi=60.0, macd_hist=2.0)
+    with caplog.at_level(logging.DEBUG, logger=MODULE_PATH):
+        strategy._maybe_enter(candle, indicators)
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(
+        "signal_evaluated_with_reason=atm_quote_unavailable" in m for m in msgs
+    ), msgs
+    # Must NOT mis-report as out-of-range.
+    assert not any(
+        "signal_evaluated_with_reason=atm_straddle_pct_out_of_range" in m
+        for m in msgs
+    )
+
+
+def test_phoenix_debug_loggers_env_var_sets_per_logger_level(monkeypatch):
+    """Codex round-3 #2: the docstring documents
+    PHOENIX_DEBUG_LOGGERS as the per-module DEBUG knob. The handler in
+    app.main._configure_logging must actually flip the named loggers to
+    DEBUG without affecting the global root level."""
+    import importlib
+
+    monkeypatch.setenv("LOG_LEVEL", "INFO")
+    monkeypatch.setenv(
+        "PHOENIX_DEBUG_LOGGERS",
+        "app.strategies.nifty_weekly_credit_spreads,app.orders.order_lifecycle",
+    )
+    main = importlib.import_module("app.main")
+    main._configure_logging()
+
+    assert (
+        logging.getLogger("app.strategies.nifty_weekly_credit_spreads").level
+        == logging.DEBUG
+    )
+    assert (
+        logging.getLogger("app.orders.order_lifecycle").level == logging.DEBUG
+    )
+    # Root level stays at the global LOG_LEVEL.
+    assert logging.getLogger().level == logging.INFO
+
+
 def test_no_entry_gates_passed_log_when_downstream_rejects(monkeypatch, caplog):
     """Codex P2 #2: a bar that passes the top-level gates but then gets
     rejected inside the spread builder must NOT emit an
@@ -334,5 +386,108 @@ def test_no_entry_gates_passed_log_when_downstream_rejects(monkeypatch, caplog):
     # The downstream rejection reason DID fire.
     assert any(
         "signal_evaluated_with_reason=condor_put_credit_below_min" in m
+        for m in msgs
+    )
+
+
+def test_enter_spread_does_not_emit_spread_opened_directly(monkeypatch, caplog):
+    """Codex round-3 #1: _enter_spread is called twice for a condor (PUT,
+    then CALL). It must NOT emit spread_opened on its own -- otherwise a
+    condor whose CALL side fails and rolls back the PUT side would have
+    a false-positive 'opened' log for the PUT leg pair."""
+    mod, strategy = _make_strategy(monkeypatch)
+    # Stub everything _enter_spread needs to claim success on both legs.
+    strategy._latest_price = lambda _label: 100.0  # type: ignore[assignment]
+    strategy._strike_from_label = lambda _label: 24000.0  # type: ignore[assignment]
+    strategy._resolve_order_identity = lambda _label: ("X", "NFO", "1")  # type: ignore[assignment]
+    strategy._remember_order_identity = lambda _label: None  # type: ignore[assignment]
+    strategy._reset_exit_retry_state = lambda _id: None  # type: ignore[assignment]
+    strategy._sync_spread_state_to_risk_manager = lambda _s: None  # type: ignore[assignment]
+    strategy._spread_leg_strategy_context = lambda *a, **kw: {}  # type: ignore[assignment]
+
+    accepted = SimpleNamespace(status="ACCEPTED")
+    strategy._place_order = lambda **kw: accepted  # type: ignore[assignment]
+
+    with caplog.at_level(logging.DEBUG, logger=MODULE_PATH):
+        ok = strategy._enter_spread(
+            "PUT_SPREAD", "P_SHORT", "P_LONG", credit=50.0, width_pts=300.0,
+            expiry=date(2026, 5, 12),
+        )
+    assert ok is True
+    msgs = [r.getMessage() for r in caplog.records]
+    # spread_opened MUST NOT appear from _enter_spread itself; only the
+    # higher-level builder emits it after the full structure is in place.
+    assert not any(
+        "signal_evaluated_with_reason=spread_opened" in m for m in msgs
+    ), msgs
+
+
+def test_open_vertical_emits_spread_opened_on_full_success(monkeypatch, caplog):
+    """Codex round-3 #1 counterpart: when a vertical spread is fully
+    placed via _open_vertical, it emits a single spread_opened log
+    (because both legs of a vertical = the full structure)."""
+    mod, strategy = _make_strategy(monkeypatch)
+    # Force _enter_spread to succeed (skip its plumbing).
+    strategy._enter_spread = lambda *_a, **_kw: True  # type: ignore[assignment]
+    strategy._estimate_credit = lambda *_a, **_kw: (100.0, 300.0, 1, 200.0)  # type: ignore[assignment]
+    with caplog.at_level(logging.DEBUG, logger=MODULE_PATH):
+        strategy._open_vertical(
+            spread_type="PUT_SPREAD",
+            short_label="NIFTY_PE_24000",
+            long_label="NIFTY_PE_23700",
+            width=300.0,
+            expiry=date(2026, 5, 12),
+        )
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(
+        "signal_evaluated_with_reason=spread_opened" in m
+        and "spread_type=PUT_SPREAD" in m
+        for m in msgs
+    ), msgs
+
+
+def test_enter_spread_short_leg_rejected_logs_reason(monkeypatch, caplog):
+    """Codex round-3 #4: when the broker rejects the short-leg entry
+    order, _enter_spread emits entry_short_leg_order_rejected with the
+    response status/message. Without this the bar would silently
+    disappear from the diagnostic loop."""
+    mod, strategy = _make_strategy(monkeypatch)
+    strategy._latest_price = lambda _label: 100.0  # type: ignore[assignment]
+    strategy._strike_from_label = lambda _label: 24000.0  # type: ignore[assignment]
+    strategy._resolve_order_identity = lambda _label: ("X", "NFO", "1")  # type: ignore[assignment]
+    strategy._remember_order_identity = lambda _label: None  # type: ignore[assignment]
+    strategy._spread_leg_strategy_context = lambda *a, **kw: {}  # type: ignore[assignment]
+    rejected = SimpleNamespace(status="REJECTED", message="margin shortfall")
+    strategy._place_order = lambda **kw: rejected  # type: ignore[assignment]
+
+    with caplog.at_level(logging.DEBUG, logger=MODULE_PATH):
+        ok = strategy._enter_spread(
+            "PUT_SPREAD", "P_SHORT", "P_LONG", credit=50.0, width_pts=300.0,
+            expiry=date(2026, 5, 12),
+        )
+    assert ok is False
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(
+        "signal_evaluated_with_reason=entry_short_leg_order_rejected" in m
+        for m in msgs
+    )
+    assert any("response_status=REJECTED" in m for m in msgs)
+
+
+def test_enter_spread_leg_price_unavailable_logs_reason(monkeypatch, caplog):
+    """Codex round-3 #4: when _latest_price returns None at order-placement
+    time (LTP feed gap between gate and submit), the reason is
+    entry_leg_price_unavailable -- not silent."""
+    mod, strategy = _make_strategy(monkeypatch)
+    strategy._latest_price = lambda _label: None  # type: ignore[assignment]
+    with caplog.at_level(logging.DEBUG, logger=MODULE_PATH):
+        ok = strategy._enter_spread(
+            "PUT_SPREAD", "P_SHORT", "P_LONG", credit=50.0, width_pts=300.0,
+            expiry=date(2026, 5, 12),
+        )
+    assert ok is False
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(
+        "signal_evaluated_with_reason=entry_leg_price_unavailable" in m
         for m in msgs
     )
