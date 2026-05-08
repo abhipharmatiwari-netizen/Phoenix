@@ -347,9 +347,9 @@ def test_carry_over_does_not_finalize_at_session_boundary(monkeypatch):
     assert window_marks and window_marks[0].get("realized") is False
 
 
-def test_carry_over_resets_option_price_book_when_flat_at_session_boundary(monkeypatch):
+def test_non_force_end_policies_reset_option_price_book_when_flat_at_session_boundary(monkeypatch):
     """A flat strategy must get a fresh synthetic ATM option anchor on the
-    next session even though carry_over preserves indicator history."""
+    next session even when non-force policies preserve indicator history."""
     base_ts = datetime(2026, 3, 2, 15, 10, tzinfo=timezone.utc)
     bars = [_bar(base_ts, close=100.0), _bar(base_ts, close=120.0, day_offset=1)]
 
@@ -360,24 +360,24 @@ def test_carry_over_resets_option_price_book_when_flat_at_session_boundary(monke
         lambda *_args: _SecondSessionOptionEntry(),
     )
 
-    recorder = ReplayEngine(
-        ReplayConfig(
-            dsn="postgresql://ignored",
-            strategy_id="ema20_strategy",
-            underlying_key="NIFTY",
-            strategy_params={},
-            timeframes=[300],
-            # Default execution = carry_over. The strategy is flat at the
-            # boundary, so the option proxy should re-anchor on day two.
-        )
-    ).run()
+    for end_policy in ("carry_over", "daily_mtm"):
+        recorder = ReplayEngine(
+            ReplayConfig(
+                dsn="postgresql://ignored",
+                strategy_id="ema20_strategy",
+                underlying_key="NIFTY",
+                strategy_params={},
+                timeframes=[300],
+                execution=ExecutionConfig(end_policy=end_policy),
+            )
+        ).run()
 
-    entry_fills = [fill for fill in recorder.fills if fill.tag == "SECOND_SESSION_OPTION_ENTRY"]
-    assert len(entry_fills) == 1
-    assert entry_fills[0].symbol == "NIFTY_ATM_CE"
-    # With a fresh day-two anchor, base premium is max(ATR * 2, 2% underlying)
-    # = max(4.0, 2.4). If the day-one 100.0 anchor leaks, this fill is 11.0.
-    assert entry_fills[0].fill_price == 4.0
+        entry_fills = [fill for fill in recorder.fills if fill.tag == "SECOND_SESSION_OPTION_ENTRY"]
+        assert len(entry_fills) == 1
+        assert entry_fills[0].symbol == "NIFTY_ATM_CE"
+        # With a fresh day-two anchor, base premium is max(ATR * 2, 2% underlying)
+        # = max(4.0, 2.4). If the day-one 100.0 anchor leaks, this fill is 11.0.
+        assert entry_fills[0].fill_price == 4.0
 
 
 def test_daily_mtm_records_snapshot_event_at_session_boundary(monkeypatch):
