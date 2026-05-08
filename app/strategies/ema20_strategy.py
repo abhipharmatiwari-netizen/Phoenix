@@ -321,6 +321,24 @@ class Ema20Strategy(BaseStrategy):
         self._risk_sync_grace_seconds = (
             max(5.0, float(sync_grace_cfg)) if sync_grace_cfg is not None else 30.0
         )
+        # PHX#199: per-label pending-exit guard. Maps option_label -> monotonic
+        # timestamp of when the most-recent exit was submitted to the bridge.
+        # Survives Ema20Position object replacement (sync_position_from_risk_
+        # _manager can restore a fresh Position into _managed_positions while
+        # an exit is in flight against the broker — that's the 2026-05-07 NG
+        # scenario where Path A submitted an exit and Path B fired a duplicate
+        # 11s later from a re-restored position). Watchdog auto-clears entries
+        # older than _pending_exit_max_seconds so a stuck guard cannot
+        # permanently block exits.
+        self._pending_exit_by_label: Dict[str, float] = {}
+        pending_exit_max_cfg = self._parse_float(
+            self._env("EMA20_PENDING_EXIT_MAX_SECONDS", "60")
+        )
+        self._pending_exit_max_seconds = (
+            max(15.0, float(pending_exit_max_cfg))
+            if pending_exit_max_cfg is not None
+            else 60.0
+        )
 
         self._lots_cache: Optional[tuple] = None
         lots, keys, values, selected_key = self._resolve_lots()
@@ -2206,6 +2224,42 @@ class Ema20Strategy(BaseStrategy):
         if self._exit_in_flight:
             return
         now_mono = time.monotonic()
+        # PHX#199: per-label pending-exit guard. The global _exit_in_flight
+        # flag above only blocks synchronous re-entry during the bridge call
+        # itself (it is reset in finally:). Without this check, a state-
+        # reconciliation exit can fire while the broker has already ACKed the
+        # original exit but the fill has not yet propagated back to state_store,
+        # producing a duplicate exit that flips the position direction.
+        # Keyed by option_label (not position object) so the guard survives
+        # the Ema20Position being replaced via sync_position_from_risk_manager
+        # while an exit is in flight.
+        prior_pending = self._pending_exit_by_label.get(pos.option_label)
+        if prior_pending is not None:
+            age = now_mono - prior_pending
+            if age < self._pending_exit_max_seconds:
+                logger.info(
+                    "[%s] EMA20 exit suppressed (in-flight) | label=%s reason=%s "
+                    "pending_age=%.1fs max=%.1fs",
+                    self.env_prefix,
+                    pos.option_label,
+                    reason,
+                    age,
+                    self._pending_exit_max_seconds,
+                )
+                return
+            # Auto-recover: the prior exit has been pending too long without a
+            # fill observation. Clear the guard with a WARNING so this is
+            # visible in alerts; allow the retry to proceed.
+            logger.warning(
+                "[%s] EMA20 pending-exit guard auto-cleared after %.1fs | "
+                "label=%s broker_symbol=%s reason=%s; allowing retry",
+                self.env_prefix,
+                age,
+                pos.option_label,
+                pos.broker_symbol,
+                reason,
+            )
+            self._pending_exit_by_label.pop(pos.option_label, None)
         if now_mono < self._exit_circuit_open_until_mono:
             if (
                 now_mono - self._exit_last_alert_mono
@@ -2270,6 +2324,10 @@ class Ema20Strategy(BaseStrategy):
         )
         routing_kwargs = self._routing_kwargs()
         self._exit_in_flight = True
+        # PHX#199: arm the per-label guard BEFORE the bridge call so a nested
+        # re-entry (or a state-reconciliation exit fired before the bridge
+        # returns) cannot slip past. Keyed by label, not position object.
+        self._pending_exit_by_label[pos.option_label] = now_mono
         try:
             response = place_order_via_bridge(
                 strategy_id=self._strategy_id,
@@ -2277,6 +2335,9 @@ class Ema20Strategy(BaseStrategy):
                 **routing_kwargs,
             )
         except Exception as exc:
+            # PHX#199: clear the per-label guard on failure paths so the
+            # retry cooldown (_next_exit_retry_mono) can fire the next attempt.
+            self._pending_exit_by_label.pop(pos.option_label, None)
             if self._is_transient_exit_exception(exc):
                 broker_state = self._confirm_exit_position_state(pos)
                 if broker_state is False:
@@ -2323,6 +2384,9 @@ class Ema20Strategy(BaseStrategy):
             self._exit_in_flight = False
         status = str(getattr(response, "status", "")).upper()
         if status in {"REJECTED", "FAILED", "ERROR"}:
+            # PHX#199: broker rejected the exit — clear the guard so the
+            # retry cooldown can fire the next attempt.
+            self._pending_exit_by_label.pop(pos.option_label, None)
             attempt, wait_s, opened = self._register_exit_failure(
                 now_mono=time.monotonic()
             )
@@ -2375,6 +2439,11 @@ class Ema20Strategy(BaseStrategy):
                 exit_lots=int(exit_lots),
                 final=False,
             )
+            # PHX#199: partial exit succeeded; clear the per-label guard so the
+            # next exit on the residual (TP / SL on remaining qty) can fire.
+            # The duplicate-exit guard is only needed between FULL-exit
+            # submission and fill observation, not after a TP1 partial.
+            self._pending_exit_by_label.pop(pos.option_label, None)
             return
         self._emit_exit_attribution(
             pos=pos,
