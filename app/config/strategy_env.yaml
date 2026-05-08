@@ -824,11 +824,19 @@ strategy_selection:
       # Keep EXCLUSIVE_CE on bar dispatch across all regimes; its own dynamic
       # policy decides whether entries are allowed, and it still needs bars for
       # diagnostics and private EMA maintenance when entries are disabled.
-      TRENDING: ["put_momentum_scalper", "exclusive_nifty_ce_buy"]
-      NORMAL: ["ema20_strategy", "exclusive_nifty_ce_buy"]
-      CHOPPY: ["ema20_strategy", "exclusive_nifty_ce_buy"]
-      HIGH_VOL: ["ema20_strategy", "put_momentum_scalper", "exclusive_nifty_ce_buy"]
-      NO_TRADE: ["exclusive_nifty_ce_buy"]
+      # `nifty_weekly_credit_spreads` is also kept in every regime: its
+      # entry_start_time/entry_end_time (10:10-13:30 IST) plus the per-bar
+      # signal_evaluated_with_reason gate logic decide when it actually
+      # attempts an entry. Excluding it from any regime causes
+      # selector_blocked to fire on every bar dispatch (no entries possible
+      # in that regime, no DEBUG diagnostics either) -- which is the bug we
+      # observed on 2026-05-08 where the strategy was in instruments.
+      # NIFTY_IDX.allowed_strategies but absent from this selector mapping.
+      TRENDING: ["put_momentum_scalper", "exclusive_nifty_ce_buy", "nifty_weekly_credit_spreads"]
+      NORMAL: ["ema20_strategy", "exclusive_nifty_ce_buy", "nifty_weekly_credit_spreads"]
+      CHOPPY: ["ema20_strategy", "exclusive_nifty_ce_buy", "nifty_weekly_credit_spreads"]
+      HIGH_VOL: ["ema20_strategy", "put_momentum_scalper", "exclusive_nifty_ce_buy", "nifty_weekly_credit_spreads"]
+      NO_TRADE: ["exclusive_nifty_ce_buy", "nifty_weekly_credit_spreads"]
     BANKNIFTY_IDX:
       TRENDING: ["put_momentum_scalper"]
       NORMAL: ["ema20_strategy"]
