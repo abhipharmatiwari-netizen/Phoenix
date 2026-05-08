@@ -203,3 +203,136 @@ def test_expiry_out_of_dte_range_logs_reason(monkeypatch, caplog):
     )
     assert any("days_to_exp=30" in m for m in msgs)
     assert any("max_dte=5" in m for m in msgs)
+
+
+# ---------------------------------------------------------------------------
+# Codex P2 follow-up tests (PR #208 round 2)
+# ---------------------------------------------------------------------------
+
+def test_open_vertical_legs_unresolved_logs_reason(monkeypatch, caplog):
+    """Codex P2 #1: _open_vertical previously silently returned when option
+    legs couldn't be resolved. Now emits vertical_legs_unresolved with the
+    spread_type and which leg(s) are missing."""
+    mod, strategy = _make_strategy(monkeypatch)
+    with caplog.at_level(logging.DEBUG, logger=MODULE_PATH):
+        strategy._open_vertical(
+            spread_type="PUT_SPREAD",
+            short_label=None,
+            long_label="NIFTY_PE_19700",
+            width=300.0,
+            expiry=date(2026, 5, 12),
+        )
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(
+        "signal_evaluated_with_reason=vertical_legs_unresolved" in m for m in msgs
+    )
+    assert any("spread_type=PUT_SPREAD" in m for m in msgs)
+    assert any("short=False" in m for m in msgs)
+
+
+def test_open_vertical_credit_estimate_failed_logs_reason(monkeypatch, caplog):
+    """Codex P2 #1: _estimate_credit returns None credit when latest_price
+    is missing. The vertical_credit_estimate_failed reason fires."""
+    mod, strategy = _make_strategy(monkeypatch)
+    # _latest_price returns None -> _estimate_credit returns (None, 0, 0, 0)
+    strategy._latest_price = lambda _label: None  # type: ignore[assignment]
+    with caplog.at_level(logging.DEBUG, logger=MODULE_PATH):
+        strategy._open_vertical(
+            spread_type="CALL_SPREAD",
+            short_label="NIFTY_CE_24500",
+            long_label="NIFTY_CE_24800",
+            width=300.0,
+            expiry=date(2026, 5, 12),
+        )
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(
+        "signal_evaluated_with_reason=vertical_credit_estimate_failed" in m
+        for m in msgs
+    )
+
+
+def test_open_vertical_credit_below_min_logs_reason(monkeypatch, caplog):
+    """Codex P2 #1: a vertical with credit below the floor logs
+    vertical_credit_below_min with the actual + minimum values."""
+    mod, strategy = _make_strategy(
+        monkeypatch, min_credit_pct_of_width=0.5
+    )
+    # Make _estimate_credit return a low credit (10) on a wide spread (300).
+    # 10 < 0.5 * 300 = 150 -> below min.
+    strategy._estimate_credit = lambda *_a, **_kw: (10.0, 300.0, 1, 290.0)  # type: ignore[assignment]
+    with caplog.at_level(logging.DEBUG, logger=MODULE_PATH):
+        strategy._open_vertical(
+            spread_type="PUT_SPREAD",
+            short_label="NIFTY_PE_19800",
+            long_label="NIFTY_PE_19500",
+            width=300.0,
+            expiry=date(2026, 5, 12),
+        )
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(
+        "signal_evaluated_with_reason=vertical_credit_below_min" in m for m in msgs
+    )
+    assert any("credit=10" in m for m in msgs)
+
+
+def test_open_vertical_risk_disallowed_logs_reason(monkeypatch, caplog):
+    """Codex P2 #1: when _risk_allows returns False (per-trade or total
+    risk cap exceeded, or max_open_spreads hit), vertical_risk_disallowed
+    fires with the relevant cap fields."""
+    # account_equity=1M, risk_per_trade_pct=0.0001 -> per-trade cap = 100.
+    # max_loss=200 > 100 -> risk_allows False.
+    mod, strategy = _make_strategy(monkeypatch, risk_per_trade_pct=0.0001)
+    strategy._estimate_credit = lambda *_a, **_kw: (100.0, 300.0, 1, 200.0)  # type: ignore[assignment]
+    with caplog.at_level(logging.DEBUG, logger=MODULE_PATH):
+        strategy._open_vertical(
+            spread_type="CALL_SPREAD",
+            short_label="NIFTY_CE_24500",
+            long_label="NIFTY_CE_24800",
+            width=300.0,
+            expiry=date(2026, 5, 12),
+        )
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(
+        "signal_evaluated_with_reason=vertical_risk_disallowed" in m for m in msgs
+    )
+    assert any("max_loss_rupees=200" in m for m in msgs)
+
+
+def test_no_entry_gates_passed_log_when_downstream_rejects(monkeypatch, caplog):
+    """Codex P2 #2: a bar that passes the top-level gates but then gets
+    rejected inside the spread builder must NOT emit an
+    'entry_gates_passed' / 'spread_opened' line. Only the downstream
+    rejection reason should appear."""
+    mod, strategy = _make_strategy(
+        monkeypatch,
+        atm_straddle_min_pct=0.014,
+        atm_straddle_max_pct=0.03,
+        min_credit_pct_of_width=0.5,
+    )
+    _patch_chain(strategy, expiry=date(2026, 5, 12))
+    # ATM straddle range is [1.4%, 3.0%]; close=24000 -> straddle in [336, 720].
+    # Set _latest_price to 200 -> straddle = 400 / 24000 = 1.67% in range.
+    strategy._latest_price = lambda _label: 200.0  # type: ignore[assignment]
+    # Force the downstream condor builder to reject on credit floor.
+    strategy._estimate_credit = lambda *_a, **_kw: (10.0, 300.0, 1, 290.0)  # type: ignore[assignment]
+    strategy._find_option_by_strike = lambda *_a, **_kw: "NIFTY_OPT"  # type: ignore[assignment]
+    candle = _candle(ist_dt=datetime(2026, 5, 8, 11, 0, tzinfo=IST), close=24000.0)
+    # Push lots of flat closes so sideways regime gate passes.
+    strategy.last_5m_closes = [24000.0] * 20
+    indicators = _ind(rsi=50.0, macd_hist=0.0)  # neutral -> sideways eligible
+    with caplog.at_level(logging.DEBUG, logger=MODULE_PATH):
+        strategy._maybe_enter(candle, indicators)
+    msgs = [r.getMessage() for r in caplog.records]
+    # No misleading "gates passed" line.
+    assert not any(
+        "signal_evaluated_with_reason=entry_gates_passed" in m for m in msgs
+    )
+    # No spurious "opened" line either since the entry was rejected.
+    assert not any(
+        "signal_evaluated_with_reason=spread_opened" in m for m in msgs
+    )
+    # The downstream rejection reason DID fire.
+    assert any(
+        "signal_evaluated_with_reason=condor_put_credit_below_min" in m
+        for m in msgs
+    )

@@ -1241,18 +1241,12 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
             )
             return
 
-        # All entry gates passed -- log the GO and dispatch to the spread builder.
-        self._log_signal_evaluation(
-            "entry_gates_passed",
-            regime=regime,
-            close=close,
-            ema=ema,
-            rsi=rsi,
-            macd_hist=macd_hist,
-            atr_pct=atr_pct,
-            atm_straddle_pct=atm_straddle_pct,
-            days_to_exp=days_to_exp,
-        )
+        # Top-level gates passed; dispatch to the spread builder. We do NOT
+        # log "entry passed" here because the builder may still reject on
+        # legs/credit/risk -- a "gates passed" line followed by a downstream
+        # rejection on the same bar is misleading for ops counts/alerts.
+        # The success signal is emitted only from _enter_spread when the
+        # order actually lands (signal_evaluated_with_reason=spread_opened).
         if regime == "bullish":
             self._try_put_spread(close, expiry)
         elif regime == "bearish":
@@ -1444,13 +1438,43 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
     # Open a vertical spread if credit/limits allow.
     def _open_vertical(self, spread_type: str, short_label: Optional[str], long_label: Optional[str], width: float, expiry: date) -> None:
         if not short_label or not long_label:
+            self._log_signal_evaluation(
+                "vertical_legs_unresolved",
+                spread_type=spread_type,
+                short=bool(short_label),
+                long=bool(long_label),
+                width=width,
+            )
             return
         credit, width_pts, qty, max_loss_rupees = self._estimate_credit(short_label, long_label)
         if credit is None:
+            self._log_signal_evaluation(
+                "vertical_credit_estimate_failed",
+                spread_type=spread_type,
+                short_label=short_label,
+                long_label=long_label,
+            )
             return
         if credit < self.min_credit_pct_of_width * width_pts:
+            self._log_signal_evaluation(
+                "vertical_credit_below_min",
+                spread_type=spread_type,
+                credit=credit,
+                width_pts=width_pts,
+                min_credit=self.min_credit_pct_of_width * width_pts,
+                min_credit_pct_of_width=self.min_credit_pct_of_width,
+            )
             return
         if not self._risk_allows(max_loss_rupees):
+            self._log_signal_evaluation(
+                "vertical_risk_disallowed",
+                spread_type=spread_type,
+                max_loss_rupees=max_loss_rupees,
+                per_trade_cap=self.risk_per_trade_pct * self.account_equity,
+                total_cap=self.max_total_risk_pct * self.account_equity,
+                open_spreads=len(self.open_spreads),
+                max_open_spreads=self.max_open_spreads,
+            )
             return
         self._enter_spread(spread_type, short_label, long_label, credit, width_pts, expiry, extra=None)
 
@@ -1548,6 +1572,20 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
             credit,
             width_pts,
             qty,
+        )
+        # Codex P2 #2 (PR #208): unambiguous "we actually placed an entry"
+        # signal at DEBUG -- only fired here, after both legs cleared the
+        # broker. Lets ops/alerting count true entries without false-positives
+        # from bars that passed top-level gates but failed downstream.
+        self._log_signal_evaluation(
+            "spread_opened",
+            spread_type=spread_type,
+            spread_id=spread_id,
+            credit=credit,
+            width_pts=width_pts,
+            qty=qty,
+            short_label=short_label,
+            long_label=long_label,
         )
         return True
 
