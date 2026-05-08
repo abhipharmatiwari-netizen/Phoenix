@@ -821,13 +821,50 @@ strategy_selection:
   ema20_is_authoritative: true
   mapping:
     NIFTY_IDX:
-      # Keep EXCLUSIVE_CE on bar dispatch across all regimes; its own dynamic
-      # policy decides whether entries are allowed, and it still needs bars for
-      # diagnostics and private EMA maintenance when entries are disabled.
-      TRENDING: ["put_momentum_scalper", "exclusive_nifty_ce_buy"]
-      NORMAL: ["ema20_strategy", "exclusive_nifty_ce_buy"]
-      CHOPPY: ["ema20_strategy", "exclusive_nifty_ce_buy"]
-      HIGH_VOL: ["ema20_strategy", "put_momentum_scalper", "exclusive_nifty_ce_buy"]
+      # Notes on this mapping (revised after Codex review on PR #211):
+      #
+      # 1. `ema20_strategy` is OMITTED from every regime list. With
+      #    ema20_is_authoritative=true (above), ema20 receives bars via
+      #    the bypass at multi_instrument_stream._is_strategy_selected
+      #    regardless of whether it appears here. Listing it here would
+      #    consume one of the slots under
+      #    auto_strategy_max_active_per_underlying (env default = 2,
+      #    overrides this YAML's max_active_per_underlying: 3) and would
+      #    truncate other strategies out of selection.
+      #
+      # 2. `nifty_weekly_credit_spreads` is placed FIRST in every list
+      #    so it survives the cap=2 truncation in TRENDING / HIGH_VOL.
+      #    Without this, the selector returns selection[:2] = the first
+      #    two entries; placing the spread last (the obvious append
+      #    position) silently truncated it back to selector_blocked --
+      #    the exact failure mode the prior round of this PR was
+      #    supposed to fix.
+      #
+      # 3. `nifty_weekly_credit_spreads` is OMITTED from NO_TRADE
+      #    entirely. Unlike `exclusive_nifty_ce_buy` (which has its
+      #    own dynamic_policy.profiles.NO_TRADE.disable_entries
+      #    handling), the spread strategy's _maybe_enter has no
+      #    selector-regime awareness; if dispatched in NO_TRADE its
+      #    own time-window + ATR + RSI + MACD gates can still pass
+      #    and it would silently fire entries. Cost: no DEBUG
+      #    diagnostics for the spread in NO_TRADE bars; acceptable
+      #    because NO_TRADE means "do nothing" and the regime is
+      #    typically transient.
+      #
+      # 4. EXCLUSIVE_CE remains in every non-NO_TRADE regime (the
+      #    pre-existing comment about diagnostics + indicator
+      #    maintenance applies). Behavioural change vs the earlier
+      #    cut: in TRENDING / HIGH_VOL EXCLUSIVE_CE is now position 2
+      #    of 3, so under cap=2 selection is [spread, put_momentum]
+      #    and EXCLUSIVE_CE is the truncated one. Acceptable because
+      #    EXCLUSIVE_CE's private-30s-EMA dependency is unfilled in
+      #    replay (#214) and direction-filtering already blocks it
+      #    on bear days; promoting the spread here is the higher-
+      #    value choice for this PR's diagnostic goal.
+      TRENDING: ["nifty_weekly_credit_spreads", "put_momentum_scalper", "exclusive_nifty_ce_buy"]
+      NORMAL: ["nifty_weekly_credit_spreads", "exclusive_nifty_ce_buy"]
+      CHOPPY: ["nifty_weekly_credit_spreads", "exclusive_nifty_ce_buy"]
+      HIGH_VOL: ["nifty_weekly_credit_spreads", "put_momentum_scalper", "exclusive_nifty_ce_buy"]
       NO_TRADE: ["exclusive_nifty_ce_buy"]
     BANKNIFTY_IDX:
       TRENDING: ["put_momentum_scalper"]
