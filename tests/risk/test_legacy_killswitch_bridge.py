@@ -389,3 +389,157 @@ def test_bridge_resets_success_flag_on_new_trading_day(tmp_path):
         "durable-bridge success tracker must reset on new day so the next "
         "auto-trip episode re-propagates"
     )
+
+
+# ---------------------------------------------------------------------------
+# Codex round-2 review fixes (PR #231): post-trip race re-verification +
+# active-manager swap detection.
+# ---------------------------------------------------------------------------
+
+
+class _RaceStubKillSwitchManager(_StubKillSwitchManager):
+    """Stub that mutates state between get_record() and trip() to simulate
+    a concurrent operator clear race."""
+
+    def __init__(self, *, initial_state, post_get_state):
+        super().__init__(initial_state=initial_state)
+        self._post_get_state = post_get_state
+        self._get_record_calls = 0
+
+    def get_record(self, scope, scope_id):
+        self._get_record_calls += 1
+        # First call: report initial_state. Second call onward: report the
+        # raced state (covers the "post-trip re-read" path).
+        if self._get_record_calls == 1:
+            return super().get_record(scope, scope_id)
+        # Apply the race transition.
+        self._state_text = self._post_get_state
+        return super().get_record(scope, scope_id)
+
+    def trip(self, scope, scope_id, reason, actor):
+        # Simulate the race outcome: trip raises ValueError because
+        # somebody else moved state out of INACTIVE between our pre-trip
+        # get_record and the trip call.
+        self._state_text = self._post_get_state
+        raise ValueError(
+            f"Cannot trip kill switch: current state is {self._post_get_state}"
+        )
+
+
+def test_bridge_does_not_mark_succeeded_when_post_trip_race_lands_in_cleared(
+    tmp_path, caplog, stub_postgres_save,
+):
+    """Codex P2 round 2: if a concurrent operator clear races between our
+    pre-trip get_record() (which sees INACTIVE) and trip() (which sees
+    CLEARED via the race), the bridge MUST NOT persist the cleared
+    record and mark itself succeeded. Instead it must log a distinct
+    blocked-by-cleared ERROR and leave the success flag False so future
+    evaluations retry once the operator rearms."""
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    raced_ksm = _RaceStubKillSwitchManager(
+        initial_state=None,         # pre-trip get_record sees no record (INACTIVE)
+        post_get_state="CLEARED",   # trip raises ValueError; post-trip
+                                    # re-read sees CLEARED
+    )
+    runtime = SimpleNamespace(kill_switch_manager=raced_ksm)
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime):
+        rm._check_kill_switch(now)
+
+    assert rm._durable_kill_switch_bridge_succeeded is False, (
+        "bridge must NOT mark succeeded when post-trip race lands in "
+        "CLEARED state (Codex round-2 P2)"
+    )
+    # No persistence attempted — the bridge bailed out.
+    assert raced_ksm.save_state_calls == 0
+    assert any(
+        "kill_switch_bridge_blocked_by_cleared_state" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_bridge_treats_post_trip_race_as_idempotent_when_lands_in_tripped(
+    tmp_path, stub_postgres_save,
+):
+    """If the post-trip re-read sees TRIPPED (concurrent trip wins the
+    race), the bridge proceeds to persistence and marks succeeded —
+    same outcome as if our trip had won."""
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    raced_ksm = _RaceStubKillSwitchManager(
+        initial_state=None,
+        post_get_state="TRIPPED",
+    )
+    runtime = SimpleNamespace(kill_switch_manager=raced_ksm)
+
+    class _NoopConn:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", return_value=_NoopConn()), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        rm._check_kill_switch(now)
+
+    assert raced_ksm.save_state_calls >= 1, (
+        "post-trip TRIPPED race must still persist"
+    )
+    assert rm._durable_kill_switch_bridge_succeeded is True
+
+
+def test_bridge_re_trips_active_manager_after_runtime_swap(
+    tmp_path, stub_postgres_save,
+):
+    """Codex P2 round 2: AppRuntime can replace
+    runtime.kill_switch_manager AFTER the bridge captures its reference.
+    If the active manager (post-swap) is a different instance and is NOT
+    tripped, the bridge MUST re-apply the trip on the active manager
+    before declaring success — otherwise hub OrderRouter consults a
+    stale untripped manager."""
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    # Bridge captures ksm_v1 (untripped). After save, the bridge re-resolves
+    # runtime.kill_switch_manager and finds ksm_v2 (untripped because
+    # AppRuntime's load_state from Postgres lost the race against our save).
+    ksm_v1 = _StubKillSwitchManager()
+    ksm_v2 = _StubKillSwitchManager()  # different instance, INACTIVE
+
+    # Use a runtime container that returns ksm_v1 first, then ksm_v2 after
+    # bridge has done its work. We model this by patching get_hub_runtime
+    # to return runtime objects whose kill_switch_manager attribute changes.
+    runtime_holder = SimpleNamespace(kill_switch_manager=ksm_v1)
+
+    class _NoopConn:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    # Side-effect on get_hub_runtime: first 2 calls (initial resolve +
+    # any internal re-resolve before save) return the runtime with v1;
+    # the post-save resolve sees v2.
+    call_count = {"n": 0}
+
+    def get_runtime():
+        call_count["n"] += 1
+        # Bridge calls get_hub_runtime twice: once at the start (sees v1)
+        # and once post-save to verify (must see v2 — the swap).
+        if call_count["n"] >= 2:
+            runtime_holder.kill_switch_manager = ksm_v2
+        return runtime_holder
+
+    with patch("app.hub.runtime.get_hub_runtime", side_effect=get_runtime), \
+         patch("app.data.postgres.connect_with_retry", return_value=_NoopConn()), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        rm._check_kill_switch(now)
+
+    # ksm_v1 was tripped + persisted by the bridge.
+    assert len(ksm_v1.trip_calls) == 1
+    # ksm_v2 was identified as the active replacement and re-tripped.
+    assert len(ksm_v2.trip_calls) == 1, (
+        "active-manager swap must trigger a re-trip on the post-swap "
+        "instance (Codex round-2 P2)"
+    )
+    assert rm._durable_kill_switch_bridge_succeeded is True

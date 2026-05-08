@@ -2026,10 +2026,22 @@ class PositionTrailingLockEngine:
         """Return True if the durable kill switch is tripped for this scope.
 
         Checks GLOBAL → TENANT → ACCOUNT hierarchy via
-        ``KillSwitchManager.is_tripped_for_scope``. Returns False on any
-        failure path (no manager, lookup error) so the engine fails OPEN —
-        the hub's primary entry-blocking gate still runs at the
-        ``GlobalKillSwitchInterceptor`` regardless of this defence.
+        ``KillSwitchManager.is_tripped_for_scope``.
+
+        Failure mode (Codex P2 round 2 review):
+
+        - **LIVE**: a lookup failure means we cannot prove the kill switch
+          is INACTIVE; we MUST fail CLOSED (return True, skip exits). The
+          ``GlobalKillSwitchInterceptor`` is NOT a backstop here because
+          it explicitly bypasses exit orders by design. If we returned
+          False on lookup failure, trailing-lock could submit exits
+          against the very stale state this gate is supposed to suppress.
+        - **non-LIVE** (PAPER/SHADOW/dev): keep the historical fail-OPEN
+          behaviour so unrelated infrastructure issues do not block dev
+          loops. The risk is bounded — no real broker order is placed.
+        - **No manager wired** (provider=None): same fail-OPEN. This is
+          the test-fixture case where the engine is exercised without
+          hub-runtime wiring.
         """
         ksm = self._resolve_kill_switch_manager()
         if ksm is None:
@@ -2042,8 +2054,21 @@ class PositionTrailingLockEngine:
                 )
             )
         except Exception as exc:  # pragma: no cover - defensive, logged below
+            import os
+            trade_mode = str(
+                os.getenv("TRADE_MODE", "PAPER") or "PAPER"
+            ).strip().upper()
+            if trade_mode == "LIVE":
+                logger.error(
+                    "PositionTrailingLockEngine: kill_switch lookup failed "
+                    "in LIVE — failing CLOSED (skipping exit submission to "
+                    "avoid running against stale state): %s",
+                    exc,
+                )
+                return True
             logger.warning(
-                "PositionTrailingLockEngine: kill_switch lookup failed (non-fatal): %s",
+                "PositionTrailingLockEngine: kill_switch lookup failed "
+                "(non-fatal in non-LIVE): %s",
                 exc,
             )
             return False

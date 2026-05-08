@@ -430,3 +430,87 @@ async def test_engine_observes_kill_switch_manager_swap_via_provider():
         "engine must observe the post-swap KillSwitchManager via provider "
         "closure (PR #231 review)"
     )
+
+
+class _RaisingKillSwitchManager:
+    """Stub whose ``is_tripped_for_scope`` raises — simulates a transient
+    Postgres outage or KSM lookup failure for the LIVE fail-closed test."""
+
+    def is_tripped_for_scope(self, *, tenant_id=None, account_id=None, strategy_id=None):
+        raise RuntimeError("simulated KSM lookup failure")
+
+
+@pytest.mark.asyncio
+async def test_engine_fails_closed_in_live_when_kill_switch_lookup_raises(monkeypatch):
+    """Codex P2 round 2 review: in LIVE mode, a KSM lookup failure means we
+    cannot prove the kill switch is INACTIVE. Trailing-lock MUST fail
+    CLOSED (skip exit submission) — the GlobalKillSwitchInterceptor is
+    NOT a backstop because it explicitly bypasses exit orders."""
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [
+            Position(
+                symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                product_type=ProductType.INTRADAY,
+            )
+        ],
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+
+    router = _RecordingOrderRouter()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+        kill_switch_manager_provider=lambda: _RaisingKillSwitchManager(),
+    )
+
+    # Cycle 1: peak builds (no exit yet, just observation).
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    # Cycle 2: pullback past giveback — would normally route an exit.
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    assert router.calls == [], (
+        "trailing-lock must fail CLOSED in LIVE when KSM lookup raises "
+        "(Codex round-2 P2)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_engine_fails_open_in_paper_when_kill_switch_lookup_raises(monkeypatch):
+    """In non-LIVE modes, preserve the historical fail-OPEN behaviour so
+    KSM infrastructure flakiness does not block dev/paper loops. Risk is
+    bounded — no real broker order is placed."""
+    monkeypatch.setenv("TRADE_MODE", "PAPER")
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [
+            Position(
+                symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                product_type=ProductType.INTRADAY,
+            )
+        ],
+    )
+    router = _RecordingOrderRouter()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+        kill_switch_manager_provider=lambda: _RaisingKillSwitchManager(),
+    )
+
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    assert len(router.calls) == 1, (
+        "trailing-lock must fail OPEN in non-LIVE when KSM lookup raises "
+        "(preserves dev-loop behaviour)"
+    )
