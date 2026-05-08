@@ -20,6 +20,13 @@ class CleanupTarget:
     path: Path
     reason: str
     dependency: bool = False
+    # Runtime-state targets (logs/, state/) are bind-mounted to host
+    # directories on the OCI VM and hold operational data
+    # (safety_alerts.log, risk_positions.json, executed_tokens_state.json,
+    # etc.). Deleting them on the VM nukes production state. Gate behind
+    # an explicit --include-runtime opt-in so a stray --yes on a misplaced
+    # checkout cannot do irreversible damage.
+    runtime: bool = False
 
 
 ROOT_RELATIVE_TARGETS: tuple[CleanupTarget, ...] = (
@@ -33,8 +40,8 @@ ROOT_RELATIVE_TARGETS: tuple[CleanupTarget, ...] = (
     CleanupTarget(Path("htmlcov"), "HTML coverage report"),
     CleanupTarget(Path(".test_tmp"), "test scratch directory"),
     CleanupTarget(Path(".docker-tmp"), "Docker build scratch directory"),
-    CleanupTarget(Path("logs"), "local runtime logs"),
-    CleanupTarget(Path("state"), "local runtime state"),
+    CleanupTarget(Path("logs"), "local runtime logs", runtime=True),
+    CleanupTarget(Path("state"), "local runtime state", runtime=True),
     CleanupTarget(Path("replay_output"), "replay output"),
     CleanupTarget(Path("frontend/build"), "frontend production build"),
     CleanupTarget(Path("frontend/playwright-report"), "Playwright report"),
@@ -45,6 +52,12 @@ ROOT_RELATIVE_TARGETS: tuple[CleanupTarget, ...] = (
 RECURSIVE_DIR_NAMES = frozenset({"__pycache__"})
 RECURSIVE_FILE_SUFFIXES = (".pyc", ".pyo")
 
+# Virtualenv directories at the workspace root. Recursing into these would
+# enumerate every __pycache__ inside installed packages -- noisy churn
+# (Python regenerates them on import) and slow on large environments.
+# Skip the same way we skip .git.
+VENV_DIR_NAMES = frozenset({".venv", "venv", "env", ".backtest_venv"})
+
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -54,8 +67,18 @@ def _is_under_git(path: Path) -> bool:
     return ".git" in path.parts
 
 
-def existing_targets(root: Path, include_deps: bool = False) -> list[CleanupTarget]:
-    """Return cleanup targets that exist under *root*."""
+def existing_targets(
+    root: Path,
+    include_deps: bool = False,
+    include_runtime: bool = False,
+) -> list[CleanupTarget]:
+    """Return cleanup targets that exist under *root*.
+
+    ``include_deps`` opts in to dependency-install paths (e.g.
+    ``frontend/node_modules``). ``include_runtime`` opts in to runtime-state
+    paths (``logs/``, ``state/``) -- never enable on the production VM
+    where these are bind-mounted to host operational data.
+    """
     targets: list[CleanupTarget] = []
     seen: set[Path] = set()
 
@@ -70,9 +93,18 @@ def existing_targets(root: Path, include_deps: bool = False) -> list[CleanupTarg
     for target in ROOT_RELATIVE_TARGETS:
         if target.dependency and not include_deps:
             continue
+        if target.runtime and not include_runtime:
+            continue
         path = root / target.path
         if path.exists() or path.is_symlink():
-            add(CleanupTarget(path, target.reason, target.dependency))
+            add(
+                CleanupTarget(
+                    path,
+                    target.reason,
+                    dependency=target.dependency,
+                    runtime=target.runtime,
+                )
+            )
 
     release_dir = root / "release"
     if release_dir.exists():
@@ -96,6 +128,11 @@ def existing_targets(root: Path, include_deps: bool = False) -> list[CleanupTarg
         for dirname in dirnames:
             child = current / dirname
             if child.name == ".git":
+                continue
+            # Skip virtualenvs at any depth -- recursing inside them produces
+            # thousands of __pycache__ "deletions" inside installed packages
+            # that Python regenerates on import.
+            if child.name in VENV_DIR_NAMES:
                 continue
             if child.resolve() in pruned_dirs:
                 continue
@@ -130,7 +167,12 @@ def remove_target(target: CleanupTarget) -> None:
 
 
 def format_targets(root: Path, targets: Iterable[CleanupTarget]) -> list[str]:
-    return [f"{target.path.relative_to(root)}  # {target.reason}" for target in targets]
+    # Emit POSIX-style relative paths so output is portable across Windows
+    # and Linux (matches .gitignore conventions, plays well with grep).
+    return [
+        f"{target.path.relative_to(root).as_posix()}  # {target.reason}"
+        for target in targets
+    ]
 
 
 def parse_args() -> argparse.Namespace:
@@ -145,13 +187,26 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="also remove dependency installs such as frontend/node_modules",
     )
+    parser.add_argument(
+        "--include-runtime",
+        action="store_true",
+        help=(
+            "also remove runtime state directories (logs/, state/). "
+            "DESTRUCTIVE on the production VM where these are bind-mounted "
+            "to host operational data -- never enable on prod."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     root = repo_root()
-    targets = existing_targets(root, include_deps=args.include_deps)
+    targets = existing_targets(
+        root,
+        include_deps=args.include_deps,
+        include_runtime=args.include_runtime,
+    )
 
     if not targets:
         print("Repo is already clean; no generated artifacts found.")

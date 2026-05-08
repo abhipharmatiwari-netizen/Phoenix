@@ -104,4 +104,5 @@ python scripts/clean_repo.py --yes --include-deps
 
 - Omit `--yes` for a dry run that only lists removable artifacts.
 - Omit `--include-deps` when you want to keep local dependency installs such as `frontend/node_modules`.
-- The cleanup script only removes known caches, build output, runtime scratch/log directories, release zip artifacts, Python bytecode, and optional dependency installs; source files, env templates, migrations, docs, and `.git` are left untouched.
+- **Never run with `--include-runtime` on the production VM.** That flag opts in to deleting `logs/` and `state/`, which are bind-mounted to host operational data on OCI (incl. `safety_alerts.log`, `risk_positions.json`, `executed_tokens_state.json`). Default behaviour (without the flag) skips these directories entirely.
+- The cleanup script only removes known caches, build output, release zip artifacts, Python bytecode, and (gated) dependency installs / runtime state. Source files, env templates, migrations, docs, virtualenvs (`.venv/`, `venv/`, `.backtest_venv/`), and `.git` are left untouched.
