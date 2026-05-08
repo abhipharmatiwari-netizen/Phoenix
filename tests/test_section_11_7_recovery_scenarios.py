@@ -23,6 +23,7 @@ live deployment:
 from __future__ import annotations
 
 import sys
+from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -30,6 +31,21 @@ import pytest
 
 from app.runtime import app_runtime as app_runtime_module
 from app.runtime.app_runtime import AppRuntime
+
+
+def _fake_connect_ctx():
+    """Stub connect_with_retry: returns a dummy DB context manager.
+
+    Mirrors tests/test_app_runtime_startup_recovery.py — needed because
+    AppRuntime.start() calls connect_with_retry several times during the
+    LIVE-mode startup-recovery path (position records, kill-switch state,
+    runtime-exit lineage) which would otherwise try to reach a real
+    Postgres at the (unstubbed) DSN.
+    """
+    @contextmanager
+    def _ctx(dsn, autocommit=False):
+        yield MagicMock()
+    return _ctx
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +84,12 @@ class _FakeOrderLifecycle:
 
     def mark_recovery_pending(self) -> None:
         self.mark_recovery_called = True
+
+    def load_position_records(self, conn) -> int:
+        return 0
+
+    def save_position_records(self, conn) -> None:
+        return None
 
 
 class _FakeOrderRouter:
@@ -116,6 +138,11 @@ def _settings():
         schema_check_mode="warn",
         enable_multi_hub=True,
         order_lifecycle_persist_markers_required=False,
+        # Satisfy the inline LIVE-mode SSL guard in AppRuntime.start();
+        # these tests simulate runtime startup with TRADE_MODE=LIVE and the
+        # guard otherwise raises before the §11.7 recovery path is exercised.
+        control_plane_pg_sslmode="require",
+        control_plane_pg_password=None,
     )
 
 
@@ -148,6 +175,25 @@ def _patch_deps(monkeypatch, *, trade_mode: str = "LIVE", feature_flag_strict: b
     )
     monkeypatch.setattr(app_runtime_module, "log_stability_feature_flags", lambda flags, log=None: None)
     _install_bq_stubs(monkeypatch)
+    if trade_mode == "LIVE":
+        # Mirror tests/test_app_runtime_startup_recovery.py: under LIVE the inline
+        # AppRuntime.start() block runs several safety guards (repo-root runtime
+        # artifact scan, Postgres SSL mode, placeholder-secret check) and then
+        # tries to connect to the control-plane Postgres for position-record /
+        # kill-switch restore. The §11.7 recovery scenarios are independent of
+        # those gates -- stub them out so the test exercises only the recovery
+        # path under test.
+        import pathlib
+        monkeypatch.setattr(pathlib.Path, "iterdir", lambda self: iter([]))
+        monkeypatch.setenv("LIVE_PG_SSL_SKIP_CHECK", "true")
+        monkeypatch.setenv("ADMIN_API_KEY", "live-test-key-injected-by-test")
+        monkeypatch.setenv("DEMO_AUTH_TOKEN_SECRET", "live-test-secret-injected-by-test")
+        monkeypatch.setattr(
+            app_runtime_module, "get_control_plane_dsn", lambda *a, **kw: "dsn://test"
+        )
+        monkeypatch.setattr(
+            app_runtime_module, "connect_with_retry", _fake_connect_ctx()
+        )
 
 
 # ---------------------------------------------------------------------------

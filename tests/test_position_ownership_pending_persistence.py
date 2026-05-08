@@ -96,7 +96,9 @@ class _FakeBackend(PostgresPositionOwnershipBackend):
             persist_pending_locks=persist_pending_locks,
         )
 
-    def _ensure_schema(self) -> None:
+    def _assert_schema_exists(self) -> None:
+        # Override the real schema-existence check: the fake cursor is dict-only
+        # and would choke on the tuple params used by the real check.
         return
 
     def _conn(self):
