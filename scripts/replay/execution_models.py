@@ -21,13 +21,12 @@ TICK_MODEL_OHLC = "ohlc"
 #   carry_over  - DEFAULT. Replay does NOT close at session boundaries;
 #                 positions carry across days and the strategy's own logic
 #                 (TP / SL / EOD square-off / explicit-exit) drives exits.
-#                 At window end, any still-open position is reported under
-#                 "open at window end" as unrealised, NOT folded into the
-#                 win/loss stats.
+#                 At window end, any still-open position is recorded as an
+#                 unrealised last-bar mark, NOT folded into realized net_pnl
+#                 or win/loss stats.
 #   daily_mtm   - same carry-over behaviour as carry_over, additionally
-#                 records a daily mark-to-market snapshot per session
-#                 close. At window end the unrealised mark IS folded into
-#                 total PnL (so total = realized exits + final unrealised).
+#                 records a daily mark-to-market snapshot per session close.
+#                 Window-end marks remain unrealised for realized metrics.
 END_POLICY_FORCE_EXIT = "force_exit"
 END_POLICY_CARRY_OVER = "carry_over"
 END_POLICY_DAILY_MTM = "daily_mtm"
@@ -118,7 +117,7 @@ def build_tick_path(
     ts_end: datetime,
     o: float,
     h: float,
-    l: float,
+    l: float,  # noqa: E741
     c: float,
     tick_model: str,
 ) -> List[TickEvent]:

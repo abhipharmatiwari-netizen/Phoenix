@@ -275,7 +275,7 @@ def test_replay_engine_keeps_order_flow_local(monkeypatch):
     assert fill.underlying == "NIFTY"
 
 
-def test_replay_engine_force_closes_open_positions_at_end(monkeypatch):
+def test_replay_engine_marks_open_positions_unrealised_at_default_window_end(monkeypatch):
     bar = _sample_bar(close=123.0)
 
     monkeypatch.setattr(
@@ -301,18 +301,19 @@ def test_replay_engine_force_closes_open_positions_at_end(monkeypatch):
     ).run()
 
     assert recorder.db_bar_count == 1
-    assert len(recorder.fills) == 2
+    assert len(recorder.fills) == 1
     tracker = PnLTracker()
     trades = tracker.process_fills(recorder.fills)
-    assert len(trades) == 1
-    # Issue #216: under the default --end-policy=carry_over, window-end
-    # forced closes carry the new REPLAY_WINDOW_END_FORCED reason.
-    # Legacy --end-policy=force_exit produces the original REPLAY_EOD.
-    assert trades[0].exit_reason in (
-        "REPLAY_WINDOW_END_FORCED",
-        "REPLAY_EOD",
-    ), trades[0].exit_reason
-    assert trades[0].exit_price == 123.0
+    assert len(trades) == 0
+    metrics = tracker.compute_metrics("ema20_strategy", "NIFTY")
+    assert metrics.total_trades == 0
+    assert metrics.net_pnl == 0.0
+    window_marks = [
+        e for e in recorder.finalization_events
+        if e.get("reason") == "REPLAY_WINDOW_END_FORCED"
+    ]
+    assert window_marks and window_marks[0].get("realized") is False
+    assert window_marks[0].get("price") == 123.0
 
 
 def test_replay_engine_records_gate_decisions_for_report(monkeypatch):

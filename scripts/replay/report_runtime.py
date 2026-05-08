@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import csv
-import io
 import json
 import os
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from scripts.replay.optimizer import OptimizationResult, ParameterRecommendation
 from scripts.replay.pnl_tracker import PnLTracker, StrategyMetrics
@@ -115,13 +114,12 @@ def format_assumptions(execution_summary: Optional[Mapping[str, Any]] = None) ->
      * force_exit (legacy): replay closes any open position at every session
        boundary AND at window end. Inflates losses on multi-bar-hold strategies.
      * carry_over (default, issue #216): positions carry across days driven by
-       the strategy's own logic (TP / SL / EOD square-off). Only the replay
-       window end forces a close, with reason REPLAY_WINDOW_END_FORCED so
-       downstream reporting can treat those as unrealised marks rather than
-       realised PnL.
+       the strategy's own logic (TP / SL / EOD square-off). The replay window
+       end records an unrealised REPLAY_WINDOW_END_FORCED mark only; it does
+       not submit an EXIT fill and is not included in realized trade metrics.
      * daily_mtm: same carry-over behaviour plus a daily_mtm_snapshot session
-       event at each session close so per-day unrealised marks can be folded
-       into total PnL by downstream reporting.
+       event at each session close. Window-end marks remain unrealised and are
+       excluded from realized net PnL and win/loss stats.
 
   8. TIME ZONES: Bars without timezone info are treated as Asia/Kolkata (IST).
      Replay time, gate diagnostics, and reporting use explicit timezone-aware

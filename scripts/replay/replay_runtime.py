@@ -82,7 +82,7 @@ class BarRow:
     timeframe_seconds: int
     o: float
     h: float
-    l: float
+    l: float  # noqa: E741
     c: float
     atr: Optional[float]
     rsi: Optional[float]
@@ -517,15 +517,34 @@ class ReplayEngine:
             strategy.last_price.update(prices)
         return prices
 
+    def _recorder_has_open_position(self) -> bool:
+        """Return True when replay fills show an unpaired entry for this run."""
+
+        open_qty = 0
+        for fill in self.recorder.fills:
+            if fill.strategy_id != self.config.strategy_id:
+                continue
+            if fill.underlying != self.config.underlying_key:
+                continue
+            qty = int(getattr(fill, "quantity", 0) or 0)
+            if fill.purpose == "ENTRY":
+                open_qty += qty
+            elif fill.purpose == "EXIT":
+                open_qty = max(0, open_qty - qty)
+        return open_qty > 0
+
     def _finalize_open_positions(
         self,
         *,
         last_bar: BarRow,
         label: str,
         reason: str,
+        submit_orders: bool = True,
     ) -> None:
         strategy = self._strategy
         if strategy is None:
+            return
+        if not submit_orders and not self._recorder_has_open_position():
             return
 
         underlying_price = float(last_bar.c)
@@ -556,7 +575,10 @@ class ReplayEngine:
             reason=reason,
             timestamp=fill_context.timestamp.isoformat(),
             price=underlying_price,
+            realized=bool(submit_orders),
         )
+        if not submit_orders:
+            return
         force_exit_all = getattr(strategy, "force_exit_all", None)
         if not callable(force_exit_all):
             return
@@ -795,18 +817,20 @@ class ReplayEngine:
                 prev_session_date = session_date
                 prev_bar = bar
 
-            # Issue #216: distinct reason for window-end forced close so
-            # downstream reporting can separate "real" exits from
-            # replay-window-truncation exits. Under carry_over /
-            # daily_mtm this is the ONLY forced exit that fires across
-            # the whole replay window (no per-session-boundary closes).
+            # Issue #216: only the legacy force_exit policy submits a real
+            # window-end EXIT order. carry_over/daily_mtm record an unrealised
+            # last-bar mark so reports can disclose open risk without letting
+            # the arbitrary replay end date affect realized trade count,
+            # win/loss stats, or net_pnl.
+            window_end_is_realized = end_policy == END_POLICY_FORCE_EXIT
             window_end_reason = (
-                "REPLAY_EOD"
-                if end_policy == END_POLICY_FORCE_EXIT
-                else "REPLAY_WINDOW_END_FORCED"
+                "REPLAY_EOD" if window_end_is_realized else "REPLAY_WINDOW_END_FORCED"
             )
             self._finalize_open_positions(
-                last_bar=all_bars[-1], label=label, reason=window_end_reason
+                last_bar=all_bars[-1],
+                label=label,
+                reason=window_end_reason,
+                submit_orders=window_end_is_realized,
             )
             indicator_snapshot = getattr(self._strategy, "indicator_availability_snapshot", None)
             if callable(indicator_snapshot):

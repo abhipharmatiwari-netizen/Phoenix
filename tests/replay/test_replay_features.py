@@ -273,13 +273,14 @@ def test_session_boundary_finalizes_open_position_under_force_exit(monkeypatch):
     assert len(trades) == 1
     assert trades[0].exit_reason == "REPLAY_SESSION_BOUNDARY"
     assert recorder.finalization_events[0]["reason"] == "REPLAY_SESSION_BOUNDARY"
+    assert recorder.finalization_events[0]["realized"] is True
 
 
 def test_carry_over_does_not_finalize_at_session_boundary(monkeypatch):
     """Issue #216: the default --end-policy=carry_over does NOT close
     open positions at session boundaries -- the position carries across
-    days and is only force-closed at the replay window end with reason
-    REPLAY_WINDOW_END_FORCED (distinct from REPLAY_SESSION_BOUNDARY)."""
+    days and the replay window end is recorded as an unrealised mark, not
+    an EXIT fill folded into realized metrics."""
     base_ts = datetime(2026, 3, 2, 15, 10, tzinfo=timezone.utc)
     bars = [_bar(base_ts, close=100.0), _bar(base_ts, close=101.0, day_offset=1)]
 
@@ -299,24 +300,29 @@ def test_carry_over_does_not_finalize_at_session_boundary(monkeypatch):
 
     tracker = PnLTracker()
     trades = tracker.process_fills(recorder.fills)
-    # Single forced exit at window end, NOT at session boundary.
-    assert len(trades) == 1, "expected single trade with one forced exit"
-    assert trades[0].exit_reason == "REPLAY_WINDOW_END_FORCED", (
-        f"Expected window-end forced exit, got {trades[0].exit_reason!r}. "
-        f"Under carry_over policy, REPLAY_SESSION_BOUNDARY must NOT fire."
-    )
+    # No realized exit was emitted: window-end marks must not affect realized
+    # trade count, win/loss stats, or net PnL.
+    assert len(trades) == 0
+    metrics = tracker.compute_metrics("ema20_strategy", "NIFTY")
+    assert metrics.total_trades == 0
+    assert metrics.net_pnl == 0.0
     # No session-boundary finalization event was recorded.
     finalize_reasons = [e.get("reason") for e in recorder.finalization_events]
     assert "REPLAY_SESSION_BOUNDARY" not in finalize_reasons, (
         f"carry_over must not finalize at session boundary; got {finalize_reasons!r}"
     )
     assert "REPLAY_WINDOW_END_FORCED" in finalize_reasons
+    window_marks = [
+        e for e in recorder.finalization_events
+        if e.get("reason") == "REPLAY_WINDOW_END_FORCED"
+    ]
+    assert window_marks and window_marks[0].get("realized") is False
 
 
 def test_daily_mtm_records_snapshot_event_at_session_boundary(monkeypatch):
     """daily_mtm policy: position carries over (like carry_over) but a
     daily_mtm_snapshot session_event is recorded at each boundary so
-    downstream reporting can fold per-day unrealised marks."""
+    downstream reporting can inspect unrealised marks separately."""
     base_ts = datetime(2026, 3, 2, 15, 10, tzinfo=timezone.utc)
     bars = [_bar(base_ts, close=100.0), _bar(base_ts, close=101.0, day_offset=1)]
 
@@ -336,15 +342,23 @@ def test_daily_mtm_records_snapshot_event_at_session_boundary(monkeypatch):
 
     tracker = PnLTracker()
     trades = tracker.process_fills(recorder.fills)
-    # No session-boundary close; position carries to window end.
-    assert len(trades) == 1
-    assert trades[0].exit_reason == "REPLAY_WINDOW_END_FORCED"
+    # No session-boundary close and no realized window-end exit; position is
+    # only represented by an unrealised finalization event.
+    assert len(trades) == 0
+    metrics = tracker.compute_metrics("ema20_strategy", "NIFTY")
+    assert metrics.total_trades == 0
+    assert metrics.net_pnl == 0.0
     # daily_mtm_snapshot was recorded.
     session_events = [e for e in recorder.session_events if e.get("event") == "daily_mtm_snapshot"]
     assert len(session_events) == 1, (
         f"Expected one daily_mtm_snapshot event, got {recorder.session_events!r}"
     )
     assert session_events[0].get("close_price") == 100.0
+    window_marks = [
+        e for e in recorder.finalization_events
+        if e.get("reason") == "REPLAY_WINDOW_END_FORCED"
+    ]
+    assert window_marks and window_marks[0].get("realized") is False
 
 
 def test_invalid_end_policy_raises_at_config_time():

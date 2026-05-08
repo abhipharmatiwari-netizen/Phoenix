@@ -44,10 +44,12 @@ def build_trade_analysis(
     n_session_boundary = sum(
         1 for t in trade_list if str(t.exit_reason) == "REPLAY_SESSION_BOUNDARY"
     )
+    finalization_list = [dict(item) for item in (finalization_events or [])]
     n_window_end_forced = sum(
         1
-        for t in trade_list
-        if str(t.exit_reason) in ("REPLAY_WINDOW_END_FORCED", "REPLAY_EOD")
+        for item in finalization_list
+        if str(item.get("reason")) == "REPLAY_WINDOW_END_FORCED"
+        and not bool(item.get("realized", False))
     )
     if n_session_boundary > 0:
         warnings.append(
@@ -59,8 +61,8 @@ def build_trade_analysis(
     if n_window_end_forced > 0:
         warnings.append(
             f"{n_window_end_forced} position(s) still open at the replay window "
-            f"end and were force-closed at last bar. These should be treated as "
-            f"unrealised marks rather than realised PnL when comparing strategies."
+            f"end and recorded as unrealised last-bar marks. These are excluded "
+            f"from realized net PnL and win/loss stats when comparing strategies."
         )
 
     return {
@@ -81,7 +83,7 @@ def build_trade_analysis(
         "top_failed_gates": failed_gates[:10],
         "data_profile": dict(data_profile or {}),
         "indicator_snapshot": dict(indicator_snapshot or {}),
-        "finalization_events": [dict(item) for item in (finalization_events or [])],
+        "finalization_events": finalization_list,
         "warnings": warnings,
     }
 
