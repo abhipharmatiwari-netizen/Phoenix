@@ -295,6 +295,32 @@ class Ema20Strategy(BaseStrategy):
             if exit_retry_cfg is not None
             else 5.0
         )
+        # Issue #223: per-instrument entry cooloff. Defends against rapid
+        # consecutive entries on the same option label (the 2026-05-08
+        # NATURALGAS22MAY26265CE incident: two BUY entries 47 seconds apart
+        # accumulated a 2-lot long that the exit engines could not cleanly
+        # close). The existing `_last_fired_start_ts` guard blocks twice on
+        # the same bar; this is a wall-clock backstop that is independent of
+        # bar boundaries, position-state syncs, and aggregation quirks.
+        # Default = one bar (signal_timeframe). Override per symbol via
+        # `<PREFIX>EMA20_ENTRY_COOLOFF_SECONDS` (e.g. `NG_EMA20_ENTRY_COOLOFF_SECONDS=180`).
+        # Set to 0 to disable (NOT recommended for LIVE).
+        entry_cooloff_cfg = self._parse_float(
+            self._env(
+                "EMA20_ENTRY_COOLOFF_SECONDS",
+                str(int(self.signal_timeframe)),
+            )
+        )
+        self._entry_cooloff_seconds = (
+            max(0.0, float(entry_cooloff_cfg))
+            if entry_cooloff_cfg is not None
+            else float(self.signal_timeframe)
+        )
+        # Per-option_label monotonic timestamp of last entry submission.
+        # In-memory only — restart resets the cooloff (acceptable: operator
+        # restarts mid-session are rare and the sync_position_from_risk_manager
+        # path will re-load any open position so duplicate-fill risk is bounded).
+        self._last_entry_mono_by_label: Dict[str, float] = {}
         self._exit_max_retries = max(1, int(self._cfg.get_int("EMA20_EXIT_MAX_RETRIES", 12)))
         self._exit_circuit_open_seconds = max(
             self._exit_retry_cooldown_seconds,
@@ -395,6 +421,19 @@ class Ema20Strategy(BaseStrategy):
             self.env_prefix,
             self._exit_retry_cooldown_seconds,
         )
+        if self._entry_cooloff_seconds > 0.0:
+            logger.info(
+                "[%s] EMA20 entry cooloff enabled (issue #223) | cooloff_seconds=%.2f",
+                self.env_prefix,
+                self._entry_cooloff_seconds,
+            )
+        else:
+            logger.warning(
+                "[%s] EMA20 entry cooloff DISABLED (cooloff_seconds=0) — "
+                "rapid consecutive entries on the same label are NOT guarded; "
+                "see issue #223 for context.",
+                self.env_prefix,
+            )
         logger.info(
             "[%s] EMA20 exit protection enabled | max_retries=%d circuit_open_seconds=%.1f alert_interval_seconds=%.1f",
             self.env_prefix,
@@ -1580,6 +1619,33 @@ class Ema20Strategy(BaseStrategy):
             logger.warning("[%s] No CE label resolved for EMA20 trade", self.env_prefix)
             return
 
+        # Issue #223: wall-clock entry cooloff per option_label. Defends
+        # against rapid consecutive entries that the bar-boundary
+        # `_last_fired_start_ts` guard cannot block (e.g. when bar
+        # aggregation timing drifts, or when sync_position_from_risk_manager
+        # clears `_managed_positions` between the two fires). On 2026-05-08
+        # NATURALGAS22MAY26265CE, two BUY entries fired 47 seconds apart and
+        # accumulated a 2-lot long that the trailing-lock could not cleanly
+        # exit. This gate stops the second fire deterministically.
+        if self._entry_cooloff_seconds > 0.0:
+            now_mono = time.monotonic()
+            last_entry_mono = self._last_entry_mono_by_label.get(ce_label)
+            if last_entry_mono is not None:
+                elapsed = now_mono - last_entry_mono
+                if elapsed < self._entry_cooloff_seconds:
+                    remaining = self._entry_cooloff_seconds - elapsed
+                    logger.warning(
+                        "[%s] EMA20 ENTRY_BLOCKED_COOLOFF | label=%s "
+                        "elapsed_s=%.2f cooloff_s=%.2f remaining_s=%.2f "
+                        "(issue #223)",
+                        self.env_prefix,
+                        ce_label,
+                        elapsed,
+                        self._entry_cooloff_seconds,
+                        remaining,
+                    )
+                    return
+
         meta = self.instrument_meta.get(ce_label, {})
         broker_symbol = self._resolve_broker_symbol(meta, ce_label)
         requested_lots = self._resolve_qty(meta)
@@ -1703,6 +1769,13 @@ class Ema20Strategy(BaseStrategy):
             )
 
         self._last_fired_start_ts = getattr(candle, "start_ts", None)
+        # Issue #223: record monotonic entry timestamp so the cooloff gate at
+        # the top of this method blocks any subsequent fire on the same label
+        # within `_entry_cooloff_seconds`. Recorded only after the broker
+        # response has been accepted (no REJECTED/FAILED status) so that a
+        # broker-rejected attempt does not lock out a legitimate retry.
+        if self._entry_cooloff_seconds > 0.0:
+            self._last_entry_mono_by_label[ce_label] = time.monotonic()
         entry_price = self.last_price.get(ce_label, close_price)
         self._reset_exit_retry_state()
         self._managed_positions[ce_label] = Ema20Position(
