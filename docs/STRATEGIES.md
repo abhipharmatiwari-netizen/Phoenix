@@ -54,8 +54,8 @@ Every active strategy wraps its exit submission with a retry circuit:
 
 Variables exist with strategy-specific prefixes (`EMA20_`, `PUT_MOM_`, `PUT_BUY_`, `NIFTY_SPREAD_`).
 
-### Position-ownership lock
-Every strategy submits exits through `place_order_via_bridge → OrderRouter`. The router calls `PositionOwnershipStore.try_acquire`, which today does **not** treat OWNED → RELEASING as exclusive — see open issue [#200](https://github.com/abhipharmatiwari-netizen/Phoenix/issues/200) for the structural fix that would protect every strategy from duplicate-exit races.
+### Position-ownership lock (structural exclusive exit lock — issue #200, shipped 2026-05-08)
+Every strategy submits exits through `place_order_via_bridge → OrderRouter`. The router calls `PositionOwnershipStore.try_acquire`, which now treats **OWNED → RELEASING as an exclusive lock**: a second exit-side acquire on a contract whose record is already in RELEASING is refused with `PositionOwnershipDecision(allowed=False, reason="exit_already_in_flight")` until either (a) the broker confirms terminal fill (entry flattens, lock auto-releases) or (b) the watchdog window expires (env `POSITION_OWNERSHIP_EXIT_LOCK_MAX_SECONDS`, default 90s — logs `exit_lock_watchdog_expired` WARNING then permits the retry so ops surfaces the stuck lock instead of the position being permanently bricked). Protection is strategy-independent — `ema20_strategy`, `exclusive_nifty_ce_buy`, `put_momentum_scalper`, `nifty_weekly_credit_spreads`, and any future strategy benefit without per-strategy code. Watch: `exit_already_in_flight` INFO log line. See [issue #200](https://github.com/abhipharmatiwari-netizen/Phoenix/issues/200) and `tests/orders/test_position_ownership_exit_lock.py`.
 
 ### EMA20-specific guard (PR #201, shipped 2026-05-08)
 `Ema20Strategy._pending_exit_by_label` blocks a second `_exit_position` call on the same `option_label` until the prior exit's fill is observed (or 60s watchdog elapses). Watch: `EMA20 exit suppressed (in-flight)` log line. See [`fix(ema20): per-label pending-exit guard prevents duplicate SL exits`](https://github.com/abhipharmatiwari-netizen/Phoenix/pull/201).
@@ -701,7 +701,10 @@ Per-leg (`sl_pct`, `tp_pct`, `trail_buffer_pct`) — all soft, monitored per leg
 
 ## Open follow-ups
 
-- **Issue [#200](https://github.com/abhipharmatiwari-netizen/Phoenix/issues/200)** — Make `PositionOwnershipStore.try_acquire` enforce `OWNED → RELEASING` as exclusive. Closes the duplicate-exit race for *every* strategy, not just `ema20`.
-- **Issue [#197](https://github.com/abhipharmatiwari-netizen/Phoenix/issues/197)** — Position state-machine should accept `RECONCILING → PARTIALLY_EXITED` (or have a documented `FLIPPED` transition) so flip-the-trade fills don't park records in `RECOVERY_PENDING`.
-- **Issue [#198](https://github.com/abhipharmatiwari-netizen/Phoenix/issues/198)** — Surface the new `POST /admin/state/clear-position-record` endpoint in the dashboard's Safety page so operators don't need raw SQL access.
 - **Strategy reactivation backlog** — `ce_orb`, `ce_pdh_rb`, `put_buy`, `put_reversion_writer`, `delta_strangle` all need re-validation on current market data + parameter retuning before re-enable.
+
+## Resolved (recent)
+
+- **Issue [#200](https://github.com/abhipharmatiwari-netizen/Phoenix/issues/200)** — `PositionOwnershipStore.try_acquire` now enforces `OWNED → RELEASING` as an exclusive lock with watchdog (default 90s). Closed 2026-05-08.
+- **Issue [#197](https://github.com/abhipharmatiwari-netizen/Phoenix/issues/197)** — Flip-the-trade fills routed to `RECONCILING` with structured `flip_fill_blocked` reason (PR #199). Closed 2026-05-08.
+- **Issue [#198](https://github.com/abhipharmatiwari-netizen/Phoenix/issues/198)** — `POST /admin/state/clear-position-record` endpoint shipped (PR #199). Closed 2026-05-08.

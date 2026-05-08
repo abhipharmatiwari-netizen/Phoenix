@@ -7,7 +7,6 @@ import pytest
 from app.core.identifiers import BrokerAccountId, TenantId
 from app.pnl.position_trailing_lock import (
     PositionTrailingLockManager,
-    PositionTrailingLockState,
     _NoopPositionTrailingLockBackend,
 )
 

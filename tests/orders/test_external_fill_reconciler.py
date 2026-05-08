@@ -11,14 +11,12 @@ Pins the contract that:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import List
-from unittest.mock import patch
 
 import pytest
 
-from app.core.identifiers import BrokerAccountId, StrategyId, TenantId
+from app.core.identifiers import BrokerAccountId, TenantId
 from app.orders.external_fill_reconciler import (
     EXTERNAL_FILL_STRATEGY_ID,
     ExternalFillReconciler,

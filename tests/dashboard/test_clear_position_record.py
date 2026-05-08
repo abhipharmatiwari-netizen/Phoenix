@@ -9,23 +9,19 @@ that has gotten stuck non-terminal (e.g. flip-fill RECOVERY_PENDING residue).
 
 from __future__ import annotations
 
-import importlib
-from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any, List, Optional
+from typing import Any, List
 
 import pytest
 from fastapi import HTTPException
 
-from app.brokers.base import Position, ProductType
-from app.core.identifiers import BrokerAccountId, StrategyId, TenantId
 from app.core.position_state import InternalPosition, PositionState
 from app.dashboard.admin_routes import (
     ClearPositionRecordRequest,
     clear_position_record,
 )
 from app.dashboard.auth import AdminContext, AdminRole
-from app.orders.order_lifecycle import OrderLifecycleService, SubmissionContext
+from app.orders.order_lifecycle import OrderLifecycleService
 from app.orders.trade_processed_store import InMemoryProcessedTradeStore
 
 
