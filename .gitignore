@@ -19,6 +19,11 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.tox/
+.nox/
+.coverage
+coverage.xml
+htmlcov/
 
 # Environment overrides with real secrets
 *.env.local
@@ -53,6 +58,8 @@ env/
 
 # Docker build cache and temporary artifacts
 .docker-tmp/
+*.log
+*.tmp
 
 # Release build artifacts (zip files are build outputs, not source)
 release/*.zip
@@ -69,5 +76,10 @@ ops/oci_log_pulls/
 # also created locally when running tsc / npm install for typecheck).
 node_modules/
 
-# Frontend build output (produced by the nginx Docker stage; not source).
+# Frontend build and test output (produced locally or by the nginx Docker stage; not source).
 frontend/build/
+frontend/playwright-report/
+frontend/test-results/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
