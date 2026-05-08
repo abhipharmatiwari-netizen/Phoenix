@@ -8,6 +8,7 @@ server-authorized tenant scope.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -22,9 +23,12 @@ from app.hub.runtime import get_hub_runtime
 from app.data.bq_persister import fetch_trades_for_tenant
 from app.core.dashboard_bus import dashboard_bus
 from app.core.identifiers import BrokerAccountId, StrategyId
+from app.core.logging_utils import log_event
 from app.core.lot_size import lot_size_for_symbol, qty_to_lots
 from app.pnl.pnl_engine import PnLEngine
 from app.pnl.types import PnLSnapshot
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/tenant",
@@ -144,7 +148,34 @@ def _normalize_position_view(pos: Any) -> dict[str, Any]:
     side = "BUY" if qty > 0 else "SELL" if qty < 0 else ""
     lot_size = lot_size_for_symbol(symbol)
     qty_lots = qty_to_lots(qty, symbol)
-    unrealized_pnl = round((ltp - avg_price) * qty, 2) if ltp is not None else None
+    # Issue #204: refuse to compute Unrealized PnL when avg_price <= 0 on an
+    # OPEN row. Computing (ltp - 0) * qty would book the contract's full
+    # notional as paper profit -- the canonical 2026-05-08 NIFTY24250CE
+    # incident (₹9,828 = 151.20 × 65 with avg_price=0). Emit a structured
+    # ALERT so the upstream desync (corrupted internal_position_records)
+    # is observable instead of silently rendered as fake unrealised gain.
+    if qty != 0 and avg_price <= 0.0:
+        if ltp is not None:
+            log_event(
+                logger,
+                event_type="POSITION_VIEW_AVG_PRICE_INVALID",
+                message=(
+                    "Position has non-zero qty but avg_price<=0; refusing to "
+                    "compute Unrealized PnL (would render full notional as "
+                    "fake profit)."
+                ),
+                level=logging.WARNING,
+                instrument=symbol,
+                qty=qty,
+                avg_price=avg_price,
+                ltp=ltp,
+                product_type=str(product_type or ""),
+            )
+        unrealized_pnl = None
+    elif ltp is not None:
+        unrealized_pnl = round((ltp - avg_price) * qty, 2)
+    else:
+        unrealized_pnl = None
 
     return {
         "symbol": symbol,

@@ -1184,7 +1184,56 @@ class OrderLifecycleService:
             return
         signed_qty = float(filled_qty if ctx.side == "BUY" else -filled_qty)
         record.last_evidence_at = trade_time
-        if self._is_exit_like(ctx):
+        # Issue #204 Layer 2: sign-aware exit fallback. If the fill direction
+        # reduces |record.net_qty| but ctx.purpose was not flagged EXIT/ADJUST,
+        # treat the fill as exit-like anyway. Protects against external fills,
+        # ADMIN replays, cross-strategy covers, and any future code path that
+        # forgets to tag ctx.purpose. Without this guard, a BUY against an
+        # existing SHORT record reaches the entry path and produces the
+        # canonical 2026-05-08 NIFTY symptom: avg_open_price=0 on a row that
+        # should be FLAT.
+        is_exit_like = self._is_exit_like(ctx)
+        if not is_exit_like:
+            prior_net_qty = float(record.net_qty)
+            if abs(prior_net_qty) > 0.0001 and (
+                (prior_net_qty > 0.0 and signed_qty < 0.0)
+                or (prior_net_qty < 0.0 and signed_qty > 0.0)
+            ):
+                logger.warning(
+                    "position_fill_exit_inferred_from_sign — fill reduces "
+                    "|net_qty|; reclassifying as EXIT despite ctx.purpose=%r. "
+                    "broker_order_id=%s symbol=%s side=%s prior_net_qty=%.2f "
+                    "signed_qty=%.2f",
+                    ctx.purpose,
+                    ctx.broker_order_id,
+                    ctx.symbol,
+                    ctx.side,
+                    prior_net_qty,
+                    signed_qty,
+                )
+                log_event(
+                    logger,
+                    event_type="POSITION_FILL_EXIT_INFERRED_FROM_SIGN",
+                    message=(
+                        "Fill direction opposes existing net_qty; reclassified "
+                        "as exit despite missing/incorrect ctx.purpose."
+                    ),
+                    level=logging.WARNING,
+                    tenant_id=ctx.tenant_id,
+                    broker_account_id=ctx.broker_account_id,
+                    strategy_id=ctx.strategy_id,
+                    instrument=ctx.symbol,
+                    broker_order_id=ctx.broker_order_id,
+                    position_id=record.position_id,
+                    scope_key=record.ownership_key,
+                    prior_purpose=str(ctx.purpose or ""),
+                    inferred_purpose="EXIT",
+                    prior_net_qty=prior_net_qty,
+                    fill_signed_qty=signed_qty,
+                    fill_price=float(price),
+                )
+                is_exit_like = True
+        if is_exit_like:
             # Flip detection: an exit fill whose signed qty would carry net_qty
             # from one sign through zero to the other (e.g. SELL -1250 plus a
             # BUY +2500 closing fill -> +1250) violates the partial-exit
