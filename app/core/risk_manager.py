@@ -10,7 +10,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Optional, Any, Tuple
+from typing import Callable, Dict, List, Optional, Any, Tuple
 from datetime import datetime, timezone, timedelta, date
 from app.core.dashboard_bus import dashboard_bus
 from app.core.identifiers import BrokerAccountId, TenantId
@@ -136,6 +136,16 @@ class RiskManager:
         self.last_total_pnl = 0.0
         self.kill_switch_activated = False
         self.kill_switch_date: Optional[date] = None
+        # Issue #218 (PR #231 review): track the success of the durable-
+        # kill-switch bridge separately from the legacy in-memory flag.
+        # The bridge is invoked from inside the legacy auto-trip block,
+        # but if the hub runtime / Postgres save fails on first attempt
+        # the legacy flag is already True and ``should_activate`` will
+        # not re-fire for subsequent evaluations — leaving the durable
+        # manager INACTIVE and the hub OrderRouter still routing entries.
+        # This flag drives a retry on every account-loss evaluation until
+        # both the trip AND the persistence have succeeded.
+        self._durable_kill_switch_bridge_succeeded = False
         self.risk_limits = risk_limits or {}
         self.instrument_controller = instrument_controller
         self._underlying_name_to_label: Dict[str, str] = {}
@@ -448,6 +458,291 @@ class RiskManager:
         with self._state_lock:
             kill_switch_active = bool(self.kill_switch_activated)
         return kill_switch_active or self._has_forced_exit_suppression(label)
+
+    def _propagate_kill_switch_to_durable_manager(
+        self,
+        *,
+        reasons: List[str],
+        source: Optional[str] = None,
+    ) -> None:
+        """Bridge legacy auto-trip to the hub-authoritative KillSwitchManager.
+
+        Issue #218: ``RiskManager`` historically only flipped its in-memory
+        ``kill_switch_activated`` flag, which the legacy stream-path consumes
+        but the hub ``OrderRouter`` does not. The hub consults the durable
+        ``KillSwitchManager`` (Postgres-backed). Without a bridge, an
+        auto-trip on daily-loss / drawdown leaves the hub silently routing
+        new entries until an operator manually trips.
+
+        Idempotency / retry semantics (PR #231 review):
+
+        - Once ``self._durable_kill_switch_bridge_succeeded`` is True, this
+          method is a no-op (cheap fast-path).
+        - On every call until success, the method tries the trip path AND
+          the persistence path. The trip path is itself idempotent against
+          an already-tripped durable record. Persistence is retried on
+          every call until it succeeds.
+        - Lazy-imported to avoid circular dependency on the hub runtime.
+        - Never raises into the legacy auto-trip path; all failures are
+          logged at ERROR / WARNING and leave
+          ``_durable_kill_switch_bridge_succeeded`` False so the next
+          evaluate-account-loss cycle retries.
+        - Operator-cleared only: trip is one-shot in TRIPPED/CLEAR_PENDING
+          state; if the durable record is in CLEARED, the bridge logs
+          ERROR (operator must rearm before a new auto-trip can register).
+        """
+        if self._durable_kill_switch_bridge_succeeded:
+            return
+
+        try:
+            from app.hub.runtime import get_hub_runtime
+            from app.risk.kill_switch import KillSwitchScope, KillSwitchState
+        except Exception as exc:
+            logger.error(
+                "kill_switch_bridge_unavailable: import failed: %s", exc,
+            )
+            return
+
+        try:
+            runtime = get_hub_runtime()
+        except Exception as exc:
+            logger.error(
+                "kill_switch_bridge_unavailable: hub runtime not initialised: %s",
+                exc,
+            )
+            return
+
+        ksm = getattr(runtime, "kill_switch_manager", None)
+        if ksm is None:
+            logger.error(
+                "kill_switch_bridge_unavailable: KillSwitchManager not bound on hub runtime",
+            )
+            return
+
+        # Step 1: ensure the durable manager is in TRIPPED state. The trip
+        # path is idempotent — if a record already exists in TRIPPED or
+        # CLEAR_PENDING, we skip the trip but still proceed to persistence.
+        # If the record is in CLEARED state (operator confirm-clear done
+        # but rearm not yet issued), we cannot re-trip without operator
+        # action. Surface that as a structured ERROR and exit; the retry
+        # will keep firing until either the operator rearms (allowing a
+        # fresh trip) or clears the legacy flag (preventing the retry).
+        already_tripped = False
+        try:
+            existing_record = ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL")
+        except Exception as exc:
+            logger.error(
+                "kill_switch_bridge_unavailable: get_record query failed: %s",
+                exc,
+            )
+            return
+
+        if existing_record is not None:
+            existing_state = existing_record.state
+            if existing_state in (
+                KillSwitchState.TRIPPED,
+                KillSwitchState.CLEAR_PENDING,
+            ):
+                already_tripped = True
+            elif existing_state == KillSwitchState.CLEARED:
+                # Distinct from the TRIPPED idempotent case: CLEARED means
+                # the operator has confirmed-clear but not yet rearmed.
+                # The state machine forbids a fresh trip here. The legacy
+                # auto-trip is real (the loss/drawdown limit is breached)
+                # but we cannot block hub entries until the operator
+                # rearms. This is a P0 alert condition.
+                logger.error(
+                    "kill_switch_bridge_blocked_by_cleared_state: durable "
+                    "GLOBAL kill switch is in CLEARED state pending operator "
+                    "rearm — legacy auto-trip cannot propagate. Operator "
+                    "MUST rearm or trip manually. record_id=%s",
+                    existing_record.id,
+                )
+                return
+            # INACTIVE falls through to the trip call below (unusual race
+            # condition where the record exists but is already cleared
+            # past CLEARED → INACTIVE).
+
+        if not already_tripped:
+            reason_text = ",".join(reasons) if reasons else "unknown"
+            if source:
+                reason_text = f"{reason_text} source={source}"
+            bridge_reason = f"risk_manager_auto: {reason_text}"
+            try:
+                record = ksm.trip(
+                    KillSwitchScope.GLOBAL,
+                    "GLOBAL",
+                    reason=bridge_reason,
+                    actor="risk_manager_auto",
+                )
+                logger.warning(
+                    "kill_switch_bridge_tripped record_id=%s scope=GLOBAL "
+                    "actor=risk_manager_auto reason=%s",
+                    record.id,
+                    bridge_reason,
+                )
+            except ValueError as exc:
+                # ValueError from trip() means "current state is not
+                # INACTIVE" — could be TRIPPED, CLEAR_PENDING, or CLEARED.
+                # Codex P2 (round 2 review): re-read the record AFTER the
+                # rejected trip and ONLY treat as already-tripped if the
+                # state is TRIPPED or CLEAR_PENDING. A race with an
+                # operator clear could move INACTIVE → CLEARED between
+                # our pre-trip get_record() and the trip() call; without
+                # this re-check we would persist the CLEARED record and
+                # mark the bridge succeeded while the hub OrderRouter is
+                # NOT actually blocking entries.
+                try:
+                    post_trip_record = ksm.get_record(
+                        KillSwitchScope.GLOBAL, "GLOBAL"
+                    )
+                except Exception as inner_exc:
+                    logger.error(
+                        "kill_switch_bridge_unavailable: post-trip "
+                        "get_record failed: %s",
+                        inner_exc,
+                    )
+                    return
+                post_trip_state = (
+                    post_trip_record.state if post_trip_record is not None
+                    else None
+                )
+                if post_trip_state in (
+                    KillSwitchState.TRIPPED,
+                    KillSwitchState.CLEAR_PENDING,
+                ):
+                    logger.info(
+                        "kill_switch_bridge_skip_race: trip rejected, "
+                        "post-trip state=%s — treating as already-tripped: %s",
+                        post_trip_state.value, exc,
+                    )
+                    already_tripped = True
+                elif post_trip_state == KillSwitchState.CLEARED:
+                    logger.error(
+                        "kill_switch_bridge_blocked_by_cleared_state: trip "
+                        "rejected — post-trip state=CLEARED. Operator MUST "
+                        "rearm or trip manually. Bridge NOT marked succeeded. "
+                        "exc=%s",
+                        exc,
+                    )
+                    return
+                else:
+                    logger.error(
+                        "kill_switch_bridge_unexpected_state: trip rejected "
+                        "but post-trip state=%s (expected TRIPPED / "
+                        "CLEAR_PENDING / CLEARED). Bridge NOT marked "
+                        "succeeded. exc=%s",
+                        post_trip_state.value if post_trip_state else "None",
+                        exc,
+                    )
+                    return
+            except Exception as exc:
+                logger.error(
+                    "kill_switch_bridge_trip_failed (will retry next "
+                    "evaluate cycle): %s",
+                    exc,
+                )
+                return
+
+        # Step 2: persist. Retried on every cycle until it succeeds, even
+        # when the trip itself was idempotent (same-process retry after
+        # a transient Postgres outage).
+        try:
+            from app.data.postgres import (
+                connect_with_retry,
+                get_control_plane_dsn,
+            )
+
+            with connect_with_retry(
+                get_control_plane_dsn(), autocommit=True
+            ) as conn:
+                ksm.save_state(conn)
+        except Exception as exc:
+            logger.error(
+                "kill_switch_bridge_save_state_failed (will retry next "
+                "evaluate cycle; durable trip is in-memory only and will "
+                "NOT survive a restart): %s",
+                exc,
+            )
+            return
+
+        # Codex P2 (round 2 review): verify the active KillSwitchManager
+        # on the hub runtime sees the trip BEFORE we declare success. The
+        # `ksm` we tripped/saved is the instance bound at the start of
+        # this method; ``AppRuntime`` may replace ``runtime.kill_switch_
+        # manager`` with a fresh instance loaded from Postgres after we
+        # captured our reference (e.g. stream worker fires a legacy trip
+        # before AppRuntime's startup recovery completes). If the active
+        # manager is a different instance and is NOT tripped, the hub
+        # OrderRouter's GlobalKillSwitchInterceptor will keep routing
+        # entries — defeating the purpose of this bridge. Re-resolve and
+        # apply the trip to the replacement if necessary.
+        try:
+            active_runtime = get_hub_runtime()
+            active_ksm = getattr(active_runtime, "kill_switch_manager", None)
+        except Exception as exc:
+            logger.error(
+                "kill_switch_bridge_post_save_resolve_failed: cannot "
+                "verify active KillSwitchManager (will retry next "
+                "evaluate cycle): %s",
+                exc,
+            )
+            return
+
+        if active_ksm is not ksm:
+            try:
+                active_is_tripped = active_ksm is not None and active_ksm.is_tripped(
+                    KillSwitchScope.GLOBAL, "GLOBAL"
+                )
+            except Exception as exc:
+                logger.error(
+                    "kill_switch_bridge_active_query_failed (will retry "
+                    "next evaluate cycle): %s",
+                    exc,
+                )
+                return
+
+            if not active_is_tripped:
+                logger.warning(
+                    "kill_switch_bridge_active_manager_swapped: hub runtime "
+                    "kill_switch_manager was replaced after our trip; "
+                    "re-applying trip on the active instance.",
+                )
+                try:
+                    active_ksm.trip(
+                        KillSwitchScope.GLOBAL,
+                        "GLOBAL",
+                        reason=f"risk_manager_auto: post-swap re-trip ({source})",
+                        actor="risk_manager_auto",
+                    )
+                except ValueError:
+                    # Active manager raised — re-read and verify.
+                    try:
+                        active_record = active_ksm.get_record(
+                            KillSwitchScope.GLOBAL, "GLOBAL"
+                        )
+                    except Exception:
+                        active_record = None
+                    if active_record is None or active_record.state not in (
+                        KillSwitchState.TRIPPED,
+                        KillSwitchState.CLEAR_PENDING,
+                    ):
+                        logger.error(
+                            "kill_switch_bridge_active_retrip_unverified "
+                            "(will retry next evaluate cycle)",
+                        )
+                        return
+                except Exception as exc:
+                    logger.error(
+                        "kill_switch_bridge_active_retrip_failed (will retry "
+                        "next evaluate cycle): %s",
+                        exc,
+                    )
+                    return
+
+        # Both trip and persistence succeeded AND the active manager sees
+        # the trip. Stop retrying.
+        self._durable_kill_switch_bridge_succeeded = True
 
     @staticmethod
     def _truncate_log_value(value: Any, limit: int = 512) -> Optional[str]:
@@ -1026,6 +1321,12 @@ class RiskManager:
         self.last_unrealized_pnl = 0.0
         self.last_total_pnl = 0.0
         self.kill_switch_activated = False
+        # Issue #218 (PR #231 review): a fresh trading day is a new
+        # legacy-auto-trip episode. Reset the bridge-success tracker so a
+        # new day's first auto-trip is propagated to the durable manager
+        # rather than skipped on the stale "already succeeded yesterday"
+        # signal.
+        self._durable_kill_switch_bridge_succeeded = False
         self._publish_account_loss_guard(source="new_day_reset")
         return True
 
@@ -1185,6 +1486,12 @@ class RiskManager:
                 source,
                 ",".join(hit_reasons) or "unknown",
             )
+            # Issue #218: bridge legacy auto-trip to the durable hub-authoritative
+            # KillSwitchManager. Without this, the hub OrderRouter keeps allowing
+            # entries until an operator manually trips. Failure-safe and idempotent.
+            self._propagate_kill_switch_to_durable_manager(
+                reasons=hit_reasons, source=source,
+            )
             if self.kill_switch_square_off_open_positions and has_open_positions:
                 try:
                     self.square_off_all(
@@ -1198,6 +1505,24 @@ class RiskManager:
             self._persist_state()
         elif state_changed:
             self._persist_state(force=False)
+        # Issue #218 (PR #231 review): retry the durable-bridge propagation
+        # on SUBSEQUENT account-loss evaluations after the initial attempt
+        # failed. The first attempt happens inside the ``if should_activate:``
+        # block above (one-shot per legacy auto-trip episode). If that
+        # initial attempt did not fully succeed (transient hub-runtime or
+        # Postgres outage), the legacy flag is set but the durable manager
+        # is INACTIVE — the very gap this PR closes. The retry below fires
+        # ONLY when ``should_activate`` was False this cycle (i.e. the
+        # legacy flag was already True from a prior cycle), so the same
+        # cycle does not run the bridge twice.
+        if (
+            not should_activate
+            and self.kill_switch_activated
+            and not self._durable_kill_switch_bridge_succeeded
+        ):
+            self._propagate_kill_switch_to_durable_manager(
+                reasons=["legacy_already_tripped_retry"], source=source,
+            )
         return {
             "kill_switch_activated": bool(self.kill_switch_activated),
             "daily_realized_pnl": float(realized_pnl),

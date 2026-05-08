@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
 import logging
 from zoneinfo import ZoneInfo
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from app.config.settings import Settings
 from app.core.clock import IClock, SystemClock
@@ -1976,9 +1976,124 @@ class PositionTrailingLockEngine:
     order_router: OrderRouter
     manager: PositionTrailingLockManager
     clock: IClock = field(default_factory=SystemClock)
+    # Issue #219: provider for the durable hub kill-switch manager. A callable
+    # is required (rather than a direct reference) because ``AppRuntime``
+    # REPLACES ``HubRuntime.kill_switch_manager`` at startup after loading
+    # state from Postgres (see ``app/runtime/app_runtime.py`` step 3 — kill-
+    # switch durable state restore). A direct reference captured at engine
+    # construction time would point at the original, empty pre-load instance
+    # while the bridge / interceptor / admin routes all consult the
+    # post-load replacement — this is the bug Codex flagged on PR #231.
+    # The provider closure resolves the ATTRIBUTE on the runtime each time,
+    # so swap-in is observed.
+    #
+    # When the provider is None (test path), the engine skips the kill-switch
+    # gate entirely and behaves exactly as before #219. Production wiring
+    # passes ``lambda: self.kill_switch_manager`` from ``HubRuntime`` so the
+    # post-load instance is always observed.
+    kill_switch_manager_provider: Optional[Callable[[], Any]] = None
+    # Per-(tenant, account) timestamp of the last suppression-skip log so we
+    # do not flood logs while a kill switch is tripped for a long window.
+    _suppression_log_state: Dict[Tuple[str, str], datetime] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def _enabled(self) -> bool:
         return bool(getattr(self.settings, "position_trailing_lock_enabled", False))
+
+    def _resolve_kill_switch_manager(self) -> Any:
+        """Resolve the current durable kill-switch manager via the provider.
+
+        Returns None when no provider is wired (tests that do not exercise
+        the gate) or when the provider raises / returns None. Callers must
+        treat None as "kill switch state unknown — fall through" (fail OPEN).
+        """
+        if self.kill_switch_manager_provider is None:
+            return None
+        try:
+            return self.kill_switch_manager_provider()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "PositionTrailingLockEngine: kill_switch_manager_provider "
+                "raised (non-fatal): %s",
+                exc,
+            )
+            return None
+
+    def _is_kill_switch_tripped_for_scope(
+        self, *, tenant_id: Any, broker_account_id: Any
+    ) -> bool:
+        """Return True if the durable kill switch is tripped for this scope.
+
+        Checks GLOBAL → TENANT → ACCOUNT hierarchy via
+        ``KillSwitchManager.is_tripped_for_scope``.
+
+        Failure mode (Codex P2 round 2 review):
+
+        - **LIVE**: a lookup failure means we cannot prove the kill switch
+          is INACTIVE; we MUST fail CLOSED (return True, skip exits). The
+          ``GlobalKillSwitchInterceptor`` is NOT a backstop here because
+          it explicitly bypasses exit orders by design. If we returned
+          False on lookup failure, trailing-lock could submit exits
+          against the very stale state this gate is supposed to suppress.
+        - **non-LIVE** (PAPER/SHADOW/dev): keep the historical fail-OPEN
+          behaviour so unrelated infrastructure issues do not block dev
+          loops. The risk is bounded — no real broker order is placed.
+        - **No manager wired** (provider=None): same fail-OPEN. This is
+          the test-fixture case where the engine is exercised without
+          hub-runtime wiring.
+        """
+        ksm = self._resolve_kill_switch_manager()
+        if ksm is None:
+            return False
+        try:
+            return bool(
+                ksm.is_tripped_for_scope(
+                    tenant_id=str(tenant_id) if tenant_id else None,
+                    account_id=str(broker_account_id) if broker_account_id else None,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - defensive, logged below
+            import os
+            trade_mode = str(
+                os.getenv("TRADE_MODE", "PAPER") or "PAPER"
+            ).strip().upper()
+            if trade_mode == "LIVE":
+                logger.error(
+                    "PositionTrailingLockEngine: kill_switch lookup failed "
+                    "in LIVE — failing CLOSED (skipping exit submission to "
+                    "avoid running against stale state): %s",
+                    exc,
+                )
+                return True
+            logger.warning(
+                "PositionTrailingLockEngine: kill_switch lookup failed "
+                "(non-fatal in non-LIVE): %s",
+                exc,
+            )
+            return False
+
+    def _maybe_log_suppression_skip(
+        self, *, tenant_id: Any, broker_account_id: Any
+    ) -> None:
+        """Emit a rate-limited (1 per 60s per scope) suppression-skip event."""
+        key = (str(tenant_id), str(broker_account_id))
+        now = self.clock.now_utc()
+        last = self._suppression_log_state.get(key)
+        if last is not None and (now - last).total_seconds() < 60.0:
+            return
+        self._suppression_log_state[key] = now
+        log_event(
+            logger,
+            event_type="POSITION_TRAILING_LOCK_SKIPPED_KILL_SWITCH",
+            message=(
+                "Trailing-lock evaluation skipped: durable kill switch tripped "
+                "for scope (issue #219)."
+            ),
+            level=logging.WARNING,
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+        )
 
     @staticmethod
     def _compute_unrealized_pnl(pos: Any, symbol: str) -> Optional[float]:
@@ -2048,6 +2163,22 @@ class PositionTrailingLockEngine:
         broker_account_id = getattr(runner, "broker_account_id", None)
         if tenant_id is None or broker_account_id is None:
             return
+        # Issue #219: do not SUBMIT exits while the durable kill switch is
+        # tripped for this scope. The legacy RiskManager auto-trip propagates
+        # to the durable manager (issue #218); when that path is active,
+        # internal position state is being held stale by BROKER_SYNC
+        # suppression and trailing-lock evaluation against it has historically
+        # produced runaway exit submissions and duplicate broker fills (the
+        # 2026-05-08 NATURALGAS22MAY26265CE incident). Skipping the exit
+        # submission is the correct safe behaviour; operator-initiated manual
+        # flatten is the documented path while the kill switch is tripped.
+        kill_switch_tripped = self._is_kill_switch_tripped_for_scope(
+            tenant_id=tenant_id, broker_account_id=broker_account_id,
+        )
+        if kill_switch_tripped:
+            self._maybe_log_suppression_skip(
+                tenant_id=tenant_id, broker_account_id=broker_account_id,
+            )
         positions = self.state_store.get_positions(broker_account_id) or []
         live_symbols: set[str] = set()
         for pos in positions:
@@ -2060,7 +2191,20 @@ class PositionTrailingLockEngine:
                 qty = 0
             if qty == 0:
                 # Position closed since last cycle — clear any persisted state.
+                # NB: this cleanup MUST run even while the kill switch is
+                # tripped (issue #220 review feedback). If a position closed
+                # during the kill-switch window, the persisted peak/armed
+                # state for that symbol must be reset; otherwise a re-opened
+                # position after rearm reuses the stale peak and immediately
+                # emits a trailing-lock exit even though its own peak never
+                # armed.
                 self.manager.reset_position(tenant_id, broker_account_id, symbol)
+                continue
+            # Skip the exit-submission path entirely when the kill switch
+            # is tripped, but keep iterating positions so the qty==0
+            # cleanup branch above continues to fire for every closed
+            # position in this cycle.
+            if kill_switch_tripped:
                 continue
             live_symbols.add(symbol)
             unrealized = self._compute_unrealized_pnl(pos, symbol)
