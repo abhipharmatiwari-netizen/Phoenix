@@ -1976,9 +1976,70 @@ class PositionTrailingLockEngine:
     order_router: OrderRouter
     manager: PositionTrailingLockManager
     clock: IClock = field(default_factory=SystemClock)
+    # Issue #219: optional reference to the durable hub kill-switch manager.
+    # When supplied (default in the production hub runtime), the engine skips
+    # the entire account-level evaluation cycle while a kill switch is tripped
+    # for that scope. This prevents trailing-lock from firing exits against
+    # stale position state that BROKER_SYNC has been suppressing during a
+    # legacy auto-trip window. Idempotent and safe to leave None in tests.
+    kill_switch_manager: Optional[Any] = None
+    # Per-(tenant, account) timestamp of the last suppression-skip log so we
+    # do not flood logs while a kill switch is tripped for a long window.
+    _suppression_log_state: Dict[Tuple[str, str], datetime] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def _enabled(self) -> bool:
         return bool(getattr(self.settings, "position_trailing_lock_enabled", False))
+
+    def _is_kill_switch_tripped_for_scope(
+        self, *, tenant_id: Any, broker_account_id: Any
+    ) -> bool:
+        """Return True if the durable kill switch is tripped for this scope.
+
+        Checks GLOBAL → TENANT → ACCOUNT hierarchy via
+        ``KillSwitchManager.is_tripped_for_scope``. Returns False on any
+        failure path (no manager, lookup error) so the engine fails OPEN —
+        the hub's primary entry-blocking gate still runs at the
+        ``GlobalKillSwitchInterceptor`` regardless of this defence.
+        """
+        if self.kill_switch_manager is None:
+            return False
+        try:
+            return bool(
+                self.kill_switch_manager.is_tripped_for_scope(
+                    tenant_id=str(tenant_id) if tenant_id else None,
+                    account_id=str(broker_account_id) if broker_account_id else None,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - defensive, logged below
+            logger.warning(
+                "PositionTrailingLockEngine: kill_switch lookup failed (non-fatal): %s",
+                exc,
+            )
+            return False
+
+    def _maybe_log_suppression_skip(
+        self, *, tenant_id: Any, broker_account_id: Any
+    ) -> None:
+        """Emit a rate-limited (1 per 60s per scope) suppression-skip event."""
+        key = (str(tenant_id), str(broker_account_id))
+        now = self.clock.now_utc()
+        last = self._suppression_log_state.get(key)
+        if last is not None and (now - last).total_seconds() < 60.0:
+            return
+        self._suppression_log_state[key] = now
+        log_event(
+            logger,
+            event_type="POSITION_TRAILING_LOCK_SKIPPED_KILL_SWITCH",
+            message=(
+                "Trailing-lock evaluation skipped: durable kill switch tripped "
+                "for scope (issue #219)."
+            ),
+            level=logging.WARNING,
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+        )
 
     @staticmethod
     def _compute_unrealized_pnl(pos: Any, symbol: str) -> Optional[float]:
@@ -2047,6 +2108,22 @@ class PositionTrailingLockEngine:
         tenant_id = getattr(runner, "tenant_id", None)
         broker_account_id = getattr(runner, "broker_account_id", None)
         if tenant_id is None or broker_account_id is None:
+            return
+        # Issue #219: do not evaluate exits while the durable kill switch is
+        # tripped for this scope. The legacy RiskManager auto-trip propagates
+        # to the durable manager (issue #218); when that path is active,
+        # internal position state is being held stale by BROKER_SYNC
+        # suppression and trailing-lock evaluation against it has historically
+        # produced runaway exit submissions and duplicate broker fills (the
+        # 2026-05-08 NATURALGAS22MAY26265CE incident). Skipping here is the
+        # correct safe behaviour; operator-initiated manual flatten is the
+        # documented path while the kill switch is tripped.
+        if self._is_kill_switch_tripped_for_scope(
+            tenant_id=tenant_id, broker_account_id=broker_account_id,
+        ):
+            self._maybe_log_suppression_skip(
+                tenant_id=tenant_id, broker_account_id=broker_account_id,
+            )
             return
         positions = self.state_store.get_positions(broker_account_id) or []
         live_symbols: set[str] = set()

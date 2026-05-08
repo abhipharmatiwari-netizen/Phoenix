@@ -495,12 +495,17 @@ class HubRuntime:
             default_time_zone=self.settings.default_time_zone,
             backend=position_trailing_backend,
         )
+        # Issue #219: pass the durable KillSwitchManager so the trailing-lock
+        # engine can skip exit evaluation while a kill switch is tripped for
+        # the runner's scope (prevents runaway exits against stale state when
+        # BROKER_SYNC is suppressed during a kill-switch-active window).
         self.position_trailing_lock_engine = PositionTrailingLockEngine(
             settings=self.settings,
             state_store=self.state_store,
             order_router=self.order_router,
             manager=self.position_trailing_lock_manager,
             clock=self.clock,
+            kill_switch_manager=self.kill_switch_manager,
         )
 
     def update_volatility(self, volatility_proxy: float) -> None:
