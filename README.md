@@ -1,6 +1,6 @@
-# Phoenix v9
+# Phoenix
 
-Phoenix v9 is an operator-run trading system. `ARCHITECTURE.md` is the production contract; this README is the short operator index for the current repo.
+Phoenix is an operator-run trading system. `ARCHITECTURE.md` is the production contract; this README is the short operator index for the current repo.
 
 If any repo asset, runbook, helper script, or deployment note conflicts with `ARCHITECTURE.md`, treat the architecture document as authoritative and fix the conflicting asset before using it.
 
