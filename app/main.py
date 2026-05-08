@@ -93,6 +93,19 @@ def _configure_logging() -> None:
         stream_handler.setFormatter(formatter)
         root_logger.addHandler(stream_handler)
 
+    # Per-logger overrides via PHOENIX_DEBUG_LOGGERS env var. Comma-separated
+    # list of logger names (Python dotted form, e.g.
+    # "app.strategies.nifty_weekly_credit_spreads,app.orders.order_lifecycle").
+    # Each named logger is set to DEBUG independently of the global LOG_LEVEL,
+    # so an investigation can flip on a single noisy module without flooding
+    # the rest of the app. Removing the env var on the next restart returns
+    # the logger to its default (root) level.
+    _debug_loggers = os.getenv("PHOENIX_DEBUG_LOGGERS", "").strip()
+    if _debug_loggers:
+        for _name in (n.strip() for n in _debug_loggers.split(",")):
+            if _name:
+                logging.getLogger(_name).setLevel(logging.DEBUG)
+
     # Add a rotating file handler so logs are persisted locally.
     # APP_LOG_DIR overrides the default so test suites can redirect to an
     # isolated directory (e.g. .test_tmp/logs) and not contaminate production
