@@ -35,6 +35,10 @@ Thumbs.db
 # Claude memory (local session state)
 .claude/
 
+# Operator-local scratch space for drafting GitHub issue bodies / comments
+# before posting via `gh issue create`. Source of truth lives on GitHub.
+.github/issue_drafts/
+
 # Runtime env injections / operator-only files
 *.env.runtime
 *.runtime.env
