@@ -174,6 +174,12 @@ class OwnershipRecord:
     last_evidence_at: Optional[datetime] = None
     break_glass_override_id: Optional[str] = None
 
+    # Set when the record enters RELEASING (exit lock acquired); cleared when
+    # the record leaves RELEASING (terminal fill, partial-fill handoff, etc.).
+    # Used by PositionOwnershipStore.try_acquire to enforce exclusive
+    # OWNED -> RELEASING locking and watchdog-based stale-lock recovery.
+    released_at: Optional[datetime] = None
+
     updated_at: datetime = field(default_factory=_utcnow)
 
     # -- helpers -------------------------------------------------------------
