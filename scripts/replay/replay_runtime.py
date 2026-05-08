@@ -25,6 +25,8 @@ from app.core.clock import SimulatedClock
 from app.orders.replay_context import isolated_replay_order_sink
 
 from scripts.replay.execution_models import (
+    END_POLICY_DAILY_MTM,
+    END_POLICY_FORCE_EXIT,
     ExecutionConfig,
     build_tick_path,
     normalize_execution_config,
@@ -713,6 +715,7 @@ class ReplayEngine:
 
             prev_session_date: Optional[date] = None
             prev_bar: Optional[BarRow] = None
+            end_policy = str(cfg.execution.end_policy)
             for bar in all_bars:
                 session_date = bar.event_ts.astimezone(IST).date()
                 if prev_session_date is not None and session_date != prev_session_date and prev_bar is not None:
@@ -723,13 +726,36 @@ class ReplayEngine:
                         strategy_id=cfg.strategy_id,
                         underlying=cfg.underlying_key,
                     )
-                    self._finalize_open_positions(
-                        last_bar=prev_bar,
-                        label=label,
-                        reason="REPLAY_SESSION_BOUNDARY",
-                    )
-                    self._price_book_state = {}
-                    self._close_history = defaultdict(list)
+                    # Issue #216: only the legacy force_exit policy closes
+                    # at session boundaries. carry_over / daily_mtm let
+                    # positions persist across days so PnL reflects natural
+                    # exits (TP/SL/strategy-EOD) instead of replay-injected
+                    # 15:00-IST market-close marks. State (price_book,
+                    # close_history) is preserved across the boundary so
+                    # the strategy's indicators retain continuity, matching
+                    # production behaviour where the runtime persists across
+                    # trading days.
+                    if end_policy == END_POLICY_FORCE_EXIT:
+                        self._finalize_open_positions(
+                            last_bar=prev_bar,
+                            label=label,
+                            reason="REPLAY_SESSION_BOUNDARY",
+                        )
+                        self._price_book_state = {}
+                        self._close_history = defaultdict(list)
+                    elif end_policy == END_POLICY_DAILY_MTM:
+                        # Snapshot unrealised mark at session close without
+                        # closing the position. The recorder treats this as
+                        # an audit event; the position remains open into
+                        # the next session.
+                        self.recorder.add_session_event(
+                            event="daily_mtm_snapshot",
+                            previous_session=prev_session_date.isoformat(),
+                            next_session=session_date.isoformat(),
+                            strategy_id=cfg.strategy_id,
+                            underlying=cfg.underlying_key,
+                            close_price=float(prev_bar.c),
+                        )
 
                 self._current_session_date = session_date
                 indicators = self._build_indicator_payload(bar)
@@ -769,7 +795,19 @@ class ReplayEngine:
                 prev_session_date = session_date
                 prev_bar = bar
 
-            self._finalize_open_positions(last_bar=all_bars[-1], label=label, reason="REPLAY_EOD")
+            # Issue #216: distinct reason for window-end forced close so
+            # downstream reporting can separate "real" exits from
+            # replay-window-truncation exits. Under carry_over /
+            # daily_mtm this is the ONLY forced exit that fires across
+            # the whole replay window (no per-session-boundary closes).
+            window_end_reason = (
+                "REPLAY_EOD"
+                if end_policy == END_POLICY_FORCE_EXIT
+                else "REPLAY_WINDOW_END_FORCED"
+            )
+            self._finalize_open_positions(
+                last_bar=all_bars[-1], label=label, reason=window_end_reason
+            )
             indicator_snapshot = getattr(self._strategy, "indicator_availability_snapshot", None)
             if callable(indicator_snapshot):
                 self.recorder.data_profile["strategy_indicator_snapshot"] = indicator_snapshot()

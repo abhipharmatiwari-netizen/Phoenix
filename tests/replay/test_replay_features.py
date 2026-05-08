@@ -248,7 +248,9 @@ def test_next_bar_open_fill_uses_following_bar_open(monkeypatch):
     assert recorder.fills[0].fill_note == "next_bar_open"
 
 
-def test_session_boundary_finalizes_open_position(monkeypatch):
+def test_session_boundary_finalizes_open_position_under_force_exit(monkeypatch):
+    """Legacy --end-policy=force_exit closes any open position at the
+    session boundary (REPLAY_SESSION_BOUNDARY exit reason)."""
     base_ts = datetime(2026, 3, 2, 15, 10, tzinfo=timezone.utc)
     bars = [_bar(base_ts, close=100.0), _bar(base_ts, close=101.0, day_offset=1)]
 
@@ -262,6 +264,7 @@ def test_session_boundary_finalizes_open_position(monkeypatch):
             underlying_key="NIFTY",
             strategy_params={},
             timeframes=[300],
+            execution=ExecutionConfig(end_policy="force_exit"),
         )
     ).run()
 
@@ -270,6 +273,89 @@ def test_session_boundary_finalizes_open_position(monkeypatch):
     assert len(trades) == 1
     assert trades[0].exit_reason == "REPLAY_SESSION_BOUNDARY"
     assert recorder.finalization_events[0]["reason"] == "REPLAY_SESSION_BOUNDARY"
+
+
+def test_carry_over_does_not_finalize_at_session_boundary(monkeypatch):
+    """Issue #216: the default --end-policy=carry_over does NOT close
+    open positions at session boundaries -- the position carries across
+    days and is only force-closed at the replay window end with reason
+    REPLAY_WINDOW_END_FORCED (distinct from REPLAY_SESSION_BOUNDARY)."""
+    base_ts = datetime(2026, 3, 2, 15, 10, tzinfo=timezone.utc)
+    bars = [_bar(base_ts, close=100.0), _bar(base_ts, close=101.0, day_offset=1)]
+
+    monkeypatch.setattr(replay_runtime_mod, "load_bars_from_postgres", lambda **kwargs: list(bars))
+    monkeypatch.setitem(replay_runtime_mod.STRATEGY_BUILDERS, "ema20_strategy", lambda *_args: _EntryThenBoundaryExit())
+
+    recorder = ReplayEngine(
+        ReplayConfig(
+            dsn="postgresql://ignored",
+            strategy_id="ema20_strategy",
+            underlying_key="NIFTY",
+            strategy_params={},
+            timeframes=[300],
+            # Default execution = carry_over (no explicit end_policy override).
+        )
+    ).run()
+
+    tracker = PnLTracker()
+    trades = tracker.process_fills(recorder.fills)
+    # Single forced exit at window end, NOT at session boundary.
+    assert len(trades) == 1, "expected single trade with one forced exit"
+    assert trades[0].exit_reason == "REPLAY_WINDOW_END_FORCED", (
+        f"Expected window-end forced exit, got {trades[0].exit_reason!r}. "
+        f"Under carry_over policy, REPLAY_SESSION_BOUNDARY must NOT fire."
+    )
+    # No session-boundary finalization event was recorded.
+    finalize_reasons = [e.get("reason") for e in recorder.finalization_events]
+    assert "REPLAY_SESSION_BOUNDARY" not in finalize_reasons, (
+        f"carry_over must not finalize at session boundary; got {finalize_reasons!r}"
+    )
+    assert "REPLAY_WINDOW_END_FORCED" in finalize_reasons
+
+
+def test_daily_mtm_records_snapshot_event_at_session_boundary(monkeypatch):
+    """daily_mtm policy: position carries over (like carry_over) but a
+    daily_mtm_snapshot session_event is recorded at each boundary so
+    downstream reporting can fold per-day unrealised marks."""
+    base_ts = datetime(2026, 3, 2, 15, 10, tzinfo=timezone.utc)
+    bars = [_bar(base_ts, close=100.0), _bar(base_ts, close=101.0, day_offset=1)]
+
+    monkeypatch.setattr(replay_runtime_mod, "load_bars_from_postgres", lambda **kwargs: list(bars))
+    monkeypatch.setitem(replay_runtime_mod.STRATEGY_BUILDERS, "ema20_strategy", lambda *_args: _EntryThenBoundaryExit())
+
+    recorder = ReplayEngine(
+        ReplayConfig(
+            dsn="postgresql://ignored",
+            strategy_id="ema20_strategy",
+            underlying_key="NIFTY",
+            strategy_params={},
+            timeframes=[300],
+            execution=ExecutionConfig(end_policy="daily_mtm"),
+        )
+    ).run()
+
+    tracker = PnLTracker()
+    trades = tracker.process_fills(recorder.fills)
+    # No session-boundary close; position carries to window end.
+    assert len(trades) == 1
+    assert trades[0].exit_reason == "REPLAY_WINDOW_END_FORCED"
+    # daily_mtm_snapshot was recorded.
+    session_events = [e for e in recorder.session_events if e.get("event") == "daily_mtm_snapshot"]
+    assert len(session_events) == 1, (
+        f"Expected one daily_mtm_snapshot event, got {recorder.session_events!r}"
+    )
+    assert session_events[0].get("close_price") == 100.0
+
+
+def test_invalid_end_policy_raises_at_config_time():
+    """normalize_execution_config validates the end_policy choice up
+    front; a typo can't silently fall through to default behaviour."""
+    import pytest as _pt
+
+    from scripts.replay.execution_models import normalize_execution_config
+
+    with _pt.raises(ValueError, match="end_policy"):
+        normalize_execution_config(end_policy="forced")  # typo of force_exit
 
 
 def test_walk_forward_validate_uses_out_of_sample_windows_only(monkeypatch):

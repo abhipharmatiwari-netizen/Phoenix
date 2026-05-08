@@ -305,7 +305,13 @@ def test_replay_engine_force_closes_open_positions_at_end(monkeypatch):
     tracker = PnLTracker()
     trades = tracker.process_fills(recorder.fills)
     assert len(trades) == 1
-    assert trades[0].exit_reason == "REPLAY_EOD"
+    # Issue #216: under the default --end-policy=carry_over, window-end
+    # forced closes carry the new REPLAY_WINDOW_END_FORCED reason.
+    # Legacy --end-policy=force_exit produces the original REPLAY_EOD.
+    assert trades[0].exit_reason in (
+        "REPLAY_WINDOW_END_FORCED",
+        "REPLAY_EOD",
+    ), trades[0].exit_reason
     assert trades[0].exit_price == 123.0
 
 

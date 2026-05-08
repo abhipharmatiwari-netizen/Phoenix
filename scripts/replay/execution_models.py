@@ -13,6 +13,30 @@ FILL_MODE_NEXT_BAR_OPEN = "next_bar_open_fill"
 TICK_MODEL_OPEN_CLOSE = "open_close"
 TICK_MODEL_OHLC = "ohlc"
 
+# Issue #216: end-of-replay-window / end-of-session position handling.
+#   force_exit  - legacy: replay closes any open position at every session
+#                 boundary AND at window end. Inflates losses on strategies
+#                 with multi-bar holds because positions that would have
+#                 hit TP overnight are booked as session-close losses.
+#   carry_over  - DEFAULT. Replay does NOT close at session boundaries;
+#                 positions carry across days and the strategy's own logic
+#                 (TP / SL / EOD square-off / explicit-exit) drives exits.
+#                 At window end, any still-open position is reported under
+#                 "open at window end" as unrealised, NOT folded into the
+#                 win/loss stats.
+#   daily_mtm   - same carry-over behaviour as carry_over, additionally
+#                 records a daily mark-to-market snapshot per session
+#                 close. At window end the unrealised mark IS folded into
+#                 total PnL (so total = realized exits + final unrealised).
+END_POLICY_FORCE_EXIT = "force_exit"
+END_POLICY_CARRY_OVER = "carry_over"
+END_POLICY_DAILY_MTM = "daily_mtm"
+_END_POLICY_VALUES = {
+    END_POLICY_FORCE_EXIT,
+    END_POLICY_CARRY_OVER,
+    END_POLICY_DAILY_MTM,
+}
+
 
 @dataclass(frozen=True)
 class ExecutionConfig:
@@ -25,6 +49,7 @@ class ExecutionConfig:
     spread_bps: float = 0.0
     latency_bars: int = 0
     reject_entries_without_future_bar: bool = True
+    end_policy: str = END_POLICY_CARRY_OVER
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -35,6 +60,7 @@ class ExecutionConfig:
             "spread_bps": float(self.spread_bps),
             "latency_bars": int(self.latency_bars),
             "reject_entries_without_future_bar": bool(self.reject_entries_without_future_bar),
+            "end_policy": str(self.end_policy),
         }
 
 
@@ -62,6 +88,13 @@ def normalize_execution_config(
     if tick_model not in {TICK_MODEL_OPEN_CLOSE, TICK_MODEL_OHLC}:
         raise ValueError(f"Unsupported replay tick_model: {tick_model!r}")
 
+    end_policy = str(overrides.get("end_policy", current.end_policy) or current.end_policy)
+    if end_policy not in _END_POLICY_VALUES:
+        raise ValueError(
+            f"Unsupported replay end_policy: {end_policy!r} "
+            f"(expected one of {sorted(_END_POLICY_VALUES)})"
+        )
+
     return ExecutionConfig(
         fill_mode=fill_mode,
         tick_model=tick_model,
@@ -75,6 +108,7 @@ def normalize_execution_config(
                 current.reject_entries_without_future_bar,
             )
         ),
+        end_policy=end_policy,
     )
 
 
@@ -182,6 +216,9 @@ __all__ = [
     "FILL_MODE_NEXT_BAR_OPEN",
     "TICK_MODEL_OHLC",
     "TICK_MODEL_OPEN_CLOSE",
+    "END_POLICY_FORCE_EXIT",
+    "END_POLICY_CARRY_OVER",
+    "END_POLICY_DAILY_MTM",
     "TickEvent",
     "adx_regime",
     "atr_regime",

@@ -35,8 +35,33 @@ def build_trade_analysis(
     warnings: List[str] = []
     if metrics.total_trades < 5:
         warnings.append("Sample size is too small to trust replay conclusions yet.")
-    if any(str(trade.exit_reason).startswith("REPLAY_") for trade in trade_list):
-        warnings.append("Replay forced one or more exits because the replay window ended before a natural exit.")
+    # Issue #216: separate the two failure modes that used to share one warning.
+    # REPLAY_SESSION_BOUNDARY only fires under the legacy --end-policy=force_exit;
+    # under the new default (carry_over) it never fires and the warning would
+    # be misleading. REPLAY_WINDOW_END_FORCED is the new reason for positions
+    # still open at the *window* end -- expected/benign behaviour, surfaced as
+    # info rather than warning.
+    n_session_boundary = sum(
+        1 for t in trade_list if str(t.exit_reason) == "REPLAY_SESSION_BOUNDARY"
+    )
+    n_window_end_forced = sum(
+        1
+        for t in trade_list
+        if str(t.exit_reason) in ("REPLAY_WINDOW_END_FORCED", "REPLAY_EOD")
+    )
+    if n_session_boundary > 0:
+        warnings.append(
+            f"Replay forced {n_session_boundary} exit(s) at session boundaries "
+            f"(--end-policy=force_exit). Net PnL is biased toward losses on "
+            f"strategies with multi-bar holds. Re-run with --end-policy=carry_over "
+            f"for an unbiased view."
+        )
+    if n_window_end_forced > 0:
+        warnings.append(
+            f"{n_window_end_forced} position(s) still open at the replay window "
+            f"end and were force-closed at last bar. These should be treated as "
+            f"unrealised marks rather than realised PnL when comparing strategies."
+        )
 
     return {
         "combo_key": combo_key,
