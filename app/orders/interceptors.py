@@ -293,42 +293,72 @@ class GlobalKillSwitchInterceptor:
             getattr(ctx.settings, "order_router_enforce_global_kill_switch", False)
         ):
             return None
-        if ctx.is_exit_order:
-            return None
 
-        # Check env-var kill switch (legacy path — still supported).
+        # Issue #220: env-var kill switch can choose to block exits too via
+        # GLOBAL_KILL_BLOCK_EXITS=1. Default (env GLOBAL_KILL=1 alone) is
+        # SOFT — entries blocked, exits allowed.
         if _is_true_env("GLOBAL_KILL"):
-            reason = "global_kill_switch_enabled"
-            log_event(
-                logger,
-                event_type="ORDER_REJECTED_GLOBAL_KILL",
-                message=reason,
-                level=logging.WARNING,
-                tenant_id=ctx.tenant_id,
-                broker_account_id=ctx.broker_account_id,
-                strategy_id=ctx.strategy_id,
-                correlation_id=ctx.correlation_id,
-                request_id=ctx.request_id,
-                instrument=ctx.order_req.symbol,
-                origin="global_kill_switch_env",
-            )
-            return _rejected_response(reason)
+            env_block_exits = _is_true_env("GLOBAL_KILL_BLOCK_EXITS")
+            if not ctx.is_exit_order or env_block_exits:
+                reason = (
+                    "global_kill_switch_enabled_block_exits"
+                    if (ctx.is_exit_order and env_block_exits)
+                    else "global_kill_switch_enabled"
+                )
+                log_event(
+                    logger,
+                    event_type=(
+                        "ORDER_REJECTED_GLOBAL_KILL_BLOCK_EXITS"
+                        if (ctx.is_exit_order and env_block_exits)
+                        else "ORDER_REJECTED_GLOBAL_KILL"
+                    ),
+                    message=reason,
+                    level=logging.WARNING,
+                    tenant_id=ctx.tenant_id,
+                    broker_account_id=ctx.broker_account_id,
+                    strategy_id=ctx.strategy_id,
+                    correlation_id=ctx.correlation_id,
+                    request_id=ctx.request_id,
+                    instrument=ctx.order_req.symbol,
+                    origin="global_kill_switch_env",
+                )
+                return _rejected_response(reason)
+            # SOFT env trip + exit order: fall through to the durable KSM
+            # check below in case a durable record sets block_exits=True at
+            # a more specific scope.
 
         # Check durable KillSwitchManager (Architecture §12.1 — primary path in LIVE).
         try:
             from app.hub.runtime import get_hub_runtime
             ksm = getattr(get_hub_runtime(), "kill_switch_manager", None)
             if ksm is not None:
-                tripped = ksm.is_tripped_for_scope(
+                # Issue #220: hierarchical query that also surfaces whether
+                # any active record at any matching scope is a HARD trip
+                # (block_exits=True). For exit orders, only HARD trips
+                # reject; entries are always rejected when tripped.
+                tripped, ksm_block_exits = ksm.is_tripped_for_scope_with_block_exits(
                     tenant_id=str(ctx.tenant_id or "") or None,
                     account_id=str(ctx.broker_account_id or "") or None,
                     strategy_id=str(ctx.strategy_id or "") or None,
                 )
                 if tripped:
-                    reason = "kill_switch_manager_tripped"
+                    if ctx.is_exit_order and not ksm_block_exits:
+                        # SOFT trip + exit order: allow (current default).
+                        # No log event — exit flow under SOFT trip is the
+                        # intended path for legacy auto-trip recovery.
+                        return None
+                    reason = (
+                        "kill_switch_manager_tripped_block_exits"
+                        if ctx.is_exit_order
+                        else "kill_switch_manager_tripped"
+                    )
                     log_event(
                         logger,
-                        event_type="ORDER_REJECTED_KILL_SWITCH_MANAGER",
+                        event_type=(
+                            "ORDER_REJECTED_KILL_SWITCH_MANAGER_BLOCK_EXITS"
+                            if ctx.is_exit_order
+                            else "ORDER_REJECTED_KILL_SWITCH_MANAGER"
+                        ),
                         message=reason,
                         level=logging.WARNING,
                         tenant_id=ctx.tenant_id,
@@ -338,6 +368,8 @@ class GlobalKillSwitchInterceptor:
                         request_id=ctx.request_id,
                         instrument=ctx.order_req.symbol,
                         origin="kill_switch_manager",
+                        is_exit_order=bool(ctx.is_exit_order),
+                        block_exits=bool(ksm_block_exits),
                     )
                     return _rejected_response(reason)
         except Exception as _ks_exc:

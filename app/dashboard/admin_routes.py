@@ -1275,6 +1275,22 @@ class KillSwitchTripRequest(BaseModel):
     scope: str = Field(..., description="GLOBAL | TENANT | ACCOUNT | STRATEGY")
     scope_id: str = Field(..., description="Scope identifier (e.g. 'GLOBAL', tenant-id, account-id)")
     reason: str = Field(..., description="Human-readable reason for tripping the kill switch")
+    # Issue #220: HARD trip vs SOFT trip selector.
+    # SOFT trip (default, block_exits=False): block new entries; exit
+    # orders that reduce exposure remain allowed. Used by the legacy
+    # daily-loss / drawdown auto-trip path so trailing-lock and operator
+    # manual flatten can still close exposure.
+    # HARD trip (block_exits=True): block ALL orders including exits.
+    # Operator-initiated panic stop. Operator must manually flatten
+    # broker-side exposure (Phoenix will not auto-exit).
+    block_exits: bool = Field(
+        False,
+        description=(
+            "Issue #220. False (default, SOFT trip) blocks new entries only; "
+            "exit orders remain allowed. True (HARD trip) blocks ALL orders "
+            "including exits — use only for operator-initiated panic stops."
+        ),
+    )
 
 
 class KillSwitchClearRequestPayload(BaseModel):
@@ -1326,7 +1342,13 @@ def kill_switch_trip(
         raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
     ksm = _get_kill_switch_manager()
     try:
-        record = ksm.trip(scope, payload.scope_id, payload.reason, actor=ctx.caller)
+        record = ksm.trip(
+            scope,
+            payload.scope_id,
+            payload.reason,
+            actor=ctx.caller,
+            block_exits=bool(payload.block_exits),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     _save_kill_switch_state(ksm)
@@ -1335,9 +1357,19 @@ def kill_switch_trip(
         action="kill_switch_trip",
         resource_type="kill_switch",
         resource_id=str(payload.scope_id),
-        metadata={"scope": payload.scope, "scope_id": payload.scope_id, "reason": payload.reason},
+        metadata={
+            "scope": payload.scope,
+            "scope_id": payload.scope_id,
+            "reason": payload.reason,
+            "block_exits": bool(payload.block_exits),
+        },
     )
-    return {"status": "tripped", "record_id": record.id, "state": record.state.value}
+    return {
+        "status": "tripped",
+        "record_id": record.id,
+        "state": record.state.value,
+        "block_exits": bool(record.block_exits),
+    }
 
 
 @router.post("/kill-switch/request-clear")

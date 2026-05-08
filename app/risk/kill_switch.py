@@ -66,6 +66,12 @@ class KillSwitchRecord:
     clear_reason: Optional[str] = None
     clear_request_id: Optional[str] = None
     updated_at: Optional[str] = None
+    # Issue #220: when True the GlobalKillSwitchInterceptor rejects exit
+    # orders too (HARD trip). Default False preserves the historical
+    # "block entries only" behaviour (SOFT trip) used by daily-loss /
+    # drawdown auto-trips so trailing-lock and operator manual flatten
+    # can still close exposure.
+    block_exits: bool = False
 
 
 @dataclass
@@ -157,8 +163,20 @@ class KillSwitchManager:
         scope_id: str,
         reason: str,
         actor: str,
+        *,
+        block_exits: bool = False,
     ) -> KillSwitchRecord:
-        """INACTIVE -> TRIPPED.  Creates a new record if none exists."""
+        """INACTIVE -> TRIPPED.  Creates a new record if none exists.
+
+        Args:
+            block_exits: Issue #220. When True (HARD trip), the
+                GlobalKillSwitchInterceptor rejects exit orders too while
+                this record is TRIPPED / CLEAR_PENDING. Default False
+                (SOFT trip) preserves the historical "block entries only"
+                behaviour used by daily-loss / drawdown auto-trips so
+                trailing-lock and operator manual flatten can still close
+                exposure.
+        """
         with self._lock:
             key = self._key(scope, scope_id)
             existing = self._records.get(key)
@@ -179,6 +197,7 @@ class KillSwitchManager:
                 tripped_by=actor,
                 trip_reason=reason,
                 updated_at=now,
+                block_exits=bool(block_exits),
             )
             self._records[key] = record
 
@@ -187,11 +206,15 @@ class KillSwitchManager:
                 action="kill_switch.trip",
                 record=record,
                 before_state=KillSwitchState.INACTIVE,
-                metadata={"reason": reason},
+                metadata={
+                    "reason": reason,
+                    "block_exits": bool(block_exits),
+                },
             )
             logger.warning(
-                "Kill switch TRIPPED scope=%s scope_id=%s reason=%s actor=%s",
-                scope.value, scope_id, reason, actor,
+                "Kill switch TRIPPED scope=%s scope_id=%s reason=%s "
+                "actor=%s block_exits=%s",
+                scope.value, scope_id, reason, actor, bool(block_exits),
             )
             return record
 
@@ -353,6 +376,45 @@ class KillSwitchManager:
                 return True
             return False
 
+    def is_tripped_for_scope_with_block_exits(
+        self,
+        tenant_id: Optional[str] = None,
+        account_id: Optional[str] = None,
+        strategy_id: Optional[str] = None,
+    ) -> Tuple[bool, bool]:
+        """Hierarchical check returning (tripped, any_record_blocks_exits).
+
+        Issue #220. The second element is True if ANY active record at
+        any matching scope has ``block_exits=True``. Caller (typically
+        ``GlobalKillSwitchInterceptor``) uses this to decide whether to
+        reject exit orders too (HARD trip) or only entries (SOFT trip).
+        """
+        scopes_to_check: List[Tuple[KillSwitchScope, str]] = [
+            (KillSwitchScope.GLOBAL, "GLOBAL"),
+        ]
+        if tenant_id:
+            scopes_to_check.append((KillSwitchScope.TENANT, tenant_id))
+        if account_id:
+            scopes_to_check.append((KillSwitchScope.ACCOUNT, account_id))
+        if strategy_id:
+            scopes_to_check.append((KillSwitchScope.STRATEGY, strategy_id))
+
+        with self._lock:
+            tripped = False
+            block_exits = False
+            for scope, scope_id in scopes_to_check:
+                record = self._records.get(self._key(scope, scope_id))
+                if record is None:
+                    continue
+                if record.state in (
+                    KillSwitchState.TRIPPED,
+                    KillSwitchState.CLEAR_PENDING,
+                ):
+                    tripped = True
+                    if record.block_exits:
+                        block_exits = True
+            return tripped, block_exits
+
     def get_record(
         self, scope: KillSwitchScope, scope_id: str,
     ) -> Optional[KillSwitchRecord]:
@@ -405,6 +467,9 @@ class KillSwitchManager:
                 clear_reason=row.get("clear_reason"),
                 clear_request_id=row.get("clear_request_id"),
                 updated_at=row.get("updated_at"),
+                # Issue #220: optional column; tolerate absence for rows
+                # written before migration 017.
+                block_exits=bool(row.get("block_exits", False)),
             )
             manager._records[manager._key(scope, row["scope_id"])] = record
         return manager
@@ -417,11 +482,13 @@ class KillSwitchManager:
         sql = """
             INSERT INTO kill_switch_state
                 (id, scope, scope_id, state, tripped_at, tripped_by, trip_reason,
-                 cleared_at, cleared_by, clear_reason, clear_request_id, updated_at)
+                 cleared_at, cleared_by, clear_reason, clear_request_id, updated_at,
+                 block_exits)
             VALUES
                 (%(id)s, %(scope)s, %(scope_id)s, %(state)s, %(tripped_at)s,
                  %(tripped_by)s, %(trip_reason)s, %(cleared_at)s, %(cleared_by)s,
-                 %(clear_reason)s, %(clear_request_id)s, %(updated_at)s)
+                 %(clear_reason)s, %(clear_request_id)s, %(updated_at)s,
+                 %(block_exits)s)
             ON CONFLICT (scope, scope_id) DO UPDATE SET
                 state = EXCLUDED.state,
                 tripped_at = EXCLUDED.tripped_at,
@@ -431,7 +498,8 @@ class KillSwitchManager:
                 cleared_by = EXCLUDED.cleared_by,
                 clear_reason = EXCLUDED.clear_reason,
                 clear_request_id = EXCLUDED.clear_request_id,
-                updated_at = EXCLUDED.updated_at
+                updated_at = EXCLUDED.updated_at,
+                block_exits = EXCLUDED.block_exits
         """
         with conn.cursor() as cur:
             for row in rows:
@@ -447,7 +515,8 @@ class KillSwitchManager:
         """Restore manager state from the kill_switch_state Postgres table."""
         sql = """
             SELECT id, scope, scope_id, state, tripped_at, tripped_by, trip_reason,
-                   cleared_at, cleared_by, clear_reason, clear_request_id, updated_at
+                   cleared_at, cleared_by, clear_reason, clear_request_id, updated_at,
+                   block_exits
             FROM kill_switch_state
             WHERE state != 'INACTIVE'
         """
