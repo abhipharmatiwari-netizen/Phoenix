@@ -272,7 +272,7 @@ async def test_engine_skips_exit_when_kill_switch_tripped_for_scope():
         state_store=state_store,
         order_router=router,  # type: ignore[arg-type]
         manager=manager,
-        kill_switch_manager=ksm,
+        kill_switch_manager_provider=lambda ksm=ksm: ksm,
     )
 
     # Cycle 1: peak climbs above the floor.
@@ -313,7 +313,7 @@ async def test_engine_emits_exit_when_kill_switch_inactive():
         state_store=state_store,
         order_router=router,  # type: ignore[arg-type]
         manager=manager,
-        kill_switch_manager=ksm,
+        kill_switch_manager_provider=lambda ksm=ksm: ksm,
     )
 
     _seed_ltp("NG22MAY26255CE", 16.50)
@@ -352,7 +352,7 @@ async def test_engine_logs_skip_event_with_rate_limit():
         state_store=state_store,
         order_router=router,  # type: ignore[arg-type]
         manager=manager,
-        kill_switch_manager=ksm,
+        kill_switch_manager_provider=lambda ksm=ksm: ksm,
     )
 
     captured: List[str] = []
@@ -375,4 +375,58 @@ async def test_engine_logs_skip_event_with_rate_limit():
     ]
     assert len(skip_events) == 1, (
         f"expected exactly 1 rate-limited skip log within 60s window, got {len(skip_events)}: {skip_events}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_engine_observes_kill_switch_manager_swap_via_provider():
+    """Codex review on PR #231: AppRuntime replaces
+    HubRuntime.kill_switch_manager AFTER engine construction. The engine
+    must observe the post-load instance, not the original empty pre-load
+    one. Proven here by holding the KSM in a mutable container the
+    provider closure reads at evaluate time."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [
+            Position(
+                symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                product_type=ProductType.INTRADAY,
+            )
+        ],
+    )
+    router = _RecordingOrderRouter()
+    manager = PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend())
+
+    # Container that simulates AppRuntime.kill_switch_manager attribute
+    # being replaced after the engine is constructed.
+    container: dict = {"ksm": _StubKillSwitchManager(tripped=False)}
+
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=manager,
+        kill_switch_manager_provider=lambda: container["ksm"],
+    )
+
+    # Cycle 1: build a peak with the original (untripped) KSM.
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert router.calls == [], "no exit while at peak"
+
+    # AppRuntime replaces the KSM with a tripped instance loaded from
+    # Postgres. The provider closure must observe the swap.
+    container["ksm"] = _StubKillSwitchManager(tripped=True)
+
+    # Cycle 2: pullback past giveback — would normally route an exit.
+    # With a stale (pre-swap) reference, the engine would still see an
+    # untripped manager and submit. With a provider closure, it sees the
+    # swap and skips.
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    assert router.calls == [], (
+        "engine must observe the post-swap KillSwitchManager via provider "
+        "closure (PR #231 review)"
     )

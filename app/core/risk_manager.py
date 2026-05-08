@@ -136,6 +136,16 @@ class RiskManager:
         self.last_total_pnl = 0.0
         self.kill_switch_activated = False
         self.kill_switch_date: Optional[date] = None
+        # Issue #218 (PR #231 review): track the success of the durable-
+        # kill-switch bridge separately from the legacy in-memory flag.
+        # The bridge is invoked from inside the legacy auto-trip block,
+        # but if the hub runtime / Postgres save fails on first attempt
+        # the legacy flag is already True and ``should_activate`` will
+        # not re-fire for subsequent evaluations — leaving the durable
+        # manager INACTIVE and the hub OrderRouter still routing entries.
+        # This flag drives a retry on every account-loss evaluation until
+        # both the trip AND the persistence have succeeded.
+        self._durable_kill_switch_bridge_succeeded = False
         self.risk_limits = risk_limits or {}
         self.instrument_controller = instrument_controller
         self._underlying_name_to_label: Dict[str, str] = {}
@@ -464,17 +474,29 @@ class RiskManager:
         auto-trip on daily-loss / drawdown leaves the hub silently routing
         new entries until an operator manually trips.
 
-        This method is:
+        Idempotency / retry semantics (PR #231 review):
+
+        - Once ``self._durable_kill_switch_bridge_succeeded`` is True, this
+          method is a no-op (cheap fast-path).
+        - On every call until success, the method tries the trip path AND
+          the persistence path. The trip path is itself idempotent against
+          an already-tripped durable record. Persistence is retried on
+          every call until it succeeds.
         - Lazy-imported to avoid circular dependency on the hub runtime.
-        - Idempotent: skips if the durable GLOBAL switch is already tripped.
-        - Failure-safe: logs structured ERROR / WARNING and returns; never
-          raises into the calling auto-trip path.
-        - Operator-cleared only: trip is one-shot; clearing remains the
-          documented HTTP API workflow.
+        - Never raises into the legacy auto-trip path; all failures are
+          logged at ERROR / WARNING and leave
+          ``_durable_kill_switch_bridge_succeeded`` False so the next
+          evaluate-account-loss cycle retries.
+        - Operator-cleared only: trip is one-shot in TRIPPED/CLEAR_PENDING
+          state; if the durable record is in CLEARED, the bridge logs
+          ERROR (operator must rearm before a new auto-trip can register).
         """
+        if self._durable_kill_switch_bridge_succeeded:
+            return
+
         try:
             from app.hub.runtime import get_hub_runtime
-            from app.risk.kill_switch import KillSwitchScope
+            from app.risk.kill_switch import KillSwitchScope, KillSwitchState
         except Exception as exc:
             logger.error(
                 "kill_switch_bridge_unavailable: import failed: %s", exc,
@@ -497,40 +519,88 @@ class RiskManager:
             )
             return
 
+        # Step 1: ensure the durable manager is in TRIPPED state. The trip
+        # path is idempotent — if a record already exists in TRIPPED or
+        # CLEAR_PENDING, we skip the trip but still proceed to persistence.
+        # If the record is in CLEARED state (operator confirm-clear done
+        # but rearm not yet issued), we cannot re-trip without operator
+        # action. Surface that as a structured ERROR and exit; the retry
+        # will keep firing until either the operator rearms (allowing a
+        # fresh trip) or clears the legacy flag (preventing the retry).
+        already_tripped = False
         try:
-            if ksm.is_tripped(KillSwitchScope.GLOBAL, "GLOBAL"):
-                logger.info(
-                    "kill_switch_bridge_skip_idempotent: durable GLOBAL kill switch already TRIPPED",
-                )
-                return
+            existing_record = ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL")
         except Exception as exc:
             logger.error(
-                "kill_switch_bridge_unavailable: is_tripped query failed: %s", exc,
-            )
-            return
-
-        reason_text = ",".join(reasons) if reasons else "unknown"
-        if source:
-            reason_text = f"{reason_text} source={source}"
-        bridge_reason = f"risk_manager_auto: {reason_text}"
-
-        try:
-            record = ksm.trip(
-                KillSwitchScope.GLOBAL,
-                "GLOBAL",
-                reason=bridge_reason,
-                actor="risk_manager_auto",
-            )
-        except ValueError as exc:
-            logger.info(
-                "kill_switch_bridge_skip_race: trip rejected (already tripped): %s",
+                "kill_switch_bridge_unavailable: get_record query failed: %s",
                 exc,
             )
             return
-        except Exception as exc:
-            logger.error("kill_switch_bridge_trip_failed: %s", exc)
-            return
 
+        if existing_record is not None:
+            existing_state = existing_record.state
+            if existing_state in (
+                KillSwitchState.TRIPPED,
+                KillSwitchState.CLEAR_PENDING,
+            ):
+                already_tripped = True
+            elif existing_state == KillSwitchState.CLEARED:
+                # Distinct from the TRIPPED idempotent case: CLEARED means
+                # the operator has confirmed-clear but not yet rearmed.
+                # The state machine forbids a fresh trip here. The legacy
+                # auto-trip is real (the loss/drawdown limit is breached)
+                # but we cannot block hub entries until the operator
+                # rearms. This is a P0 alert condition.
+                logger.error(
+                    "kill_switch_bridge_blocked_by_cleared_state: durable "
+                    "GLOBAL kill switch is in CLEARED state pending operator "
+                    "rearm — legacy auto-trip cannot propagate. Operator "
+                    "MUST rearm or trip manually. record_id=%s",
+                    existing_record.id,
+                )
+                return
+            # INACTIVE falls through to the trip call below (unusual race
+            # condition where the record exists but is already cleared
+            # past CLEARED → INACTIVE).
+
+        if not already_tripped:
+            reason_text = ",".join(reasons) if reasons else "unknown"
+            if source:
+                reason_text = f"{reason_text} source={source}"
+            bridge_reason = f"risk_manager_auto: {reason_text}"
+            try:
+                record = ksm.trip(
+                    KillSwitchScope.GLOBAL,
+                    "GLOBAL",
+                    reason=bridge_reason,
+                    actor="risk_manager_auto",
+                )
+                logger.warning(
+                    "kill_switch_bridge_tripped record_id=%s scope=GLOBAL "
+                    "actor=risk_manager_auto reason=%s",
+                    record.id,
+                    bridge_reason,
+                )
+            except ValueError as exc:
+                # Race with a concurrent trip — treat as already-tripped
+                # so we proceed to persistence.
+                logger.info(
+                    "kill_switch_bridge_skip_race: trip rejected, "
+                    "treating as already-tripped: %s",
+                    exc,
+                )
+                already_tripped = True
+            except Exception as exc:
+                logger.error(
+                    "kill_switch_bridge_trip_failed (will retry next "
+                    "evaluate cycle): %s",
+                    exc,
+                )
+                return
+
+        # Step 2: persist. Retried on every cycle until it succeeds, even
+        # when the trip itself was idempotent (same-process retry after
+        # a transient Postgres outage).
         try:
             from app.data.postgres import (
                 connect_with_retry,
@@ -542,16 +612,16 @@ class RiskManager:
             ) as conn:
                 ksm.save_state(conn)
         except Exception as exc:
-            logger.warning(
-                "kill_switch_bridge_save_state_failed (non-fatal): %s", exc,
+            logger.error(
+                "kill_switch_bridge_save_state_failed (will retry next "
+                "evaluate cycle; durable trip is in-memory only and will "
+                "NOT survive a restart): %s",
+                exc,
             )
+            return
 
-        logger.warning(
-            "kill_switch_bridge_tripped record_id=%s scope=GLOBAL "
-            "actor=risk_manager_auto reason=%s",
-            record.id,
-            bridge_reason,
-        )
+        # Both trip and persistence succeeded. Stop retrying.
+        self._durable_kill_switch_bridge_succeeded = True
 
     @staticmethod
     def _truncate_log_value(value: Any, limit: int = 512) -> Optional[str]:
@@ -1130,6 +1200,12 @@ class RiskManager:
         self.last_unrealized_pnl = 0.0
         self.last_total_pnl = 0.0
         self.kill_switch_activated = False
+        # Issue #218 (PR #231 review): a fresh trading day is a new
+        # legacy-auto-trip episode. Reset the bridge-success tracker so a
+        # new day's first auto-trip is propagated to the durable manager
+        # rather than skipped on the stale "already succeeded yesterday"
+        # signal.
+        self._durable_kill_switch_bridge_succeeded = False
         self._publish_account_loss_guard(source="new_day_reset")
         return True
 
@@ -1308,6 +1384,24 @@ class RiskManager:
             self._persist_state()
         elif state_changed:
             self._persist_state(force=False)
+        # Issue #218 (PR #231 review): retry the durable-bridge propagation
+        # on SUBSEQUENT account-loss evaluations after the initial attempt
+        # failed. The first attempt happens inside the ``if should_activate:``
+        # block above (one-shot per legacy auto-trip episode). If that
+        # initial attempt did not fully succeed (transient hub-runtime or
+        # Postgres outage), the legacy flag is set but the durable manager
+        # is INACTIVE — the very gap this PR closes. The retry below fires
+        # ONLY when ``should_activate`` was False this cycle (i.e. the
+        # legacy flag was already True from a prior cycle), so the same
+        # cycle does not run the bridge twice.
+        if (
+            not should_activate
+            and self.kill_switch_activated
+            and not self._durable_kill_switch_bridge_succeeded
+        ):
+            self._propagate_kill_switch_to_durable_manager(
+                reasons=["legacy_already_tripped_retry"], source=source,
+            )
         return {
             "kill_switch_activated": bool(self.kill_switch_activated),
             "daily_realized_pnl": float(realized_pnl),

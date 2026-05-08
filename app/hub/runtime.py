@@ -495,17 +495,22 @@ class HubRuntime:
             default_time_zone=self.settings.default_time_zone,
             backend=position_trailing_backend,
         )
-        # Issue #219: pass the durable KillSwitchManager so the trailing-lock
-        # engine can skip exit evaluation while a kill switch is tripped for
-        # the runner's scope (prevents runaway exits against stale state when
-        # BROKER_SYNC is suppressed during a kill-switch-active window).
+        # Issue #219: pass a provider closure rather than a direct reference
+        # so the engine always observes the CURRENT durable KillSwitchManager.
+        # ``AppRuntime`` replaces ``self.kill_switch_manager`` after loading
+        # state from Postgres at startup (see ``app/runtime/app_runtime.py``
+        # step 3 — kill-switch durable state restore). A direct reference
+        # captured here would point at the original empty pre-load instance
+        # while the bridge / interceptor / admin routes all consult the
+        # post-load replacement — Codex flagged this on PR #231 and it is a
+        # real bug in the LIVE startup path.
         self.position_trailing_lock_engine = PositionTrailingLockEngine(
             settings=self.settings,
             state_store=self.state_store,
             order_router=self.order_router,
             manager=self.position_trailing_lock_manager,
             clock=self.clock,
-            kill_switch_manager=self.kill_switch_manager,
+            kill_switch_manager_provider=lambda: self.kill_switch_manager,
         )
 
     def update_volatility(self, volatility_proxy: float) -> None:

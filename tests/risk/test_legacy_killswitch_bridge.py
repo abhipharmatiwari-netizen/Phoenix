@@ -17,7 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import importlib
 from types import SimpleNamespace
-from typing import List
+from typing import List, Optional
 from unittest.mock import patch
 
 import pytest
@@ -37,31 +37,56 @@ def _build_risk_manager(tmp_path):
 
 
 class _StubKillSwitchManager:
-    """Records calls; emulates the real manager's ``is_tripped`` semantics."""
+    """Records calls; emulates the real manager's state semantics for the
+    fields ``RiskManager._propagate_kill_switch_to_durable_manager`` reads.
 
-    def __init__(self):
+    The bridge now consults ``get_record(scope, scope_id)`` before calling
+    ``trip(...)`` so it can distinguish TRIPPED/CLEAR_PENDING (idempotent
+    skip) from CLEARED (operator must rearm) from INACTIVE (proceed to
+    trip). The stub mirrors that surface.
+    """
+
+    def __init__(self, *, initial_state: Optional[str] = None):
         self.trip_calls: List[dict] = []
-        self._tripped = False
+        self.save_state_calls: int = 0
+        self.save_state_should_fail: bool = False
+        # ``state`` mirrors the real KillSwitchState enum's ``.value`` text
+        # since the bridge compares to KillSwitchState.TRIPPED etc. We
+        # store the text and translate at query time below.
+        self._state_text: Optional[str] = initial_state
+
+    def _record_or_none(self):
+        if self._state_text is None:
+            return None
+        # Lazy import to mirror what the bridge does.
+        from app.risk.kill_switch import KillSwitchState
+        state_enum = KillSwitchState(self._state_text)
+        return SimpleNamespace(
+            id="rec-1", state=state_enum, scope=None, scope_id="GLOBAL",
+            trip_reason=None, tripped_by=None,
+        )
+
+    def get_record(self, scope, scope_id):
+        return self._record_or_none()
 
     def is_tripped(self, scope, scope_id):
-        return self._tripped
+        return self._state_text in {"TRIPPED", "CLEAR_PENDING"}
 
     def trip(self, scope, scope_id, reason, actor):
-        if self._tripped:
-            raise ValueError("Cannot trip kill switch: current state is TRIPPED")
-        self._tripped = True
-        record = SimpleNamespace(
-            id="rec-1", state=SimpleNamespace(value="TRIPPED"),
-            scope=scope, scope_id=scope_id, trip_reason=reason, tripped_by=actor,
-        )
+        if self._state_text in {"TRIPPED", "CLEAR_PENDING", "CLEARED"}:
+            raise ValueError(
+                f"Cannot trip kill switch: current state is {self._state_text}"
+            )
+        self._state_text = "TRIPPED"
         self.trip_calls.append(
             {"scope": scope, "scope_id": scope_id, "reason": reason, "actor": actor}
         )
-        return record
+        return self._record_or_none()
 
     def save_state(self, conn):
-        # No-op for the stub. Real manager writes to Postgres.
-        return
+        self.save_state_calls += 1
+        if self.save_state_should_fail:
+            raise RuntimeError("simulated postgres outage")
 
 
 def _force_legacy_trip_state(rm):
@@ -184,4 +209,183 @@ def test_bridge_is_failure_safe_when_kill_switch_manager_absent(tmp_path, caplog
         "kill_switch_bridge_unavailable" in rec.message
         and "KillSwitchManager not bound" in rec.message
         for rec in caplog.records
+    )
+
+
+# ---------------------------------------------------------------------------
+# PR #231 review (Codex) — retry + CLEARED + persistence-failure scenarios.
+# ---------------------------------------------------------------------------
+
+
+def test_bridge_retries_on_subsequent_evaluate_after_initial_failure(
+    tmp_path, stub_postgres_save,
+):
+    """Codex P1: when the FIRST attempt fails (hub runtime unavailable),
+    ``self.kill_switch_activated`` is already True and ``should_activate``
+    will not re-fire. The bridge MUST retry on the next evaluate cycle so
+    a transient outage does not leave the durable manager INACTIVE
+    forever. Verified by failing the import once, then succeeding on the
+    second call."""
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    # First evaluate: hub runtime raises. Bridge logs ERROR, returns;
+    # legacy flag now True; bridge_succeeded still False.
+    with patch(
+        "app.hub.runtime.get_hub_runtime",
+        side_effect=RuntimeError("not initialised"),
+    ):
+        rm._check_kill_switch(now)
+    assert rm.kill_switch_activated is True
+    assert rm._durable_kill_switch_bridge_succeeded is False
+
+    # Second evaluate: hub runtime now available. The bridge retries
+    # (because the legacy flag is set and bridge_succeeded is False)
+    # without needing ``should_activate`` to re-fire.
+    stub_ksm = _StubKillSwitchManager()
+    runtime = SimpleNamespace(kill_switch_manager=stub_ksm)
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime):
+        # Force a re-evaluation past the min-interval gate.
+        rm._check_kill_switch(now)
+
+    assert len(stub_ksm.trip_calls) == 1, (
+        "bridge must retry trip on the next evaluate after first-attempt "
+        "failure (Codex P1 / PR #231 review)"
+    )
+    assert rm._durable_kill_switch_bridge_succeeded is True
+
+
+def test_bridge_retries_when_persistence_fails_then_succeeds(
+    tmp_path,
+):
+    """Codex P1: the in-memory trip can succeed but Postgres save_state
+    can fail. The legacy flag is already True; future ``should_activate``
+    cycles will not call the bridge. Without a retry, on restart the
+    in-memory durable trip is lost (load_state finds nothing) and the
+    auto-trip becomes invisible to the hub OrderRouter — recreating the
+    very gap this PR is supposed to close. The retry must persist on the
+    next evaluate cycle."""
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    stub_ksm = _StubKillSwitchManager()
+    stub_ksm.save_state_should_fail = True
+    runtime = SimpleNamespace(kill_switch_manager=stub_ksm)
+
+    class _NoopConn:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", return_value=_NoopConn()), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        rm._check_kill_switch(now)
+
+    # Trip succeeded in-memory but persistence failed.
+    assert len(stub_ksm.trip_calls) == 1
+    assert stub_ksm.save_state_calls == 1
+    assert rm._durable_kill_switch_bridge_succeeded is False
+
+    # Next evaluate: persistence now succeeds. Trip is already in-memory
+    # so the bridge skips the trip call but RETRIES persistence.
+    stub_ksm.save_state_should_fail = False
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", return_value=_NoopConn()), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        rm._check_kill_switch(now)
+
+    assert len(stub_ksm.trip_calls) == 1, (
+        "bridge must NOT re-trip when in-memory record already TRIPPED"
+    )
+    assert stub_ksm.save_state_calls == 2, (
+        "bridge MUST retry persistence on the next evaluate after first-"
+        "attempt save failure (Codex P1 / PR #231 review)"
+    )
+    assert rm._durable_kill_switch_bridge_succeeded is True
+
+
+def test_bridge_blocks_in_cleared_state_with_distinct_log(
+    tmp_path, caplog, stub_postgres_save,
+):
+    """Codex P2: when the durable record is in CLEARED state (operator
+    confirm-clear done but rearm not yet issued), a fresh legacy auto-trip
+    MUST NOT silently treat that as 'already tripped' (idempotent). The
+    state machine forbids a fresh trip in CLEARED. The bridge must log a
+    distinct ERROR pointing at the operator action required."""
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    stub_ksm = _StubKillSwitchManager(initial_state="CLEARED")
+    runtime = SimpleNamespace(kill_switch_manager=stub_ksm)
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime):
+        rm._check_kill_switch(now)
+
+    # Trip is NOT called (state machine forbids).
+    assert len(stub_ksm.trip_calls) == 0
+    # Bridge has not succeeded (durable state is not TRIPPED).
+    assert rm._durable_kill_switch_bridge_succeeded is False
+    # Distinct error message for the operator.
+    assert any(
+        "kill_switch_bridge_blocked_by_cleared_state" in rec.message
+        for rec in caplog.records
+    ), (
+        "bridge must emit a distinct ERROR for CLEARED state — operator "
+        "must rearm before legacy auto-trip can register (Codex P2)"
+    )
+
+
+def test_bridge_treats_existing_TRIPPED_record_as_idempotent_and_persists(
+    tmp_path, stub_postgres_save,
+):
+    """If the durable record already exists in TRIPPED state (from a
+    prior process or operator action), the bridge must NOT call
+    ``trip(...)`` again but MUST still persist (covers the race where a
+    same-process retry sees an in-memory trip already in place but the
+    prior persistence had failed)."""
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    stub_ksm = _StubKillSwitchManager(initial_state="TRIPPED")
+    runtime = SimpleNamespace(kill_switch_manager=stub_ksm)
+
+    class _NoopConn:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", return_value=_NoopConn()), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        rm._check_kill_switch(now)
+
+    # No fresh trip call (already TRIPPED).
+    assert len(stub_ksm.trip_calls) == 0
+    # Persistence still attempted.
+    assert stub_ksm.save_state_calls >= 1
+    # Bridge marked succeeded.
+    assert rm._durable_kill_switch_bridge_succeeded is True
+
+
+def test_bridge_resets_success_flag_on_new_trading_day(tmp_path):
+    """A fresh trading day is a new auto-trip episode. The
+    bridge-success tracker must reset so a new day's first auto-trip
+    propagates again (it MUST NOT be skipped on the stale 'succeeded
+    yesterday' signal)."""
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    rm._durable_kill_switch_bridge_succeeded = True
+    rm.kill_switch_activated = True
+
+    # Force a "new day" by setting kill_switch_date to yesterday.
+    rm.kill_switch_date = (now - dt.timedelta(days=1)).date()
+
+    rm._reset_daily_if_new_day(now)
+
+    assert rm.kill_switch_activated is False, (
+        "legacy flag must reset on new day"
+    )
+    assert rm._durable_kill_switch_bridge_succeeded is False, (
+        "durable-bridge success tracker must reset on new day so the next "
+        "auto-trip episode re-propagates"
     )
