@@ -58,8 +58,6 @@ env/
 
 # Docker build cache and temporary artifacts
 .docker-tmp/
-*.log
-*.tmp
 
 # Release build artifacts (zip files are build outputs, not source)
 release/*.zip
