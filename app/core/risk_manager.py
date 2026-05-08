@@ -10,7 +10,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Optional, Any, Tuple
+from typing import Callable, Dict, List, Optional, Any, Tuple
 from datetime import datetime, timezone, timedelta, date
 from app.core.dashboard_bus import dashboard_bus
 from app.core.identifiers import BrokerAccountId, TenantId
@@ -448,6 +448,110 @@ class RiskManager:
         with self._state_lock:
             kill_switch_active = bool(self.kill_switch_activated)
         return kill_switch_active or self._has_forced_exit_suppression(label)
+
+    def _propagate_kill_switch_to_durable_manager(
+        self,
+        *,
+        reasons: List[str],
+        source: Optional[str] = None,
+    ) -> None:
+        """Bridge legacy auto-trip to the hub-authoritative KillSwitchManager.
+
+        Issue #218: ``RiskManager`` historically only flipped its in-memory
+        ``kill_switch_activated`` flag, which the legacy stream-path consumes
+        but the hub ``OrderRouter`` does not. The hub consults the durable
+        ``KillSwitchManager`` (Postgres-backed). Without a bridge, an
+        auto-trip on daily-loss / drawdown leaves the hub silently routing
+        new entries until an operator manually trips.
+
+        This method is:
+        - Lazy-imported to avoid circular dependency on the hub runtime.
+        - Idempotent: skips if the durable GLOBAL switch is already tripped.
+        - Failure-safe: logs structured ERROR / WARNING and returns; never
+          raises into the calling auto-trip path.
+        - Operator-cleared only: trip is one-shot; clearing remains the
+          documented HTTP API workflow.
+        """
+        try:
+            from app.hub.runtime import get_hub_runtime
+            from app.risk.kill_switch import KillSwitchScope
+        except Exception as exc:
+            logger.error(
+                "kill_switch_bridge_unavailable: import failed: %s", exc,
+            )
+            return
+
+        try:
+            runtime = get_hub_runtime()
+        except Exception as exc:
+            logger.error(
+                "kill_switch_bridge_unavailable: hub runtime not initialised: %s",
+                exc,
+            )
+            return
+
+        ksm = getattr(runtime, "kill_switch_manager", None)
+        if ksm is None:
+            logger.error(
+                "kill_switch_bridge_unavailable: KillSwitchManager not bound on hub runtime",
+            )
+            return
+
+        try:
+            if ksm.is_tripped(KillSwitchScope.GLOBAL, "GLOBAL"):
+                logger.info(
+                    "kill_switch_bridge_skip_idempotent: durable GLOBAL kill switch already TRIPPED",
+                )
+                return
+        except Exception as exc:
+            logger.error(
+                "kill_switch_bridge_unavailable: is_tripped query failed: %s", exc,
+            )
+            return
+
+        reason_text = ",".join(reasons) if reasons else "unknown"
+        if source:
+            reason_text = f"{reason_text} source={source}"
+        bridge_reason = f"risk_manager_auto: {reason_text}"
+
+        try:
+            record = ksm.trip(
+                KillSwitchScope.GLOBAL,
+                "GLOBAL",
+                reason=bridge_reason,
+                actor="risk_manager_auto",
+            )
+        except ValueError as exc:
+            logger.info(
+                "kill_switch_bridge_skip_race: trip rejected (already tripped): %s",
+                exc,
+            )
+            return
+        except Exception as exc:
+            logger.error("kill_switch_bridge_trip_failed: %s", exc)
+            return
+
+        try:
+            from app.data.postgres import (
+                connect_with_retry,
+                get_control_plane_dsn,
+            )
+
+            with connect_with_retry(
+                get_control_plane_dsn(), autocommit=True
+            ) as conn:
+                ksm.save_state(conn)
+        except Exception as exc:
+            logger.warning(
+                "kill_switch_bridge_save_state_failed (non-fatal): %s", exc,
+            )
+
+        logger.warning(
+            "kill_switch_bridge_tripped record_id=%s scope=GLOBAL "
+            "actor=risk_manager_auto reason=%s",
+            record.id,
+            bridge_reason,
+        )
 
     @staticmethod
     def _truncate_log_value(value: Any, limit: int = 512) -> Optional[str]:
@@ -1184,6 +1288,12 @@ class RiskManager:
                 self.max_intraday_drawdown,
                 source,
                 ",".join(hit_reasons) or "unknown",
+            )
+            # Issue #218: bridge legacy auto-trip to the durable hub-authoritative
+            # KillSwitchManager. Without this, the hub OrderRouter keeps allowing
+            # entries until an operator manually trips. Failure-safe and idempotent.
+            self._propagate_kill_switch_to_durable_manager(
+                reasons=hit_reasons, source=source,
             )
             if self.kill_switch_square_off_open_positions and has_open_positions:
                 try:
