@@ -311,11 +311,26 @@ class Ema20Strategy(BaseStrategy):
                 str(int(self.signal_timeframe)),
             )
         )
-        self._entry_cooloff_seconds = (
-            max(0.0, float(entry_cooloff_cfg))
-            if entry_cooloff_cfg is not None
-            else float(self.signal_timeframe)
-        )
+        # Codex review (PR #232): reject non-finite values. Without this
+        # validation, `inf` survives `max(0.0, ...)` and blocks all future
+        # same-label entries forever; `NaN` collapses to 0.0 in float
+        # comparisons, silently disabling the gate. Either malformation
+        # would defeat the safety guarantee. Fall back to one full bar.
+        if (
+            entry_cooloff_cfg is None
+            or not math.isfinite(float(entry_cooloff_cfg))
+        ):
+            if entry_cooloff_cfg is not None:
+                logger.warning(
+                    "[%s] EMA20 entry cooloff env value is non-finite (%r); "
+                    "falling back to one bar (%ds)",
+                    self.env_prefix,
+                    entry_cooloff_cfg,
+                    int(self.signal_timeframe),
+                )
+            self._entry_cooloff_seconds = float(self.signal_timeframe)
+        else:
+            self._entry_cooloff_seconds = max(0.0, float(entry_cooloff_cfg))
         # Per-option_label monotonic timestamp of last entry submission.
         # In-memory only — restart resets the cooloff (acceptable: operator
         # restarts mid-session are rare and the sync_position_from_risk_manager
@@ -1627,24 +1642,41 @@ class Ema20Strategy(BaseStrategy):
         # NATURALGAS22MAY26265CE, two BUY entries fired 47 seconds apart and
         # accumulated a 2-lot long that the trailing-lock could not cleanly
         # exit. This gate stops the second fire deterministically.
+        #
+        # Codex review (PR #232): replay/backtest harnesses process historical
+        # candles in a tight loop, so wall-clock ``time.monotonic()`` does not
+        # advance while the strategy fires across many simulated bars. A
+        # cooloff of 300 real seconds would block ALL same-label re-entries
+        # for 5 real minutes of replay execution and corrupt experiment
+        # results. Detect replay context via the existing
+        # ``app.orders.replay_context.get_replay_flag()`` (the same flag the
+        # bridge uses) and skip the wall-clock cooloff there — the bar-
+        # boundary ``_last_fired_start_ts`` guard remains active in replay
+        # so same-bar duplicates are still blocked.
         if self._entry_cooloff_seconds > 0.0:
-            now_mono = time.monotonic()
-            last_entry_mono = self._last_entry_mono_by_label.get(ce_label)
-            if last_entry_mono is not None:
-                elapsed = now_mono - last_entry_mono
-                if elapsed < self._entry_cooloff_seconds:
-                    remaining = self._entry_cooloff_seconds - elapsed
-                    logger.warning(
-                        "[%s] EMA20 ENTRY_BLOCKED_COOLOFF | label=%s "
-                        "elapsed_s=%.2f cooloff_s=%.2f remaining_s=%.2f "
-                        "(issue #223)",
-                        self.env_prefix,
-                        ce_label,
-                        elapsed,
-                        self._entry_cooloff_seconds,
-                        remaining,
-                    )
-                    return
+            try:
+                from app.orders.replay_context import get_replay_flag
+                in_replay = bool(get_replay_flag())
+            except Exception:  # pragma: no cover - defensive
+                in_replay = False
+            if not in_replay:
+                now_mono = time.monotonic()
+                last_entry_mono = self._last_entry_mono_by_label.get(ce_label)
+                if last_entry_mono is not None:
+                    elapsed = now_mono - last_entry_mono
+                    if elapsed < self._entry_cooloff_seconds:
+                        remaining = self._entry_cooloff_seconds - elapsed
+                        logger.warning(
+                            "[%s] EMA20 ENTRY_BLOCKED_COOLOFF | label=%s "
+                            "elapsed_s=%.2f cooloff_s=%.2f remaining_s=%.2f "
+                            "(issue #223)",
+                            self.env_prefix,
+                            ce_label,
+                            elapsed,
+                            self._entry_cooloff_seconds,
+                            remaining,
+                        )
+                        return
 
         meta = self.instrument_meta.get(ce_label, {})
         broker_symbol = self._resolve_broker_symbol(meta, ce_label)

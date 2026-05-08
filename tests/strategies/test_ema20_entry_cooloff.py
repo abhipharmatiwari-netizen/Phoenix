@@ -34,8 +34,6 @@ import types
 from datetime import datetime, timezone
 from typing import List
 
-import pytest
-
 from app.brokers.base import OrderResponse
 
 
@@ -271,3 +269,78 @@ def test_cooloff_records_timestamp_after_successful_entry(monkeypatch):
         assert before <= ts <= after, (
             f"recorded timestamp {ts} must be within [before={before}, after={after}]"
         )
+
+
+# ---------------------------------------------------------------------------
+# PR #232 review fixes (Codex P2): isfinite validation + replay-mode skip.
+# ---------------------------------------------------------------------------
+
+
+def test_cooloff_inf_value_falls_back_to_signal_timeframe(monkeypatch, caplog):
+    """Codex P2: ``inf`` must NOT survive into the gate. Without validation,
+    ``inf`` would block all future same-label entries forever. Fall back to
+    one bar (signal_timeframe) and emit a WARNING."""
+    caplog.set_level(logging.WARNING)
+    _, strategy = _make_strategy(
+        monkeypatch, NG_EMA20_ENTRY_COOLOFF_SECONDS="inf",
+    )
+    assert strategy._entry_cooloff_seconds == 300.0, (
+        "non-finite cooloff env must fall back to signal_timeframe (=300s)"
+    )
+    assert any(
+        "non-finite" in rec.getMessage() for rec in caplog.records
+    ), "non-finite fallback must log a WARNING"
+
+
+def test_cooloff_nan_value_falls_back_to_signal_timeframe(monkeypatch, caplog):
+    """Codex P2: ``NaN`` must NOT silently disable the gate (NaN comparisons
+    return False, which would let the second entry through)."""
+    caplog.set_level(logging.WARNING)
+    _, strategy = _make_strategy(
+        monkeypatch, NG_EMA20_ENTRY_COOLOFF_SECONDS="nan",
+    )
+    assert strategy._entry_cooloff_seconds == 300.0
+    assert any(
+        "non-finite" in rec.getMessage() for rec in caplog.records
+    )
+
+
+def test_cooloff_skipped_in_replay_context(monkeypatch):
+    """Codex P2: replay/backtest harnesses fast-forward through historical
+    candles in a tight loop. Wall-clock ``time.monotonic()`` does not advance
+    while the strategy fires across many simulated bars. The cooloff gate
+    must therefore be a no-op when ``app.orders.replay_context.get_replay_flag()``
+    returns True. The bar-boundary ``_last_fired_start_ts`` guard remains
+    active in replay so same-bar duplicates are still blocked."""
+    mod, strategy = _make_strategy(
+        monkeypatch, NG_EMA20_ENTRY_COOLOFF_SECONDS="300",
+    )
+    strategy.ce_label = "NG_ATM_CE_265"
+
+    calls: List[dict] = []
+    _patch_bridge(monkeypatch, mod, calls)
+
+    # Pre-arm the cooloff to block any new entry on this label in production.
+    strategy._last_entry_mono_by_label["NG_ATM_CE_265"] = time.monotonic()
+
+    # Activate replay context; the cooloff must be skipped.
+    from app.orders.replay_context import isolated_replay_flag
+
+    bar_start = datetime(2026, 5, 8, 13, 7, 0, tzinfo=timezone.utc)
+    with isolated_replay_flag(True):
+        strategy._short_call_once_per_bar(
+            candle=_candle(bar_start, close=12.95),
+            close_price=12.95,
+            ema_val=12.50,
+        )
+
+    # Without replay, this would have been blocked. With replay flag, the
+    # gate is skipped — bridge call should reach (or be blocked only by
+    # unrelated downstream guards, NOT by the cooloff WARNING).
+    # Assert no ENTRY_BLOCKED_COOLOFF was emitted by inspecting the strategy:
+    # the cooloff timestamp would not have been refreshed if blocked.
+    assert (
+        calls
+        or strategy._last_entry_mono_by_label.get("NG_ATM_CE_265")
+        != strategy._last_entry_mono_by_label.get("NG_ATM_CE_265", -1)
+    ), "cooloff gate must be a no-op in replay context"
