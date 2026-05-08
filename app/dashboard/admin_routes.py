@@ -1275,6 +1275,22 @@ class KillSwitchTripRequest(BaseModel):
     scope: str = Field(..., description="GLOBAL | TENANT | ACCOUNT | STRATEGY")
     scope_id: str = Field(..., description="Scope identifier (e.g. 'GLOBAL', tenant-id, account-id)")
     reason: str = Field(..., description="Human-readable reason for tripping the kill switch")
+    # Issue #220: HARD trip vs SOFT trip selector.
+    # SOFT trip (default, block_exits=False): block new entries; exit
+    # orders that reduce exposure remain allowed. Used by the legacy
+    # daily-loss / drawdown auto-trip path so trailing-lock and operator
+    # manual flatten can still close exposure.
+    # HARD trip (block_exits=True): block ALL orders including exits.
+    # Operator-initiated panic stop. Operator must manually flatten
+    # broker-side exposure (Phoenix will not auto-exit).
+    block_exits: bool = Field(
+        False,
+        description=(
+            "Issue #220. False (default, SOFT trip) blocks new entries only; "
+            "exit orders remain allowed. True (HARD trip) blocks ALL orders "
+            "including exits — use only for operator-initiated panic stops."
+        ),
+    )
 
 
 class KillSwitchClearRequestPayload(BaseModel):
@@ -1325,19 +1341,75 @@ def kill_switch_trip(
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
     ksm = _get_kill_switch_manager()
+    upgraded = False
     try:
-        record = ksm.trip(scope, payload.scope_id, payload.reason, actor=ctx.caller)
+        record = ksm.trip(
+            scope,
+            payload.scope_id,
+            payload.reason,
+            actor=ctx.caller,
+            block_exits=bool(payload.block_exits),
+        )
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        # Issue #220 (PR #233 review): if a record already exists in
+        # TRIPPED / CLEAR_PENDING and the operator is requesting a
+        # different ``block_exits`` value (e.g. SOFT auto-trip → HARD
+        # panic stop), allow the in-place flag upgrade via
+        # set_block_exits rather than rejecting with 409. Without this,
+        # an operator could not panic-stop exit orders after a daily-
+        # loss auto-trip without first clearing and rearming the kill
+        # switch — defeating the purpose of the HARD trip.
+        from app.risk.kill_switch import KillSwitchState
+        existing = ksm.get_record(scope, payload.scope_id)
+        can_upgrade = (
+            existing is not None
+            and existing.state in (
+                KillSwitchState.TRIPPED, KillSwitchState.CLEAR_PENDING,
+            )
+            and bool(existing.block_exits) != bool(payload.block_exits)
+        )
+        if not can_upgrade:
+            raise HTTPException(status_code=409, detail=str(exc))
+        try:
+            record = ksm.set_block_exits(
+                scope,
+                payload.scope_id,
+                block_exits=bool(payload.block_exits),
+                actor=ctx.caller,
+                reason=payload.reason,
+            )
+        except (ValueError, KeyError) as upgrade_exc:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"trip rejected ({exc}) and block_exits upgrade also "
+                    f"failed ({upgrade_exc})"
+                ),
+            )
+        upgraded = True
     _save_kill_switch_state(ksm)
     emit_audit_event(
         actor=ctx.caller,
-        action="kill_switch_trip",
+        action=(
+            "kill_switch_block_exits_upgraded" if upgraded else "kill_switch_trip"
+        ),
         resource_type="kill_switch",
         resource_id=str(payload.scope_id),
-        metadata={"scope": payload.scope, "scope_id": payload.scope_id, "reason": payload.reason},
+        metadata={
+            "scope": payload.scope,
+            "scope_id": payload.scope_id,
+            "reason": payload.reason,
+            "block_exits": bool(payload.block_exits),
+            "upgraded_in_place": upgraded,
+        },
     )
-    return {"status": "tripped", "record_id": record.id, "state": record.state.value}
+    return {
+        "status": "block_exits_upgraded" if upgraded else "tripped",
+        "record_id": record.id,
+        "state": record.state.value,
+        "block_exits": bool(record.block_exits),
+        "upgraded_in_place": upgraded,
+    }
 
 
 @router.post("/kill-switch/request-clear")

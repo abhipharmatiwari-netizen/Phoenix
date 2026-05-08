@@ -66,6 +66,12 @@ class KillSwitchRecord:
     clear_reason: Optional[str] = None
     clear_request_id: Optional[str] = None
     updated_at: Optional[str] = None
+    # Issue #220: when True the GlobalKillSwitchInterceptor rejects exit
+    # orders too (HARD trip). Default False preserves the historical
+    # "block entries only" behaviour (SOFT trip) used by daily-loss /
+    # drawdown auto-trips so trailing-lock and operator manual flatten
+    # can still close exposure.
+    block_exits: bool = False
 
 
 @dataclass
@@ -98,6 +104,64 @@ _TRANSITIONS: Dict[Tuple[KillSwitchState, str], KillSwitchState] = {
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+# Issue #220 (PR #233 review): cache schema-detection result so we don't
+# re-query information_schema on every save_state / load_state call. The
+# cache key is (host, db) inferred from the connection's DSN parameters
+# where available, falling back to a single-bucket cache for the common
+# single-Postgres deployment.
+
+_SCHEMA_DETECTION_CACHE: Dict[str, bool] = {}
+
+
+def _schema_cache_key(conn) -> str:
+    """Best-effort cache key from a psycopg connection. Falls back to a
+    single global bucket which is safe for the single-Postgres
+    deployment Phoenix uses."""
+    try:
+        info = getattr(conn, "info", None)
+        if info is not None:
+            return f"{info.host}:{info.port}:{info.dbname}"
+    except Exception:
+        pass
+    return "default"
+
+
+def _kill_switch_state_table_has_block_exits_column(conn) -> bool:
+    """Return True if the ``kill_switch_state`` table has the
+    ``block_exits`` column (i.e. migration 017 has been applied).
+
+    Cached per-connection-target so the per-call overhead is one
+    information_schema query the first time only. Cache survives until
+    process restart; if the migration is applied while the process is
+    running, the cache misses the schema change — operators must restart
+    the process to pick up the new column.
+    """
+    cache_key = _schema_cache_key(conn)
+    cached = _SCHEMA_DETECTION_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'kill_switch_state' "
+                "AND column_name = 'block_exits' LIMIT 1"
+            )
+            row = cur.fetchone()
+        present = row is not None
+    except Exception as exc:
+        # If the information_schema query itself fails, default to
+        # assuming the column is absent (legacy SQL is the safer
+        # fallback). Log so it is observable.
+        logger.warning(
+            "kill_switch.schema_detect: information_schema query failed "
+            "(%s); falling back to legacy SQL without block_exits", exc,
+        )
+        present = False
+    _SCHEMA_DETECTION_CACHE[cache_key] = present
+    return present
 
 
 # ---------------------------------------------------------------------------
@@ -157,8 +221,20 @@ class KillSwitchManager:
         scope_id: str,
         reason: str,
         actor: str,
+        *,
+        block_exits: bool = False,
     ) -> KillSwitchRecord:
-        """INACTIVE -> TRIPPED.  Creates a new record if none exists."""
+        """INACTIVE -> TRIPPED.  Creates a new record if none exists.
+
+        Args:
+            block_exits: Issue #220. When True (HARD trip), the
+                GlobalKillSwitchInterceptor rejects exit orders too while
+                this record is TRIPPED / CLEAR_PENDING. Default False
+                (SOFT trip) preserves the historical "block entries only"
+                behaviour used by daily-loss / drawdown auto-trips so
+                trailing-lock and operator manual flatten can still close
+                exposure.
+        """
         with self._lock:
             key = self._key(scope, scope_id)
             existing = self._records.get(key)
@@ -179,6 +255,7 @@ class KillSwitchManager:
                 tripped_by=actor,
                 trip_reason=reason,
                 updated_at=now,
+                block_exits=bool(block_exits),
             )
             self._records[key] = record
 
@@ -187,11 +264,78 @@ class KillSwitchManager:
                 action="kill_switch.trip",
                 record=record,
                 before_state=KillSwitchState.INACTIVE,
-                metadata={"reason": reason},
+                metadata={
+                    "reason": reason,
+                    "block_exits": bool(block_exits),
+                },
             )
             logger.warning(
-                "Kill switch TRIPPED scope=%s scope_id=%s reason=%s actor=%s",
-                scope.value, scope_id, reason, actor,
+                "Kill switch TRIPPED scope=%s scope_id=%s reason=%s "
+                "actor=%s block_exits=%s",
+                scope.value, scope_id, reason, actor, bool(block_exits),
+            )
+            return record
+
+    def set_block_exits(
+        self,
+        scope: KillSwitchScope,
+        scope_id: str,
+        *,
+        block_exits: bool,
+        actor: str,
+        reason: str,
+    ) -> KillSwitchRecord:
+        """Update ``block_exits`` on an existing TRIPPED / CLEAR_PENDING record.
+
+        Issue #220 (PR #233 review). Without this method, an operator who
+        needs to escalate a SOFT auto-trip (e.g. daily-loss propagated from
+        the legacy RiskManager bridge) to a HARD panic stop has to first
+        clear and rearm the kill switch — defeating the purpose of the
+        HARD trip. This method allows in-place upgrade or downgrade of
+        the flag while preserving the underlying TRIPPED state. Audited
+        as ``kill_switch.set_block_exits``.
+
+        Raises:
+            KeyError: if no record exists for the (scope, scope_id).
+            ValueError: if the existing record is not TRIPPED or
+                CLEAR_PENDING (e.g. INACTIVE / CLEARED).
+        """
+        with self._lock:
+            key = self._key(scope, scope_id)
+            record = self._records.get(key)
+            if record is None:
+                raise KeyError(
+                    f"No kill switch record for scope={scope.value}, "
+                    f"scope_id={scope_id}"
+                )
+            if record.state not in (
+                KillSwitchState.TRIPPED,
+                KillSwitchState.CLEAR_PENDING,
+            ):
+                raise ValueError(
+                    f"Cannot set block_exits: current state is "
+                    f"{record.state.value} (must be TRIPPED or CLEAR_PENDING)"
+                )
+            previous = bool(record.block_exits)
+            record.block_exits = bool(block_exits)
+            record.updated_at = _now_iso()
+
+            self._emit_audit(
+                actor=actor,
+                action="kill_switch.set_block_exits",
+                record=record,
+                before_state=record.state,
+                metadata={
+                    "reason": reason,
+                    "previous_block_exits": previous,
+                    "new_block_exits": bool(block_exits),
+                },
+            )
+            logger.warning(
+                "Kill switch BLOCK_EXITS UPDATED scope=%s scope_id=%s "
+                "previous=%s new=%s actor=%s reason=%s",
+                scope.value, scope_id, previous, bool(block_exits),
+                actor, reason,
             )
             return record
 
@@ -353,6 +497,45 @@ class KillSwitchManager:
                 return True
             return False
 
+    def is_tripped_for_scope_with_block_exits(
+        self,
+        tenant_id: Optional[str] = None,
+        account_id: Optional[str] = None,
+        strategy_id: Optional[str] = None,
+    ) -> Tuple[bool, bool]:
+        """Hierarchical check returning (tripped, any_record_blocks_exits).
+
+        Issue #220. The second element is True if ANY active record at
+        any matching scope has ``block_exits=True``. Caller (typically
+        ``GlobalKillSwitchInterceptor``) uses this to decide whether to
+        reject exit orders too (HARD trip) or only entries (SOFT trip).
+        """
+        scopes_to_check: List[Tuple[KillSwitchScope, str]] = [
+            (KillSwitchScope.GLOBAL, "GLOBAL"),
+        ]
+        if tenant_id:
+            scopes_to_check.append((KillSwitchScope.TENANT, tenant_id))
+        if account_id:
+            scopes_to_check.append((KillSwitchScope.ACCOUNT, account_id))
+        if strategy_id:
+            scopes_to_check.append((KillSwitchScope.STRATEGY, strategy_id))
+
+        with self._lock:
+            tripped = False
+            block_exits = False
+            for scope, scope_id in scopes_to_check:
+                record = self._records.get(self._key(scope, scope_id))
+                if record is None:
+                    continue
+                if record.state in (
+                    KillSwitchState.TRIPPED,
+                    KillSwitchState.CLEAR_PENDING,
+                ):
+                    tripped = True
+                    if record.block_exits:
+                        block_exits = True
+            return tripped, block_exits
+
     def get_record(
         self, scope: KillSwitchScope, scope_id: str,
     ) -> Optional[KillSwitchRecord]:
@@ -405,34 +588,83 @@ class KillSwitchManager:
                 clear_reason=row.get("clear_reason"),
                 clear_request_id=row.get("clear_request_id"),
                 updated_at=row.get("updated_at"),
+                # Issue #220: optional column; tolerate absence for rows
+                # written before migration 017.
+                block_exits=bool(row.get("block_exits", False)),
             )
             manager._records[manager._key(scope, row["scope_id"])] = record
         return manager
 
     def save_state(self, conn) -> None:
-        """Upsert all kill switch records to the kill_switch_state Postgres table."""
+        """Upsert all kill switch records to the kill_switch_state Postgres table.
+
+        Issue #220 (PR #233 review): tolerates the pre-migration schema
+        (migration 017 not yet applied, ``block_exits`` column absent).
+        Detects column presence via ``information_schema`` and falls back
+        to the legacy SQL when missing. Caches the detection result so
+        the per-call overhead is one query the first time only.
+
+        IMPORTANT: when running on the pre-017 schema, ``block_exits`` is
+        not persisted — a HARD trip survives in-memory but reverts to
+        SOFT on restart. Operators MUST run migration 017 in the same
+        deployment window as this code; the legacy fallback exists ONLY
+        to keep the service booting through the brief deploy gap.
+        """
         rows = self.to_persistence_dict()
         if not rows:
             return
-        sql = """
-            INSERT INTO kill_switch_state
-                (id, scope, scope_id, state, tripped_at, tripped_by, trip_reason,
-                 cleared_at, cleared_by, clear_reason, clear_request_id, updated_at)
-            VALUES
-                (%(id)s, %(scope)s, %(scope_id)s, %(state)s, %(tripped_at)s,
-                 %(tripped_by)s, %(trip_reason)s, %(cleared_at)s, %(cleared_by)s,
-                 %(clear_reason)s, %(clear_request_id)s, %(updated_at)s)
-            ON CONFLICT (scope, scope_id) DO UPDATE SET
-                state = EXCLUDED.state,
-                tripped_at = EXCLUDED.tripped_at,
-                tripped_by = EXCLUDED.tripped_by,
-                trip_reason = EXCLUDED.trip_reason,
-                cleared_at = EXCLUDED.cleared_at,
-                cleared_by = EXCLUDED.cleared_by,
-                clear_reason = EXCLUDED.clear_reason,
-                clear_request_id = EXCLUDED.clear_request_id,
-                updated_at = EXCLUDED.updated_at
-        """
+        has_block_exits = _kill_switch_state_table_has_block_exits_column(conn)
+        if has_block_exits:
+            sql = """
+                INSERT INTO kill_switch_state
+                    (id, scope, scope_id, state, tripped_at, tripped_by, trip_reason,
+                     cleared_at, cleared_by, clear_reason, clear_request_id, updated_at,
+                     block_exits)
+                VALUES
+                    (%(id)s, %(scope)s, %(scope_id)s, %(state)s, %(tripped_at)s,
+                     %(tripped_by)s, %(trip_reason)s, %(cleared_at)s, %(cleared_by)s,
+                     %(clear_reason)s, %(clear_request_id)s, %(updated_at)s,
+                     %(block_exits)s)
+                ON CONFLICT (scope, scope_id) DO UPDATE SET
+                    state = EXCLUDED.state,
+                    tripped_at = EXCLUDED.tripped_at,
+                    tripped_by = EXCLUDED.tripped_by,
+                    trip_reason = EXCLUDED.trip_reason,
+                    cleared_at = EXCLUDED.cleared_at,
+                    cleared_by = EXCLUDED.cleared_by,
+                    clear_reason = EXCLUDED.clear_reason,
+                    clear_request_id = EXCLUDED.clear_request_id,
+                    updated_at = EXCLUDED.updated_at,
+                    block_exits = EXCLUDED.block_exits
+            """
+        else:
+            # Legacy SQL — pre-migration-017 schema. Loud WARNING so any
+            # HARD-trip persistence loss is observable.
+            logger.warning(
+                "kill_switch.save_state: kill_switch_state.block_exits column "
+                "missing (migration 017 not yet applied) — HARD trip "
+                "(block_exits=True) will NOT survive a restart until the "
+                "migration is run.",
+            )
+            sql = """
+                INSERT INTO kill_switch_state
+                    (id, scope, scope_id, state, tripped_at, tripped_by, trip_reason,
+                     cleared_at, cleared_by, clear_reason, clear_request_id, updated_at)
+                VALUES
+                    (%(id)s, %(scope)s, %(scope_id)s, %(state)s, %(tripped_at)s,
+                     %(tripped_by)s, %(trip_reason)s, %(cleared_at)s, %(cleared_by)s,
+                     %(clear_reason)s, %(clear_request_id)s, %(updated_at)s)
+                ON CONFLICT (scope, scope_id) DO UPDATE SET
+                    state = EXCLUDED.state,
+                    tripped_at = EXCLUDED.tripped_at,
+                    tripped_by = EXCLUDED.tripped_by,
+                    trip_reason = EXCLUDED.trip_reason,
+                    cleared_at = EXCLUDED.cleared_at,
+                    cleared_by = EXCLUDED.cleared_by,
+                    clear_reason = EXCLUDED.clear_reason,
+                    clear_request_id = EXCLUDED.clear_request_id,
+                    updated_at = EXCLUDED.updated_at
+            """
         with conn.cursor() as cur:
             for row in rows:
                 cur.execute(sql, row)
@@ -445,12 +677,30 @@ class KillSwitchManager:
         audit_fn: Optional[Callable[..., Any]] = None,
     ) -> KillSwitchManager:
         """Restore manager state from the kill_switch_state Postgres table."""
-        sql = """
-            SELECT id, scope, scope_id, state, tripped_at, tripped_by, trip_reason,
-                   cleared_at, cleared_by, clear_reason, clear_request_id, updated_at
-            FROM kill_switch_state
-            WHERE state != 'INACTIVE'
-        """
+        # Issue #220 (PR #233 review): tolerate pre-migration-017 schema.
+        # AppRuntime treats load_state failures as fatal in LIVE; we MUST
+        # not break boot during the deploy window between code rollout
+        # and migration application.
+        if _kill_switch_state_table_has_block_exits_column(conn):
+            sql = """
+                SELECT id, scope, scope_id, state, tripped_at, tripped_by, trip_reason,
+                       cleared_at, cleared_by, clear_reason, clear_request_id, updated_at,
+                       block_exits
+                FROM kill_switch_state
+                WHERE state != 'INACTIVE'
+            """
+        else:
+            logger.warning(
+                "kill_switch.load_state: kill_switch_state.block_exits column "
+                "missing (migration 017 not yet applied) — restored records "
+                "will default to block_exits=False until the migration is run.",
+            )
+            sql = """
+                SELECT id, scope, scope_id, state, tripped_at, tripped_by, trip_reason,
+                       cleared_at, cleared_by, clear_reason, clear_request_id, updated_at
+                FROM kill_switch_state
+                WHERE state != 'INACTIVE'
+            """
         with conn.cursor() as cur:
             cur.execute(sql)
             col_names = [desc[0] for desc in cur.description]

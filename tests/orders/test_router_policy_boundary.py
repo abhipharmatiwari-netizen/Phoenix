@@ -1168,3 +1168,219 @@ async def test_live_lifecycle_register_failure_blocks_and_raises(monkeypatch):
     finally:
         monkeypatch.delenv("TRADE_MODE", raising=False)
         dashboard_bus.set_instrument_meta(original_meta)
+
+
+# ---------------------------------------------------------------------------
+# Issue #220 — block_exits HARD-trip policy in GlobalKillSwitchInterceptor.
+# Soft trip (block_exits=False, default): block entries, allow exits — used
+# by the legacy daily-loss / drawdown auto-trip bridge. Hard trip
+# (block_exits=True): block ALL orders including exits — operator panic stop.
+# ---------------------------------------------------------------------------
+
+
+def _build_router_for_killswitch_test(monkeypatch, *, runner_response):
+    """Common fixture: build an OrderRouter with all gates disabled except
+    the GlobalKillSwitchInterceptor."""
+    runner = MagicMock()
+    runner.is_running = True
+    runner.place_order = AsyncMock(return_value=runner_response)
+
+    hub = MagicMock()
+    hub.get_runner.return_value = runner
+
+    state_store = MagicMock()
+    state_store.get_balance.return_value = None
+    state_store.get_positions.return_value = []
+
+    settings = SimpleNamespace(
+        enable_profit_checks=False,
+        enable_capital_checks=False,
+        capital_auto_resize_enabled=False,
+        enable_risk_checks=False,
+        order_router_enforce_global_kill_switch=True,
+    )
+    monkeypatch.setattr("app.orders.router.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.orders.router.get_runtime_settings", lambda **_kwargs: settings,
+    )
+    dashboard_bus.set_instrument_meta(
+        {"SBIN": {"symbol": "SBIN", "token": "SBIN", "lot_size": 1}}
+    )
+    return OrderRouter(
+        hub=hub,
+        capital_engine=None,
+        risk_engine=None,
+        profit_engine=None,
+        state_store=state_store,
+    ), runner
+
+
+@pytest.mark.asyncio
+async def test_router_global_kill_env_with_block_exits_rejects_exit(monkeypatch):
+    """Issue #220: env-var hard trip via GLOBAL_KILL_BLOCK_EXITS=1 must
+    reject EXIT orders too, with a distinct rejection message."""
+    original_meta = dict(getattr(dashboard_bus, "_instrument_meta", {}))
+    try:
+        monkeypatch.setenv("GLOBAL_KILL", "1")
+        monkeypatch.setenv("GLOBAL_KILL_BLOCK_EXITS", "1")
+        router, runner = _build_router_for_killswitch_test(
+            monkeypatch,
+            runner_response=OrderResponse(
+                broker_order_id="OID-HARD-EXIT", status="FILLED",
+                message="should-not-fill", filled_quantity=1, average_price=100.0,
+            ),
+        )
+
+        order_req = OrderRequest(
+            symbol="SBIN", quantity=1, side=OrderSide.SELL,
+            order_type=OrderType.MARKET, product_type=ProductType.INTRADAY,
+            time_in_force=TimeInForce.DAY, purpose=OrderPurpose.EXIT,
+        )
+
+        _, response = await router.submit_order(
+            tenant_id=TenantId("tenant-1"),
+            broker_account_id=BrokerAccountId("account-1"),
+            strategy_id=StrategyId("strategy-1"),
+            order_req=order_req,
+        )
+
+        assert response.status == "REJECTED"
+        assert response.message == "global_kill_switch_enabled_block_exits"
+        runner.place_order.assert_not_called()
+    finally:
+        dashboard_bus.set_instrument_meta(original_meta)
+
+
+@pytest.mark.asyncio
+async def test_router_ksm_soft_trip_allows_exit(monkeypatch):
+    """Issue #220: when the durable KSM has a SOFT trip (block_exits=False),
+    EXIT orders must still flow — preserves the current default and is
+    required for trailing-lock to flatten exposure during legacy auto-trip."""
+    original_meta = dict(getattr(dashboard_bus, "_instrument_meta", {}))
+    try:
+        # No env trip — exercising the durable-KSM path.
+        monkeypatch.delenv("GLOBAL_KILL", raising=False)
+        monkeypatch.delenv("GLOBAL_KILL_BLOCK_EXITS", raising=False)
+
+        ksm_stub = MagicMock()
+        ksm_stub.is_tripped_for_scope_with_block_exits.return_value = (True, False)
+        runtime_stub = SimpleNamespace(kill_switch_manager=ksm_stub)
+        monkeypatch.setattr(
+            "app.hub.runtime.get_hub_runtime", lambda: runtime_stub,
+        )
+
+        router, runner = _build_router_for_killswitch_test(
+            monkeypatch,
+            runner_response=OrderResponse(
+                broker_order_id="OID-SOFT-EXIT", status="FILLED",
+                message="ok", filled_quantity=1, average_price=100.0,
+            ),
+        )
+
+        order_req = OrderRequest(
+            symbol="SBIN", quantity=1, side=OrderSide.SELL,
+            order_type=OrderType.MARKET, product_type=ProductType.INTRADAY,
+            time_in_force=TimeInForce.DAY, purpose=OrderPurpose.EXIT,
+        )
+
+        _, response = await router.submit_order(
+            tenant_id=TenantId("tenant-1"),
+            broker_account_id=BrokerAccountId("account-1"),
+            strategy_id=StrategyId("strategy-1"),
+            order_req=order_req,
+        )
+
+        assert response.status == "FILLED", (
+            "SOFT KSM trip must allow exit orders to route (#220 default)"
+        )
+        runner.place_order.assert_called_once()
+    finally:
+        dashboard_bus.set_instrument_meta(original_meta)
+
+
+@pytest.mark.asyncio
+async def test_router_ksm_hard_trip_rejects_exit(monkeypatch):
+    """Issue #220: when the durable KSM has a HARD trip (block_exits=True),
+    EXIT orders must be rejected with a distinct message and event."""
+    original_meta = dict(getattr(dashboard_bus, "_instrument_meta", {}))
+    try:
+        monkeypatch.delenv("GLOBAL_KILL", raising=False)
+        monkeypatch.delenv("GLOBAL_KILL_BLOCK_EXITS", raising=False)
+
+        ksm_stub = MagicMock()
+        ksm_stub.is_tripped_for_scope_with_block_exits.return_value = (True, True)
+        runtime_stub = SimpleNamespace(kill_switch_manager=ksm_stub)
+        monkeypatch.setattr(
+            "app.hub.runtime.get_hub_runtime", lambda: runtime_stub,
+        )
+
+        router, runner = _build_router_for_killswitch_test(
+            monkeypatch,
+            runner_response=OrderResponse(
+                broker_order_id="OID-HARD-KSM-EXIT", status="FILLED",
+                message="should-not-fill", filled_quantity=1, average_price=100.0,
+            ),
+        )
+
+        order_req = OrderRequest(
+            symbol="SBIN", quantity=1, side=OrderSide.SELL,
+            order_type=OrderType.MARKET, product_type=ProductType.INTRADAY,
+            time_in_force=TimeInForce.DAY, purpose=OrderPurpose.EXIT,
+        )
+
+        _, response = await router.submit_order(
+            tenant_id=TenantId("tenant-1"),
+            broker_account_id=BrokerAccountId("account-1"),
+            strategy_id=StrategyId("strategy-1"),
+            order_req=order_req,
+        )
+
+        assert response.status == "REJECTED"
+        assert response.message == "kill_switch_manager_tripped_block_exits"
+        runner.place_order.assert_not_called()
+    finally:
+        dashboard_bus.set_instrument_meta(original_meta)
+
+
+@pytest.mark.asyncio
+async def test_router_ksm_hard_trip_rejects_entry(monkeypatch):
+    """Issue #220 regression: HARD trip must continue to reject entries
+    (existing behaviour preserved)."""
+    original_meta = dict(getattr(dashboard_bus, "_instrument_meta", {}))
+    try:
+        monkeypatch.delenv("GLOBAL_KILL", raising=False)
+        monkeypatch.delenv("GLOBAL_KILL_BLOCK_EXITS", raising=False)
+
+        ksm_stub = MagicMock()
+        ksm_stub.is_tripped_for_scope_with_block_exits.return_value = (True, True)
+        runtime_stub = SimpleNamespace(kill_switch_manager=ksm_stub)
+        monkeypatch.setattr(
+            "app.hub.runtime.get_hub_runtime", lambda: runtime_stub,
+        )
+
+        router, runner = _build_router_for_killswitch_test(
+            monkeypatch,
+            runner_response=OrderResponse(
+                broker_order_id="OID-HARD-KSM-ENTRY", status="FILLED",
+                message="should-not-fill", filled_quantity=1, average_price=100.0,
+            ),
+        )
+
+        order_req = OrderRequest(
+            symbol="SBIN", quantity=1, side=OrderSide.BUY,
+            order_type=OrderType.MARKET, product_type=ProductType.INTRADAY,
+            time_in_force=TimeInForce.DAY, purpose=OrderPurpose.ENTRY,
+        )
+
+        _, response = await router.submit_order(
+            tenant_id=TenantId("tenant-1"),
+            broker_account_id=BrokerAccountId("account-1"),
+            strategy_id=StrategyId("strategy-1"),
+            order_req=order_req,
+        )
+
+        assert response.status == "REJECTED"
+        assert response.message == "kill_switch_manager_tripped"
+        runner.place_order.assert_not_called()
+    finally:
+        dashboard_bus.set_instrument_meta(original_meta)
