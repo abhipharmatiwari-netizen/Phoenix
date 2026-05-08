@@ -1341,6 +1341,7 @@ def kill_switch_trip(
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
     ksm = _get_kill_switch_manager()
+    upgraded = False
     try:
         record = ksm.trip(
             scope,
@@ -1350,11 +1351,48 @@ def kill_switch_trip(
             block_exits=bool(payload.block_exits),
         )
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        # Issue #220 (PR #233 review): if a record already exists in
+        # TRIPPED / CLEAR_PENDING and the operator is requesting a
+        # different ``block_exits`` value (e.g. SOFT auto-trip → HARD
+        # panic stop), allow the in-place flag upgrade via
+        # set_block_exits rather than rejecting with 409. Without this,
+        # an operator could not panic-stop exit orders after a daily-
+        # loss auto-trip without first clearing and rearming the kill
+        # switch — defeating the purpose of the HARD trip.
+        from app.risk.kill_switch import KillSwitchState
+        existing = ksm.get_record(scope, payload.scope_id)
+        can_upgrade = (
+            existing is not None
+            and existing.state in (
+                KillSwitchState.TRIPPED, KillSwitchState.CLEAR_PENDING,
+            )
+            and bool(existing.block_exits) != bool(payload.block_exits)
+        )
+        if not can_upgrade:
+            raise HTTPException(status_code=409, detail=str(exc))
+        try:
+            record = ksm.set_block_exits(
+                scope,
+                payload.scope_id,
+                block_exits=bool(payload.block_exits),
+                actor=ctx.caller,
+                reason=payload.reason,
+            )
+        except (ValueError, KeyError) as upgrade_exc:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"trip rejected ({exc}) and block_exits upgrade also "
+                    f"failed ({upgrade_exc})"
+                ),
+            )
+        upgraded = True
     _save_kill_switch_state(ksm)
     emit_audit_event(
         actor=ctx.caller,
-        action="kill_switch_trip",
+        action=(
+            "kill_switch_block_exits_upgraded" if upgraded else "kill_switch_trip"
+        ),
         resource_type="kill_switch",
         resource_id=str(payload.scope_id),
         metadata={
@@ -1362,13 +1400,15 @@ def kill_switch_trip(
             "scope_id": payload.scope_id,
             "reason": payload.reason,
             "block_exits": bool(payload.block_exits),
+            "upgraded_in_place": upgraded,
         },
     )
     return {
-        "status": "tripped",
+        "status": "block_exits_upgraded" if upgraded else "tripped",
         "record_id": record.id,
         "state": record.state.value,
         "block_exits": bool(record.block_exits),
+        "upgraded_in_place": upgraded,
     }
 
 
