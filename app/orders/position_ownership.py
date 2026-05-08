@@ -1124,12 +1124,16 @@ class PositionOwnershipStore:
         reason: str,
     ) -> None:
         now = datetime.now(timezone.utc)
-        prior_state = record.state
         if record.state == target:
             record.state_reason = reason
             record.updated_at = now
             if target != OwnershipState.NONE:
                 record.last_evidence_at = now
+            # Issue #200: refresh `released_at` on partial-fill / re-affirm
+            # evidence so an exit that genuinely is still in flight extends
+            # the watchdog instead of expiring under a long broker-side delay.
+            if target == OwnershipState.RELEASING:
+                record.released_at = now
             return
         try:
             record.transition_to(target, reason)
@@ -1142,9 +1146,7 @@ class PositionOwnershipStore:
                     )
                     if target != OwnershipState.RECONCILING:
                         record.transition_to(target, reason)
-                    self._maintain_releasing_timestamp(
-                        record=record, prior_state=prior_state, now=now
-                    )
+                    self._stamp_releasing_timestamp_on_enter(record=record, now=now)
                     return
                 except InvalidOwnershipTransition:
                     pass
@@ -1173,34 +1175,27 @@ class PositionOwnershipStore:
             record.updated_at = replacement.updated_at
         if target != OwnershipState.NONE:
             record.last_evidence_at = now
-        self._maintain_releasing_timestamp(
-            record=record, prior_state=prior_state, now=now
-        )
+        self._stamp_releasing_timestamp_on_enter(record=record, now=now)
 
     @staticmethod
-    def _maintain_releasing_timestamp(
+    def _stamp_releasing_timestamp_on_enter(
         *,
         record: OwnershipRecord,
-        prior_state: OwnershipState,
         now: datetime,
     ) -> None:
-        """Set/clear ``record.released_at`` as the record enters/leaves RELEASING.
+        """Stamp ``record.released_at`` whenever the record's final state is
+        RELEASING after ``_apply_record_transition`` runs.
 
-        Called from ``_apply_record_transition`` after the (possibly handed-off)
-        transition completes. The same-target no-op branch in
-        ``_apply_record_transition`` does NOT call this — re-affirming RELEASING
-        with a fresh reason must not extend the watchdog.
+        Note: we DO NOT clear ``released_at`` automatically on transitions OUT
+        of RELEASING. The exit lock is decoupled from state so that broker
+        reconciliation, partial fills, and entry-acquire syncs (all of which
+        can move the record out of RELEASING) cannot silently invalidate the
+        in-flight exit guard. The lock is cleared only when the entry
+        flattens (record removed entirely) or when ``release_pending``
+        decrements the strategy's pending count to zero.
         """
-        if (
-            record.state == OwnershipState.RELEASING
-            and prior_state != OwnershipState.RELEASING
-        ):
+        if record.state == OwnershipState.RELEASING:
             record.released_at = now
-        elif (
-            record.state != OwnershipState.RELEASING
-            and prior_state == OwnershipState.RELEASING
-        ):
-            record.released_at = None
 
     def _sync_ownership_record_from_entry(
         self,
@@ -1374,6 +1369,18 @@ class PositionOwnershipStore:
                 entry=entry,
                 reason="loaded_from_persistence",
             )
+            # Issue #200 (restart mitigation): if persistence preserved a
+            # non-zero pending count, the prior process had an exit in flight
+            # whose `released_at` is in-memory and lost on restart. Stamp
+            # `released_at = now` to give a fresh watchdog window during which
+            # duplicate exits are blocked. This is bounded by
+            # POSITION_OWNERSHIP_EXIT_LOCK_MAX_SECONDS (default 90s), so a
+            # genuinely stuck lock self-resolves shortly after restart while
+            # the in-flight window of the original exit is still protected.
+            if any(int(c or 0) > 0 for c in (entry.pending_by_strategy or {}).values()):
+                reloaded_record = self._ownership_records.get(scoped_key)
+                if reloaded_record is not None:
+                    reloaded_record.released_at = datetime.now(timezone.utc)
         self._loaded_accounts.add(account_scope)
 
     def _persist_contract_state(
@@ -1572,37 +1579,38 @@ class PositionOwnershipStore:
                         f"try_acquire:{strategy}:{'exit' if bool(is_exit_order) else 'entry'}"
                     ),
                 )
-                # Issue #200: enforce OWNED -> RELEASING as an exclusive exit lock.
-                # The pre-sync record state is the source of truth here because
-                # _sync_ownership_record_from_entry below would re-infer OWNED
-                # from a non-zero entry net, clobbering the in-flight RELEASING
-                # signal. Inspect the prior record before any sync.
+                # Issue #200: enforce an exclusive exit lock for the duration of
+                # any in-flight exit. The lock claim is the record's
+                # `released_at` timestamp, which is decoupled from `state`
+                # because broker reconciliation, partial fills, and even
+                # entry-acquire syncs can all transition state out of RELEASING
+                # (to RECONCILING / OWNED / PENDING_LOCK) while the original
+                # exit order is still pending at the broker. Gating on
+                # `released_at` directly keeps the lock active across all such
+                # transitions. UNKNOWN-owner exits land in RECONCILING (not
+                # RELEASING) but still set `released_at`, so they are also
+                # covered.
                 if bool(is_exit_order):
                     prior_record = self._ownership_records.get(scoped)
-                    if (
-                        prior_record is not None
-                        and prior_record.state == OwnershipState.RELEASING
-                    ):
-                        released_at = prior_record.released_at
+                    released_at = (
+                        prior_record.released_at if prior_record is not None else None
+                    )
+                    if released_at is not None:
                         now_ts = datetime.now(timezone.utc)
                         watchdog = float(self._exit_lock_max_seconds or 0.0)
-                        active_lock = (
-                            released_at is not None
-                            and watchdog > 0.0
-                            and (now_ts - released_at).total_seconds() < watchdog
-                        )
+                        age_seconds = (now_ts - released_at).total_seconds()
+                        active_lock = watchdog > 0.0 and age_seconds < watchdog
                         if active_lock:
                             logger.info(
                                 "exit_already_in_flight ownership_key=%s "
-                                "owner=%s requesting_strategy=%s "
+                                "owner=%s requesting_strategy=%s state=%s "
                                 "released_at=%s age_seconds=%.3f",
                                 prior_record.ownership_key,
                                 prior_record.owner_strategy_id,
                                 strategy,
-                                released_at.isoformat() if released_at else "",
-                                (now_ts - released_at).total_seconds()
-                                if released_at
-                                else 0.0,
+                                prior_record.state.value,
+                                released_at.isoformat(),
+                                age_seconds,
                             )
                             return PositionOwnershipDecision(
                                 allowed=False,
@@ -1612,18 +1620,18 @@ class PositionOwnershipStore:
                                 reason="exit_already_in_flight",
                                 acquired_pending=False,
                             )
-                        # Watchdog expired (or never recorded released_at on a
-                        # legacy record) -- log a WARNING and let the retry
+                        # Watchdog expired -- log a WARNING and let the retry
                         # proceed so ops surfaces a stuck lock instead of
                         # bricking the runner.
                         logger.warning(
                             "exit_lock_watchdog_expired ownership_key=%s "
-                            "owner=%s requesting_strategy=%s "
+                            "owner=%s requesting_strategy=%s state=%s "
                             "released_at=%s watchdog_seconds=%.1f",
                             prior_record.ownership_key,
                             prior_record.owner_strategy_id,
                             strategy,
-                            released_at.isoformat() if released_at else "(unset)",
+                            prior_record.state.value,
+                            released_at.isoformat(),
                             watchdog,
                         )
                 self._sync_ownership_record_from_entry(
@@ -1676,6 +1684,13 @@ class PositionOwnershipStore:
                             owner_strategy_id=(None if owner == UNKNOWN_OWNER else strategy),
                             authority_path=authority_path,
                         )
+                        # Issue #200: claim the exit lock explicitly. Decoupled
+                        # from `state` so that UNKNOWN-owner exits (target =
+                        # RECONCILING) and any later state churn from broker
+                        # reconciliation still trip the duplicate-exit guard.
+                        granted_record = self._ownership_records.get(scoped)
+                        if granted_record is not None:
+                            granted_record.released_at = datetime.now(timezone.utc)
                     elif owner is None:
                         self._update_ownership_record_state(
                             scoped_key=scoped,
@@ -1812,6 +1827,13 @@ class PositionOwnershipStore:
                         entry.pending_by_strategy.get(strategy, 0)
                     ) - 1
                 self._cleanup_entry(entry)
+                # Issue #200: when the strategy's pending count reaches zero,
+                # the in-flight exit (if any) is no longer pending -- clear
+                # `released_at` so a fresh retry can claim a new exit lock.
+                if int(entry.pending_by_strategy.get(strategy, 0)) <= 0:
+                    record_for_release = self._ownership_records.get(scoped)
+                    if record_for_release is not None:
+                        record_for_release.released_at = None
                 if self._entry_empty(entry):
                     self._entries.pop(scoped, None)
                     self._persist_contract_state(
@@ -1894,6 +1916,14 @@ class PositionOwnershipStore:
                         ) + delta
 
                 self._cleanup_entry(entry)
+                # Issue #200: when the strategy's pending count reaches zero
+                # the in-flight exit is no longer pending -- clear
+                # `released_at` so a fresh retry on residual quantity (e.g.
+                # post-partial-fill) can claim a new exit lock.
+                if int(entry.pending_by_strategy.get(strategy, 0)) <= 0:
+                    record_for_release = self._ownership_records.get(scoped)
+                    if record_for_release is not None:
+                        record_for_release.released_at = None
                 if self._entry_empty(entry):
                     self._entries.pop(scoped, None)
                     self._persist_contract_state(

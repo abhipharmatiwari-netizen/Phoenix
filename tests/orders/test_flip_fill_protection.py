@@ -18,12 +18,9 @@ updated value).
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from types import SimpleNamespace
-from typing import Optional
 
 import pytest
 
-from app.brokers.base import OrderPurpose
 from app.core.identifiers import BrokerAccountId, StrategyId, TenantId
 from app.core.position_state import InternalPosition, PositionState
 from app.orders.order_lifecycle import OrderLifecycleService, SubmissionContext

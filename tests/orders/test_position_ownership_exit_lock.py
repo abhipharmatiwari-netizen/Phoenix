@@ -16,9 +16,7 @@ POSITION_OWNERSHIP_EXIT_LOCK_MAX_SECONDS) expires.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
-import pytest
+from datetime import timedelta
 
 from app.orders.ownership_state import OwnershipState
 from app.orders.position_ownership import (
@@ -274,9 +272,11 @@ def test_lock_auto_releases_on_terminal_fill_then_re_acquire_allowed():
 
 
 def test_lock_auto_releases_on_partial_fill_handoff_then_retry_allowed():
-    """A partial exit fill drops the net but doesn't flatten. The
-    OwnershipRecord exits RELEASING (handed off to OWNED via the sync
-    on apply_fill). A retry exit must then be permitted."""
+    """A partial exit fill drops the net but doesn't flatten. apply_fill
+    decrements pending_by_strategy[strategy] from 1 to 0 (one fill = one
+    decrement, regardless of partial vs full), which clears released_at
+    explicitly. A retry exit on the residual quantity must then be
+    permitted."""
     store = PositionOwnershipStore(backend=_MemoryBackend())
     contract = _ng_contract()
     _open_short_position(store, contract=contract, qty=1250)
@@ -305,10 +305,8 @@ def test_lock_auto_releases_on_partial_fill_handoff_then_retry_allowed():
         contract_key=contract,
     )
     assert rec is not None
-    # After partial fill, sync infers OWNED from the still-non-zero entry net.
-    # The InvalidTransition handoff in _apply_record_transition reroutes
-    # RELEASING -> RECONCILING -> OWNED, and released_at is cleared.
-    assert rec.state == OwnershipState.OWNED
+    # released_at must be cleared once the strategy's pending count reaches
+    # zero (the original exit-claim is no longer pending).
     assert rec.released_at is None
 
     # Retry exit must succeed -- this is the partial-exit follow-up path.
@@ -524,3 +522,293 @@ def test_2026_05_07_ng_incident_regression():
     assert second.allowed is False
     assert second.reason == "exit_already_in_flight"
     assert second.acquired_pending is False
+
+
+# ----------------------------------------------------------------------
+# Codex review hardening (PR #202)
+# Each test below pins a behaviour the Codex bot flagged as a P1 / P2
+# correctness gap in the original state-based guard.
+# ----------------------------------------------------------------------
+
+def test_lock_persists_through_state_transition_to_owned():
+    """Codex P1/P2: an entry-acquire (or any operation that drives a sync
+    of the ownership record) re-infers OWNED from the still-non-zero entry
+    net and used to clobber `released_at`. The lock now decouples from
+    `state` -- as long as the owning strategy still has pending_by_strategy
+    > 0, the next exit acquire is refused regardless of current state."""
+    store = PositionOwnershipStore(backend=_MemoryBackend())
+    contract = _ng_contract()
+    _open_short_position(store, contract=contract)
+
+    first = store.try_acquire(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        contract_key=contract,
+        strategy_id="ema20_strategy",
+        is_exit_order=True,
+        unknown_mode="block_entries",
+    )
+    assert first.allowed is True
+
+    # Drive the record's state out of RELEASING by force-applying a
+    # transition (simulating broker reconciliation putting the record
+    # into RECONCILING / OWNED while the original exit is still pending).
+    live = next(iter(store._ownership_records.values()))
+    assert live.state == OwnershipState.RELEASING
+    assert live.released_at is not None
+
+    # Move the state but NOT released_at (the lock claim).
+    live.state = OwnershipState.OWNED
+    # released_at intentionally preserved -- it represents the in-flight
+    # exit claim, not the current state.
+
+    # A second exit attempt must still be refused -- the lock protects
+    # the in-flight order, not just the RELEASING state.
+    second = store.try_acquire(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        contract_key=contract,
+        strategy_id="ema20_strategy",
+        is_exit_order=True,
+        unknown_mode="block_entries",
+    )
+    assert second.allowed is False
+    assert second.reason == "exit_already_in_flight"
+
+
+def test_partial_fill_observation_refreshes_lock_watchdog():
+    """Codex P2 #4: observe_fill_progress reaffirms RELEASING with a fresh
+    'partial_exit_fill_observed' reason. The watchdog must be refreshed on
+    that evidence -- otherwise an exit that takes longer than 90s but
+    visibly receives partial fills would have its lock expire and admit a
+    duplicate exit submission."""
+    store = PositionOwnershipStore(backend=_MemoryBackend())
+    contract = _ng_contract()
+    _open_short_position(store, contract=contract)
+
+    store.try_acquire(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        contract_key=contract,
+        strategy_id="ema20_strategy",
+        is_exit_order=True,
+        unknown_mode="block_entries",
+    )
+    live = next(iter(store._ownership_records.values()))
+    original_released_at = live.released_at
+    assert original_released_at is not None
+
+    # Roll released_at back so the watchdog is "old".
+    live.released_at = original_released_at - timedelta(seconds=5)
+    aged = live.released_at
+
+    # A partial-fill broker observation arrives.
+    store.observe_fill_progress(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        contract_key=contract,
+        strategy_id="ema20_strategy",
+        is_exit_order=True,
+        filled_qty=500,
+    )
+
+    # released_at must be refreshed to ~now, NOT left at the aged value.
+    refreshed = store._ownership_records[
+        next(iter(store._ownership_records.keys()))
+    ].released_at
+    assert refreshed is not None
+    assert refreshed > aged
+
+
+def test_release_pending_clears_lock_when_pending_returns_to_zero():
+    """Codex review: when an exit order is rejected/cancelled and
+    OrderLifecycleService calls release_pending, the per-strategy pending
+    count returns to zero and the lock must clear so a retry can proceed.
+    """
+    store = PositionOwnershipStore(backend=_MemoryBackend())
+    contract = _ng_contract()
+    _open_short_position(store, contract=contract)
+
+    store.try_acquire(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        contract_key=contract,
+        strategy_id="ema20_strategy",
+        is_exit_order=True,
+        unknown_mode="block_entries",
+    )
+    live = next(iter(store._ownership_records.values()))
+    assert live.released_at is not None
+
+    # Broker rejects the exit; lifecycle calls release_pending.
+    store.release_pending(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        contract_key=contract,
+        strategy_id="ema20_strategy",
+    )
+
+    # The lock must be released -- a retry must succeed.
+    retry = store.try_acquire(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        contract_key=contract,
+        strategy_id="ema20_strategy",
+        is_exit_order=True,
+        unknown_mode="block_entries",
+    )
+    assert retry.allowed is True
+    assert retry.reason == "acquired"
+
+
+def test_unknown_owner_exit_also_locks():
+    """Codex P1 #3: the first exit on a broker-only / UNKNOWN-owner
+    position lands in RECONCILING (not RELEASING). The state-based guard
+    missed this entirely; the released_at-based guard must catch it too --
+    a duplicate UNKNOWN-owner flatten must be refused."""
+    store = PositionOwnershipStore(backend=_MemoryBackend())
+    contract = _ng_contract()
+
+    # Seed an UNKNOWN-owner entry directly (simulates broker reconcile of
+    # a position opened outside Phoenix's option universe).
+    scoped = (
+        "tenant-1", "A1", "A1",
+        contract.as_storage_key(),
+    )
+    from app.orders.position_ownership import _OwnershipEntry
+    entry = _OwnershipEntry(unknown_net_qty=-1250, authority_path="hub")
+    store._entries[scoped] = entry
+    store._loaded_accounts.add(("tenant-1", "A1"))
+
+    # First flatten attempt by a strategy -- allowed via UNKNOWN-owner
+    # branch, lands the record in RECONCILING.
+    first = store.try_acquire(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        contract_key=contract,
+        strategy_id="ema20_strategy",
+        is_exit_order=True,
+        unknown_mode="allow_entries",
+    )
+    assert first.allowed is True
+    rec = store.get_ownership_record(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        contract_key=contract,
+    )
+    assert rec is not None
+    # State is RECONCILING (UNKNOWN-owner exit), not RELEASING.
+    assert rec.state == OwnershipState.RECONCILING
+    # But released_at IS set so the duplicate guard fires.
+    assert rec.released_at is not None
+
+    # Duplicate flatten attempt -- must be refused.
+    second = store.try_acquire(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        contract_key=contract,
+        strategy_id="ema20_strategy",
+        is_exit_order=True,
+        unknown_mode="allow_entries",
+    )
+    assert second.allowed is False
+    assert second.reason == "exit_already_in_flight"
+
+
+def test_restart_with_pending_persisted_re_locks_with_fresh_watchdog():
+    """Codex P1 #1 (partial mitigation): on process restart, in-memory
+    `released_at` is lost. If persistence preserved a non-zero
+    pending_by_strategy[*] count, the prior process had an exit in flight.
+    _ensure_account_loaded must stamp released_at = now to give a fresh
+    watchdog window during which duplicate exits are blocked, even though
+    the original released_at is unrecoverable."""
+
+    # Custom backend that returns an entry with both net and pending,
+    # mimicking what PostgresPositionOwnershipBackend produces when
+    # persist_pending_locks=True and the prior process had an in-flight
+    # exit at the moment of crash/restart.
+    class _PendingPersistedBackend(OwnershipPersistenceBackend):
+        def __init__(self) -> None:
+            self.saved: list = []
+
+        def load_account_entries(self, *, tenant_id, broker_account_id):
+            from app.orders.position_ownership import _OwnershipEntry
+            entry = _OwnershipEntry(
+                pending_by_strategy={"ema20_strategy": 1},
+                net_by_strategy={"ema20_strategy": -1250},
+                authority_path="hub",
+            )
+            return {_ng_contract().as_storage_key(): entry}
+
+        def save_contract_state(self, **kw) -> None:
+            self.saved.append(kw)
+
+    contract = _ng_contract()
+    store = PositionOwnershipStore(backend=_PendingPersistedBackend())
+
+    # Trigger the load (any operation does this).
+    rec = store.get_ownership_record(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        contract_key=contract,
+    )
+    assert rec is not None
+    # released_at must have been stamped on load because pending was
+    # non-zero in persisted state.
+    assert rec.released_at is not None
+
+    # Duplicate exit attempt against the reloaded state must be refused.
+    duplicate = store.try_acquire(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        contract_key=contract,
+        strategy_id="ema20_strategy",
+        is_exit_order=True,
+        unknown_mode="block_entries",
+    )
+    assert duplicate.allowed is False
+    assert duplicate.reason == "exit_already_in_flight"
+
+
+def test_restart_without_pending_does_not_pre_lock():
+    """Counterpart to the restart test: if persistence has only net (no
+    pending claim), the prior process had no exit in flight at restart
+    time. released_at must NOT be stamped -- a clean exit acquire must
+    succeed normally."""
+
+    class _NetOnlyBackend(OwnershipPersistenceBackend):
+        def load_account_entries(self, *, tenant_id, broker_account_id):
+            from app.orders.position_ownership import _OwnershipEntry
+            entry = _OwnershipEntry(
+                pending_by_strategy={},
+                net_by_strategy={"ema20_strategy": -1250},
+                authority_path="hub",
+            )
+            return {_ng_contract().as_storage_key(): entry}
+
+        def save_contract_state(self, **kw) -> None:
+            return None
+
+    contract = _ng_contract()
+    store = PositionOwnershipStore(backend=_NetOnlyBackend())
+
+    rec = store.get_ownership_record(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        contract_key=contract,
+    )
+    assert rec is not None
+    # No pending in persistence -> no synthetic released_at on load.
+    assert rec.released_at is None
+
+    # Fresh exit acquire must succeed.
+    decision = store.try_acquire(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        contract_key=contract,
+        strategy_id="ema20_strategy",
+        is_exit_order=True,
+        unknown_mode="block_entries",
+    )
+    assert decision.allowed is True
+    assert decision.reason == "acquired"

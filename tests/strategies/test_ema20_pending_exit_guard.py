@@ -45,7 +45,6 @@ import types
 from datetime import datetime, timezone
 from typing import List
 
-import pytest
 
 from app.brokers.base import OrderResponse
 
@@ -137,7 +136,7 @@ def test_first_exit_call_fires_and_arms_pending_guard(monkeypatch):
     """Path A: first exit submission. Verify the bridge is called and the
     per-label guard is armed for future _exit_position invocations."""
     mod, strategy = _make_strategy(monkeypatch)
-    pos = _seed_short_position(mod, strategy)
+    _seed_short_position(mod, strategy)
     calls: List[dict] = []
     _patch_bridge_success(monkeypatch, mod, calls)
 
