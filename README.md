@@ -93,3 +93,15 @@ The following are not authoritative LIVE stores or current go-live paths:
 - stale multi-file Docker Compose profiles not present in this repo
 
 Build clean promotion artifacts with `python scripts/build_release_artifact.py --output release/phoenix-live-source.zip`.
+
+## Repository Hygiene
+
+Keep generated files out of the checkout before packaging or handing off work:
+
+```bash
+python scripts/clean_repo.py --yes --include-deps
+```
+
+- Omit `--yes` for a dry run that only lists removable artifacts.
+- Omit `--include-deps` when you want to keep local dependency installs such as `frontend/node_modules`.
+- The cleanup script only removes known caches, build output, runtime scratch/log directories, release zip artifacts, Python bytecode, and optional dependency installs; source files, env templates, migrations, docs, and `.git` are left untouched.
