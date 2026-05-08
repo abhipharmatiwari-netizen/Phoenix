@@ -1106,16 +1106,46 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
 
     # ---- core logic ----
     # Evaluate entry conditions and open spreads if signals align.
+    def _log_signal_evaluation(self, reason: str, **details: Any) -> None:
+        """Emit a structured ``signal_evaluated_with_reason=<reason>`` line at
+        DEBUG. This makes per-bar gate-rejection visible without flooding
+        normal INFO logs. Enable with logger level DEBUG for
+        ``app.strategies.nifty_weekly_credit_spreads`` -- e.g.
+        ``LOG_LEVEL_app_strategies_nifty_weekly_credit_spreads=DEBUG`` or via
+        the ops dashboard's per-logger level controls."""
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        parts = [f"signal_evaluated_with_reason={reason}"]
+        for key, value in details.items():
+            if isinstance(value, float):
+                parts.append(f"{key}={value:.6g}")
+            else:
+                parts.append(f"{key}={value}")
+        logger.debug("[NIFTY_SPREAD] %s", " ".join(parts))
+
     def _maybe_enter(self, candle: Any, indicators: Dict[str, Any]) -> None:
         now = candle.start_ts.astimezone(IST)
         if not (self.entry_start_time <= now.time() <= self.entry_end_time):
+            self._log_signal_evaluation(
+                "outside_entry_window",
+                ist_time=now.time().isoformat(timespec="seconds"),
+                window=f"{self.entry_start_time}-{self.entry_end_time}",
+            )
             return
 
         expiry = self._current_expiry_and_chain()
         if not expiry:
+            self._log_signal_evaluation("no_current_expiry_or_chain")
             return
         days_to_exp = (expiry - now.date()).days
         if days_to_exp < self.min_days_to_expiry or days_to_exp > self.max_days_to_expiry:
+            self._log_signal_evaluation(
+                "expiry_out_of_dte_range",
+                days_to_exp=days_to_exp,
+                min_dte=self.min_days_to_expiry,
+                max_dte=self.max_days_to_expiry,
+                expiry=expiry.isoformat(),
+            )
             return
 
         close = candle.c
@@ -1124,21 +1154,40 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
         macd_hist = indicators.get("macd_hist")
         atr = indicators.get("atr")
         if None in (ema, rsi, macd_hist, atr):
+            self._log_signal_evaluation(
+                "indicators_not_ready",
+                ema_set=ema is not None,
+                rsi_set=rsi is not None,
+                macd_hist_set=macd_hist is not None,
+                atr_set=atr is not None,
+            )
             return
 
         atr_pct = atr / close if close else 0.0
         if atr_pct > self.atr_max_pct_5m:
+            self._log_signal_evaluation(
+                "atr_too_high",
+                atr_pct=atr_pct,
+                atr_max_pct_5m=self.atr_max_pct_5m,
+                atr=atr,
+                close=close,
+            )
             return
 
         # regime classification
         bullish = close > ema and self.bullish_rsi_min <= rsi <= self.bullish_rsi_max and macd_hist > 0
         bearish = close < ema and self.bearish_rsi_min <= rsi <= self.bearish_rsi_max and macd_hist < 0
         sideways = False
+        flat_range_pct: Optional[float] = None
+        flat_range_lookback_ready = (
+            len(self.last_5m_closes) >= self.flat_range_lookback_bars
+        )
         if self.neutral_rsi_min <= rsi <= self.neutral_rsi_max and abs(macd_hist) <= self.macd_hist_flat_factor * close:
-            if len(self.last_5m_closes) >= self.flat_range_lookback_bars:
+            if flat_range_lookback_ready:
                 window = self.last_5m_closes[-self.flat_range_lookback_bars :]
                 if window:
                     rng = max(window) - min(window)
+                    flat_range_pct = rng / close if close else 0.0
                     if rng <= self.flat_range_max_pct * close:
                         sideways = True
 
@@ -1151,18 +1200,59 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
             regime = "sideways"
 
         if regime == "none":
+            self._log_signal_evaluation(
+                "regime_none",
+                close=close,
+                ema=ema,
+                rsi=rsi,
+                macd_hist=macd_hist,
+                bullish_eligible=bullish,
+                bearish_eligible=bearish,
+                sideways_eligible=sideways,
+                flat_range_lookback_ready=flat_range_lookback_ready,
+                flat_range_pct=flat_range_pct,
+            )
             return
 
         # ATM straddle check
         atm_ce, atm_pe = self._atm_options(expiry)
         if not atm_ce or not atm_pe:
+            self._log_signal_evaluation(
+                "atm_options_unavailable",
+                atm_ce_found=bool(atm_ce),
+                atm_pe_found=bool(atm_pe),
+                expiry=expiry.isoformat(),
+                regime=regime,
+            )
             return
         atm_ce_price = self._latest_price(atm_ce) or 0.0
         atm_pe_price = self._latest_price(atm_pe) or 0.0
         atm_straddle_pct = (atm_ce_price + atm_pe_price) / close if close else 0.0
         if atm_straddle_pct < self.atm_straddle_min_pct or atm_straddle_pct > self.atm_straddle_max_pct:
+            self._log_signal_evaluation(
+                "atm_straddle_pct_out_of_range",
+                atm_straddle_pct=atm_straddle_pct,
+                min=self.atm_straddle_min_pct,
+                max=self.atm_straddle_max_pct,
+                regime=regime,
+                atm_ce_price=atm_ce_price,
+                atm_pe_price=atm_pe_price,
+                close=close,
+            )
             return
 
+        # All entry gates passed -- log the GO and dispatch to the spread builder.
+        self._log_signal_evaluation(
+            "entry_gates_passed",
+            regime=regime,
+            close=close,
+            ema=ema,
+            rsi=rsi,
+            macd_hist=macd_hist,
+            atr_pct=atr_pct,
+            atm_straddle_pct=atm_straddle_pct,
+            days_to_exp=days_to_exp,
+        )
         if regime == "bullish":
             self._try_put_spread(close, expiry)
         elif regime == "bearish":
@@ -1250,21 +1340,64 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
         call_short_label = self._find_option_by_strike(sp_short_call, "CE", expiry)
         call_long_label = self._find_option_by_strike(sp_long_call, "CE", expiry)
         if not all([put_short_label, put_long_label, call_short_label, call_long_label]):
+            self._log_signal_evaluation(
+                "condor_legs_unresolved",
+                put_short=bool(put_short_label),
+                put_long=bool(put_long_label),
+                call_short=bool(call_short_label),
+                call_long=bool(call_long_label),
+                spot=spot,
+                width=width,
+            )
             return
 
         # Build both spreads and check credits
         put_credit, put_width, put_qty, put_loss = self._estimate_credit(put_short_label, put_long_label)
         call_credit, call_width, call_qty, call_loss = self._estimate_credit(call_short_label, call_long_label)
         if put_credit is None or call_credit is None:
+            self._log_signal_evaluation(
+                "condor_credit_estimate_failed",
+                put_credit=put_credit,
+                call_credit=call_credit,
+            )
             return
         if put_credit < self.min_credit_pct_of_width * put_width:
+            self._log_signal_evaluation(
+                "condor_put_credit_below_min",
+                put_credit=put_credit,
+                put_width=put_width,
+                min_credit=self.min_credit_pct_of_width * put_width,
+                min_credit_pct_of_width=self.min_credit_pct_of_width,
+            )
             return
         if call_credit < self.min_credit_pct_of_width * call_width:
+            self._log_signal_evaluation(
+                "condor_call_credit_below_min",
+                call_credit=call_credit,
+                call_width=call_width,
+                min_credit=self.min_credit_pct_of_width * call_width,
+                min_credit_pct_of_width=self.min_credit_pct_of_width,
+            )
             return
         if (put_credit + call_credit) < self.min_condor_total_credit_pct * width:
+            self._log_signal_evaluation(
+                "condor_total_credit_below_min",
+                total_credit=put_credit + call_credit,
+                min_total_credit=self.min_condor_total_credit_pct * width,
+                width=width,
+                min_condor_total_credit_pct=self.min_condor_total_credit_pct,
+            )
             return
         max_loss_rupees = put_loss + call_loss
         if not self._risk_allows(max_loss_rupees):
+            self._log_signal_evaluation(
+                "condor_risk_disallowed",
+                max_loss_rupees=max_loss_rupees,
+                per_trade_cap=self.risk_per_trade_pct * self.account_equity,
+                total_cap=self.max_total_risk_pct * self.account_equity,
+                open_spreads=len(self.open_spreads),
+                max_open_spreads=self.max_open_spreads,
+            )
             return
         # place orders: put spread then call spread
         if not self._enter_spread("IRON_CONDOR_PUT", put_short_label, put_long_label, put_credit, put_width, expiry, extra=None):
