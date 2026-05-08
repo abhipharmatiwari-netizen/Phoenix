@@ -533,6 +533,12 @@ class ReplayEngine:
                 open_qty = max(0, open_qty - qty)
         return open_qty > 0
 
+    def _reset_option_price_book_if_flat(self) -> None:
+        """Clear session-scoped option anchors unless a position carries over."""
+
+        if not self._recorder_has_open_position():
+            self._price_book_state = {}
+
     def _finalize_open_positions(
         self,
         *,
@@ -768,8 +774,7 @@ class ReplayEngine:
                         self._price_book_state = {}
                         self._close_history = defaultdict(list)
                     else:
-                        if not self._recorder_has_open_position():
-                            self._price_book_state = {}
+                        self._reset_option_price_book_if_flat()
                     if end_policy == END_POLICY_DAILY_MTM:
                         # Snapshot unrealised mark at session close without
                         # closing the position. The recorder treats this as
