@@ -72,6 +72,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fixed-slippage", type=float, default=0.0)
     parser.add_argument("--spread-bps", type=float, default=0.0)
     parser.add_argument("--latency-bars", type=int, default=0)
+    parser.add_argument(
+        "--end-policy",
+        choices=["force_exit", "carry_over", "daily_mtm"],
+        default="carry_over",
+        help=(
+            "How replay handles open positions at session boundaries and at "
+            "the replay window end. Default is 'carry_over' (issue #216): "
+            "positions carry across days driven by the strategy's own logic; "
+            "any still-open at window end is reported separately as "
+            "unrealised, NOT folded into win/loss stats. 'force_exit' is "
+            "legacy behaviour that closes everything at session boundaries "
+            "(inflates losses; kept for parity with pre-#216 reports). "
+            "'daily_mtm' is carry_over plus per-session unrealised snapshots, "
+            "with final unrealised folded into total PnL."
+        ),
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
     return parser.parse_args()
 
@@ -297,6 +313,7 @@ def build_execution_config(args: argparse.Namespace) -> ExecutionConfig:
         fixed_slippage=args.fixed_slippage,
         spread_bps=args.spread_bps,
         latency_bars=args.latency_bars,
+        end_policy=args.end_policy,
     )
 
 

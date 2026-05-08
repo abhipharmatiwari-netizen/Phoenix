@@ -125,6 +125,34 @@ class _EntryThenBoundaryExit:
         )
 
 
+class _SecondSessionOptionEntry:
+    def __init__(self) -> None:
+        self.last_price = {}
+        self._bars_seen = 0
+
+    def on_tick(self, label, price) -> None:
+        del label, price
+
+    def on_bar(self, label, timeframe_seconds, candle, indicators) -> None:
+        del label, timeframe_seconds, candle, indicators
+        self._bars_seen += 1
+        if self._bars_seen != 2:
+            return
+        place_order_via_bridge(
+            strategy_id=StrategyId("ema20_strategy"),
+            order_req=OrderRequest(
+                symbol="NIFTY_ATM_CE",
+                quantity=1,
+                side=OrderSide.BUY,
+                order_type=OrderType.MARKET,
+                product_type=ProductType.INTRADAY,
+                time_in_force=TimeInForce.DAY,
+                purpose=OrderPurpose.ENTRY,
+                tag="SECOND_SESSION_OPTION_ENTRY",
+            ),
+        )
+
+
 def test_bar_to_indicators_uses_private_exclusive_ema_when_present():
     ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
     bar = _bar(ts, close=100.0)
@@ -248,7 +276,9 @@ def test_next_bar_open_fill_uses_following_bar_open(monkeypatch):
     assert recorder.fills[0].fill_note == "next_bar_open"
 
 
-def test_session_boundary_finalizes_open_position(monkeypatch):
+def test_session_boundary_finalizes_open_position_under_force_exit(monkeypatch):
+    """Legacy --end-policy=force_exit closes any open position at the
+    session boundary (REPLAY_SESSION_BOUNDARY exit reason)."""
     base_ts = datetime(2026, 3, 2, 15, 10, tzinfo=timezone.utc)
     bars = [_bar(base_ts, close=100.0), _bar(base_ts, close=101.0, day_offset=1)]
 
@@ -262,6 +292,7 @@ def test_session_boundary_finalizes_open_position(monkeypatch):
             underlying_key="NIFTY",
             strategy_params={},
             timeframes=[300],
+            execution=ExecutionConfig(end_policy="force_exit"),
         )
     ).run()
 
@@ -270,6 +301,136 @@ def test_session_boundary_finalizes_open_position(monkeypatch):
     assert len(trades) == 1
     assert trades[0].exit_reason == "REPLAY_SESSION_BOUNDARY"
     assert recorder.finalization_events[0]["reason"] == "REPLAY_SESSION_BOUNDARY"
+    assert recorder.finalization_events[0]["realized"] is True
+
+
+def test_carry_over_does_not_finalize_at_session_boundary(monkeypatch):
+    """Issue #216: the default --end-policy=carry_over does NOT close
+    open positions at session boundaries -- the position carries across
+    days and the replay window end is recorded as an unrealised mark, not
+    an EXIT fill folded into realized metrics."""
+    base_ts = datetime(2026, 3, 2, 15, 10, tzinfo=timezone.utc)
+    bars = [_bar(base_ts, close=100.0), _bar(base_ts, close=101.0, day_offset=1)]
+
+    monkeypatch.setattr(replay_runtime_mod, "load_bars_from_postgres", lambda **kwargs: list(bars))
+    monkeypatch.setitem(replay_runtime_mod.STRATEGY_BUILDERS, "ema20_strategy", lambda *_args: _EntryThenBoundaryExit())
+
+    recorder = ReplayEngine(
+        ReplayConfig(
+            dsn="postgresql://ignored",
+            strategy_id="ema20_strategy",
+            underlying_key="NIFTY",
+            strategy_params={},
+            timeframes=[300],
+            # Default execution = carry_over (no explicit end_policy override).
+        )
+    ).run()
+
+    tracker = PnLTracker()
+    trades = tracker.process_fills(recorder.fills)
+    # No realized exit was emitted: window-end marks must not affect realized
+    # trade count, win/loss stats, or net PnL.
+    assert len(trades) == 0
+    metrics = tracker.compute_metrics("ema20_strategy", "NIFTY")
+    assert metrics.total_trades == 0
+    assert metrics.net_pnl == 0.0
+    # No session-boundary finalization event was recorded.
+    finalize_reasons = [e.get("reason") for e in recorder.finalization_events]
+    assert "REPLAY_SESSION_BOUNDARY" not in finalize_reasons, (
+        f"carry_over must not finalize at session boundary; got {finalize_reasons!r}"
+    )
+    assert "REPLAY_WINDOW_END_FORCED" in finalize_reasons
+    window_marks = [
+        e for e in recorder.finalization_events
+        if e.get("reason") == "REPLAY_WINDOW_END_FORCED"
+    ]
+    assert window_marks and window_marks[0].get("realized") is False
+
+
+def test_carry_over_resets_option_price_book_when_flat_at_session_boundary(monkeypatch):
+    """A flat strategy must get a fresh synthetic ATM option anchor on the
+    next session even though carry_over preserves indicator history."""
+    base_ts = datetime(2026, 3, 2, 15, 10, tzinfo=timezone.utc)
+    bars = [_bar(base_ts, close=100.0), _bar(base_ts, close=120.0, day_offset=1)]
+
+    monkeypatch.setattr(replay_runtime_mod, "load_bars_from_postgres", lambda **kwargs: list(bars))
+    monkeypatch.setitem(
+        replay_runtime_mod.STRATEGY_BUILDERS,
+        "ema20_strategy",
+        lambda *_args: _SecondSessionOptionEntry(),
+    )
+
+    recorder = ReplayEngine(
+        ReplayConfig(
+            dsn="postgresql://ignored",
+            strategy_id="ema20_strategy",
+            underlying_key="NIFTY",
+            strategy_params={},
+            timeframes=[300],
+            # Default execution = carry_over. The strategy is flat at the
+            # boundary, so the option proxy should re-anchor on day two.
+        )
+    ).run()
+
+    entry_fills = [fill for fill in recorder.fills if fill.tag == "SECOND_SESSION_OPTION_ENTRY"]
+    assert len(entry_fills) == 1
+    assert entry_fills[0].symbol == "NIFTY_ATM_CE"
+    # With a fresh day-two anchor, base premium is max(ATR * 2, 2% underlying)
+    # = max(4.0, 2.4). If the day-one 100.0 anchor leaks, this fill is 11.0.
+    assert entry_fills[0].fill_price == 4.0
+
+
+def test_daily_mtm_records_snapshot_event_at_session_boundary(monkeypatch):
+    """daily_mtm policy: position carries over (like carry_over) but a
+    daily_mtm_snapshot session_event is recorded at each boundary so
+    downstream reporting can inspect unrealised marks separately."""
+    base_ts = datetime(2026, 3, 2, 15, 10, tzinfo=timezone.utc)
+    bars = [_bar(base_ts, close=100.0), _bar(base_ts, close=101.0, day_offset=1)]
+
+    monkeypatch.setattr(replay_runtime_mod, "load_bars_from_postgres", lambda **kwargs: list(bars))
+    monkeypatch.setitem(replay_runtime_mod.STRATEGY_BUILDERS, "ema20_strategy", lambda *_args: _EntryThenBoundaryExit())
+
+    recorder = ReplayEngine(
+        ReplayConfig(
+            dsn="postgresql://ignored",
+            strategy_id="ema20_strategy",
+            underlying_key="NIFTY",
+            strategy_params={},
+            timeframes=[300],
+            execution=ExecutionConfig(end_policy="daily_mtm"),
+        )
+    ).run()
+
+    tracker = PnLTracker()
+    trades = tracker.process_fills(recorder.fills)
+    # No session-boundary close and no realized window-end exit; position is
+    # only represented by an unrealised finalization event.
+    assert len(trades) == 0
+    metrics = tracker.compute_metrics("ema20_strategy", "NIFTY")
+    assert metrics.total_trades == 0
+    assert metrics.net_pnl == 0.0
+    # daily_mtm_snapshot was recorded.
+    session_events = [e for e in recorder.session_events if e.get("event") == "daily_mtm_snapshot"]
+    assert len(session_events) == 1, (
+        f"Expected one daily_mtm_snapshot event, got {recorder.session_events!r}"
+    )
+    assert session_events[0].get("close_price") == 100.0
+    window_marks = [
+        e for e in recorder.finalization_events
+        if e.get("reason") == "REPLAY_WINDOW_END_FORCED"
+    ]
+    assert window_marks and window_marks[0].get("realized") is False
+
+
+def test_invalid_end_policy_raises_at_config_time():
+    """normalize_execution_config validates the end_policy choice up
+    front; a typo can't silently fall through to default behaviour."""
+    import pytest as _pt
+
+    from scripts.replay.execution_models import normalize_execution_config
+
+    with _pt.raises(ValueError, match="end_policy"):
+        normalize_execution_config(end_policy="forced")  # typo of force_exit
 
 
 def test_walk_forward_validate_uses_out_of_sample_windows_only(monkeypatch):

@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import csv
-import io
 import json
 import os
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from scripts.replay.optimizer import OptimizationResult, ParameterRecommendation
 from scripts.replay.pnl_tracker import PnLTracker, StrategyMetrics
@@ -111,9 +110,16 @@ def format_assumptions(execution_summary: Optional[Mapping[str, Any]] = None) ->
   6. PRIVATE EMA SUPPORT: Replay reads exclusive_nifty_ce_buy_ema20_30s when
      present and falls back to derived EMA replay calculations when absent.
 
-  7. SESSION RESETS / FINALIZATION: Replay finalizes any still-open positions at session
-     boundaries and at the replay window end so reports do not silently leave
-     unmatched entries open.
+  7. SESSION RESETS / FINALIZATION: Behaviour depends on --end-policy:
+     * force_exit (legacy): replay closes any open position at every session
+       boundary AND at window end. Inflates losses on multi-bar-hold strategies.
+     * carry_over (default, issue #216): positions carry across days driven by
+       the strategy's own logic (TP / SL / EOD square-off). The replay window
+       end records an unrealised REPLAY_WINDOW_END_FORCED mark only; it does
+       not submit an EXIT fill and is not included in realized trade metrics.
+     * daily_mtm: same carry-over behaviour plus a daily_mtm_snapshot session
+       event at each session close. Window-end marks remain unrealised and are
+       excluded from realized net PnL and win/loss stats.
 
   8. TIME ZONES: Bars without timezone info are treated as Asia/Kolkata (IST).
      Replay time, gate diagnostics, and reporting use explicit timezone-aware

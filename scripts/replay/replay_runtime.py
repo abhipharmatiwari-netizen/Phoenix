@@ -25,6 +25,8 @@ from app.core.clock import SimulatedClock
 from app.orders.replay_context import isolated_replay_order_sink
 
 from scripts.replay.execution_models import (
+    END_POLICY_DAILY_MTM,
+    END_POLICY_FORCE_EXIT,
     ExecutionConfig,
     build_tick_path,
     normalize_execution_config,
@@ -80,7 +82,7 @@ class BarRow:
     timeframe_seconds: int
     o: float
     h: float
-    l: float
+    l: float  # noqa: E741
     c: float
     atr: Optional[float]
     rsi: Optional[float]
@@ -515,15 +517,34 @@ class ReplayEngine:
             strategy.last_price.update(prices)
         return prices
 
+    def _recorder_has_open_position(self) -> bool:
+        """Return True when replay fills show an unpaired entry for this run."""
+
+        open_qty = 0
+        for fill in self.recorder.fills:
+            if fill.strategy_id != self.config.strategy_id:
+                continue
+            if fill.underlying != self.config.underlying_key:
+                continue
+            qty = int(getattr(fill, "quantity", 0) or 0)
+            if fill.purpose == "ENTRY":
+                open_qty += qty
+            elif fill.purpose == "EXIT":
+                open_qty = max(0, open_qty - qty)
+        return open_qty > 0
+
     def _finalize_open_positions(
         self,
         *,
         last_bar: BarRow,
         label: str,
         reason: str,
+        submit_orders: bool = True,
     ) -> None:
         strategy = self._strategy
         if strategy is None:
+            return
+        if not submit_orders and not self._recorder_has_open_position():
             return
 
         underlying_price = float(last_bar.c)
@@ -554,7 +575,10 @@ class ReplayEngine:
             reason=reason,
             timestamp=fill_context.timestamp.isoformat(),
             price=underlying_price,
+            realized=bool(submit_orders),
         )
+        if not submit_orders:
+            return
         force_exit_all = getattr(strategy, "force_exit_all", None)
         if not callable(force_exit_all):
             return
@@ -713,6 +737,7 @@ class ReplayEngine:
 
             prev_session_date: Optional[date] = None
             prev_bar: Optional[BarRow] = None
+            end_policy = str(cfg.execution.end_policy)
             for bar in all_bars:
                 session_date = bar.event_ts.astimezone(IST).date()
                 if prev_session_date is not None and session_date != prev_session_date and prev_bar is not None:
@@ -723,13 +748,41 @@ class ReplayEngine:
                         strategy_id=cfg.strategy_id,
                         underlying=cfg.underlying_key,
                     )
-                    self._finalize_open_positions(
-                        last_bar=prev_bar,
-                        label=label,
-                        reason="REPLAY_SESSION_BOUNDARY",
-                    )
-                    self._price_book_state = {}
-                    self._close_history = defaultdict(list)
+                    # Issue #216: only the legacy force_exit policy closes
+                    # at session boundaries. carry_over / daily_mtm let
+                    # positions persist across days so PnL reflects natural
+                    # exits (TP/SL/strategy-EOD) instead of replay-injected
+                    # 15:00-IST market-close marks. Indicator close_history
+                    # is preserved across carry-over boundaries so strategy
+                    # indicators retain continuity, matching production. The
+                    # synthetic option price book is preserved only when an
+                    # option position is actually open; flat strategies need a
+                    # fresh ATM anchor on the next session so overnight gaps do
+                    # not corrupt the next independent option trade's fills.
+                    if end_policy == END_POLICY_FORCE_EXIT:
+                        self._finalize_open_positions(
+                            last_bar=prev_bar,
+                            label=label,
+                            reason="REPLAY_SESSION_BOUNDARY",
+                        )
+                        self._price_book_state = {}
+                        self._close_history = defaultdict(list)
+                    else:
+                        if not self._recorder_has_open_position():
+                            self._price_book_state = {}
+                    if end_policy == END_POLICY_DAILY_MTM:
+                        # Snapshot unrealised mark at session close without
+                        # closing the position. The recorder treats this as
+                        # an audit event; the position remains open into
+                        # the next session.
+                        self.recorder.add_session_event(
+                            event="daily_mtm_snapshot",
+                            previous_session=prev_session_date.isoformat(),
+                            next_session=session_date.isoformat(),
+                            strategy_id=cfg.strategy_id,
+                            underlying=cfg.underlying_key,
+                            close_price=float(prev_bar.c),
+                        )
 
                 self._current_session_date = session_date
                 indicators = self._build_indicator_payload(bar)
@@ -769,7 +822,21 @@ class ReplayEngine:
                 prev_session_date = session_date
                 prev_bar = bar
 
-            self._finalize_open_positions(last_bar=all_bars[-1], label=label, reason="REPLAY_EOD")
+            # Issue #216: only the legacy force_exit policy submits a real
+            # window-end EXIT order. carry_over/daily_mtm record an unrealised
+            # last-bar mark so reports can disclose open risk without letting
+            # the arbitrary replay end date affect realized trade count,
+            # win/loss stats, or net_pnl.
+            window_end_is_realized = end_policy == END_POLICY_FORCE_EXIT
+            window_end_reason = (
+                "REPLAY_EOD" if window_end_is_realized else "REPLAY_WINDOW_END_FORCED"
+            )
+            self._finalize_open_positions(
+                last_bar=all_bars[-1],
+                label=label,
+                reason=window_end_reason,
+                submit_orders=window_end_is_realized,
+            )
             indicator_snapshot = getattr(self._strategy, "indicator_availability_snapshot", None)
             if callable(indicator_snapshot):
                 self.recorder.data_profile["strategy_indicator_snapshot"] = indicator_snapshot()
