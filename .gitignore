@@ -29,6 +29,13 @@ htmlcov/
 *.env.local
 *.env.secrets
 
+# Generated temp secret files from scripts/fetch-secrets.sh when SECRETS_DIR is inside checkout
+admin_api_key.tmp
+auth_token_secret.tmp
+control_plane_pg_password.tmp
+angel_postback_token.tmp
+dashboard_hmac_secret.tmp
+
 # IDE
 .vscode/
 .idea/
