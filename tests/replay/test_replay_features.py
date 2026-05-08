@@ -153,6 +153,39 @@ class _SecondSessionOptionEntry:
         )
 
 
+class _OpenOptionThenSecondSessionAdd:
+    def __init__(self) -> None:
+        self.last_price = {}
+        self._bars_seen = 0
+
+    def on_tick(self, label, price) -> None:
+        del label, price
+
+    def on_bar(self, label, timeframe_seconds, candle, indicators) -> None:
+        del label, timeframe_seconds, candle, indicators
+        self._bars_seen += 1
+        tag = None
+        if self._bars_seen == 1:
+            tag = "FIRST_SESSION_OPTION_ENTRY"
+        elif self._bars_seen == 2:
+            tag = "SECOND_SESSION_OPTION_ADD"
+        if tag is None:
+            return
+        place_order_via_bridge(
+            strategy_id=StrategyId("ema20_strategy"),
+            order_req=OrderRequest(
+                symbol="NIFTY_ATM_CE",
+                quantity=1,
+                side=OrderSide.BUY,
+                order_type=OrderType.MARKET,
+                product_type=ProductType.INTRADAY,
+                time_in_force=TimeInForce.DAY,
+                purpose=OrderPurpose.ENTRY,
+                tag=tag,
+            ),
+        )
+
+
 def test_bar_to_indicators_uses_private_exclusive_ema_when_present():
     ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
     bar = _bar(ts, close=100.0)
@@ -378,6 +411,38 @@ def test_carry_over_resets_option_price_book_when_flat_at_session_boundary(monke
     # With a fresh day-two anchor, base premium is max(ATR * 2, 2% underlying)
     # = max(4.0, 2.4). If the day-one 100.0 anchor leaks, this fill is 11.0.
     assert entry_fills[0].fill_price == 4.0
+
+
+def test_carry_over_preserves_option_price_book_with_open_position(monkeypatch):
+    """An open option position keeps its synthetic ATM anchor across a
+    carry_over boundary so carried positions are marked continuously."""
+    base_ts = datetime(2026, 3, 2, 15, 10, tzinfo=timezone.utc)
+    bars = [_bar(base_ts, close=100.0), _bar(base_ts, close=120.0, day_offset=1)]
+
+    monkeypatch.setattr(replay_runtime_mod, "load_bars_from_postgres", lambda **kwargs: list(bars))
+    monkeypatch.setitem(
+        replay_runtime_mod.STRATEGY_BUILDERS,
+        "ema20_strategy",
+        lambda *_args: _OpenOptionThenSecondSessionAdd(),
+    )
+
+    recorder = ReplayEngine(
+        ReplayConfig(
+            dsn="postgresql://ignored",
+            strategy_id="ema20_strategy",
+            underlying_key="NIFTY",
+            strategy_params={},
+            timeframes=[300],
+            # Default execution = carry_over. The first option entry remains
+            # open at the boundary, so the option proxy should not re-anchor.
+        )
+    ).run()
+
+    entry_fills = {fill.tag: fill for fill in recorder.fills}
+    assert entry_fills["FIRST_SESSION_OPTION_ENTRY"].fill_price == 4.0
+    # The day-one anchor (100 underlying, 4 premium) is preserved while the
+    # position is open, so day two at 120 marks CE as 4 + 0.35 * 20 = 11.
+    assert entry_fills["SECOND_SESSION_OPTION_ADD"].fill_price == 11.0
 
 
 def test_daily_mtm_records_snapshot_event_at_session_boundary(monkeypatch):
