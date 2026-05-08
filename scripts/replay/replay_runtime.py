@@ -752,11 +752,13 @@ class ReplayEngine:
                     # at session boundaries. carry_over / daily_mtm let
                     # positions persist across days so PnL reflects natural
                     # exits (TP/SL/strategy-EOD) instead of replay-injected
-                    # 15:00-IST market-close marks. State (price_book,
-                    # close_history) is preserved across the boundary so
-                    # the strategy's indicators retain continuity, matching
-                    # production behaviour where the runtime persists across
-                    # trading days.
+                    # 15:00-IST market-close marks. Indicator close_history
+                    # is preserved across carry-over boundaries so strategy
+                    # indicators retain continuity, matching production. The
+                    # synthetic option price book is preserved only when an
+                    # option position is actually open; flat strategies need a
+                    # fresh ATM anchor on the next session so overnight gaps do
+                    # not corrupt the next independent option trade's fills.
                     if end_policy == END_POLICY_FORCE_EXIT:
                         self._finalize_open_positions(
                             last_bar=prev_bar,
@@ -765,7 +767,10 @@ class ReplayEngine:
                         )
                         self._price_book_state = {}
                         self._close_history = defaultdict(list)
-                    elif end_policy == END_POLICY_DAILY_MTM:
+                    else:
+                        if not self._recorder_has_open_position():
+                            self._price_book_state = {}
+                    if end_policy == END_POLICY_DAILY_MTM:
                         # Snapshot unrealised mark at session close without
                         # closing the position. The recorder treats this as
                         # an audit event; the position remains open into

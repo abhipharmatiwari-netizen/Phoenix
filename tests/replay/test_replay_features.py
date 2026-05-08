@@ -125,6 +125,34 @@ class _EntryThenBoundaryExit:
         )
 
 
+class _SecondSessionOptionEntry:
+    def __init__(self) -> None:
+        self.last_price = {}
+        self._bars_seen = 0
+
+    def on_tick(self, label, price) -> None:
+        del label, price
+
+    def on_bar(self, label, timeframe_seconds, candle, indicators) -> None:
+        del label, timeframe_seconds, candle, indicators
+        self._bars_seen += 1
+        if self._bars_seen != 2:
+            return
+        place_order_via_bridge(
+            strategy_id=StrategyId("ema20_strategy"),
+            order_req=OrderRequest(
+                symbol="NIFTY_ATM_CE",
+                quantity=1,
+                side=OrderSide.BUY,
+                order_type=OrderType.MARKET,
+                product_type=ProductType.INTRADAY,
+                time_in_force=TimeInForce.DAY,
+                purpose=OrderPurpose.ENTRY,
+                tag="SECOND_SESSION_OPTION_ENTRY",
+            ),
+        )
+
+
 def test_bar_to_indicators_uses_private_exclusive_ema_when_present():
     ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
     bar = _bar(ts, close=100.0)
@@ -317,6 +345,39 @@ def test_carry_over_does_not_finalize_at_session_boundary(monkeypatch):
         if e.get("reason") == "REPLAY_WINDOW_END_FORCED"
     ]
     assert window_marks and window_marks[0].get("realized") is False
+
+
+def test_carry_over_resets_option_price_book_when_flat_at_session_boundary(monkeypatch):
+    """A flat strategy must get a fresh synthetic ATM option anchor on the
+    next session even though carry_over preserves indicator history."""
+    base_ts = datetime(2026, 3, 2, 15, 10, tzinfo=timezone.utc)
+    bars = [_bar(base_ts, close=100.0), _bar(base_ts, close=120.0, day_offset=1)]
+
+    monkeypatch.setattr(replay_runtime_mod, "load_bars_from_postgres", lambda **kwargs: list(bars))
+    monkeypatch.setitem(
+        replay_runtime_mod.STRATEGY_BUILDERS,
+        "ema20_strategy",
+        lambda *_args: _SecondSessionOptionEntry(),
+    )
+
+    recorder = ReplayEngine(
+        ReplayConfig(
+            dsn="postgresql://ignored",
+            strategy_id="ema20_strategy",
+            underlying_key="NIFTY",
+            strategy_params={},
+            timeframes=[300],
+            # Default execution = carry_over. The strategy is flat at the
+            # boundary, so the option proxy should re-anchor on day two.
+        )
+    ).run()
+
+    entry_fills = [fill for fill in recorder.fills if fill.tag == "SECOND_SESSION_OPTION_ENTRY"]
+    assert len(entry_fills) == 1
+    assert entry_fills[0].symbol == "NIFTY_ATM_CE"
+    # With a fresh day-two anchor, base premium is max(ATR * 2, 2% underlying)
+    # = max(4.0, 2.4). If the day-one 100.0 anchor leaks, this fill is 11.0.
+    assert entry_fills[0].fill_price == 4.0
 
 
 def test_daily_mtm_records_snapshot_event_at_session_boundary(monkeypatch):
