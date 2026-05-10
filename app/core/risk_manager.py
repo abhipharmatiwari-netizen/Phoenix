@@ -1544,6 +1544,15 @@ class RiskManager:
             self._propagate_kill_switch_to_durable_manager(
                 reasons=hit_reasons, source=source,
             )
+            # Issue #222 (PR #234 round-3 review P2): the bridge call
+            # above can construct the hub runtime singleton on first use
+            # in early startup (before the regular tick path has built
+            # it). Republish legacy state HERE so the freshly-built hub
+            # observes ``legacy_active=True`` immediately — otherwise
+            # /readyz reports ``publisher_seen=false`` / ``legacy_active=
+            # false`` for the exact startup bridge-failure case the
+            # divergence detector is meant to surface.
+            self._publish_legacy_kill_switch_state_to_hub()
             if self.kill_switch_square_off_open_positions and has_open_positions:
                 try:
                     self.square_off_all(
@@ -1575,6 +1584,11 @@ class RiskManager:
             self._propagate_kill_switch_to_durable_manager(
                 reasons=["legacy_already_tripped_retry"], source=source,
             )
+            # PR #234 round-3 review P2: republish after the retry path
+            # too — same rationale as above (the retry can lazily build
+            # the hub runtime; republish so it observes the active
+            # legacy halt immediately).
+            self._publish_legacy_kill_switch_state_to_hub()
         return {
             "kill_switch_activated": bool(self.kill_switch_activated),
             "daily_realized_pnl": float(realized_pnl),

@@ -1263,11 +1263,17 @@ async def readyz() -> JSONResponse:
             payload["kill_switch_legacy_active"] = bool(div.get("legacy_active", False))
             if div.get("divergent"):
                 _emit_kill_switch_divergence_alert(div)
-            else:
+            elif div.get("durable_global_active") is not None:
                 # Healthy / converged: emit one-shot RESOLVED if we
-                # previously saw a divergence. Note this fires even
-                # when the durable kill switch is now ACTIVE — that's
-                # the expected bridge-converged path.
+                # previously saw a divergence — but only when the
+                # durable KillSwitchManager state is KNOWN. PR #234
+                # round-3 review P2: when ``compute_kill_switch_divergence``
+                # cannot read the durable manager it returns
+                # ``divergent=False`` with ``durable_global_active=None``;
+                # treating that as a clean convergence would emit a
+                # false RESOLVED audit event despite legacy still
+                # potentially being active. Gate on a known durable
+                # state to avoid the spurious resolved entry.
                 _maybe_emit_kill_switch_divergence_resolved()
         except Exception as _div_exc:
             # Divergence detection failure is non-fatal here — log so
