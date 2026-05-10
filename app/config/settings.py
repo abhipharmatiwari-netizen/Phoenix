@@ -436,6 +436,23 @@ class Settings(BaseSettings):
         validation_alias="POSITION_TRAILING_LOCK_EXIT_COOLDOWN_SECONDS",
         description="Cooldown between per-position trailing-lock exit attempts for the same symbol.",
     )
+    # Issue #225 (PR #236 review): per-position inflight idempotency
+    # marker max age. Default 120s — must be larger than the watchdog
+    # cadence (``hub_subscription_poll_interval`` default 60s) so the
+    # marker outlives at least one full poll cycle. If this is set
+    # smaller than the watchdog cadence, the marker can time out
+    # BEFORE the next evaluate cycle fires, allowing a duplicate
+    # submission against the same in-flight broker order — recreating
+    # the 2026-05-08 duplicate-fill scenario.
+    position_trailing_lock_inflight_max_seconds: float = Field(
+        default=120.0,
+        validation_alias="POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS",
+        description=(
+            "Max age of an inflight trailing-lock marker before it is "
+            "auto-cleared with an ERROR event (issue #225). MUST be "
+            "larger than the engine's watchdog cadence."
+        ),
+    )
     enable_eod_exit: bool = Field(
         default=False,
         validation_alias="ENABLE_EOD_EXIT",
@@ -563,6 +580,71 @@ class Settings(BaseSettings):
         default="daily_pnl",
         description="BigQuery table for daily PnL snapshots (multi-tenant).",
     )
+
+    @model_validator(mode="after")
+    def validate_position_trailing_lock_inflight_window(self) -> Settings:
+        """Issue #225 (PR #236 review P2): validate the inflight window.
+
+        Round-3 review P2: skip validation when trailing-lock is
+        DISABLED — there is no inflight protection to validate, and
+        operators legitimately may not have configured the inflight
+        window when ``POSITION_TRAILING_LOCK_ENABLED=false``.
+
+        Round-4 review P2/P3:
+          - Reject non-finite values (NaN, +/-inf). NaN comparisons
+            are always False so an unchecked NaN max age makes every
+            marker time out immediately, silently disabling the
+            duplicate-fill guard; +inf leaves stale markers blocking
+            exits forever.
+          - Compare against the EFFECTIVE watchdog interval. The
+            profit watchdog clamps ``hub_subscription_poll_interval``
+            with ``max(10.0, interval)`` in ``app/hub/hub.py``; an
+            inflight window of 5s combined with a configured poll of
+            1s passes the raw check but expires before the actual
+            10s evaluate cycle.
+        """
+        if not bool(getattr(self, "position_trailing_lock_enabled", False)):
+            return self
+        import math
+        inflight_max = float(
+            getattr(self, "position_trailing_lock_inflight_max_seconds", 0.0) or 0.0
+        )
+        if not math.isfinite(inflight_max):
+            raise ValueError(
+                "POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS must be a "
+                f"finite number; got {inflight_max!r}. NaN expires every "
+                "marker immediately (silently disabling protection); "
+                "+/-inf leaves stale markers blocking exits forever."
+            )
+        if inflight_max <= 0.0:
+            raise ValueError(
+                "POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS must be > 0 "
+                "when POSITION_TRAILING_LOCK_ENABLED=true; "
+                f"got {inflight_max}. Setting it to 0 silently disables "
+                "the trailing-lock duplicate-fill protection (issue #225)."
+            )
+        # Effective watchdog floor — the profit watchdog clamps the
+        # configured poll interval at 10s, so the inflight window must
+        # outlast the LARGER of the configured interval and the 10s
+        # floor.
+        raw_poll_interval = float(
+            getattr(self, "hub_subscription_poll_interval", 0.0) or 0.0
+        )
+        effective_poll_interval = max(10.0, raw_poll_interval) if raw_poll_interval > 0.0 else 10.0
+        if inflight_max <= effective_poll_interval:
+            raise ValueError(
+                "POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS "
+                f"({inflight_max}) must be larger than the effective "
+                f"watchdog interval ({effective_poll_interval}s — the "
+                f"larger of HUB_SUBSCRIPTION_POLL_INTERVAL "
+                f"({raw_poll_interval}) and the 10s clamp floor in "
+                "hub.py). Otherwise the inflight marker can expire "
+                "before the next watchdog evaluation, recreating the "
+                "2026-05-08 duplicate-fill scenario (issue #225). Set "
+                f"the inflight window to at least "
+                f"{effective_poll_interval + 30} seconds."
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_profit_sweep_settings(self) -> Settings:

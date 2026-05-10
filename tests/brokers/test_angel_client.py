@@ -173,6 +173,86 @@ def test_parse_orders_keeps_legacy_terminal_drop_when_snapshot_flag_disabled(
     assert orders == []
 
 
+# ---------------------------------------------------------------------------
+# Issue #224: snapshot poll path must capture broker rejection text +
+# error code so terminal non-fill diagnostics are observable.
+# ---------------------------------------------------------------------------
+
+
+def _raw_rejected_row(*, text: str = "", errorcode: str = "") -> dict:
+    """Realistic Angel REJECTED snapshot row that carries broker
+    diagnostics in ``text`` + ``errorcode`` fields."""
+    return {
+        "orderid": "260508000842329",
+        "tradingsymbol": "NATURALGAS22MAY26265CE",
+        "transactiontype": "SELL",
+        "ordertype": "LIMIT",
+        "producttype": "INTRADAY",
+        "quantity": "1250",
+        "filledshares": "0",
+        "averageprice": "0",
+        "price": "11.65",
+        "exchange": "MCX",
+        "updatetime": "2026-05-08T18:58:33+05:30",
+        "orderstatus": "REJECTED",
+        "text": text,
+        "errorcode": errorcode,
+    }
+
+
+def test_parse_orders_captures_broker_rejection_text_and_errorcode(monkeypatch):
+    """Issue #224: when the broker rejects an order, the snapshot must
+    carry the rejection text and error code into ``OrderStatus`` so the
+    lifecycle log can surface diagnostics."""
+    monkeypatch.setenv("ORDER_SNAPSHOT_PRESERVE_TERMINAL", "true")
+    client = AngelBrokerClient(_dummy_account(), _dummy_secrets())
+
+    orders = client._parse_orders(
+        {
+            "data": [
+                _raw_rejected_row(
+                    text="RMS:Margin Exceeds, Required:75000 Available:50000",
+                    errorcode="AB1009",
+                )
+            ]
+        }
+    )
+
+    assert len(orders) == 1
+    o = orders[0]
+    assert o.status == "REJECTED"
+    assert o.status_message == "RMS:Margin Exceeds, Required:75000 Available:50000"
+    assert o.error_code == "AB1009"
+
+
+def test_parse_orders_tolerates_legacy_rejectionreason_field(monkeypatch):
+    """Some Angel responses carry the rejection text under
+    ``rejectionreason`` instead of ``text``. Both must surface."""
+    monkeypatch.setenv("ORDER_SNAPSHOT_PRESERVE_TERMINAL", "true")
+    client = AngelBrokerClient(_dummy_account(), _dummy_secrets())
+
+    legacy_row = _raw_rejected_row(text="", errorcode="")
+    legacy_row["rejectionreason"] = "Insufficient holdings to cover SELL"
+    legacy_row["errorcode"] = ""
+    orders = client._parse_orders({"data": [legacy_row]})
+
+    assert len(orders) == 1
+    assert orders[0].status_message == "Insufficient holdings to cover SELL"
+
+
+def test_parse_orders_no_diagnostics_when_broker_omits_them(monkeypatch):
+    """If broker doesn't include ``text`` / ``errorcode``, both fields
+    must be None — never empty strings or coerced fallback values."""
+    monkeypatch.setenv("ORDER_SNAPSHOT_PRESERVE_TERMINAL", "true")
+    client = AngelBrokerClient(_dummy_account(), _dummy_secrets())
+
+    orders = client._parse_orders({"data": [_raw_order_row(status="COMPLETE")]})
+
+    assert len(orders) == 1
+    assert orders[0].status_message is None
+    assert orders[0].error_code is None
+
+
 def test_place_order_retries_timeout_then_succeeds(monkeypatch):
     class _FlakyOrderClient:
         def __init__(self) -> None:
@@ -280,3 +360,53 @@ def test_place_order_unregistered_ip_returns_rejected_and_sets_cooldown():
     assert "Unregistered IP address" in resp.message
     assert client._orders_blocked_count == 1
     assert client._orders_blocked_until > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Codex round-1 review on PR #235: 3 follow-up bugs.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_orders_skips_blank_text_to_use_rejectionreason_fallback(monkeypatch):
+    """Codex P2 round 1: a whitespace-only ``text=" "`` previously was
+    selected by the ``or`` chain, then collapsed to None on strip — losing
+    the actual rejection text in fallback fields. Trim each candidate
+    before choosing the first non-empty value."""
+    monkeypatch.setenv("ORDER_SNAPSHOT_PRESERVE_TERMINAL", "true")
+    client = AngelBrokerClient(_dummy_account(), _dummy_secrets())
+
+    row = _raw_rejected_row(text="   ", errorcode="AB1009")
+    row["rejectionreason"] = "Insufficient holdings to cover SELL"
+    orders = client._parse_orders({"data": [row]})
+
+    assert len(orders) == 1
+    assert orders[0].status_message == "Insufficient holdings to cover SELL"
+
+
+def test_parse_orders_recognizes_camelCase_errorCode(monkeypatch):
+    """Codex P2 round 1: ``errorCode`` (camelCase) is the form Angel
+    uses elsewhere in the codebase — must be normalized."""
+    monkeypatch.setenv("ORDER_SNAPSHOT_PRESERVE_TERMINAL", "true")
+    client = AngelBrokerClient(_dummy_account(), _dummy_secrets())
+
+    row = _raw_rejected_row(text="Margin Exceeds", errorcode="")
+    row["errorCode"] = "AB1009"
+    orders = client._parse_orders({"data": [row]})
+
+    assert len(orders) == 1
+    assert orders[0].error_code == "AB1009"
+
+
+def test_parse_orders_blank_errorCode_falls_back_to_lowercase(monkeypatch):
+    """If multiple casings carry partial values, the first non-empty
+    after trim wins."""
+    monkeypatch.setenv("ORDER_SNAPSHOT_PRESERVE_TERMINAL", "true")
+    client = AngelBrokerClient(_dummy_account(), _dummy_secrets())
+
+    row = _raw_rejected_row(text="error", errorcode="")
+    row["errorCode"] = "  "  # whitespace
+    row["error_code"] = "AB1004"
+    orders = client._parse_orders({"data": [row]})
+
+    assert len(orders) == 1
+    assert orders[0].error_code == "AB1004"

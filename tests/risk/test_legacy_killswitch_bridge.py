@@ -524,9 +524,13 @@ def test_bridge_re_trips_active_manager_after_runtime_swap(
 
     def get_runtime():
         call_count["n"] += 1
-        # Bridge calls get_hub_runtime twice: once at the start (sees v1)
-        # and once post-save to verify (must see v2 — the swap).
-        if call_count["n"] >= 2:
+        # Calls in order (post PR #234 review P3 fix):
+        #   1. _publish_legacy_kill_switch_state_to_hub pre-throttle
+        #   2. _publish_legacy_kill_switch_state_to_hub post-evaluate
+        #   3. bridge initial resolve (sees ksm_v1)
+        #   4. bridge post-save resolve (must see ksm_v2 — the swap)
+        # Swap on call 4.
+        if call_count["n"] >= 4:
             runtime_holder.kill_switch_manager = ksm_v2
         return runtime_holder
 

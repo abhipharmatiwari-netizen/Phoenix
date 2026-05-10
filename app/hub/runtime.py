@@ -327,6 +327,29 @@ class HubRuntime:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.clock: IClock = SystemClock()
+        # Issue #222: legacy-kill-switch state publisher.
+        # Stream-path ``RiskManager`` lives in the stream worker (separate
+        # object instance from the hub) but the same process. The bridge
+        # in ``RiskManager._propagate_kill_switch_to_durable_manager``
+        # also publishes its current legacy ``kill_switch_activated`` flag
+        # here so the hub can detect divergence — i.e. legacy=True while
+        # durable ``KillSwitchManager`` is INACTIVE. Such divergence
+        # indicates the bridge has not yet succeeded (transient infra
+        # failure) and is the silent-bypass condition that bit live on
+        # 2026-05-08 for 23 minutes.
+        # Thread-safe via _legacy_lock; serializable via
+        # ``get_legacy_kill_switch_snapshot``.
+        from threading import Lock as _Lock
+        self._legacy_kill_switch_lock = _Lock()
+        self._legacy_kill_switch_active: bool = False
+        self._legacy_kill_switch_reason: Optional[str] = None
+        self._legacy_kill_switch_updated_at: Optional[Any] = None  # datetime
+        self._legacy_kill_switch_publisher_seen: bool = False
+        # PR #234 round-1 review P2: track the first-active timestamp
+        # separately from updated_at so divergence_age_seconds reports
+        # how long legacy has been halted, not the heartbeat interval
+        # since the last republish.
+        self._legacy_kill_switch_first_active_at: Optional[Any] = None
 
         # Core engines
         self.capital_engine = CapitalEngine()
@@ -901,6 +924,141 @@ class HubRuntime:
         """
         if self.circuit_breaker is not None:
             self.circuit_breaker.update_volatility(volatility_proxy)
+
+    # ----------------------------------------------------------------------
+    # Issue #222: legacy-kill-switch publisher + divergence detection.
+    # ----------------------------------------------------------------------
+
+    def record_legacy_kill_switch_state(
+        self,
+        *,
+        active: bool,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Publish the stream-path ``RiskManager.kill_switch_activated``
+        state to the hub so that ``/readyz`` and admin endpoints can
+        detect divergence with the durable ``KillSwitchManager``.
+
+        Called by ``RiskManager.evaluate_account_loss`` on every cycle
+        (including when the legacy flag is False — so ``False`` overwrites
+        any earlier ``True``). Thread-safe via ``_legacy_kill_switch_lock``.
+        """
+        from datetime import datetime as _dt, timezone as _tz
+        now_utc = _dt.now(_tz.utc)
+        new_active = bool(active)
+        with self._legacy_kill_switch_lock:
+            prev_active = self._legacy_kill_switch_active
+            self._legacy_kill_switch_active = new_active
+            self._legacy_kill_switch_reason = reason
+            self._legacy_kill_switch_updated_at = now_utc
+            self._legacy_kill_switch_publisher_seen = True
+            # PR #234 round-1 review P2: track first-active timestamp
+            # separately so divergence_age_seconds reports how long
+            # legacy has been halted, not just the heartbeat interval.
+            # Set on False→True transition; clear on True→False.
+            if new_active and not prev_active:
+                self._legacy_kill_switch_first_active_at = now_utc
+            elif not new_active:
+                self._legacy_kill_switch_first_active_at = None
+
+    def get_legacy_kill_switch_snapshot(self) -> dict:
+        """Return a serializable snapshot of the published legacy state.
+
+        ``publisher_seen`` is False until ``record_legacy_kill_switch_state``
+        has been called at least once — useful for distinguishing
+        "no publisher running" from "publisher running and reports False".
+        """
+        with self._legacy_kill_switch_lock:
+            updated_iso = (
+                self._legacy_kill_switch_updated_at.isoformat().replace(
+                    "+00:00", "Z"
+                )
+                if self._legacy_kill_switch_updated_at is not None
+                else None
+            )
+            first_active_iso = (
+                self._legacy_kill_switch_first_active_at.isoformat().replace(
+                    "+00:00", "Z"
+                )
+                if self._legacy_kill_switch_first_active_at is not None
+                else None
+            )
+            return {
+                "publisher_seen": bool(self._legacy_kill_switch_publisher_seen),
+                "legacy_active": bool(self._legacy_kill_switch_active),
+                "legacy_reason": self._legacy_kill_switch_reason,
+                "legacy_updated_at": updated_iso,
+                # PR #234 round-1 review P2: first-active timestamp for
+                # accurate divergence-age reporting.
+                "legacy_first_active_at": first_active_iso,
+            }
+
+    def compute_kill_switch_divergence(self) -> dict:
+        """Detect divergence between legacy ``RiskManager.kill_switch_activated``
+        and durable ``KillSwitchManager`` GLOBAL state.
+
+        Divergence definition (issue #222): ``legacy_active=True`` AND the
+        durable manager has NO active record at GLOBAL scope (i.e.
+        ``is_tripped(GLOBAL, "GLOBAL")=False``). This is the silent-
+        bypass scenario — the legacy stream-path treats trading as
+        halted but the hub OrderRouter is still routing entries.
+
+        Returns a dict with:
+        - ``divergent``: bool
+        - ``legacy_active``: bool
+        - ``durable_global_active``: bool (None if KSM unavailable)
+        - ``legacy_reason``: str | None
+        - ``divergence_age_seconds``: float | None — seconds since the
+          publisher last reported (None if never reported)
+        """
+        from datetime import datetime as _dt, timezone as _tz
+        snapshot = self.get_legacy_kill_switch_snapshot()
+        legacy_active = snapshot["legacy_active"]
+        try:
+            from app.risk.kill_switch import KillSwitchScope
+            ksm = getattr(self, "kill_switch_manager", None)
+            durable_global_active = bool(
+                ksm.is_tripped(KillSwitchScope.GLOBAL, "GLOBAL")
+            ) if ksm is not None else None
+        except Exception:
+            durable_global_active = None
+
+        if durable_global_active is None:
+            divergent = False  # cannot compute without KSM
+        else:
+            divergent = legacy_active and not durable_global_active
+
+        # PR #234 round-1 review P2: divergence_age_seconds reports
+        # the time since legacy first became active in this episode,
+        # not the heartbeat interval since the last republish. Falls
+        # back to legacy_updated_at if first_active_at is unavailable
+        # (e.g. legacy is currently inactive).
+        age_seconds: Optional[float] = None
+        age_source = (
+            snapshot.get("legacy_first_active_at")
+            or snapshot.get("legacy_updated_at")
+        )
+        if age_source:
+            try:
+                from datetime import datetime as _dt2
+                ts_text = age_source
+                if ts_text.endswith("Z"):
+                    ts_text = ts_text[:-1] + "+00:00"
+                ts = _dt2.fromisoformat(ts_text)
+                age_seconds = (
+                    _dt.now(_tz.utc) - ts
+                ).total_seconds()
+            except Exception:
+                age_seconds = None
+
+        return {
+            "divergent": bool(divergent),
+            "legacy_active": bool(legacy_active),
+            "durable_global_active": durable_global_active,
+            "legacy_reason": snapshot["legacy_reason"],
+            "publisher_seen": snapshot["publisher_seen"],
+            "divergence_age_seconds": age_seconds,
+        }
 
 
 # Return a cached singleton HubRuntime instance.
