@@ -570,13 +570,26 @@ class HubRuntime:
         # corrupt rows that the dashboard's reactive defence already
         # surfaces.
         def _first_present(p, *keys):
+            """Return the first key whose value is present (not None
+            and not a blank string). PR #237 round-5 review P2/P3:
+            blank strings are treated as MISSING so a row carrying
+            ``{'netqty': '', 'net': '65', ...}`` falls through to
+            ``net``, matching the angel_client normalizer; same for a
+            blank ``symbol`` field falling through to ``tradingsymbol``.
+            """
             for k in keys:
                 if isinstance(p, dict):
-                    if k in p and p[k] is not None:
-                        return p[k]
+                    if k in p:
+                        v = p[k]
+                        if v is not None and not (
+                            isinstance(v, str) and not v.strip()
+                        ):
+                            return v
                 else:
                     v = getattr(p, k, None)
-                    if v is not None:
+                    if v is not None and not (
+                        isinstance(v, str) and not v.strip()
+                    ):
                         return v
             return None
 
@@ -587,6 +600,8 @@ class HubRuntime:
             production normalizer exactly."""
             for v in values:
                 if v is None:
+                    continue
+                if isinstance(v, str) and not v.strip():
                     continue
                 f = _coerce_float(v)
                 if f != 0.0:
@@ -671,97 +686,116 @@ class HubRuntime:
                 qty = _coerce_int(qty_raw)
                 if qty == 0:
                     continue
-                # PR #237 round-4 review P2: use FIRST-PRESENT primary
-                # alias (matching dashboard ``_first_present`` semantics
-                # in ``app/dashboard/tenant_routes.py``). Dashboard
-                # preserves an explicit zero ``avg_price`` as the
-                # corruption signal — POSITION_VIEW_AVG_PRICE_INVALID
-                # is the existing reactive defence — so the audit must
-                # do the same. Order matches dashboard exactly so a row
-                # like ``{'avg_price': 0, 'avgPrice': 100}`` returns 0
-                # (corrupt) and ``{'entry_price': 100}`` returns 100
-                # (healthy via documented fallback).
-                primary_raw = _first_present(
-                    pos,
-                    "avg_price", "avgPrice", "average_price", "avgprice",
-                    "entry_price",
-                )
-                if primary_raw is None:
-                    primary_f: Optional[float] = None
-                else:
-                    primary_f = _coerce_float(primary_raw)
+                # PR #237 round-4/round-5 review P2: tiered avg-price
+                # resolution.
+                #
+                #   Tier 1 — normalized authoritative ``avg_price``
+                #   (snake_case): if PRESENT, treat as the dashboard
+                #   defence does (zero or negative = corrupt regardless
+                #   of any other alias). This preserves the existing
+                #   POSITION_VIEW_AVG_PRICE_INVALID signal that the
+                #   dashboard emits at request time.
+                #
+                #   Tier 2 — broker primary aliases: when ``avg_price``
+                #   snake_case is missing, raw broker rows carry the
+                #   value under ``avgPrice``/``avgprice``/
+                #   ``average_price``/``averageprice``. Production
+                #   normalizers (angel_client, position_sync) use
+                #   FIRST-NON-ZERO across this set, so a row like
+                #   ``{'avgPrice': 0, 'avgprice': 250.5}`` is healthy.
+                #
+                #   Tier 3 — broker net fallback (``netavgprice``,
+                #   ``netAvgPrice``, ``netprice``, ``netPrice``).
+                #
+                #   Tier 4 — side-specific fallback gated by qty sign:
+                #     qty>0: ``buyavgprice``/``buyAvgPrice``/
+                #            ``buyaverageprice``/``buyAveragePrice``
+                #     qty<0: ``sellavgprice``/``sellAvgPrice``/
+                #            ``sellaverageprice``/``sellAveragePrice``
+                #
+                #   Tier 5 — final fallback ``entry_price`` (only used
+                #   when no other alias is populated).
+                def _maybe_get(p, key):
+                    if isinstance(p, dict):
+                        return p.get(key)
+                    return getattr(p, key, None)
 
-                if primary_f is not None and primary_f < 0.0:
-                    # Negative primary is always corrupt — broker would
-                    # never legitimately send a negative average price
-                    # for an open position; broker fallbacks must NOT
-                    # mask it.
-                    avg_f_for_report = primary_f
-                elif primary_f is not None and primary_f > 0.0:
-                    # Healthy via primary alias.
-                    continue
+                # Tier 1: snake_case avg_price is authoritative when
+                # present. ``avg_price=0`` is corrupt; ``avg_price=-X``
+                # is corrupt; ``avg_price=Y>0`` is healthy.
+                snake_case_avg = _maybe_get(pos, "avg_price")
+                snake_case_present = (
+                    snake_case_avg is not None
+                    and not (
+                        isinstance(snake_case_avg, str)
+                        and not snake_case_avg.strip()
+                    )
+                )
+                if snake_case_present:
+                    snake_f = _coerce_float(snake_case_avg)
+                    if snake_f > 0.0:
+                        continue  # healthy via snake_case
+                    avg_f_for_report = snake_f
                 else:
-                    # primary_f is None (no primary alias present) OR
-                    # 0.0 (raw broker rows often carry ``avgprice=0``
-                    # while a valid net/side fallback is populated).
-                    # Try the broker normalizer's fallback chain — same
-                    # ordering / first-non-zero semantics as
-                    # ``app/core/position_sync.py::_extract_broker_avg_price``.
-                    if isinstance(pos, dict):
+                    # Tier 2: broker primary aliases (first-non-zero).
+                    broker_primary = _pick_nonzero(
+                        _maybe_get(pos, "avgPrice"),
+                        _maybe_get(pos, "avgprice"),
+                        _maybe_get(pos, "average_price"),
+                        _maybe_get(pos, "averageprice"),
+                    )
+                    if broker_primary is not None and broker_primary < 0.0:
+                        avg_f_for_report = broker_primary
+                    elif broker_primary is not None and broker_primary > 0.0:
+                        continue  # healthy via broker primary
+                    else:
+                        # Tier 3: broker net fallback.
                         net_value = _pick_nonzero(
-                            pos.get("netavgprice"),
-                            pos.get("netAvgPrice"),
-                            pos.get("netprice"),
-                            pos.get("netPrice"),
+                            _maybe_get(pos, "netavgprice"),
+                            _maybe_get(pos, "netAvgPrice"),
+                            _maybe_get(pos, "netprice"),
+                            _maybe_get(pos, "netPrice"),
                         )
+                        # Tier 4: side-specific fallback.
                         side_value: Optional[float] = None
                         if qty > 0:
                             side_value = _pick_nonzero(
-                                pos.get("buyavgprice"),
-                                pos.get("buyAvgPrice"),
-                                pos.get("buyaverageprice"),
-                                pos.get("buyAveragePrice"),
+                                _maybe_get(pos, "buyavgprice"),
+                                _maybe_get(pos, "buyAvgPrice"),
+                                _maybe_get(pos, "buyaverageprice"),
+                                _maybe_get(pos, "buyAveragePrice"),
                             )
                         elif qty < 0:
                             side_value = _pick_nonzero(
-                                pos.get("sellavgprice"),
-                                pos.get("sellAvgPrice"),
-                                pos.get("sellaverageprice"),
-                                pos.get("sellAveragePrice"),
+                                _maybe_get(pos, "sellavgprice"),
+                                _maybe_get(pos, "sellAvgPrice"),
+                                _maybe_get(pos, "sellaverageprice"),
+                                _maybe_get(pos, "sellAveragePrice"),
                             )
-                    else:
-                        net_value = _pick_nonzero(
-                            getattr(pos, "netavgprice", None),
-                            getattr(pos, "netAvgPrice", None),
-                            getattr(pos, "netprice", None),
-                            getattr(pos, "netPrice", None),
+                        broker_fallback = (
+                            net_value
+                            if net_value is not None
+                            else side_value
                         )
-                        side_value = None
-                        if qty > 0:
-                            side_value = _pick_nonzero(
-                                getattr(pos, "buyavgprice", None),
-                                getattr(pos, "buyAvgPrice", None),
-                                getattr(pos, "buyaverageprice", None),
-                                getattr(pos, "buyAveragePrice", None),
+                        if broker_fallback is not None and broker_fallback > 0.0:
+                            continue  # healthy via broker fallback
+                        # Tier 5: final entry_price fallback (only when
+                        # no other alias contributed).
+                        entry_raw = _maybe_get(pos, "entry_price")
+                        entry_present = (
+                            entry_raw is not None
+                            and not (
+                                isinstance(entry_raw, str)
+                                and not entry_raw.strip()
                             )
-                        elif qty < 0:
-                            side_value = _pick_nonzero(
-                                getattr(pos, "sellavgprice", None),
-                                getattr(pos, "sellAvgPrice", None),
-                                getattr(pos, "sellaverageprice", None),
-                                getattr(pos, "sellAveragePrice", None),
-                            )
-                    fallback_value = (
-                        net_value if net_value is not None else side_value
-                    )
-                    if fallback_value is not None and fallback_value > 0.0:
-                        # Healthy via broker fallback.
-                        continue
-                    # Genuinely corrupt: qty != 0 + no positive
-                    # avg_price found anywhere.
-                    avg_f_for_report = (
-                        primary_f if primary_f is not None else 0.0
-                    )
+                        )
+                        if entry_present:
+                            entry_f = _coerce_float(entry_raw)
+                            if entry_f > 0.0:
+                                continue  # healthy via entry_price
+                        # Genuinely corrupt: qty != 0 with no positive
+                        # avg_price across any tier.
+                        avg_f_for_report = 0.0
                 # Found a corrupt record.
                 symbol = str(
                     _first_present(

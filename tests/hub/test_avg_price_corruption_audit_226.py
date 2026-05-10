@@ -575,3 +575,133 @@ def test_audit_surfaces_setup_error_when_list_runner_ids_raises():
     assert result["corrupt_count"] == 0
     assert result["setup_error"] is not None
     assert "hub registry unreachable" in result["setup_error"]
+
+
+# ---------------------------------------------------------------------------
+# PR #237 round-5: full-spelling broker primary, blank-string fallthrough,
+# tiered alias resolution.
+# ---------------------------------------------------------------------------
+
+
+def test_audit_honours_averageprice_full_spelling_broker_primary():
+    """Round-5 P2: ``averageprice`` (single word, no underscore) is a
+    valid broker primary alias accepted by both
+    ``app/core/position_sync.py::_extract_broker_avg_price`` and
+    ``app/brokers/angel_client.py``. A row like
+    ``{'netqty': 65, 'averageprice': 101.25}`` must NOT be flagged
+    corrupt (no other primary alias is populated)."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "netqty": 65,
+                    "averageprice": 101.25,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 0
+
+
+def test_audit_uses_first_nonzero_across_broker_primary_aliases():
+    """Round-5 P2: when no snake_case ``avg_price`` is present, the
+    audit must use FIRST-NON-ZERO across the broker primary aliases
+    (``avgPrice``, ``avgprice``, ``average_price``, ``averageprice``)
+    matching the broker normalizer. A row like
+    ``{'netqty': 65, 'avgPrice': 0, 'avgprice': 250.5}`` is healthy
+    via the positive ``avgprice``."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "netqty": 65,
+                    "avgPrice": 0,
+                    "avgprice": 250.5,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 0
+
+
+def test_audit_treats_blank_netqty_as_missing_and_falls_through_to_net():
+    """Round-5 P2: ``_first_present`` must treat an empty/whitespace
+    string as MISSING, falling through to the next alias. A raw row
+    like ``{'netqty': '', 'net': '65', 'avgprice': 0}`` would
+    otherwise be skipped (``_coerce_int('') -> 0``) and a corrupt
+    open position would never be flagged."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "netqty": "",
+                    "net": "65",
+                    "avgprice": 0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    result = rt.audit_position_avg_price_corruption()
+    assert result["corrupt_count"] == 1
+    assert result["samples"][0]["quantity"] == 65
+
+
+def test_audit_falls_through_blank_symbol_to_tradingsymbol():
+    """Round-5 P3: a blank ``symbol`` must fall through to
+    ``tradingsymbol`` so corruption samples and rate-limit keys
+    carry the actual instrument identifier rather than rate-limiting
+    every corrupt row in the account under ``(account, '')``."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": 65,
+                    "symbol": "",
+                    "tradingsymbol": "REAL_SYMBOL_X",
+                    "avg_price": 0,
+                }
+            ]
+        }
+    )
+    result = rt.audit_position_avg_price_corruption()
+    assert result["corrupt_count"] == 1
+    assert result["samples"][0]["symbol"] == "REAL_SYMBOL_X"
+
+
+def test_audit_snake_case_avg_price_zero_overrides_broker_primary():
+    """Round-4 P2 still holds under round-5 tiered logic: an explicit
+    snake_case ``avg_price=0`` is corrupt regardless of any later
+    alias. Tier 1 is authoritative when ``avg_price`` is present."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": 65,
+                    "avg_price": 0,
+                    "avgPrice": 100.0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 1
+
+
+def test_audit_uses_entry_price_only_as_final_fallback():
+    """Round-5 P2: ``entry_price`` is consulted ONLY when no other
+    avg-price alias is populated. ``{entry_price: 100}`` is healthy."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": 65,
+                    "entry_price": 100.0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 0

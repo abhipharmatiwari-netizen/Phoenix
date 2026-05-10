@@ -1009,6 +1009,58 @@ async def readyz() -> JSONResponse:
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     payload: dict = {"timestamp": now}
 
+    # Issue #226 (PR #237 round-5 review P2): populate the avg_price
+    # corruption audit FIRST — before any LIVE early-return gates
+    # (leader-lease, startup-recovery, multi-hub runner gates,
+    # stream-worker, sync-freshness). The audit doc says it runs on
+    # every readiness probe to catch corruption proactively; if any
+    # earlier gate returns 503 first, the corruption signal is lost.
+    # Population is non-blocking; the readiness-fail decision happens
+    # after the kill-switch gate.
+    #
+    # ``samples`` are kept in a LOCAL variable rather than the payload
+    # so the unauthenticated /readyz never echoes account/symbol/qty
+    # details (PR #237 round-3/round-4 review P2). Counts only.
+    #
+    # PR #237 round-5 review P2: ``get_hub_runtime()`` runs INSIDE
+    # the try block so a hub initialisation failure cannot crash the
+    # readyz handler — the structured 503/fail-closed payload is
+    # always preserved.
+    _avg_price_corruption_samples: list = []
+    _avg_price_audit_setup_error: Optional[str] = None
+    if _readiness_trade_mode() == "LIVE":
+        try:
+            _hub_runtime_for_audit = get_hub_runtime()
+            _audit_method = getattr(
+                _hub_runtime_for_audit,
+                "audit_position_avg_price_corruption",
+                None,
+            )
+            if not callable(_audit_method):
+                # PR #237 round-4 review P3: tolerate readyz runtime
+                # stubs that don't expose the audit method.
+                payload["avg_price_corrupt_count"] = 0
+                payload["avg_price_audit_read_failures"] = 0
+            else:
+                corruption = _audit_method()
+                corrupt_count = int(corruption.get("corrupt_count", 0))
+                payload["avg_price_corrupt_count"] = corrupt_count
+                _avg_price_corruption_samples = (
+                    corruption.get("samples") or []
+                )[:5]
+                payload["avg_price_audit_read_failures"] = len(
+                    corruption.get("read_failures") or []
+                )
+                _avg_price_audit_setup_error = corruption.get("setup_error")
+        except Exception as _corr_exc:
+            logger.warning(
+                "readyz: avg_price corruption audit failed (non-fatal): %s",
+                _corr_exc,
+            )
+            payload["avg_price_corrupt_count"] = -1
+            payload["avg_price_audit_read_failures"] = -1
+            _avg_price_audit_setup_error = repr(_corr_exc)
+
     if _readiness_trade_mode() == "LIVE":
         leader_lease_snapshot = _leader_lease_readiness_snapshot(runtime)
         payload["leader_lease_status"] = leader_lease_snapshot
@@ -1087,63 +1139,11 @@ async def readyz() -> JSONResponse:
             payload["reason"] = f"hub_unavailable:{exc}"
             return JSONResponse(status_code=503, content=payload)
 
-    # Issue #226 (PR #237 round-3 review P2): populate avg_price
-    # corruption audit fields BEFORE the LIVE stream-worker AND
-    # sync-freshness early-return gates. The audit is meant to surface
-    # corruption EXACTLY when broker sync is suppressed/stale or
-    # stream/watchdog is down — but those blocks return 503 first, so
-    # the audit fields would never reach the response if we ran it
-    # later. Population is non-blocking; the readiness-fail decision
-    # happens after the kill-switch gate.
-    #
-    # PR #237 round-3 review P2: keep ``samples`` in a LOCAL variable
-    # rather than the payload, so an earlier 503 path doesn't expose
-    # account/symbol/qty/avg_price details to unauthenticated /readyz
-    # callers. Only counts go in the payload; samples are consumed by
-    # the corruption-fail-readiness reason text.
-    _avg_price_corruption_samples: list = []
-    _avg_price_audit_setup_error: Optional[str] = None
-    if _readiness_trade_mode() == "LIVE":
-        # PR #237 round-4 review P3: tolerate readyz runtime stubs
-        # that don't expose ``audit_position_avg_price_corruption``.
-        # Existing test harnesses (e.g.
-        # ``tests/api/test_server.py::test_readyz_returns_200_when_single_runner_is_running``)
-        # monkeypatch ``get_hub_runtime`` with a hub-shaped stub that
-        # only provides the readiness fields needed for that test;
-        # treating a missing audit method as "audit not applicable
-        # for this stub" keeps unrelated readiness coverage green
-        # while real LIVE deployments always have the method.
-        _hub_runtime_for_audit = get_hub_runtime()
-        _audit_method = getattr(
-            _hub_runtime_for_audit,
-            "audit_position_avg_price_corruption",
-            None,
-        )
-        if not callable(_audit_method):
-            payload["avg_price_corrupt_count"] = 0
-            payload["avg_price_audit_read_failures"] = 0
-        else:
-            try:
-                corruption = _audit_method()
-                corrupt_count = int(corruption.get("corrupt_count", 0))
-                payload["avg_price_corrupt_count"] = corrupt_count
-                _avg_price_corruption_samples = (
-                    corruption.get("samples") or []
-                )[:5]
-                payload["avg_price_audit_read_failures"] = len(
-                    corruption.get("read_failures") or []
-                )
-                # PR #237 round-4 review P2: surface a setup-time
-                # account-enumeration failure so /readyz fails closed.
-                _avg_price_audit_setup_error = corruption.get("setup_error")
-            except Exception as _corr_exc:
-                logger.warning(
-                    "readyz: avg_price corruption audit failed (non-fatal): %s",
-                    _corr_exc,
-                )
-                payload["avg_price_corrupt_count"] = -1
-                payload["avg_price_audit_read_failures"] = -1
-                _avg_price_audit_setup_error = repr(_corr_exc)
+    # Issue #226: avg_price corruption audit is now populated at the
+    # very top of /readyz (before any LIVE early-return gates) — see
+    # the ``_avg_price_corruption_samples`` block above. The
+    # readiness-fail decision based on those counts happens after the
+    # kill-switch gate below.
 
     if _readiness_trade_mode() == "LIVE":
         stream_status = _stream_worker_readiness_snapshot(runtime)
