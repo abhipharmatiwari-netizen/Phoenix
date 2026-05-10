@@ -7,9 +7,13 @@ from typing import Optional
 
 from .market_context import MarketContext
 
+CLASSIFIER_VERSION = "dynamic_policy_v2"
+
 
 class Regime(str, Enum):
     TRENDING = "TRENDING"
+    TRENDING_UP = "TRENDING_UP"
+    TRENDING_DOWN = "TRENDING_DOWN"
     NORMAL = "NORMAL"
     CHOPPY = "CHOPPY"
     HIGH_VOL = "HIGH_VOL"
@@ -85,6 +89,9 @@ class RegimeClassifier:
             and ctx.di_spread >= self.thresholds.di_spread_trend
             and abs(ctx.ema_slope) >= self.thresholds.ema_slope_trend_min
         ):
+            directional = self._directional_trending_regime(ctx)
+            if directional is not None:
+                return directional
             return Regime.TRENDING
 
         use_chop_index = bool(self.thresholds.use_chop_index)
@@ -107,6 +114,27 @@ class RegimeClassifier:
             return Regime.NORMAL
 
         return Regime.NORMAL
+
+    def _directional_trending_regime(self, ctx: MarketContext) -> Optional[Regime]:
+        """Return an opt-in directional trend when DI and EMA agree.
+
+        Older callers only supplied ``di_spread`` and ``ema_slope``. In that
+        case we keep emitting legacy TRENDING so existing dynamic-policy and
+        selector configs retain their exact behaviour.
+        """
+
+        if (
+            ctx.plus_di is None
+            or ctx.minus_di is None
+            or ctx.last_price is None
+            or ctx.ema_value is None
+        ):
+            return None
+        if ctx.last_price > ctx.ema_value and ctx.plus_di > ctx.minus_di:
+            return Regime.TRENDING_UP
+        if ctx.last_price < ctx.ema_value and ctx.minus_di > ctx.plus_di:
+            return Regime.TRENDING_DOWN
+        return None
 
     def update(self, ctx: Optional[MarketContext]) -> Regime:
         target = self.classify_once(ctx)
@@ -164,6 +192,7 @@ class RegimeClassifier:
 
 
 __all__ = [
+    "CLASSIFIER_VERSION",
     "Regime",
     "RegimeThresholds",
     "RegimeClassifier",

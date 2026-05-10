@@ -103,12 +103,14 @@ def format_assumptions(execution_summary: Optional[Mapping[str, Any]] = None) ->
      current close or next-bar open depending on this configuration.
 
   5. OPTION PRICING: Historical option chains are unavailable in indicator_bars.
-     Replay uses a deterministic underlying-driven option proxy for ATM CE/PE
-     marks and fills. This is more realistic than pure underlying fills, but it
-     is still an approximation and ignores Greeks, IV, and exact strike history.
+     Replay uses a deterministic underlying-driven option proxy for ATM and
+     OTM CE/PE marks and fills. Credit-spread legs are approximated from strike
+     distance, intrinsic value, ATR, and spot; this is still an approximation
+     and ignores Greeks, IV, and exact strike history.
 
   6. PRIVATE EMA SUPPORT: Replay reads exclusive_nifty_ce_buy_ema20_30s when
-     present and falls back to derived EMA replay calculations when absent.
+     present and falls back to deterministic load-time 30s EMA calculations
+     when absent.
 
   7. SESSION RESETS / FINALIZATION: Behaviour depends on --end-policy:
      * force_exit (legacy): replay closes any open position at every session
@@ -144,6 +146,7 @@ def format_data_gaps_report(bars_loaded: Mapping[str, int], combo_analyses: Opti
             data_profile = dict(combo_analyses[key].get("data_profile") or {})
             missing_by_tf = data_profile.get("missing_optional_columns_by_timeframe") or {}
             null_by_tf = data_profile.get("null_indicator_counts_by_timeframe") or {}
+            synthetic_by_tf = data_profile.get("synthetic_indicator_counts_by_timeframe") or {}
             for timeframe, columns in sorted(missing_by_tf.items()):
                 if columns:
                     lines.append(f"    tf={timeframe}s missing optional columns: {', '.join(columns)}")
@@ -151,6 +154,10 @@ def format_data_gaps_report(bars_loaded: Mapping[str, int], combo_analyses: Opti
                 if counts:
                     counts_text = ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
                     lines.append(f"    tf={timeframe}s null indicators: {counts_text}")
+            for timeframe, counts in sorted(synthetic_by_tf.items()):
+                if counts:
+                    counts_text = ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
+                    lines.append(f"    tf={timeframe}s synthetic replay fields: {counts_text}")
     lines.append("")
     return "\n".join(lines)
 
@@ -182,9 +189,41 @@ def format_gate_diagnostics_report(gate_summaries: Mapping[str, Sequence[Mapping
         lines.append("    Top failed gates:")
         for row in failed_rows[:5]:
             timeframe = row.get("timeframe_seconds")
+            regime = row.get("regime") or "unknown"
             lines.append(
-                f"      {row.get('reason')} (gate={row.get('gate')}, tf={timeframe}s): {int(row.get('count', 0))}"
+                f"      {row.get('reason')} (gate={row.get('gate')}, tf={timeframe}s, regime={regime}): {int(row.get('count', 0))}"
             )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def format_regime_pnl_report(combo_analyses: Mapping[str, Mapping[str, Any]]) -> str:
+    lines = ["", "  REGIME PNL", "  " + "=" * 58]
+    if not combo_analyses:
+        lines.extend(["  No regime PnL available.", ""])
+        return "\n".join(lines)
+    wrote = False
+    for key, analysis in sorted(combo_analyses.items()):
+        rows = list(analysis.get("regime_summary") or [])
+        if not rows:
+            continue
+        wrote = True
+        lines.append(f"  {key}:")
+        for row in rows:
+            trades = max(1, int(row.get("trades", 0) or 0))
+            wins = int(row.get("wins", 0) or 0)
+            win_rate = wins / trades if trades else 0.0
+            lines.append(
+                "    {bucket}: trades={trades} net_pnl={net_pnl} win_rate={win_rate:.1%} avg_pnl={avg}".format(
+                    bucket=row.get("bucket") or "unknown",
+                    trades=int(row.get("trades", 0) or 0),
+                    net_pnl=row.get("net_pnl", 0.0),
+                    win_rate=win_rate,
+                    avg=row.get("avg_net_pnl", 0.0),
+                )
+            )
+    if not wrote:
+        lines.append("  No trades with regime tags.")
     lines.append("")
     return "\n".join(lines)
 
@@ -255,6 +294,7 @@ def write_full_report(
             handle.write(format_metrics_table(metrics) + "\n\n")
         for key, analysis in sorted((combo_analyses or {}).items()):
             handle.write(format_combo_diagnostics(key, analysis))
+        handle.write(format_regime_pnl_report(combo_analyses or {}))
         handle.write(format_gate_diagnostics_report(gate_summaries))
         handle.write(format_data_gaps_report(bars_loaded, combo_analyses))
         handle.write("\n" + "=" * 60 + "\n")
@@ -335,7 +375,7 @@ def _write_gate_artifacts(output_dir: str, gate_summaries: Mapping[str, Sequence
         path = os.path.join(output_dir, f"gate_summary_{key.replace('/', '_')}.csv")
         with open(path, "w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle, lineterminator="\n")
-            writer.writerow(["gate", "reason", "passed", "timeframe_seconds", "count"])
+            writer.writerow(["gate", "reason", "passed", "timeframe_seconds", "regime", "count"])
             for row in rows:
                 writer.writerow(
                     [
@@ -343,6 +383,7 @@ def _write_gate_artifacts(output_dir: str, gate_summaries: Mapping[str, Sequence
                         row.get("reason", ""),
                         str(bool(row.get("passed"))).lower(),
                         row.get("timeframe_seconds", ""),
+                        row.get("regime", ""),
                         int(row.get("count", 0)),
                     ]
                 )
@@ -418,5 +459,6 @@ __all__ = [
     "format_invalid_combinations",
     "format_metrics_table",
     "format_recommendations",
+    "format_regime_pnl_report",
     "write_full_report",
 ]

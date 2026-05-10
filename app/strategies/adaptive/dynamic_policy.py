@@ -202,6 +202,8 @@ def _regime_from_name(name: str) -> Optional[Regime]:
 def _default_profiles() -> dict[Regime, dict[str, Any]]:
     return {
         Regime.TRENDING: {},
+        Regime.TRENDING_UP: {},
+        Regime.TRENDING_DOWN: {},
         Regime.NORMAL: {},
         Regime.CHOPPY: {},
         Regime.HIGH_VOL: {},
@@ -393,7 +395,7 @@ class DynamicPolicyEngine:
                         effective[key] = value
             return effective
 
-        profile = self.config.profiles.get(regime) or {}
+        profile = self._profile_for_regime(regime)
         sanitized = self._sanitize_overrides(profile)
         effective.update(sanitized)
         self._apply_computed_overrides(effective=effective, context=context)
@@ -404,6 +406,14 @@ class DynamicPolicyEngine:
                 if key in frozen and key not in set(self.config.allow_runtime_updates_for):
                     effective[key] = frozen[key]
         return effective
+
+    def _profile_for_regime(self, regime: Regime) -> Mapping[str, Any]:
+        profile = self.config.profiles.get(regime)
+        if profile:
+            return profile
+        if regime in {Regime.TRENDING_UP, Regime.TRENDING_DOWN}:
+            return self.config.profiles.get(Regime.TRENDING) or {}
+        return profile or {}
 
     def _apply_computed_overrides(
         self,

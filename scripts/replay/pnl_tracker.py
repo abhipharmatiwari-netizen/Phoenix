@@ -141,7 +141,7 @@ class PnLTracker:
         self._trade_counter = 0
 
         for fill in fills:
-            pos_key = f"{fill.strategy_id}:{fill.underlying}"
+            pos_key = self._position_key(fill)
 
             if fill.purpose == "ENTRY":
                 self._open_positions[pos_key] = fill
@@ -210,6 +210,7 @@ class PnLTracker:
         replay_ctx = {}
         if isinstance(entry.strategy_context, dict):
             replay_ctx = dict(entry.strategy_context.get("_replay") or {})
+        persisted_regime = str(replay_ctx.get("regime") or "").strip()
         adx_regime = "unknown"
         adx_val = replay_ctx.get("adx")
         try:
@@ -260,8 +261,20 @@ class PnLTracker:
             execution_mode=str(replay_ctx.get("fill_mode") or entry.execution_mode or ""),
             entry_time_bucket=str(replay_ctx.get("time_bucket") or ""),
             entry_time_of_day=str(replay_ctx.get("time_of_day") or ""),
-            entry_regime=f"{adx_regime}|{atr_regime}",
+            entry_regime=persisted_regime or f"{adx_regime}|{atr_regime}",
         )
+
+    @staticmethod
+    def _position_key(fill: ReplayFill) -> str:
+        replay_ctx = {}
+        if isinstance(fill.strategy_context, dict):
+            replay_ctx = dict(fill.strategy_context.get("_replay") or {})
+        label = (
+            str(replay_ctx.get("position_label") or "").strip()
+            or str(getattr(fill, "symbol", "") or "").strip()
+            or str(getattr(fill, "tag", "") or "").strip()
+        )
+        return f"{fill.strategy_id}:{fill.underlying}:{label}"
 
     def compute_metrics(
         self,

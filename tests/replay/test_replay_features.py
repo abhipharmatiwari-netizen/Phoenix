@@ -165,6 +165,52 @@ def test_bar_to_indicators_uses_private_exclusive_ema_when_present():
     assert indicators["ema_20"] == 123.45
 
 
+def test_exclusive_ce_private_ema_backfill_uses_deterministic_iir():
+    ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
+    rows = [
+        BarRow(
+            ts_start=ts + timedelta(seconds=30 * idx),
+            ts_end=ts + timedelta(seconds=30 * (idx + 1)),
+            label="NIFTY_IDX",
+            timeframe_seconds=30,
+            o=100.0 + idx,
+            h=101.0 + idx,
+            l=99.0 + idx,
+            c=100.0 + idx,
+            atr=1.0,
+            rsi=60.0,
+            macd=0.0,
+            macd_signal=0.0,
+            macd_hist=0.0,
+            ema_20=None,
+            ema_30=None,
+            ema_50=None,
+            exclusive_nifty_ce_buy_ema20_30s=None,
+            adx=30.0,
+            plus_di=25.0,
+            minus_di=10.0,
+            di_spread=15.0,
+            series_index=idx,
+        )
+        for idx in range(25)
+    ]
+
+    counts = replay_runtime_mod._backfill_exclusive_ce_ema(rows)
+
+    alpha = 2.0 / 21.0
+    ema = 100.0
+    expected = None
+    for idx in range(25):
+        close = 100.0 + idx
+        ema = close if idx == 0 else (close * alpha) + (ema * (1.0 - alpha))
+        if idx == 19:
+            expected = ema
+    assert counts["exclusive_nifty_ce_buy_ema20_30s"] == 6
+    assert rows[18].exclusive_nifty_ce_buy_ema20_30s is None
+    assert rows[19].exclusive_nifty_ce_buy_ema20_30s == expected
+    assert rows[19].ema_20 == expected
+
+
 def test_load_bars_from_postgres_tolerates_missing_optional_columns(monkeypatch):
     ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
     row = (
@@ -274,6 +320,55 @@ def test_next_bar_open_fill_uses_following_bar_open(monkeypatch):
     assert len(recorder.fills) == 1
     assert recorder.fills[0].fill_price == 105.0
     assert recorder.fills[0].fill_note == "next_bar_open"
+
+
+def test_gate_summary_groups_by_regime():
+    recorder = MockExecutionRecorder()
+    recorder.set_market_context(
+        replay_runtime_mod.ReplayMarketContext(
+            timestamp=datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc),
+            underlying="NIFTY",
+            current_price=100.0,
+            phase="bar_close",
+            indicators={"regime": "TRENDING_UP"},
+        )
+    )
+
+    recorder.record_gate_decision(
+        strategy_id="exclusive_nifty_ce_buy",
+        payload={"gate": "entry", "passed": False, "reason": "rsi_band"},
+    )
+
+    rows = recorder.gate_summary_rows()
+    assert rows[0]["regime"] == "TRENDING_UP"
+    assert rows[0]["count"] == 1
+
+
+def test_nifty_weekly_credit_spreads_replay_builder_runs(monkeypatch):
+    base_ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
+    bars = [
+        _bar(base_ts, close=24000.0, open_=23980.0),
+        _bar(base_ts + timedelta(minutes=5), close=24020.0, open_=24000.0),
+    ]
+    for row in bars:
+        row.ema_20 = 23900.0
+        row.rsi = 60.0
+        row.macd_hist = 1.0
+        row.atr = 50.0
+
+    monkeypatch.setattr(replay_runtime_mod, "load_bars_from_postgres", lambda **kwargs: list(bars))
+
+    recorder = ReplayEngine(
+        ReplayConfig(
+            dsn="postgresql://ignored",
+            strategy_id="nifty_weekly_credit_spreads",
+            underlying_key="NIFTY",
+            strategy_params={},
+            timeframes=[300],
+        )
+    ).run()
+
+    assert all(fill.strategy_id == "nifty_weekly_credit_spreads" for fill in recorder.fills)
 
 
 def test_session_boundary_finalizes_open_position_under_force_exit(monkeypatch):

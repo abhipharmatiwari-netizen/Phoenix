@@ -13,6 +13,7 @@ DEFAULT_TABLE = "indicator_bars"
 _IDENTIFIER_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 
 _COLUMN_NULL_SQL: Dict[str, str] = {
+    "id": "NULL::BIGINT AS id",
     "ts_start": "NULL::TIMESTAMPTZ AS ts_start",
     "ts_end": "NULL::TIMESTAMPTZ AS ts_end",
     "label": "NULL::TEXT AS label",

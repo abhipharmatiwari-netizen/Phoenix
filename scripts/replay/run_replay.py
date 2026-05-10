@@ -16,6 +16,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from app.orders.replay_context import isolated_replay_flag
+from app.strategies.adaptive.regime import Regime
 from app.strategies.ema20_strategy import resolve_ema20_lots_config
 from scripts.replay.diagnostics import build_trade_analysis
 from scripts.replay.execution_models import ExecutionConfig, normalize_execution_config
@@ -66,6 +67,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--step-days", type=int, default=20)
     parser.add_argument("--chunk-size", type=int, default=5000)
     parser.add_argument("--strategy-env", default=str(DEFAULT_STRATEGY_ENV_PATH))
+    parser.add_argument(
+        "--filter-regime",
+        choices=[regime.value for regime in Regime],
+        help="Only replay bars classified in this dynamic_policy regime.",
+    )
     parser.add_argument("--fill-mode", choices=["bar_close_fill", "next_bar_open_fill"], default="bar_close_fill")
     parser.add_argument("--tick-model", choices=["open_close", "ohlc"], default="ohlc")
     parser.add_argument("--slippage-bps", type=float, default=0.0)
@@ -161,6 +167,7 @@ def run_evaluate(
     execution: Optional[ExecutionConfig] = None,
     chunk_size: int = 5000,
     combo_analyses: Optional[Dict[str, Dict[str, Any]]] = None,
+    filter_regime: Optional[str] = None,
 ) -> tuple:
     execution_cfg = normalize_execution_config(execution)
     all_metrics: Dict[str, StrategyMetrics] = {}
@@ -182,6 +189,7 @@ def run_evaluate(
             table=table,
             chunk_size=chunk_size,
             execution=execution_cfg,
+            filter_regime=filter_regime,
         )
         tracker = PnLTracker()
         tracker.process_fills(recorder.fills)
@@ -356,6 +364,7 @@ def main() -> None:
                 execution=execution,
                 chunk_size=args.chunk_size,
                 combo_analyses=combo_analyses,
+                filter_regime=args.filter_regime,
             )
             all_metrics.update(metrics)
             all_trackers.update(trackers)

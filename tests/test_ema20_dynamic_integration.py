@@ -112,7 +112,7 @@ def test_dynamic_mode_on_changes_effective_params_by_regime(monkeypatch):
     calls = _patch_bridge(monkeypatch, mod)
     base_ts = datetime(2025, 1, 1, 4, 0, tzinfo=timezone.utc)
 
-    # Warm up ATR median, then allow entry under TRENDING regime.
+    # Warm up ATR median, then allow entry under directional TRENDING regime.
     for i in range(60):
         candle = _make_candle(base_ts + timedelta(minutes=5 * i), 90.0, open_=90.0)
         strategy.on_bar("NG_FUT", 300, candle, _bar_indicators())
@@ -121,7 +121,7 @@ def test_dynamic_mode_on_changes_effective_params_by_regime(monkeypatch):
 
     assert len(calls) == 1
     assert strategy.position is not None
-    assert strategy._current_regime.value == "TRENDING"
+    assert strategy._current_regime.value == "TRENDING_DOWN"
     # Dynamic profile modifies entry SL/TP away from defaults 0.30/0.30.
     assert round(strategy.position.sl_price / strategy.position.entry_price - 1.0, 6) == 0.5
     assert round(1.0 - strategy.position.tp_price / strategy.position.entry_price, 6) == 0.7
@@ -209,9 +209,9 @@ def test_dynamic_metrics_emit_with_labels(monkeypatch):
     ) == 1.0
     assert metrics.counter_value(
         "policy_apply_total",
-        labels={"underlying": "NG_FUT", "tenant": "default", "regime": "TRENDING"},
+        labels={"underlying": "NG_FUT", "tenant": "default", "regime": "TRENDING_DOWN"},
     ) >= 1.0
     assert metrics.gauge_value(
         "regime_current_gauge",
-        labels={"underlying": "NG_FUT", "tenant": "default", "regime": "TRENDING"},
+        labels={"underlying": "NG_FUT", "tenant": "default", "regime": "TRENDING_DOWN"},
     ) == 1.0

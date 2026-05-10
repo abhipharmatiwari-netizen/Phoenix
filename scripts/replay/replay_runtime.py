@@ -23,6 +23,9 @@ import psycopg
 from app.config.boot_config import StrategyValueResolver
 from app.core.clock import SimulatedClock
 from app.orders.replay_context import isolated_replay_order_sink
+from app.strategies.restart_state import sync_open_position_state as _REAL_SYNC_OPEN_POSITION_STATE
+from app.strategies.adaptive.market_context import MarketContextBuilder
+from app.strategies.adaptive.regime import CLASSIFIER_VERSION, Regime, RegimeClassifier
 
 from scripts.replay.execution_models import (
     END_POLICY_DAILY_MTM,
@@ -97,6 +100,7 @@ class BarRow:
     plus_di: Optional[float]
     minus_di: Optional[float]
     di_spread: Optional[float]
+    regime: Optional[str] = None
     series_index: int = 0
 
     @property
@@ -144,6 +148,7 @@ VALID_COMBINATIONS = {
     "ema20_strategy": ["NIFTY", "BANKNIFTY", "NG_FUT"],
     "put_momentum_scalper": ["NIFTY", "BANKNIFTY"],
     "exclusive_nifty_ce_buy": ["NIFTY"],
+    "nifty_weekly_credit_spreads": ["NIFTY"],
 }
 
 INVALID_COMBINATIONS_REASONS = {
@@ -187,6 +192,7 @@ def load_bars_from_postgres(
     end_date: Optional[date] = None,
     table: str = "indicator_bars",
     chunk_size: int = 5000,
+    strategy_id: Optional[str] = None,
 ) -> ReplayBarBatch:
     """Load historical bars from Postgres, preserving schema diagnostics."""
 
@@ -210,8 +216,16 @@ def load_bars_from_postgres(
         params.append(_session_start_ist(end_date + timedelta(days=1)))
 
     select_list = build_select_list(schema, _REQUIRED_COLUMNS + _OPTIONAL_COLUMNS)
+    regime_select = "NULL::TEXT AS replay_regime"
+    if "id" in schema.available_set:
+        regime_select = (
+            "(SELECT br.regime FROM bar_regime br "
+            f"WHERE br.bar_id = {normalized_table}.id "
+            "AND br.classifier_version = %s LIMIT 1) AS replay_regime"
+        )
+        params.insert(0, CLASSIFIER_VERSION)
     query = f"""
-        SELECT {select_list}
+        SELECT {select_list}, {regime_select}
         FROM {normalized_table}
         WHERE {" AND ".join(conditions)}
         ORDER BY ts_start ASC
@@ -234,6 +248,11 @@ def load_bars_from_postgres(
                         if getattr(row, indicator_name) is None:
                             null_counts[indicator_name] += 1
 
+    synthetic_counts: Dict[str, int] = {}
+    if str(strategy_id or "") == "exclusive_nifty_ce_buy":
+        synthetic_counts.update(_backfill_exclusive_ce_ema(rows))
+    synthetic_counts.update(_attach_synthetic_regimes(rows))
+
     profile = {
         "label": label,
         "timeframe_seconds": int(timeframe_seconds) if timeframe_seconds is not None else None,
@@ -243,6 +262,8 @@ def load_bars_from_postgres(
         "available_columns": list(schema.available_columns),
         "missing_optional_columns": list(schema.missing_optional_columns),
         "null_indicator_counts": {k: int(v) for k, v in sorted(null_counts.items()) if int(v) > 0},
+        "synthetic_indicator_counts": synthetic_counts,
+        "regime_classifier_version": CLASSIFIER_VERSION,
     }
     logger.info(
         "Loaded %d bars for label=%s tf=%s range=[%s, %s] missing_optional_columns=%s",
@@ -298,6 +319,9 @@ def bar_to_indicators(
         indicators["exclusive_nifty_ce_buy_ema20_30s"] = bar.exclusive_nifty_ce_buy_ema20_30s
         if strategy_id == "exclusive_nifty_ce_buy" and indicators.get("ema_20") is None:
             indicators["ema_20"] = bar.exclusive_nifty_ce_buy_ema20_30s
+
+    if bar.regime:
+        indicators["regime"] = str(bar.regime)
 
     preview = list(close_history or [])
     preview.append(float(bar.c))
@@ -409,10 +433,54 @@ def build_exclusive_ce_strategy(
     )
 
 
+def build_nifty_spread_strategy(
+    underlying_key: str,
+    params: Optional[Dict[str, Any]] = None,
+) -> Any:
+    import app.strategies.nifty_weekly_credit_spreads as spread_mod
+
+    if underlying_key != "NIFTY":
+        raise ValueError("nifty_weekly_credit_spreads replay is NIFTY-only")
+    spread_mod.sync_open_position_state = _REAL_SYNC_OPEN_POSITION_STATE
+    uinfo = UNDERLYING_MAP[underlying_key]
+    replay_params = {
+        "account_equity": 1_000_000,
+        "lot_size": uinfo["lot_size"],
+        "entry_start_time": "09:15",
+        "entry_end_time": "15:10",
+        "min_days_to_expiry": 0,
+        "max_days_to_expiry": 7,
+        "atm_straddle_min_pct": 0.001,
+        "atm_straddle_max_pct": 0.20,
+        "atr_max_pct_5m": 0.10,
+        "risk_per_trade_pct": 0.50,
+        "max_total_risk_pct": 1.00,
+        "max_open_spreads": 10,
+    }
+    replay_params.update(dict(params or {}))
+    return spread_mod.NiftyWeeklyCreditSpreadStrategy(
+        instrument_meta=build_nifty_spread_instrument_meta(
+            uinfo["underlying_label"],
+            uinfo["lot_size"],
+        ),
+        order_client=MockOrderClient(),
+        risk_manager=MockRiskManager(),
+        env_prefix=uinfo["env_prefix"],
+        underlying_label=uinfo["underlying_label"],
+        params=replay_params,
+        config_resolver=StrategyValueResolver(
+            env_prefix=uinfo["env_prefix"],
+            params=replay_params,
+            env=dict(os.environ),
+        ),
+    )
+
+
 STRATEGY_BUILDERS = {
     "ema20_strategy": build_ema20_strategy,
     "put_momentum_scalper": build_put_momentum_strategy,
     "exclusive_nifty_ce_buy": build_exclusive_ce_strategy,
+    "nifty_weekly_credit_spreads": build_nifty_spread_strategy,
 }
 
 
@@ -431,6 +499,7 @@ class ReplayConfig:
     isolated_execution: bool = True
     chunk_size: int = 5000
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    filter_regime: Optional[str] = None
 
 
 class ReplayEngine:
@@ -451,10 +520,12 @@ class ReplayEngine:
     def _patch_strategy_clock(self, strategy: Any) -> None:
         if self._clock is None:
             return
-        if hasattr(strategy, "_now_ist"):
-            strategy._now_ist = lambda: self._clock.now_local(IST)
-        if hasattr(strategy, "_now_utc"):
-            strategy._now_utc = lambda: self._clock.now_utc()
+        strategy._now_ist = lambda: self._clock.now_local(IST)
+        strategy._now_utc = lambda: self._clock.now_utc()
+        if self.config.strategy_id == "nifty_weekly_credit_spreads":
+            strategy._current_expiry_and_chain = (  # type: ignore[attr-defined]
+                lambda: _next_weekly_expiry(strategy._now_ist().date())
+            )
 
     def _build_indicator_payload(self, bar: BarRow) -> Dict[str, Any]:
         requested_ema_period: Optional[int] = None
@@ -513,6 +584,22 @@ class ReplayEngine:
             ce_label: float(ce_price),
             pe_label: float(pe_price),
         }
+        if strategy is not None:
+            meta_map = getattr(strategy, "instrument_meta", {}) or {}
+            if isinstance(meta_map, dict):
+                for option_label, meta in meta_map.items():
+                    if option_label == label or not isinstance(meta, dict):
+                        continue
+                    option_type = _option_type_from_meta(option_label, meta)
+                    strike = _strike_from_label(option_label)
+                    if option_type not in {"CE", "PE"} or strike is None:
+                        continue
+                    prices[str(option_label)] = _option_proxy_price(
+                        underlying_price=float(underlying_price),
+                        strike=float(strike),
+                        option_type=option_type,
+                        atr=atr,
+                    )
         if strategy is not None and hasattr(strategy, "last_price"):
             strategy.last_price.update(prices)
         return prices
@@ -653,8 +740,10 @@ class ReplayEngine:
             "bars_loaded_by_timeframe": {},
             "missing_optional_columns_by_timeframe": {},
             "null_indicator_counts_by_timeframe": {},
+            "synthetic_indicator_counts_by_timeframe": {},
             "available_columns": [],
             "execution": cfg.execution.as_dict(),
+            "filter_regime": cfg.filter_regime,
             "timezone": "Asia/Kolkata",
             "source_table": cfg.table,
         }
@@ -668,8 +757,16 @@ class ReplayEngine:
                 end_date=cfg.end_date,
                 table=cfg.table,
                 chunk_size=cfg.chunk_size,
+                strategy_id=cfg.strategy_id,
             )
             bars = list(batch)
+            if cfg.filter_regime:
+                wanted = _normalize_regime_name(cfg.filter_regime)
+                bars = [
+                    bar
+                    for bar in bars
+                    if _normalize_regime_name(bar.regime) == wanted
+                ]
             profile = dict(getattr(batch, "replay_profile", {}) or {})
             db_bar_count_by_timeframe[int(tf)] = len(bars)
             merged_profile["bars_loaded_by_timeframe"][str(int(tf))] = len(bars)
@@ -678,6 +775,9 @@ class ReplayEngine:
             )
             merged_profile["null_indicator_counts_by_timeframe"][str(int(tf))] = dict(
                 profile.get("null_indicator_counts") or {}
+            )
+            merged_profile["synthetic_indicator_counts_by_timeframe"][str(int(tf))] = dict(
+                profile.get("synthetic_indicator_counts") or {}
             )
             available_columns = set(merged_profile.get("available_columns") or [])
             available_columns.update(profile.get("available_columns") or [])
@@ -855,6 +955,7 @@ def run_single_replay(
     table: str = "indicator_bars",
     chunk_size: int = 5000,
     execution: Optional[ExecutionConfig] = None,
+    filter_regime: Optional[str] = None,
 ) -> MockExecutionRecorder:
     """Convenience wrapper for running a single strategy replay."""
 
@@ -878,6 +979,7 @@ def run_single_replay(
         isolated_execution=True,
         chunk_size=chunk_size,
         execution=normalize_execution_config(execution),
+        filter_regime=_normalize_regime_name(filter_regime),
     )
     return ReplayEngine(config).run()
 
@@ -907,6 +1009,7 @@ def _build_bar_row(raw: Sequence[Any], *, series_index: int) -> BarRow:
         plus_di=_optional_float(raw[18]),
         minus_di=_optional_float(raw[19]),
         di_spread=_optional_float(raw[20]),
+        regime=(str(raw[21]) if len(raw) > 21 and raw[21] not in (None, "") else None),
         series_index=series_index,
     )
 
@@ -933,6 +1036,16 @@ def _optional_float(value: Any) -> Optional[float]:
     return out
 
 
+def _normalize_regime_name(value: Any) -> Optional[str]:
+    text = str(value or "").strip().upper()
+    if not text:
+        return None
+    for regime in Regime:
+        if regime.value == text:
+            return regime.value
+    return text
+
+
 def _compute_ema(values: Sequence[float], period: int) -> Optional[float]:
     period_int = max(2, int(period))
     if len(values) < period_int:
@@ -942,6 +1055,130 @@ def _compute_ema(values: Sequence[float], period: int) -> Optional[float]:
     for value in values[1:]:
         ema = (float(value) * k) + (ema * (1.0 - k))
     return float(ema)
+
+
+def _strike_from_label(label: Any) -> Optional[float]:
+    try:
+        return float(str(label or "").rsplit("_", 1)[-1])
+    except Exception:
+        return None
+
+
+def _option_type_from_meta(label: Any, meta: Dict[str, Any]) -> Optional[str]:
+    text = f"{label} {meta.get('kind', '')} {meta.get('instrument_type', '')}".upper()
+    if "CE" in text:
+        return "CE"
+    if "PE" in text:
+        return "PE"
+    return None
+
+
+def _option_proxy_price(
+    *,
+    underlying_price: float,
+    strike: float,
+    option_type: str,
+    atr: Optional[float],
+) -> float:
+    intrinsic = (
+        max(underlying_price - strike, 0.0)
+        if option_type == "CE"
+        else max(strike - underlying_price, 0.0)
+    )
+    base_time_value = max(
+        2.0,
+        abs(float(underlying_price)) * 0.020,
+        float(atr or 0.0) * 2.0,
+    )
+    width_scale = max(150.0, abs(float(underlying_price)) * 0.015)
+    distance = abs(float(strike) - float(underlying_price))
+    time_value = max(0.5, base_time_value * math.exp(-distance / width_scale))
+    return max(0.5, float(intrinsic + time_value))
+
+
+def _next_weekly_expiry(session_date: date) -> date:
+    # NIFTY weekly expiry is Thursday. If replay is already past Thursday for
+    # the week, roll to the next one.
+    days_until_thursday = (3 - session_date.weekday()) % 7
+    return session_date + timedelta(days=days_until_thursday)
+
+
+def build_nifty_spread_instrument_meta(
+    underlying_label: str,
+    lot_size: int,
+    *,
+    min_strike: int = 12000,
+    max_strike: int = 32000,
+    step: int = 50,
+) -> Dict[str, Dict[str, Any]]:
+    meta = build_mock_instrument_meta(underlying_label, lot_size)
+    meta[underlying_label]["underlying"] = "NIFTY"
+    for strike in range(int(min_strike), int(max_strike) + int(step), int(step)):
+        for option_type in ("CE", "PE"):
+            label = f"NIFTY_{option_type}_{strike}"
+            meta[label] = {
+                "label": label,
+                "broker_symbol": label,
+                "symbol": label,
+                "exchange": "NFO",
+                "symbol_token": f"REPLAY_{option_type}_{strike}",
+                "token": f"REPLAY_{option_type}_{strike}",
+                "lot_size": int(lot_size),
+                "instrument_type": "OPTIDX",
+                "kind": option_type,
+                "underlying": "NIFTY",
+            }
+    return meta
+
+
+def _backfill_exclusive_ce_ema(rows: Sequence[BarRow], *, period: int = 20) -> Dict[str, int]:
+    period_int = max(2, int(period))
+    alpha = 2.0 / (period_int + 1.0)
+    ema: Optional[float] = None
+    seen = 0
+    backfilled_private = 0
+    backfilled_shared = 0
+    for row in rows:
+        if int(row.timeframe_seconds) != 30:
+            continue
+        close = _optional_float(row.c)
+        if close is None:
+            continue
+        seen += 1
+        ema = close if ema is None else (close * alpha) + (ema * (1.0 - alpha))
+        if seen < period_int:
+            continue
+        if row.exclusive_nifty_ce_buy_ema20_30s is None:
+            row.exclusive_nifty_ce_buy_ema20_30s = float(ema)
+            backfilled_private += 1
+        if row.ema_20 is None:
+            row.ema_20 = float(ema)
+            backfilled_shared += 1
+    out: Dict[str, int] = {}
+    if backfilled_private:
+        out["exclusive_nifty_ce_buy_ema20_30s"] = backfilled_private
+    if backfilled_shared:
+        out["ema_20"] = backfilled_shared
+    return out
+
+
+def _attach_synthetic_regimes(rows: Sequence[BarRow]) -> Dict[str, int]:
+    builders: Dict[int, MarketContextBuilder] = {}
+    classifiers: Dict[int, RegimeClassifier] = {}
+    filled = 0
+    for row in rows:
+        if row.regime:
+            continue
+        tf = int(row.timeframe_seconds)
+        builder = builders.setdefault(tf, MarketContextBuilder())
+        classifier = classifiers.setdefault(tf, RegimeClassifier())
+        context = builder.build(
+            candle=bar_to_candle(row),
+            indicators=bar_to_indicators(row),
+        )
+        row.regime = classifier.update(context).value
+        filled += 1
+    return {"regime": filled} if filled else {}
 
 
 __all__ = [
@@ -956,6 +1193,7 @@ __all__ = [
     "bar_to_candle",
     "bar_to_indicators",
     "build_mock_instrument_meta",
+    "build_nifty_spread_instrument_meta",
     "load_bars_from_postgres",
     "run_single_replay",
 ]

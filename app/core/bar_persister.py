@@ -2,6 +2,7 @@
 
 import csv
 import hashlib
+import json
 import logging
 import os
 import re
@@ -373,6 +374,33 @@ class BarPersister:
                         self.postgres_retention_months,
                         self.postgres_retention_prune_interval_seconds,
                     )
+                try:
+                    cur.execute(
+                        f"""
+                        CREATE TABLE IF NOT EXISTS bar_regime (
+                            bar_id BIGINT NOT NULL REFERENCES {self._pg_table_sql}(id) ON DELETE CASCADE,
+                            regime TEXT NOT NULL,
+                            classifier_version TEXT NOT NULL,
+                            signals JSONB,
+                            classified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                            PRIMARY KEY (bar_id, classifier_version)
+                        )
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS bar_regime_classifier_ts
+                        ON bar_regime (classifier_version, classified_at DESC)
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS bar_regime_regime_classifier_idx
+                        ON bar_regime (regime, classifier_version)
+                        """
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to ensure bar_regime table: %s", exc)
             self._maybe_prune_postgres_retention(force=True)
         except Exception as exc:
             logger.error("Failed to init Postgres indicator table: %s", exc)
@@ -544,6 +572,58 @@ class BarPersister:
         self._to_sqlite(row)
         self._to_postgres(row)
         self._to_bigquery(row)
+
+    def persist_regime(
+        self,
+        label: str,
+        timeframe_seconds: int,
+        candle,
+        *,
+        regime: str,
+        classifier_version: str,
+        signals: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not self._pg_conn or not self._pg_table_sql:
+            return
+        try:
+            ts_start = getattr(candle, "start_ts", None)
+            if hasattr(ts_start, "isoformat"):
+                ts_start_param = ts_start
+            else:
+                ts_start_param = str(ts_start or "")
+            with self._pg_conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    INSERT INTO bar_regime (
+                        bar_id, regime, classifier_version, signals, classified_at
+                    )
+                    SELECT id, %s, %s, %s::jsonb, CURRENT_TIMESTAMP
+                    FROM {self._pg_table_sql}
+                    WHERE label = %s
+                      AND timeframe_seconds = %s
+                      AND ts_start = %s
+                    ON CONFLICT (bar_id, classifier_version) DO UPDATE SET
+                        regime = EXCLUDED.regime,
+                        signals = EXCLUDED.signals,
+                        classified_at = EXCLUDED.classified_at
+                    """,
+                    (
+                        str(regime),
+                        str(classifier_version),
+                        json.dumps(signals or {}, sort_keys=True, default=str),
+                        str(label),
+                        int(timeframe_seconds),
+                        ts_start_param,
+                    ),
+                )
+        except Exception:
+            logger.debug(
+                "Failed to persist bar regime label=%s tf=%s regime=%s",
+                label,
+                timeframe_seconds,
+                regime,
+                exc_info=True,
+            )
 
     def _to_csv(self, row: Dict[str, Any]) -> None:
         if not self.csv_path:

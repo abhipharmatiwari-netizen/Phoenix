@@ -66,7 +66,7 @@ from app.strategies.put_buy_live import PutBuyLiveStrategy
 from app.strategies.naming import canonicalize_strategy_name
 from app.strategies.validators import validate_strategy_list
 from app.strategies.adaptive.market_context import MarketContextBuilder
-from app.strategies.adaptive.regime import Regime, RegimeClassifier
+from app.strategies.adaptive.regime import CLASSIFIER_VERSION, Regime, RegimeClassifier
 from app.strategies.adaptive.strategy_selector import (
     StrategySelector,
     StrategySelectorConfig,
@@ -3140,6 +3140,7 @@ def stream_multi_instruments(
         indicators: dict,
         publish_state: bool = True,
         emit_log: bool = True,
+        persist_regime: bool = True,
     ) -> None:
         if strategy_selector is None:
             return
@@ -3156,6 +3157,35 @@ def stream_multi_instruments(
             return
         classifier = selector_regime_classifiers.setdefault(key, RegimeClassifier())
         regime = classifier.update(context)
+        if persist_regime and hasattr(persister, "persist_regime"):
+            try:
+                persister.persist_regime(
+                    underlying_label,
+                    timeframe_seconds,
+                    candle,
+                    regime=regime.value,
+                    classifier_version=CLASSIFIER_VERSION,
+                    signals={
+                        "atr14": context.atr14,
+                        "atr_norm": context.atr_norm,
+                        "adx14": context.adx14,
+                        "di_spread": context.di_spread,
+                        "plus_di": context.plus_di,
+                        "minus_di": context.minus_di,
+                        "ema_slope": context.ema_slope,
+                        "ema_value": context.ema_value,
+                        "last_price": context.last_price,
+                        "gap_ratio": context.gap_ratio,
+                        "chop_index": context.chop_index,
+                    },
+                )
+            except Exception:
+                logger.debug(
+                    "Strategy selector regime persistence failed for %s tf=%s",
+                    key,
+                    timeframe_seconds,
+                    exc_info=True,
+                )
         decision = strategy_selector.select(
             underlying=key,
             regime=regime,
@@ -3243,6 +3273,7 @@ def stream_multi_instruments(
                     indicators=indicators,
                     publish_state=False,
                     emit_log=False,
+                    persist_regime=False,
                 ),
             )
             if replayed:

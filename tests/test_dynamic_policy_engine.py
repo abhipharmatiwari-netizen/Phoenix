@@ -51,6 +51,56 @@ def test_policy_overlay_applies_profile_overrides():
     assert base == {"sl_pct": 0.3, "tp_pct": 0.3, "use_adx_filter": False}
 
 
+def test_directional_trending_profiles_fallback_to_legacy_trending_profile():
+    base = {"sl_pct": 0.3, "tp_pct": 0.3}
+    cfg = parse_dynamic_policy_config(
+        {
+            "enabled": True,
+            "policy_id": "ema20_ng_v1",
+            "profiles": {
+                "TRENDING": {
+                    "sl_pct": 0.45,
+                    "tp_pct": 0.60,
+                }
+            },
+        }
+    )
+    engine = DynamicPolicyEngine(config=cfg)
+
+    effective = engine.apply(
+        base_params=base,
+        regime=Regime.TRENDING_DOWN,
+        context=_ctx(),
+    )
+
+    assert effective["sl_pct"] == 0.45
+    assert effective["tp_pct"] == 0.60
+
+
+def test_directional_trending_profile_overrides_legacy_profile_when_present():
+    base = {"sl_pct": 0.3, "tp_pct": 0.3}
+    cfg = parse_dynamic_policy_config(
+        {
+            "enabled": True,
+            "policy_id": "ema20_ng_v1",
+            "profiles": {
+                "TRENDING": {"sl_pct": 0.45},
+                "TRENDING_UP": {"sl_pct": 0.25, "tp_pct": 0.50},
+            },
+        }
+    )
+    engine = DynamicPolicyEngine(config=cfg)
+
+    effective = engine.apply(
+        base_params=base,
+        regime=Regime.TRENDING_UP,
+        context=_ctx(),
+    )
+
+    assert effective["sl_pct"] == 0.25
+    assert effective["tp_pct"] == 0.50
+
+
 def test_no_trade_profile_disables_entries():
     base = {"disable_entries": False}
     cfg = parse_dynamic_policy_config(

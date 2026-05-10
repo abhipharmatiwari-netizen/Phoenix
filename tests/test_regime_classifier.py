@@ -15,16 +15,23 @@ def _ctx(
     di_spread: float = 5.0,
     ema_slope: float = 0.01,
     gap_ratio: float = 0.0,
+    plus_di: float | None = None,
+    minus_di: float | None = None,
+    ema_value: float | None = None,
+    last_price: float = 100.0,
 ) -> MarketContext:
     return MarketContext(
         ts=ts,
-        last_price=100.0,
+        last_price=last_price,
         atr14=atr14,
         atr_norm=atr_norm,
         adx14=adx14,
         di_spread=di_spread,
         ema_slope=ema_slope,
         gap_ratio=gap_ratio,
+        plus_di=plus_di,
+        minus_di=minus_di,
+        ema_value=ema_value,
     )
 
 
@@ -33,6 +40,60 @@ def test_regime_trending_when_adx_and_di_high():
     ts = datetime(2025, 1, 1, 9, 30, tzinfo=timezone.utc)
     reg = clf.update(_ctx(ts=ts, atr_norm=1.1, adx14=30.0, di_spread=10.0))
     assert reg == Regime.TRENDING
+
+
+def test_regime_trending_up_when_price_and_di_are_bullish():
+    clf = RegimeClassifier(RegimeThresholds(hold_bars=1))
+    ts = datetime(2025, 1, 1, 9, 30, tzinfo=timezone.utc)
+    reg = clf.update(
+        _ctx(
+            ts=ts,
+            atr_norm=1.1,
+            adx14=30.0,
+            di_spread=10.0,
+            plus_di=28.0,
+            minus_di=12.0,
+            ema_value=99.0,
+            last_price=100.0,
+        )
+    )
+    assert reg == Regime.TRENDING_UP
+
+
+def test_regime_trending_down_when_price_and_di_are_bearish():
+    clf = RegimeClassifier(RegimeThresholds(hold_bars=1))
+    ts = datetime(2025, 1, 1, 9, 30, tzinfo=timezone.utc)
+    reg = clf.update(
+        _ctx(
+            ts=ts,
+            atr_norm=1.1,
+            adx14=30.0,
+            di_spread=10.0,
+            plus_di=12.0,
+            minus_di=28.0,
+            ema_value=101.0,
+            last_price=100.0,
+        )
+    )
+    assert reg == Regime.TRENDING_DOWN
+
+
+def test_regime_di_cross_with_low_adx_is_not_directional_trending():
+    clf = RegimeClassifier(RegimeThresholds(hold_bars=1))
+    ts = datetime(2025, 1, 1, 9, 30, tzinfo=timezone.utc)
+    reg = clf.update(
+        _ctx(
+            ts=ts,
+            atr_norm=1.1,
+            adx14=20.0,
+            di_spread=10.0,
+            plus_di=28.0,
+            minus_di=12.0,
+            ema_value=99.0,
+            last_price=100.0,
+        )
+    )
+    assert reg == Regime.NORMAL
 
 
 def test_regime_choppy_when_adx_low():

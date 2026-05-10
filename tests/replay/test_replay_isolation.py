@@ -348,6 +348,7 @@ def test_replay_engine_records_gate_decisions_for_report(monkeypatch):
             "reason": "trend_filter_not_met",
             "passed": False,
             "timeframe_seconds": 300,
+            "regime": "unknown",
             "count": 2,
         },
         {
@@ -355,6 +356,7 @@ def test_replay_engine_records_gate_decisions_for_report(monkeypatch):
             "reason": "candidate_entry",
             "passed": True,
             "timeframe_seconds": 300,
+            "regime": "unknown",
             "count": 1,
         },
     ]
@@ -492,6 +494,7 @@ def test_write_full_report_writes_raw_fills_and_db_bar_counts(tmp_path):
                     "reason": "trend_filter_not_met",
                     "passed": False,
                     "timeframe_seconds": 300,
+                    "regime": "unknown",
                     "count": 4,
                 },
                 {
@@ -499,6 +502,7 @@ def test_write_full_report_writes_raw_fills_and_db_bar_counts(tmp_path):
                     "reason": "candidate_entry",
                     "passed": True,
                     "timeframe_seconds": 300,
+                    "regime": "unknown",
                     "count": 1,
                 },
             ]
@@ -516,10 +520,10 @@ def test_write_full_report_writes_raw_fills_and_db_bar_counts(tmp_path):
     assert "Trading days:        2" in summary_text
     assert "ema20_strategy/NIFTY: 42 DB bars loaded" in summary_text
     assert "GATE DIAGNOSTICS" in summary_text
-    assert "trend_filter_not_met (gate=trend, tf=300s): 4" in summary_text
+    assert "trend_filter_not_met (gate=trend, tf=300s, regime=unknown): 4" in summary_text
     assert "SESSION RESETS / FINALIZATION" in summary_text
     assert fills_text.splitlines()[0].startswith("timestamp,strategy_id,underlying")
     assert len(fills_text.splitlines()) == 3
     assert len(trades_text.splitlines()) == 2
-    assert gate_summary_text.splitlines()[0] == "gate,reason,passed,timeframe_seconds,count"
-    assert "trend,trend_filter_not_met,false,300,4" in gate_summary_text
+    assert gate_summary_text.splitlines()[0] == "gate,reason,passed,timeframe_seconds,regime,count"
+    assert "trend,trend_filter_not_met,false,300,unknown,4" in gate_summary_text

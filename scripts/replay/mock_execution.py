@@ -59,6 +59,7 @@ class ReplayGateDecision:
     reason: str
     timeframe_seconds: Optional[int]
     bar_start_ts: Optional[str]
+    regime: str = ""
     context: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -176,6 +177,7 @@ class MockExecutionRecorder:
                 "reason",
                 "bar_start_ts",
                 "timeframe_seconds",
+                "regime",
             }
             and value is not None
         }
@@ -190,6 +192,9 @@ class MockExecutionRecorder:
         underlying = str(raw_payload.get("underlying") or "")
         if not underlying and self._current_context is not None:
             underlying = self._current_context.underlying
+        regime = str(raw_payload.get("regime") or "")
+        if not regime and self._current_context is not None:
+            regime = str(self._current_context.indicators.get("regime") or "")
 
         decision = ReplayGateDecision(
             strategy_id=str(strategy_id),
@@ -203,6 +208,7 @@ class MockExecutionRecorder:
                 if raw_payload.get("bar_start_ts") not in (None, "")
                 else None
             ),
+            regime=regime or "unknown",
             context=context,
         )
         self.gate_decisions.append(decision)
@@ -210,7 +216,7 @@ class MockExecutionRecorder:
     def gate_summary_rows(self) -> List[Dict[str, Any]]:
         """Aggregate gate decisions for report-friendly output."""
 
-        buckets: Dict[tuple[str, str, bool, Optional[int]], int] = defaultdict(int)
+        buckets: Dict[tuple[str, str, bool, Optional[int], str], int] = defaultdict(int)
         for decision in self.gate_decisions:
             buckets[
                 (
@@ -218,6 +224,7 @@ class MockExecutionRecorder:
                     decision.reason,
                     bool(decision.passed),
                     decision.timeframe_seconds,
+                    decision.regime or "unknown",
                 )
             ] += 1
 
@@ -227,9 +234,10 @@ class MockExecutionRecorder:
                 "reason": reason,
                 "passed": passed,
                 "timeframe_seconds": timeframe_seconds,
+                "regime": regime,
                 "count": count,
             }
-            for (gate, reason, passed, timeframe_seconds), count in buckets.items()
+            for (gate, reason, passed, timeframe_seconds, regime), count in buckets.items()
         ]
         rows.sort(
             key=lambda row: (
@@ -237,6 +245,7 @@ class MockExecutionRecorder:
                 -int(row["count"]),
                 str(row["gate"]),
                 str(row["reason"]),
+                str(row["regime"]),
                 (
                     int(row["timeframe_seconds"])
                     if row["timeframe_seconds"] not in (None, "")
@@ -276,6 +285,7 @@ class MockExecutionRecorder:
         qty = int(getattr(order_req, "quantity", 1))
         tag = str(getattr(order_req, "tag", "") or "")
         symbol = str(getattr(order_req, "symbol", "") or "")
+        position_label = str(getattr(order_req, "position_label", "") or "")
         fill_ts, reference_price, fill_note = self._resolve_reference_price(
             order_req=order_req,
             context=context,
@@ -330,9 +340,11 @@ class MockExecutionRecorder:
             "ema_20": context.indicators.get("ema_20"),
             "ema_30": context.indicators.get("ema_30"),
             "ema_50": context.indicators.get("ema_50"),
+            "regime": context.indicators.get("regime"),
             "slippage_abs": slippage_amount,
             "fill_note": fill_note,
             "symbol": symbol,
+            "position_label": position_label,
         }
         strategy_context = dict(raw_ctx)
         strategy_context["_replay"] = replay_ctx
@@ -392,13 +404,16 @@ class MockExecutionRecorder:
         context: ReplayMarketContext,
     ) -> tuple[datetime, Optional[float], str]:
         symbol = str(getattr(order_req, "symbol", "") or "")
+        position_label = str(getattr(order_req, "position_label", "") or "")
         purpose_raw = getattr(order_req, "purpose", None)
         purpose = (
             purpose_raw.value if hasattr(purpose_raw, "value") else str(purpose_raw or "")
         ).upper()
 
         price = context.current_price
-        if symbol and symbol in context.instrument_prices:
+        if position_label and position_label in context.instrument_prices:
+            price = context.instrument_prices[position_label]
+        elif symbol and symbol in context.instrument_prices:
             price = context.instrument_prices[symbol]
 
         use_future_open = (
