@@ -1108,6 +1108,32 @@ async def readyz() -> JSONResponse:
                 payload["reason"] = "stream_watchdog_not_running"
                 return JSONResponse(status_code=503, content=payload)
 
+    # Issue #226 (PR #237 round-2 review P2): populate avg_price
+    # corruption audit fields BEFORE the sync-freshness early-return
+    # gates. The audit is meant to surface corruption EXACTLY when
+    # broker sync is suppressed/stale — but the sync-freshness block
+    # below returns 503 first, so the audit fields would never reach
+    # the response if we ran it later. Population is non-blocking; the
+    # readiness-fail decision happens after the kill-switch gate.
+    if _readiness_trade_mode() == "LIVE":
+        try:
+            corruption = get_hub_runtime().audit_position_avg_price_corruption()
+            corrupt_count = int(corruption.get("corrupt_count", 0))
+            payload["avg_price_corrupt_count"] = corrupt_count
+            payload["_avg_price_corruption_samples"] = (
+                corruption.get("samples") or []
+            )[:5]
+            payload["avg_price_audit_read_failures"] = len(
+                corruption.get("read_failures") or []
+            )
+        except Exception as _corr_exc:
+            logger.warning(
+                "readyz: avg_price corruption audit failed (non-fatal): %s",
+                _corr_exc,
+            )
+            payload["avg_price_corrupt_count"] = -1
+            payload["avg_price_audit_read_failures"] = -1
+
     # Sync freshness check — gates readiness on position and orders sync currency
     try:
         hub_runtime = get_hub_runtime()
@@ -1166,27 +1192,9 @@ async def readyz() -> JSONResponse:
         return JSONResponse(status_code=503, content=payload)
 
     if _readiness_trade_mode() == "LIVE":
-        # Issue #226 (PR #237 review P2): run the avg_price corruption
-        # audit BEFORE the kill-switch gate so it surfaces in EXACTLY
-        # the scenario the audit was designed for — when BROKER_SYNC
-        # is suppressed by a tripped kill switch (the 2026-05-08 root
-        # cause). The audit only adds payload fields here; the gate
-        # below decides whether corruption forces ready=false.
-        # Uses the module-level ``get_hub_runtime`` (NOT a local
-        # re-import) so monkeypatched test stubs are observed.
-        try:
-            corruption = get_hub_runtime().audit_position_avg_price_corruption()
-            corrupt_count = int(corruption.get("corrupt_count", 0))
-            payload["avg_price_corrupt_count"] = corrupt_count
-            payload["_avg_price_corruption_samples"] = (
-                corruption.get("samples") or []
-            )[:5]
-        except Exception as _corr_exc:
-            logger.warning(
-                "readyz: avg_price corruption audit failed (non-fatal): %s",
-                _corr_exc,
-            )
-            payload["avg_price_corrupt_count"] = -1
+        # Issue #226 audit fields are already populated above (before
+        # the sync-freshness gate). The readiness-fail decision is
+        # evaluated AFTER the kill-switch gate below.
 
         # §58/§93 — Surface kill-switch state in readyz; block readiness when
         # the durable kill-switch state is active or cannot be verified.
@@ -1209,9 +1217,25 @@ async def readyz() -> JSONResponse:
             return JSONResponse(status_code=503, content=payload)
 
         # Issue #226: now that the kill-switch gate has cleared, decide
-        # whether avg_price corruption should fail readiness. Configurable
-        # via ``AVG_PRICE_CORRUPTION_FAILS_READY`` (default true).
+        # whether avg_price corruption (or audit read failures) should
+        # fail readiness.
+        # PR #237 round-2 review P2: per-account get_positions failures
+        # mean the audit could NOT verify those accounts are clean — in
+        # LIVE we must fail closed rather than silently report
+        # corrupt_count=0 for un-scanned accounts.
         corrupt_count = int(payload.get("avg_price_corrupt_count", 0) or 0)
+        read_failures_count = int(
+            payload.get("avg_price_audit_read_failures", 0) or 0
+        )
+        if read_failures_count > 0:
+            payload["ready"] = False
+            payload.pop("_avg_price_corruption_samples", None)
+            payload["reason"] = (
+                f"avg_price_audit_read_failures: {read_failures_count} "
+                f"account(s) could not be scanned — failing closed in "
+                f"LIVE so corruption cannot hide behind a read error"
+            )
+            return JSONResponse(status_code=503, content=payload)
         if corrupt_count > 0:
             fails_ready = str(
                 os.getenv("AVG_PRICE_CORRUPTION_FAILS_READY", "true") or ""

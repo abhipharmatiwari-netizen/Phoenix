@@ -566,31 +566,72 @@ class HubRuntime:
                         return v
             return None
 
+        # Issue #226 (PR #237 round-2 review P2/P3): comprehensive alias
+        # support + decimal-string coercion. Aliases observed in this
+        # repo:
+        #   quantity: quantity, qty, net_qty, netqty
+        #   avg_price: avg_price, average_price, avgPrice, avgprice,
+        #              averageprice, entry_price
+        #   symbol:    symbol, tradingsymbol, trading_symbol
+        # Decimal strings like "65.0" must coerce via int(float(v))
+        # rather than int(v) directly — otherwise the audit silently
+        # drops corrupt records that have serialized numeric quantities.
+        def _coerce_int(value) -> int:
+            try:
+                if isinstance(value, str):
+                    value = value.strip()
+                    if not value:
+                        return 0
+                return int(float(value))
+            except (TypeError, ValueError):
+                return 0
+
+        def _coerce_float(value) -> float:
+            try:
+                return float(value) if value is not None else 0.0
+            except (TypeError, ValueError):
+                return 0.0
+
         corrupt: list[dict] = []
+        # Issue #226 (PR #237 round-2 review P2): per-account read
+        # failures must be SURFACED — otherwise a get_positions
+        # exception leaves the audit with corrupt_count=0 and /readyz
+        # passes despite that account never being scanned.
+        read_failures: list[dict] = []
         for account_id in account_ids:
             try:
                 positions = state_store.get_positions(account_id) or []
-            except Exception:
+            except Exception as exc:
+                read_failures.append(
+                    {"account_id": str(account_id), "error": repr(exc)}
+                )
+                logger.error(
+                    "audit_position_avg_price_corruption: get_positions "
+                    "failed for account=%s — account NOT scanned (%s)",
+                    account_id, exc,
+                )
                 continue
             for pos in positions:
-                qty_raw = _first_present(pos, "quantity", "qty", "net_qty")
-                try:
-                    qty = int(qty_raw or 0)
-                except (TypeError, ValueError):
-                    qty = 0
+                qty_raw = _first_present(
+                    pos, "quantity", "qty", "net_qty", "netqty",
+                )
+                qty = _coerce_int(qty_raw)
                 if qty == 0:
                     continue
                 avg_raw = _first_present(
-                    pos, "avg_price", "average_price", "avgPrice", "entry_price",
+                    pos,
+                    "avg_price", "average_price", "avgPrice", "avgprice",
+                    "averageprice", "entry_price",
                 )
-                try:
-                    avg_f = float(avg_raw) if avg_raw is not None else 0.0
-                except (TypeError, ValueError):
-                    avg_f = 0.0
+                avg_f = _coerce_float(avg_raw)
                 if avg_f > 0.0:
                     continue
                 # Found a corrupt record.
-                symbol = str(_first_present(pos, "symbol") or "")
+                symbol = str(
+                    _first_present(
+                        pos, "symbol", "tradingsymbol", "trading_symbol",
+                    ) or ""
+                )
                 tenant_id = str(_first_present(pos, "tenant_id") or "")
                 corrupt.append(
                     {
@@ -612,6 +653,11 @@ class HubRuntime:
         return {
             "corrupt_count": len(corrupt),
             "samples": corrupt[:5],  # cap payload
+            # Issue #226 (PR #237 round-2 review P2): surface per-account
+            # read failures so /readyz can fail closed when accounts
+            # were not scanned. Empty list means every account was
+            # successfully scanned.
+            "read_failures": read_failures,
         }
 
     def _maybe_emit_avg_price_corruption_alert(

@@ -221,3 +221,93 @@ def test_audit_dict_position_with_healthy_avg_price_is_not_flagged():
     )
     result = rt.audit_position_avg_price_corruption()
     assert result["corrupt_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Codex round-2 review on PR #237: alias + decimal-coercion + read-failure.
+# ---------------------------------------------------------------------------
+
+
+def test_audit_normalizes_avgprice_lowercase_alias():
+    """avgprice (Angel-style lowercase no-camelCase) must be recognized."""
+    rt = _make_runtime_with_positions(
+        {"A1": [{"symbol": "X", "qty": 100, "avgprice": 0.0}]}
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 1
+
+
+def test_audit_normalizes_averageprice_lowercase_alias():
+    """averageprice (lowercase variant) must be recognized."""
+    rt = _make_runtime_with_positions(
+        {"A1": [{"symbol": "X", "qty": 100, "averageprice": 0.0}]}
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 1
+
+
+def test_audit_normalizes_netqty_alias():
+    """netqty (Angel) must be recognized as quantity."""
+    rt = _make_runtime_with_positions(
+        {"A1": [{"symbol": "X", "netqty": 100, "avgPrice": 0.0}]}
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 1
+
+
+def test_audit_normalizes_tradingsymbol_alias():
+    """tradingsymbol (Angel) must be normalized as symbol — otherwise
+    rate-limit alerts collide on empty symbol."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {"tradingsymbol": "ANGEL_FORMAT_SYM", "qty": 100, "avgPrice": 0.0},
+            ]
+        }
+    )
+    result = rt.audit_position_avg_price_corruption()
+    assert result["corrupt_count"] == 1
+    assert result["samples"][0]["symbol"] == "ANGEL_FORMAT_SYM"
+
+
+def test_audit_coerces_decimal_string_quantity_to_int():
+    """Codex P2: qty='65.0' must be coerced via int(float()) instead
+    of failing to parse and being skipped as zero."""
+    rt = _make_runtime_with_positions(
+        {"A1": [{"symbol": "X", "quantity": "65.0", "avg_price": 0.0}]}
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 1
+
+
+def test_audit_does_not_flag_healthy_dict_with_avgprice_alias():
+    """Sanity: a healthy position with the Angel ``avgprice`` alias and
+    a positive value must NOT be flagged. (Earlier rounds missed this
+    alias and incorrectly flagged positive avgprice as zero.)"""
+    rt = _make_runtime_with_positions(
+        {"A1": [{"symbol": "X", "qty": 100, "avgprice": 250.5}]}
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 0
+
+
+def test_audit_surfaces_per_account_read_failures():
+    """Codex P2: when get_positions raises for an account, the audit
+    must report it via ``read_failures`` rather than silently
+    continuing with corrupt_count=0."""
+    failing_state_store = SimpleNamespace(
+        get_positions=lambda acct: (_ for _ in ()).throw(
+            RuntimeError("postgres unreachable")
+        ),
+    )
+    from app.hub.runtime import HubRuntime
+    rt = SimpleNamespace(
+        hub=SimpleNamespace(list_runner_ids=lambda: ["A1"]),
+        state_store=failing_state_store,
+    )
+    rt.audit_position_avg_price_corruption = (
+        HubRuntime.audit_position_avg_price_corruption.__get__(rt, HubRuntime)
+    )
+    rt._maybe_emit_avg_price_corruption_alert = (
+        HubRuntime._maybe_emit_avg_price_corruption_alert.__get__(rt, HubRuntime)
+    )
+    result = rt.audit_position_avg_price_corruption()
+    assert result["corrupt_count"] == 0
+    assert len(result["read_failures"]) == 1
+    assert result["read_failures"][0]["account_id"] == "A1"
+    assert "postgres unreachable" in result["read_failures"][0]["error"]
