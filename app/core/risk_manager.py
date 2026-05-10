@@ -1411,7 +1411,14 @@ class RiskManager:
         force: bool = False,
     ) -> Dict[str, Any]:
         now_ts = now or datetime.now(timezone.utc)
+        # Issue #222 (PR #234 review P3): _reset_daily_if_new_day can
+        # flip kill_switch_activated from True to False. Publish the
+        # post-reset state to the hub BEFORE the throttle-skip return
+        # below — otherwise the hub keeps reporting the stale (yesterday's)
+        # legacy_active=True until a forced or unthrottled evaluation
+        # later in the day, surfacing a phantom divergence in /readyz.
         self._reset_daily_if_new_day(now_ts)
+        self._publish_legacy_kill_switch_state_to_hub()
         now_mono = time.monotonic()
         if (
             not force

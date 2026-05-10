@@ -15,7 +15,7 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from uuid import uuid4
 
 from fastapi import (
@@ -996,7 +996,12 @@ async def health_summary() -> dict:
 # Issue #222: rate-limit kill-switch divergence WARNING events to once per
 # 60s per process. Without this, /readyz polled every 5s would flood logs
 # while a divergence persists.
-_KILL_SWITCH_DIVERGENCE_LAST_EMIT_TS: float = 0.0
+# PR #234 review P2: initialize last-emit to a sentinel that ALLOWS the
+# first divergence to emit immediately. Previously initialized to 0.0,
+# which meant a divergence detected within the first 60s of process
+# start (the most likely time to detect it post-restart) was suppressed,
+# missing the warning and the subsequent RESOLVED audit event.
+_KILL_SWITCH_DIVERGENCE_LAST_EMIT_TS: Optional[float] = None
 _KILL_SWITCH_DIVERGENCE_LAST_RESOLVED_LOGGED: bool = True
 
 
@@ -1012,7 +1017,11 @@ def _emit_kill_switch_divergence_alert(div: dict) -> None:
     global _KILL_SWITCH_DIVERGENCE_LAST_RESOLVED_LOGGED
     import time as _t
     now_mono = _t.monotonic()
-    if now_mono - _KILL_SWITCH_DIVERGENCE_LAST_EMIT_TS >= 60.0:
+    # First-emit (None) always proceeds; subsequent emits respect 60s.
+    if (
+        _KILL_SWITCH_DIVERGENCE_LAST_EMIT_TS is None
+        or (now_mono - _KILL_SWITCH_DIVERGENCE_LAST_EMIT_TS) >= 60.0
+    ):
         _KILL_SWITCH_DIVERGENCE_LAST_EMIT_TS = now_mono
         _KILL_SWITCH_DIVERGENCE_LAST_RESOLVED_LOGGED = False
         try:
@@ -1262,27 +1271,40 @@ async def readyz() -> JSONResponse:
         # silent-bypass condition (the auto-trip bridge has not converged).
         # Fail readiness in LIVE so the operator sees it. Configurable via
         # ``KILL_SWITCH_DIVERGENCE_FAILS_READY`` (default true).
+        # Codex round-1 review (PR #234) P1: previous logic was
+        # INVERTED — the ``else`` branch fired on the HEALTHY non-
+        # divergent state and incorrectly failed readiness, while the
+        # actual divergent case only emitted a warning and continued
+        # as ready. Fix: gate the readiness-fail strictly on
+        # ``div.get("divergent") is True``. Codex P2: use the module-
+        # level ``get_hub_runtime`` (NOT a local re-import) so
+        # monkeypatched test stubs are observed.
         try:
-            from app.hub.runtime import get_hub_runtime as _gh
-            div = _gh().compute_kill_switch_divergence()
+            div = get_hub_runtime().compute_kill_switch_divergence()
             payload["kill_switch_divergence"] = bool(div.get("divergent", False))
             payload["kill_switch_legacy_active"] = bool(div.get("legacy_active", False))
             if div.get("divergent"):
                 _emit_kill_switch_divergence_alert(div)
-            else:
-                _maybe_emit_kill_switch_divergence_resolved()
                 fails_ready = str(
                     os.getenv("KILL_SWITCH_DIVERGENCE_FAILS_READY", "true") or ""
                 ).strip().lower() in {"1", "true", "yes", "on"}
                 if fails_ready:
                     payload["ready"] = False
                     age = div.get("divergence_age_seconds")
-                    age_text = f" age_s={age:.1f}" if isinstance(age, (int, float)) else ""
+                    age_text = (
+                        f" age_s={age:.1f}"
+                        if isinstance(age, (int, float))
+                        else ""
+                    )
                     payload["reason"] = (
                         "kill_switch_divergence: legacy=True durable_global=False"
                         + age_text
                     )
                     return JSONResponse(status_code=503, content=payload)
+            else:
+                # Healthy: emit one-shot RESOLVED if we previously saw
+                # a divergence; do NOT fail readiness.
+                _maybe_emit_kill_switch_divergence_resolved()
         except Exception as _div_exc:
             # Divergence detection failure is non-fatal — better to keep
             # readyz informative than to flip ready=false on an unrelated
