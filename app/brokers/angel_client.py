@@ -1015,6 +1015,26 @@ class AngelBrokerClient(BrokerClient):
             updated_at = str(
                 order.get("updatetime") or order.get("exchorderupdatetime") or ""
             ).strip() or None
+            # Issue #224: capture broker-side rejection text + error code
+            # so the lifecycle log on the snapshot polling path can
+            # surface diagnostics for REJECTED / CANCELLED orders. Angel
+            # returns these as ``text`` and ``errorcode`` (sometimes
+            # ``rejectionreason`` for legacy responses). Defensive about
+            # which fields are populated — adapters returning None are
+            # fine; the fields default to None on the dataclass.
+            status_message = str(
+                order.get("text")
+                or order.get("rejectionreason")
+                or order.get("rejection_reason")
+                or order.get("status_message")
+                or order.get("statusmessage")
+                or ""
+            ).strip() or None
+            error_code = str(
+                order.get("errorcode")
+                or order.get("error_code")
+                or ""
+            ).strip() or None
             results.append(
                 OrderStatus(
                     order_id=order_id,
@@ -1030,6 +1050,8 @@ class AngelBrokerClient(BrokerClient):
                     exchange=exchange,
                     variety=variety,
                     updated_at=updated_at,
+                    status_message=status_message,
+                    error_code=error_code,
                 )
             )
         log_event(

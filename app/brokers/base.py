@@ -115,6 +115,18 @@ class OrderStatus:
     updated_at: Optional[str] = None
     execution_mode: Optional[str] = None
     virtual: Optional[bool] = None
+    # Issue #224: broker-side rejection / status message + error code
+    # surfaced from the snapshot poll path. Without these, when a
+    # terminal status arrives via snapshot polling rather than the
+    # original ``place_order`` response, the lifecycle log only knows
+    # the abstract status (e.g. "REJECTED") and the broker's text /
+    # error code is lost. On 2026-05-08 order 842329 was REJECTED with
+    # no diagnostic info captured. ``status_message`` carries the
+    # broker's free-form text, ``error_code`` the structured error code
+    # where the broker provides one. Both default to None for backward
+    # compatibility with adapters that don't populate them.
+    status_message: Optional[str] = None
+    error_code: Optional[str] = None
 
 
 @dataclass

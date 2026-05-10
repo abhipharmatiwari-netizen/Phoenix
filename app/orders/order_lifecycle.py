@@ -1775,6 +1775,15 @@ class OrderLifecycleService:
                 recovery_action=transition_source,
                 updated_at=_parse_utc(order.updated_at, fallback=self._clock.now_utc()),
             )
+            # Issue #224: surface broker-side rejection text + error
+            # code for terminal non-fills. Without these, REJECTED /
+            # CANCELLED orders observed via the snapshot poll path leave
+            # operators with only the abstract status enum value and no
+            # actionable diagnostic. The fields are optional on
+            # ``OrderStatus`` (default None) so adapters that don't yet
+            # populate them are silently tolerated.
+            broker_status_message = getattr(order, "status_message", None)
+            broker_error_code = getattr(order, "error_code", None)
             log_event(
                 logger,
                 event_type="ORDER_LIFECYCLE_TERMINAL_NON_FILL",
@@ -1787,6 +1796,8 @@ class OrderLifecycleService:
                 transition_source=transition_source,
                 broker_order_id=broker_order_id,
                 status=observed_state.value,
+                broker_status_message=broker_status_message,
+                broker_error_code=broker_error_code,
                 mode=self._stability_flags.order_lifecycle_use_broker_snapshot,
             )
             record = self._ensure_position_record(ctx)
