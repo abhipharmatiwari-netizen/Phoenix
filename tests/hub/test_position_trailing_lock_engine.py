@@ -84,6 +84,26 @@ def _seed_ltp(symbol: str, price: float, *, lot_size: int = 1250) -> None:
     dashboard_bus.upsert_instrument_meta(symbol, {"symbol": symbol, "lot_size": lot_size})
 
 
+def _mark_positions_sync_fresh(
+    state_store: StateStore, account_id: str,
+) -> None:
+    """Mark the broker positions sync as freshly succeeded for an
+    account so the trailing-lock engine's disappeared-symbol sweep
+    (which gates on sync freshness in PR #236 round-4 review P2)
+    treats subsequent state-store snapshots as authoritative."""
+    from datetime import datetime, timezone
+
+    state_store.update_positions_status(
+        account_id,
+        status="OK",
+        last_ok_ts=datetime.now(timezone.utc).isoformat(),
+        last_count=0,
+        error_reason=None,
+        blocked_ts=None,
+        retry_after_seconds=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_engine_disabled_does_nothing():
     state_store = StateStore()
@@ -915,6 +935,7 @@ async def test_marker_cleared_when_symbol_disappears_from_snapshot():
     _t.sleep(5.5)
 
     state_store.set_positions("A1", [])
+    _mark_positions_sync_fresh(state_store, "A1")
     # First missing-symbol observation — round-4 P1 requires a
     # second consecutive miss before the marker is swept.
     await engine.evaluate_runners([_runner("t-1", "A1")])
@@ -923,6 +944,7 @@ async def test_marker_cleared_when_symbol_disappears_from_snapshot():
         "until a second consecutive miss (#236 round-4 P1)"
     )
     # Second consecutive missing-symbol observation — now sweep.
+    _mark_positions_sync_fresh(state_store, "A1")
     await engine.evaluate_runners([_runner("t-1", "A1")])
     assert key not in engine._inflight_markers, (
         "marker must be swept after two consecutive missing snapshots "
@@ -1077,7 +1099,9 @@ async def test_disappeared_symbol_sweep_also_resets_manager_state():
     # Symbol disappears from snapshot — PR #236 round-4 P1 requires
     # TWO consecutive missing snapshots before sweep / state reset.
     state_store.set_positions("A1", [])
+    _mark_positions_sync_fresh(state_store, "A1")
     await engine.evaluate_runners([_runner("t-1", "A1")])  # 1st miss
+    _mark_positions_sync_fresh(state_store, "A1")
     await engine.evaluate_runners([_runner("t-1", "A1")])  # 2nd miss
 
     assert state_key not in manager._states, (
@@ -1121,6 +1145,107 @@ class _RouterExecutedResponse:
             "hub-order-id",
             SimpleNamespace(status="EXECUTED", broker_order_id="BOI-EX"),
         )
+
+
+@pytest.mark.asyncio
+async def test_stale_positions_sync_does_not_clear_marker():
+    """Round-4 P2: when the broker positions sync is stale (no
+    successful poll since the marker was armed), the disappeared-
+    symbol sweep must NOT count the same stale empty snapshot as
+    repeated missing observations. Otherwise a sync outage that
+    leaves an empty snapshot in StateStore would cause the marker
+    to be cleared after two evaluation cycles even though no fresh
+    broker confirmation has arrived."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-1")
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key in engine._inflight_markers
+    import time as _t
+    _t.sleep(5.5)
+    # Positions snapshot is empty AND sync is stale (no last_ok_ts
+    # update) — sweep must NOT count this as a missing-symbol
+    # observation. Marker must persist across BOTH cycles.
+    state_store.set_positions("A1", [])
+    # Intentionally NOT calling _mark_positions_sync_fresh here.
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert key in engine._inflight_markers, (
+        "stale positions sync must NOT trigger marker clearance "
+        "(#236 round-4 P2)"
+    )
+
+
+class _RouterFilledResponse:
+    """Router returning FILLED — synchronous terminal fill."""
+
+    def __init__(self):
+        self.calls: List[dict] = []
+
+    async def submit_order(
+        self, *, tenant_id, broker_account_id, strategy_id, order_req,
+    ):
+        self.calls.append({"symbol": order_req.symbol})
+        return (
+            "hub-order-id",
+            SimpleNamespace(status="FILLED", broker_order_id="BOI-FILLED"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_synchronous_fill_logs_submitted_event_not_rejected(caplog):
+    """Round-4 P3: a synchronous terminal FILL must be reported as
+    SUBMITTED (with synchronous_fill=True), not as a rejection.
+    Mislabelling real executions as router rejections corrupts log
+    review and metrics."""
+    import logging as _logging
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterFilledResponse()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    with caplog.at_level(_logging.WARNING, logger="app.hub.exit_engines"):
+        _seed_ltp("NG22MAY26255CE", 16.27)
+        await engine.evaluate_runners([_runner("t-1", "A1")])
+    submitted_records = [
+        r for r in caplog.records
+        if "POSITION_TRAILING_LOCK_EXIT_SUBMITTED" in r.getMessage()
+    ]
+    rejected_records = [
+        r for r in caplog.records
+        if "POSITION_TRAILING_LOCK_EXIT_REJECTED_BY_ROUTER" in r.getMessage()
+    ]
+    assert submitted_records, (
+        "synchronous fill must emit SUBMITTED event (#236 round-4 P3)"
+    )
+    assert not rejected_records, (
+        "synchronous fill must NOT be mislabelled as REJECTED_BY_ROUTER "
+        "(#236 round-4 P3)"
+    )
 
 
 @pytest.mark.asyncio
@@ -1274,6 +1399,7 @@ async def test_single_missing_snapshot_does_not_clear_marker():
     _t.sleep(5.5)  # past grace period
     # Single transient empty snapshot must NOT clear marker.
     state_store.set_positions("A1", [])
+    _mark_positions_sync_fresh(state_store, "A1")
     await engine.evaluate_runners([_runner("t-1", "A1")])
     assert key in engine._inflight_markers, (
         "single missing snapshot is ambiguous — marker must persist "
@@ -1285,12 +1411,14 @@ async def test_single_missing_snapshot_does_not_clear_marker():
         [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
                   product_type=ProductType.INTRADAY)],
     )
+    _mark_positions_sync_fresh(state_store, "A1")
     await engine.evaluate_runners([_runner("t-1", "A1")])
     assert key in engine._inflight_markers, (
         "marker persists when symbol reappears (#236 round-4 P1)"
     )
     # Now disappear again — counter restarts at 1, still no clearance.
     state_store.set_positions("A1", [])
+    _mark_positions_sync_fresh(state_store, "A1")
     await engine.evaluate_runners([_runner("t-1", "A1")])
     assert key in engine._inflight_markers, (
         "miss-counter must reset on observed reappearance — single "

@@ -2400,12 +2400,74 @@ class PositionTrailingLockEngine:
         # and incorrectly block a quick re-open. The grace period
         # (5s) prevents clearing a marker that was just armed in this
         # same cycle.
+        # PR #236 round-4 review P2: pass the broker positions sync
+        # freshness signal so the disappeared-symbol sweep does NOT
+        # count a stale snapshot as evidence the symbol vanished.
+        # Without this, a transient OK-but-empty positions response
+        # left in StateStore can be observed twice in a row by the
+        # watchdog before the next successful sync replaces it,
+        # incorrectly clearing the marker.
+        positions_status_fresh = self._is_positions_status_fresh(
+            broker_account_id=broker_account_id,
+        )
         self._sweep_disappeared_symbol_markers(
             tenant_id=tenant_id,
             broker_account_id=broker_account_id,
             seen_symbols=seen_symbols,
             grace_seconds=5.0,
+            positions_status_fresh=positions_status_fresh,
         )
+
+    def _is_positions_status_fresh(
+        self, *, broker_account_id: Any,
+    ) -> bool:
+        """Return True if the broker positions snapshot in StateStore
+        was last updated by a SUCCESSFUL sync within the watchdog's
+        own poll cadence.
+
+        PR #236 round-4 review P2: the disappeared-symbol sweep must
+        only count snapshots that were ACTUALLY refreshed by a recent
+        sync. If the sync has been failing (or has not run since the
+        marker was armed), repeated evaluations of the SAME stale
+        snapshot must not all count as missing-symbol observations.
+        """
+        try:
+            get_status = getattr(
+                self.state_store, "get_positions_status", None,
+            )
+            if not callable(get_status):
+                # State store does not expose freshness — be permissive
+                # (fall back to monotonic-clock-only behaviour, which
+                # is the round-3 behaviour).
+                return True
+            status = get_status(broker_account_id) or {}
+            last_ok_iso = status.get("last_ok_ts")
+            if not last_ok_iso:
+                return False
+            from datetime import datetime, timezone
+            try:
+                last_ok = datetime.fromisoformat(
+                    str(last_ok_iso).replace("Z", "+00:00")
+                )
+            except ValueError:
+                return False
+            now = self.clock.now_utc()
+            if last_ok.tzinfo is None:
+                last_ok = last_ok.replace(tzinfo=timezone.utc)
+            age = (now - last_ok).total_seconds()
+            # Fresh iff last successful sync is no older than 2× the
+            # poll interval (giving the sync one cycle of grace).
+            poll_interval = float(
+                getattr(
+                    self.settings,
+                    "hub_subscription_poll_interval",
+                    60.0,
+                ) or 60.0
+            )
+            max_fresh_age = max(poll_interval * 2.0, 30.0)
+            return age <= max_fresh_age
+        except Exception:  # pragma: no cover - defensive
+            return False
 
     def _sweep_disappeared_symbol_markers(
         self,
@@ -2414,6 +2476,7 @@ class PositionTrailingLockEngine:
         broker_account_id: Any,
         seen_symbols: set,
         grace_seconds: float,
+        positions_status_fresh: bool = True,
     ) -> None:
         """Issue #225 (PR #236 review P2): clear inflight markers for
         symbols that disappeared from the snapshot entirely. Skips
@@ -2430,6 +2493,13 @@ class PositionTrailingLockEngine:
         unresolved. Requiring multiple consecutive misses guards against
         single-snapshot ambiguity while keeping the timeout safety net
         as the ultimate backstop.
+
+        PR #236 round-4 review P2: ``positions_status_fresh`` must be
+        True for the miss to count. A stale positions snapshot (sync
+        failing or not yet run since the marker was armed) can be
+        observed twice in a row without ever being refreshed by the
+        broker — counting both as missing observations would clear
+        the guard while the broker order may still be unresolved.
         """
         import time as _t
         now_mono = _t.monotonic()
@@ -2453,6 +2523,12 @@ class PositionTrailingLockEngine:
             self._disappeared_symbol_miss_counts.pop(
                 (tenant_key, account_key, str(symbol)), None
             )
+        # PR #236 round-4 review P2: if the underlying positions
+        # snapshot is stale, do NOT count this evaluation against the
+        # miss threshold. The stale snapshot could be the same data
+        # observed in the previous cycle.
+        if not positions_status_fresh:
+            return
         for key in keys_to_check:
             symbol = key[2]
             if symbol in seen_symbols:
@@ -2616,35 +2692,43 @@ class PositionTrailingLockEngine:
             # "complete") via prefix matching after upper-case
             # normalization. The clearance set is conservative — only
             # statuses that are definitely terminal qualify.
-            # PR #236 round-4 review P2: include FULL and EXECUTED so
-            # the local prefix list matches the canonical terminal
-            # classifier. Angel and other brokers can return terminal
-            # fill statuses as ``FULL`` / ``EXECUTED`` (the router /
-            # ``classify_broker_status`` treats those as filled
-            # terminal outcomes); without these prefixes a synchronous
-            # fill leaves the marker armed for the full inflight
-            # window and incorrectly blocks legitimate retries or
-            # same-symbol re-opens.
-            terminal_clearable_prefixes = (
+            # PR #236 round-4 review P2: align with the canonical
+            # ``classify_broker_status`` set. Cover BOTH terminal
+            # non-fill (``REJECTED``/``REJECT``/``FAILED``/``FAILURE``/
+            # ``ERROR``/``CANCELLED``/``CANCELED``/``EXPIRED``) and
+            # terminal-fill (``FILLED``/``FULL``/``COMPLETE``/
+            # ``EXECUTED``) prefixes. PR #236 round-4 review P3:
+            # distinguish the two so a synchronous broker fill is NOT
+            # mislabelled as a router rejection in logs/alerts.
+            terminal_nonfill_prefixes = (
                 "REJECTED",
+                "REJECT",
                 "FAILED",
+                "FAILURE",
                 "ERROR",
                 "CANCELLED",
                 "CANCELED",
                 "EXPIRED",
+            )
+            terminal_fill_prefixes = (
                 "FILLED",
                 "FULL",
                 "COMPLETE",
                 "EXECUTED",
             )
-            rejected = any(
+            is_terminal_nonfill = any(
                 response_status.startswith(p)
-                for p in terminal_clearable_prefixes
+                for p in terminal_nonfill_prefixes
             )
-            if rejected:
-                # Router-rejected submission — no broker order to wait
-                # for. Clear marker so a subsequent eligible cycle is
-                # not blocked by a non-existent in-flight order.
+            is_terminal_fill = any(
+                response_status.startswith(p)
+                for p in terminal_fill_prefixes
+            )
+            if is_terminal_nonfill:
+                # Router-rejected / non-fill terminal — no broker order
+                # to wait for. Clear marker so a subsequent eligible
+                # cycle is not blocked by a non-existent in-flight
+                # order.
                 self._clear_inflight_marker(
                     tenant_id=tenant_id,
                     broker_account_id=broker_account_id,
@@ -2663,6 +2747,39 @@ class PositionTrailingLockEngine:
                     broker_account_id=broker_account_id,
                     symbol=decision.symbol,
                     response_status=response_status,
+                )
+                return
+            if is_terminal_fill:
+                # Synchronous terminal fill — broker reports the exit
+                # is already filled. Clear marker (no inflight order
+                # remains) and emit the SUBMITTED event with a
+                # ``synchronous_fill`` flag so log/alert review does
+                # not mistake a real execution for a router rejection
+                # (PR #236 round-4 review P3).
+                self._clear_inflight_marker(
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    symbol=decision.symbol,
+                )
+                log_event(
+                    logger,
+                    event_type="POSITION_TRAILING_LOCK_EXIT_SUBMITTED",
+                    message=(
+                        "position trailing exit submitted (synchronous "
+                        "terminal fill — broker confirmed completion in "
+                        "the submit response)"
+                    ),
+                    level=logging.WARNING,
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    symbol=decision.symbol,
+                    peak_unrealized_pnl=round(decision.peak_unrealized_pnl, 2),
+                    current_unrealized_pnl=round(decision.current_unrealized_pnl, 2),
+                    lock_floor=round(decision.lock_floor, 2) if decision.lock_floor is not None else None,
+                    exit_reason=reason,
+                    broker_order_id=broker_order_id,
+                    response_status=response_status,
+                    synchronous_fill=True,
                 )
                 return
             # Accepted — refresh marker with broker_order_id (if any) so
