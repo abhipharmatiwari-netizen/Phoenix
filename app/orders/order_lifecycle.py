@@ -1775,6 +1775,46 @@ class OrderLifecycleService:
                 recovery_action=transition_source,
                 updated_at=_parse_utc(order.updated_at, fallback=self._clock.now_utc()),
             )
+            # Issue #224: surface broker-side rejection text + error
+            # code for terminal non-fills. Without these, REJECTED /
+            # CANCELLED orders observed via the snapshot poll path leave
+            # operators with only the abstract status enum value and no
+            # actionable diagnostic. The fields are optional on
+            # ``OrderStatus`` (default None) so adapters that don't yet
+            # populate them are silently tolerated.
+            #
+            # PR #235 round-1 review (P2): broker rejection text
+            # is free-form and typically contains spaces, ``=``,
+            # and commas (e.g. ``RMS:Margin Exceeds,
+            # Required:75000 Available:50000``). ``log_event``
+            # formats extras as flat ``key=value`` tokens joined
+            # by spaces, so even a JSON-quoted value gets split
+            # across the line during downstream parsing.
+            #
+            # PR #235 round-2 review (P2): use ``urllib.parse.quote``
+            # with empty ``safe`` to percent-encode spaces, ``=``,
+            # commas, and quotes — guarantees the value is a single
+            # whitespace-free token that flat parsers can keep
+            # together. Downstream consumers can ``unquote`` for
+            # human display.
+            #
+            # PR #235 round-2 review (P2): skip None values entirely
+            # so absent diagnostics don't appear as
+            # ``broker_status_message=None`` in logs (which would
+            # match "field exists" filters and obscure real
+            # diagnostics).
+            from urllib.parse import quote as _url_quote
+            raw_status_message = getattr(order, "status_message", None)
+            raw_error_code = getattr(order, "error_code", None)
+            extra_log_fields: dict[str, Any] = {}
+            if raw_status_message:
+                extra_log_fields["broker_status_message"] = _url_quote(
+                    str(raw_status_message), safe="",
+                )
+            if raw_error_code:
+                extra_log_fields["broker_error_code"] = _url_quote(
+                    str(raw_error_code), safe="",
+                )
             log_event(
                 logger,
                 event_type="ORDER_LIFECYCLE_TERMINAL_NON_FILL",
@@ -1788,6 +1828,7 @@ class OrderLifecycleService:
                 broker_order_id=broker_order_id,
                 status=observed_state.value,
                 mode=self._stability_flags.order_lifecycle_use_broker_snapshot,
+                **extra_log_fields,
             )
             record = self._ensure_position_record(ctx)
             if record is not None:

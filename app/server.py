@@ -642,6 +642,31 @@ def _parse_angel_postback(payload: dict[str, Any]) -> OrderStatus | None:
         or payload.get("exchtime")
         or ""
     ).strip() or None
+    # Issue #224 (PR #235 round-2 review P2): the webhook path also
+    # needs to populate ``status_message`` and ``error_code`` so
+    # rejected orders observed via /angel/postback carry the same
+    # broker diagnostics as the order-book snapshot path. Use the same
+    # trim-then-pick logic the snapshot parser uses.
+    def _first_non_empty(*candidates):
+        for c in candidates:
+            if c is None:
+                continue
+            s = str(c).strip()
+            if s:
+                return s
+        return None
+    status_message = _first_non_empty(
+        payload.get("text"),
+        payload.get("rejectionreason"),
+        payload.get("rejection_reason"),
+        payload.get("status_message"),
+        payload.get("statusmessage"),
+    )
+    error_code = _first_non_empty(
+        payload.get("errorcode"),
+        payload.get("errorCode"),
+        payload.get("error_code"),
+    )
     return OrderStatus(
         order_id=order_id,
         symbol=symbol,
@@ -655,6 +680,8 @@ def _parse_angel_postback(payload: dict[str, Any]) -> OrderStatus | None:
         price=price,
         exchange=exchange,
         updated_at=updated_at,
+        status_message=status_message,
+        error_code=error_code,
     )
 
 
