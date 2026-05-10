@@ -1166,6 +1166,28 @@ async def readyz() -> JSONResponse:
         return JSONResponse(status_code=503, content=payload)
 
     if _readiness_trade_mode() == "LIVE":
+        # Issue #226 (PR #237 review P2): run the avg_price corruption
+        # audit BEFORE the kill-switch gate so it surfaces in EXACTLY
+        # the scenario the audit was designed for — when BROKER_SYNC
+        # is suppressed by a tripped kill switch (the 2026-05-08 root
+        # cause). The audit only adds payload fields here; the gate
+        # below decides whether corruption forces ready=false.
+        # Uses the module-level ``get_hub_runtime`` (NOT a local
+        # re-import) so monkeypatched test stubs are observed.
+        try:
+            corruption = get_hub_runtime().audit_position_avg_price_corruption()
+            corrupt_count = int(corruption.get("corrupt_count", 0))
+            payload["avg_price_corrupt_count"] = corrupt_count
+            payload["_avg_price_corruption_samples"] = (
+                corruption.get("samples") or []
+            )[:5]
+        except Exception as _corr_exc:
+            logger.warning(
+                "readyz: avg_price corruption audit failed (non-fatal): %s",
+                _corr_exc,
+            )
+            payload["avg_price_corrupt_count"] = -1
+
         # §58/§93 — Surface kill-switch state in readyz; block readiness when
         # the durable kill-switch state is active or cannot be verified.
         try:
@@ -1186,43 +1208,30 @@ async def readyz() -> JSONResponse:
             payload["reason"] = f"kill_switch_unavailable: {_ks_exc}"
             return JSONResponse(status_code=503, content=payload)
 
-        # Issue #226: detect avg_price corruption in internal position
-        # records and surface to readyz. Corruption (qty != 0 with
-        # avg_price <= 0) means Unrealized PnL cannot be computed and
-        # exit engines / risk gates may operate against fiction. The
-        # 2026-05-08 incident logged ``POSITION_VIEW_AVG_PRICE_INVALID
-        # qty=7500 avg_price=0.0`` but only on the dashboard request
-        # path. This periodic-on-readyz audit makes corruption visible
-        # to operators without needing them to open the dashboard.
-        # Configurable via ``AVG_PRICE_CORRUPTION_FAILS_READY`` (default
-        # true).
-        try:
-            from app.hub.runtime import get_hub_runtime as _gh_corr
-            corruption = _gh_corr().audit_position_avg_price_corruption()
-            corrupt_count = int(corruption.get("corrupt_count", 0))
-            payload["avg_price_corrupt_count"] = corrupt_count
-            if corrupt_count > 0:
-                fails_ready = str(
-                    os.getenv("AVG_PRICE_CORRUPTION_FAILS_READY", "true") or ""
-                ).strip().lower() in {"1", "true", "yes", "on"}
-                if fails_ready:
-                    payload["ready"] = False
-                    samples = corruption.get("samples") or []
-                    sample_text = ",".join(
-                        f"{s.get('account_id')}:{s.get('symbol')}"
-                        for s in samples[:3]
-                    )
-                    payload["reason"] = (
-                        f"avg_price_corruption: {corrupt_count} record(s) "
-                        f"with qty != 0 + avg_price <= 0 "
-                        f"(samples: {sample_text})"
-                    )
-                    return JSONResponse(status_code=503, content=payload)
-        except Exception as _corr_exc:
-            logger.warning(
-                "readyz: avg_price corruption audit failed (non-fatal): %s",
-                _corr_exc,
-            )
+        # Issue #226: now that the kill-switch gate has cleared, decide
+        # whether avg_price corruption should fail readiness. Configurable
+        # via ``AVG_PRICE_CORRUPTION_FAILS_READY`` (default true).
+        corrupt_count = int(payload.get("avg_price_corrupt_count", 0) or 0)
+        if corrupt_count > 0:
+            fails_ready = str(
+                os.getenv("AVG_PRICE_CORRUPTION_FAILS_READY", "true") or ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if fails_ready:
+                payload["ready"] = False
+                samples = payload.pop("_avg_price_corruption_samples", []) or []
+                sample_text = ",".join(
+                    f"{s.get('account_id')}:{s.get('symbol')}"
+                    for s in samples[:3]
+                )
+                payload["reason"] = (
+                    f"avg_price_corruption: {corrupt_count} record(s) "
+                    f"with qty != 0 + avg_price <= 0 "
+                    f"(samples: {sample_text})"
+                )
+                return JSONResponse(status_code=503, content=payload)
+        # Drop internal sample field if not consumed by the failure path.
+        payload.pop("_avg_price_corruption_samples", None)
+
 
     if _readiness_trade_mode() == "LIVE":
         # §57 / #108 — Gate readiness on restored authoritative position state.

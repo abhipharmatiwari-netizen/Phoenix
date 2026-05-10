@@ -168,3 +168,56 @@ def test_audit_iterates_multiple_accounts():
     assert result["corrupt_count"] == 2
     accounts_in_samples = {s["account_id"] for s in result["samples"]}
     assert accounts_in_samples == {"A1", "A2"}
+
+
+# ---------------------------------------------------------------------------
+# Codex round-1 review on PR #237: dict-style position with field aliases.
+# ---------------------------------------------------------------------------
+
+
+def test_audit_detects_corruption_in_dict_position_with_qty_alias():
+    """Codex P2 round 1: dict-style positions with ``qty`` alias instead
+    of ``quantity`` (and ``avgPrice``/``entry_price`` aliases) must be
+    audited. Some adapters and test harnesses return dicts — the same
+    shapes the dashboard normalizer accepts."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {"symbol": "DICT_SYM_1", "qty": 1000, "avgPrice": 0.0},
+                {"symbol": "DICT_SYM_2", "net_qty": 500, "entry_price": 0.0},
+            ]
+        }
+    )
+    result = rt.audit_position_avg_price_corruption()
+    assert result["corrupt_count"] == 2, (
+        "dict/alias positions must be audited (#237 review P2)"
+    )
+    symbols = {s["symbol"] for s in result["samples"]}
+    assert symbols == {"DICT_SYM_1", "DICT_SYM_2"}
+
+
+def test_audit_detects_corruption_in_dict_position_with_average_price_alias():
+    """``average_price`` (with underscore) is an Angel-API alias that
+    must also be normalized."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {"symbol": "DICT_SYM", "quantity": 250, "average_price": 0.0},
+            ]
+        }
+    )
+    result = rt.audit_position_avg_price_corruption()
+    assert result["corrupt_count"] == 1
+
+
+def test_audit_dict_position_with_healthy_avg_price_is_not_flagged():
+    """Sanity: dict positions with positive avg_price are NOT corrupt."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {"symbol": "DICT_OK", "qty": 1000, "avgPrice": 100.5},
+            ]
+        }
+    )
+    result = rt.audit_position_avg_price_corruption()
+    assert result["corrupt_count"] == 0

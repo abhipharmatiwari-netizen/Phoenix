@@ -548,6 +548,24 @@ class HubRuntime:
             )
             return {"corrupt_count": 0, "samples": []}
 
+        # Issue #226 (PR #237 review P2): dict/alias normalization.
+        # Some adapters / test harnesses store positions as dicts with
+        # field aliases (``qty``/``net_qty`` for quantity, ``avgPrice``/
+        # ``entry_price`` for avg_price) — the same shapes the dashboard
+        # normalizer accepts. Without this, the audit misses exactly the
+        # corrupt rows that the dashboard's reactive defence already
+        # surfaces.
+        def _first_present(p, *keys):
+            for k in keys:
+                if isinstance(p, dict):
+                    if k in p and p[k] is not None:
+                        return p[k]
+                else:
+                    v = getattr(p, k, None)
+                    if v is not None:
+                        return v
+            return None
+
         corrupt: list[dict] = []
         for account_id in account_ids:
             try:
@@ -555,24 +573,25 @@ class HubRuntime:
             except Exception:
                 continue
             for pos in positions:
+                qty_raw = _first_present(pos, "quantity", "qty", "net_qty")
                 try:
-                    qty = int(getattr(pos, "quantity", 0) or 0)
+                    qty = int(qty_raw or 0)
                 except (TypeError, ValueError):
                     qty = 0
                 if qty == 0:
                     continue
-                avg_price = getattr(pos, "avg_price", None)
-                if avg_price is None:
-                    avg_price = getattr(pos, "average_price", None)
+                avg_raw = _first_present(
+                    pos, "avg_price", "average_price", "avgPrice", "entry_price",
+                )
                 try:
-                    avg_f = float(avg_price) if avg_price is not None else 0.0
+                    avg_f = float(avg_raw) if avg_raw is not None else 0.0
                 except (TypeError, ValueError):
                     avg_f = 0.0
                 if avg_f > 0.0:
                     continue
                 # Found a corrupt record.
-                symbol = str(getattr(pos, "symbol", "") or "")
-                tenant_id = str(getattr(pos, "tenant_id", "") or "")
+                symbol = str(_first_present(pos, "symbol") or "")
+                tenant_id = str(_first_present(pos, "tenant_id") or "")
                 corrupt.append(
                     {
                         "tenant_id": tenant_id,
