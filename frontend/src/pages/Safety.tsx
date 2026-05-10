@@ -8,6 +8,7 @@ import StatusBadge from '../components/shared/StatusBadge';
 import DataTable, { Column } from '../components/shared/DataTable';
 import LoadingSpinner from '../components/shared/LoadingSpinner';
 import Card from '../components/shared/Card';
+import KillSwitchPanel from '../components/KillSwitchPanel';
 
 const Safety: React.FC = () => {
   const [health, setHealth] = useState<HealthSummary | null>(null);
@@ -19,13 +20,29 @@ const Safety: React.FC = () => {
     let active = true;
     const fetchData = async () => {
       try {
-        const [healthResp, auditResp] = await Promise.all([
+        const [healthResp, breakGlassResp, killSwitchResp] = await Promise.all([
           DefaultService.getHealthSummary(),
           AuditService.getAuditLog({ action: 'break_glass', limit: 20 }).catch(() => ({ events: [], count: 0 })),
+          // Issue #238: surface every kill-switch toggle attempt in the
+          // audit table so operators see who tripped/cleared/rearmed and
+          // what reason was recorded.
+          AuditService.getAuditLog({ resource_type: 'kill_switch', limit: 50 }).catch(() => ({ events: [], count: 0 })),
         ]);
         if (active) {
           setHealth(healthResp);
-          setAuditEvents(auditResp.events || []);
+          // Merge the two audit feeds; de-duplicate by audit_id when
+          // present, otherwise by timestamp+action+resource_id.
+          const merged: AuditEvent[] = [];
+          const seen = new Set<string>();
+          [...(killSwitchResp.events || []), ...(breakGlassResp.events || [])].forEach((e) => {
+            const key = (e as { audit_id?: string }).audit_id
+              || `${e.timestamp}|${e.action}|${e.resource_id}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            merged.push(e);
+          });
+          merged.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+          setAuditEvents(merged);
         }
       } catch (err) {
         if (active) setError(err instanceof Error ? err.message : 'Failed to fetch safety data');
@@ -107,6 +124,15 @@ const Safety: React.FC = () => {
               </Card>
             </div>
 
+            {/* Issue #238: Kill-switch controls — admin only.
+                Operators see a read-only state line via the audit table; only
+                admins see the trip/clear/rearm/cancel-all buttons. The panel
+                fetches its own state via /admin/kill-switch/state and refreshes
+                after every action so the UI cannot drift from backend. */}
+            <Gate requiredRoles={[Role.ADMIN]}>
+              <KillSwitchPanel />
+            </Gate>
+
             {/* Safety Note */}
             <div style={{
               border: '1px solid #fcd34d',
@@ -117,13 +143,18 @@ const Safety: React.FC = () => {
               fontSize: '0.875rem',
               color: '#92400e',
             }}>
-              <strong>Note:</strong> Kill switch and break-glass controls are enforced server-side via the maintenance manager.
-              Strategy toggles are available from the <a href="/control-tower" style={{ color: '#2563eb' }}>Control Tower</a>.
-              For emergency shutdown, use backend ops procedures or the break-glass CLI tool.
+              <strong>Note:</strong> Kill switch is enforced server-side via the
+              durable <code>KillSwitchManager</code>. Admins use the controls above
+              to trip, clear, rearm, and cancel open broker orders. Strategy toggles
+              are available from the <a href="/control-tower" style={{ color: '#2563eb' }}>Control Tower</a>.
+              For emergency operator-initiated panic stops, see the runbook at
+              <code>docs/runbooks/dashboard-kill-switch.md</code>.
             </div>
 
-            {/* Audit Trail */}
-            <h2 style={{ fontSize: '1rem', color: '#374151', marginBottom: '0.5rem' }}>Safety Audit Trail</h2>
+            {/* Audit Trail (kill-switch + break-glass) */}
+            <h2 style={{ fontSize: '1rem', color: '#374151', marginBottom: '0.5rem' }}>
+              Safety Audit Trail (Kill Switch &amp; Break-Glass)
+            </h2>
             <DataTable
               columns={auditColumns}
               data={auditData}

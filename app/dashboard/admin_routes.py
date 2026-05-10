@@ -1261,13 +1261,40 @@ def _get_kill_switch_manager():
 
 
 def _save_kill_switch_state(ksm) -> None:
-    """Persist KillSwitchManager state to Postgres (non-fatal)."""
+    """Persist KillSwitchManager state to Postgres.
+
+    Issue #238 acceptance: in LIVE mode the kill-switch state MUST be
+    persisted durably. A silent in-memory-only save would leave the
+    operator's UI showing TRIPPED while a process restart would
+    rehydrate from Postgres and find INACTIVE — defeating the
+    durability guarantee. Fail closed in LIVE so the API call surfaces
+    a 500 to the dashboard instead of misleading the operator.
+
+    In non-LIVE modes the existing non-fatal warning is preserved so
+    local/dev runs without a control-plane Postgres do not crash.
+    """
+    import logging as _log
+    import os as _os
+    trade_mode = str(_os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper()
     try:
         from app.data.postgres import connect_with_retry, get_control_plane_dsn
         with connect_with_retry(get_control_plane_dsn(), autocommit=True) as conn:
             ksm.save_state(conn)
     except Exception as exc:
-        import logging as _log
+        if trade_mode == "LIVE":
+            _log.getLogger(__name__).error(
+                "kill_switch.save_state failed in LIVE — failing closed "
+                "so the operator does not see a phantom toggle: %s", exc,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Kill-switch state could not be persisted to Postgres. "
+                    "The toggle has NOT taken durable effect. Resolve the "
+                    "control-plane outage and retry. "
+                    f"Underlying error: {exc}"
+                ),
+            ) from exc
         _log.getLogger(__name__).warning("kill_switch.save_state failed (non-fatal): %s", exc)
 
 
@@ -1571,6 +1598,230 @@ def get_kill_switch_state_endpoint(ctx: AdminContext = Depends(get_admin_context
     ctx.require_role(AdminRole.OPERATOR)
     from app.risk.kill_switch import get_kill_switch_state
     return get_kill_switch_state()
+
+
+class KillSwitchCancelAllRequest(BaseModel):
+    """Issue #238: idempotent broker-side cancel of all open orders."""
+
+    reason: str = Field(
+        ...,
+        description=(
+            "Operator-entered reason for cancelling all open broker orders. "
+            "Stored in the audit trail."
+        ),
+    )
+    broker_account_id: Optional[str] = Field(
+        None,
+        description=(
+            "Optional: limit cancellation to a single broker account. "
+            "Omit to cancel across every registered runner."
+        ),
+    )
+
+
+@router.post("/kill-switch/cancel-all")
+async def kill_switch_cancel_all(
+    payload: KillSwitchCancelAllRequest,
+    ctx: AdminContext = Depends(get_admin_context),
+) -> dict:
+    """Cancel every open broker order across registered account runners.
+
+    Issue #238: dashboard-driven safety control. Iterates each runner's
+    last-known broker order list and calls the broker adapter's
+    ``cancel_order`` per pending order. Cancellation is idempotent on the
+    broker side — a missing or already-cancelled order returns a
+    REJECTED ``OrderResponse`` which is recorded but does NOT fail the
+    batch. Per-broker results are aggregated and returned so the
+    dashboard can surface per-account success / failure.
+
+    This endpoint does NOT trip the durable kill switch — call
+    ``/admin/kill-switch/trip`` separately for that. The dashboard flow
+    is: trip first (block new placements), then cancel-all (drain open
+    orders), then optionally manual flatten via break-glass.
+
+    Requires ADMIN role (stricter than ``trip``/``rearm`` which allow
+    OPERATOR) because bulk cancellation affects every account at once.
+    """
+    ctx.require_role(AdminRole.ADMIN)
+    if not str(payload.reason or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="reason is required and must be non-empty",
+        )
+
+    try:
+        runtime = get_hub_runtime()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"hub runtime unavailable: {exc}",
+        ) from exc
+    hub = getattr(runtime, "hub", None)
+    if hub is None:
+        raise HTTPException(
+            status_code=503,
+            detail="hub not available on runtime",
+        )
+
+    # Collect target runners. When broker_account_id is provided, scope
+    # to that single account; otherwise iterate every registered runner.
+    target_runner_ids: list = []
+    if payload.broker_account_id:
+        runner = hub.get_runner(payload.broker_account_id)
+        if runner is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"broker_account_id {payload.broker_account_id!r} has "
+                    "no registered runner"
+                ),
+            )
+        target_runner_ids = [payload.broker_account_id]
+    else:
+        target_runner_ids = list(hub.list_runner_ids())
+
+    per_account_results: list[dict] = []
+    aggregate_attempted = 0
+    aggregate_cancelled = 0
+    aggregate_failed = 0
+    aggregate_skipped = 0
+
+    # ``_TERMINAL_BROKER_STATUSES`` lists statuses for which there is
+    # nothing left to cancel — we count those as "skipped" rather than
+    # attempting a no-op cancel that the broker would reject anyway.
+    _TERMINAL_BROKER_STATUSES = {
+        "FILLED", "FULL", "COMPLETE", "EXECUTED",
+        "CANCELLED", "CANCELED", "CANCEL", "EXPIRED",
+        "REJECTED", "REJECT", "FAILED", "FAILURE", "ERROR",
+    }
+
+    for acct_id in target_runner_ids:
+        runner = hub.get_runner(acct_id)
+        if runner is None:
+            per_account_results.append({
+                "broker_account_id": str(acct_id),
+                "status": "no_runner",
+                "attempted": 0,
+                "cancelled": 0,
+                "failed": 0,
+                "skipped": 0,
+                "errors": [],
+            })
+            continue
+        broker_client = getattr(runner, "_broker_client", None)
+        last_orders = list(getattr(runner, "_last_orders", None) or [])
+        attempted = 0
+        cancelled = 0
+        failed = 0
+        skipped = 0
+        errors: list[dict] = []
+        cancel_fn = getattr(broker_client, "cancel_order", None)
+        if not callable(cancel_fn):
+            per_account_results.append({
+                "broker_account_id": str(acct_id),
+                "status": "broker_no_cancel_api",
+                "attempted": 0,
+                "cancelled": 0,
+                "failed": 0,
+                "skipped": 0,
+                "errors": [],
+            })
+            continue
+        for order in last_orders:
+            broker_order_id = str(getattr(order, "broker_order_id", "") or "")
+            order_status = str(getattr(order, "status", "") or "").strip().upper()
+            symbol = getattr(order, "symbol", None)
+            if not broker_order_id:
+                skipped += 1
+                continue
+            if order_status in _TERMINAL_BROKER_STATUSES:
+                skipped += 1
+                continue
+            attempted += 1
+            try:
+                resp = await cancel_fn(broker_order_id, symbol=symbol)
+            except Exception as exc:
+                failed += 1
+                errors.append({
+                    "broker_order_id": broker_order_id,
+                    "error": repr(exc),
+                })
+                continue
+            resp_status = str(getattr(resp, "status", "") or "").strip().upper()
+            if resp_status in {"CANCELLED", "CANCELED", "CANCEL"}:
+                cancelled += 1
+            elif resp_status in {"FILLED", "FULL", "COMPLETE", "EXECUTED"}:
+                # Already terminal — broker raced us; idempotent OK.
+                cancelled += 1
+            elif resp_status in {"REJECTED", "REJECT", "FAILED", "FAILURE", "ERROR"}:
+                # Idempotent: a cancel of an already-cancelled or
+                # unknown order frequently yields REJECTED. Treat as
+                # skipped so an operator-driven double-click doesn't
+                # surface as a hard failure.
+                resp_message = str(getattr(resp, "message", "") or "")
+                skipped += 1
+                if resp_message:
+                    errors.append({
+                        "broker_order_id": broker_order_id,
+                        "broker_status": resp_status,
+                        "broker_message": resp_message,
+                    })
+            else:
+                # Unknown / pending status from the broker.
+                failed += 1
+                errors.append({
+                    "broker_order_id": broker_order_id,
+                    "broker_status": resp_status or "unknown",
+                })
+        per_account_results.append({
+            "broker_account_id": str(acct_id),
+            "status": "ok" if failed == 0 else "partial",
+            "attempted": attempted,
+            "cancelled": cancelled,
+            "failed": failed,
+            "skipped": skipped,
+            "errors": errors[:20],  # cap for payload size
+        })
+        aggregate_attempted += attempted
+        aggregate_cancelled += cancelled
+        aggregate_failed += failed
+        aggregate_skipped += skipped
+
+    overall_status = "ok" if aggregate_failed == 0 else "partial"
+    emit_audit_event(
+        actor=ctx.caller,
+        action="kill_switch_cancel_all",
+        resource_type="broker_orders",
+        resource_id=payload.broker_account_id or "ALL_ACCOUNTS",
+        metadata={
+            "reason": payload.reason,
+            "broker_account_id": payload.broker_account_id,
+            "attempted": aggregate_attempted,
+            "cancelled": aggregate_cancelled,
+            "failed": aggregate_failed,
+            "skipped": aggregate_skipped,
+            "overall_status": overall_status,
+            "per_account": [
+                {
+                    "broker_account_id": r["broker_account_id"],
+                    "status": r["status"],
+                    "attempted": r["attempted"],
+                    "cancelled": r["cancelled"],
+                    "failed": r["failed"],
+                    "skipped": r["skipped"],
+                }
+                for r in per_account_results
+            ],
+        },
+    )
+    return {
+        "status": overall_status,
+        "attempted": aggregate_attempted,
+        "cancelled": aggregate_cancelled,
+        "failed": aggregate_failed,
+        "skipped": aggregate_skipped,
+        "per_account": per_account_results,
+    }
 
 
 @router.get("/release-evidence")
