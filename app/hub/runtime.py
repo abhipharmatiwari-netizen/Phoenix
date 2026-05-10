@@ -345,6 +345,11 @@ class HubRuntime:
         self._legacy_kill_switch_reason: Optional[str] = None
         self._legacy_kill_switch_updated_at: Optional[Any] = None  # datetime
         self._legacy_kill_switch_publisher_seen: bool = False
+        # PR #234 round-1 review P2: track the first-active timestamp
+        # separately from updated_at so divergence_age_seconds reports
+        # how long legacy has been halted, not the heartbeat interval
+        # since the last republish.
+        self._legacy_kill_switch_first_active_at: Optional[Any] = None
 
         # Core engines
         self.capital_engine = CapitalEngine()
@@ -560,11 +565,22 @@ class HubRuntime:
         any earlier ``True``). Thread-safe via ``_legacy_kill_switch_lock``.
         """
         from datetime import datetime as _dt, timezone as _tz
+        now_utc = _dt.now(_tz.utc)
+        new_active = bool(active)
         with self._legacy_kill_switch_lock:
-            self._legacy_kill_switch_active = bool(active)
+            prev_active = self._legacy_kill_switch_active
+            self._legacy_kill_switch_active = new_active
             self._legacy_kill_switch_reason = reason
-            self._legacy_kill_switch_updated_at = _dt.now(_tz.utc)
+            self._legacy_kill_switch_updated_at = now_utc
             self._legacy_kill_switch_publisher_seen = True
+            # PR #234 round-1 review P2: track first-active timestamp
+            # separately so divergence_age_seconds reports how long
+            # legacy has been halted, not just the heartbeat interval.
+            # Set on False→True transition; clear on True→False.
+            if new_active and not prev_active:
+                self._legacy_kill_switch_first_active_at = now_utc
+            elif not new_active:
+                self._legacy_kill_switch_first_active_at = None
 
     def get_legacy_kill_switch_snapshot(self) -> dict:
         """Return a serializable snapshot of the published legacy state.
@@ -581,11 +597,21 @@ class HubRuntime:
                 if self._legacy_kill_switch_updated_at is not None
                 else None
             )
+            first_active_iso = (
+                self._legacy_kill_switch_first_active_at.isoformat().replace(
+                    "+00:00", "Z"
+                )
+                if self._legacy_kill_switch_first_active_at is not None
+                else None
+            )
             return {
                 "publisher_seen": bool(self._legacy_kill_switch_publisher_seen),
                 "legacy_active": bool(self._legacy_kill_switch_active),
                 "legacy_reason": self._legacy_kill_switch_reason,
                 "legacy_updated_at": updated_iso,
+                # PR #234 round-1 review P2: first-active timestamp for
+                # accurate divergence-age reporting.
+                "legacy_first_active_at": first_active_iso,
             }
 
     def compute_kill_switch_divergence(self) -> dict:
@@ -623,12 +649,20 @@ class HubRuntime:
         else:
             divergent = legacy_active and not durable_global_active
 
+        # PR #234 round-1 review P2: divergence_age_seconds reports
+        # the time since legacy first became active in this episode,
+        # not the heartbeat interval since the last republish. Falls
+        # back to legacy_updated_at if first_active_at is unavailable
+        # (e.g. legacy is currently inactive).
         age_seconds: Optional[float] = None
-        if snapshot["legacy_updated_at"]:
+        age_source = (
+            snapshot.get("legacy_first_active_at")
+            or snapshot.get("legacy_updated_at")
+        )
+        if age_source:
             try:
                 from datetime import datetime as _dt2
-                ts_text = snapshot["legacy_updated_at"]
-                # Tolerate both Z and +00:00 forms.
+                ts_text = age_source
                 if ts_text.endswith("Z"):
                     ts_text = ts_text[:-1] + "+00:00"
                 ts = _dt2.fromisoformat(ts_text)

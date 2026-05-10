@@ -53,6 +53,7 @@ def _make_runtime():
     rt._legacy_kill_switch_reason = None
     rt._legacy_kill_switch_updated_at = None
     rt._legacy_kill_switch_publisher_seen = False
+    rt._legacy_kill_switch_first_active_at = None
     rt.kill_switch_manager = None
     # Bind the real methods.
     rt.record_legacy_kill_switch_state = (

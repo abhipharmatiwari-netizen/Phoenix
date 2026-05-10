@@ -1017,13 +1017,18 @@ def _emit_kill_switch_divergence_alert(div: dict) -> None:
     global _KILL_SWITCH_DIVERGENCE_LAST_RESOLVED_LOGGED
     import time as _t
     now_mono = _t.monotonic()
+    # PR #234 round-2 review P2: ALWAYS mark the incident as open
+    # (RESOLVED_LOGGED=False) on a divergence detection — even when
+    # the WARNING itself is rate-limited. Otherwise a divergence that
+    # resolves and recurs within 60s loses both the new warning and
+    # the next RESOLVED audit event.
+    _KILL_SWITCH_DIVERGENCE_LAST_RESOLVED_LOGGED = False
     # First-emit (None) always proceeds; subsequent emits respect 60s.
     if (
         _KILL_SWITCH_DIVERGENCE_LAST_EMIT_TS is None
         or (now_mono - _KILL_SWITCH_DIVERGENCE_LAST_EMIT_TS) >= 60.0
     ):
         _KILL_SWITCH_DIVERGENCE_LAST_EMIT_TS = now_mono
-        _KILL_SWITCH_DIVERGENCE_LAST_RESOLVED_LOGGED = False
         try:
             from app.core.logging_utils import log_event as _log_event
             _log_event(
@@ -1244,6 +1249,35 @@ async def readyz() -> JSONResponse:
         return JSONResponse(status_code=503, content=payload)
 
     if _readiness_trade_mode() == "LIVE":
+        # PR #234 round-2 review P2: compute divergence FIRST (before
+        # the kill-switch active early return) so a divergence that
+        # resolves via the expected bridge path (durable becomes active,
+        # legacy still True) still calls
+        # ``_maybe_emit_kill_switch_divergence_resolved()`` and emits
+        # the RESOLVED audit event. Computing here also means the
+        # divergence fields are available in the payload regardless of
+        # which subsequent gate fails readiness.
+        try:
+            div = get_hub_runtime().compute_kill_switch_divergence()
+            payload["kill_switch_divergence"] = bool(div.get("divergent", False))
+            payload["kill_switch_legacy_active"] = bool(div.get("legacy_active", False))
+            if div.get("divergent"):
+                _emit_kill_switch_divergence_alert(div)
+            else:
+                # Healthy / converged: emit one-shot RESOLVED if we
+                # previously saw a divergence. Note this fires even
+                # when the durable kill switch is now ACTIVE — that's
+                # the expected bridge-converged path.
+                _maybe_emit_kill_switch_divergence_resolved()
+        except Exception as _div_exc:
+            # Divergence detection failure is non-fatal here — log so
+            # it is observable; the readyz response can still proceed.
+            logger.warning(
+                "readyz: kill_switch divergence pre-check failed (non-fatal): %s",
+                _div_exc,
+            )
+            div = {"divergent": False}
+
         # §58/§93 — Surface kill-switch state in readyz; block readiness when
         # the durable kill-switch state is active or cannot be verified.
         try:
@@ -1264,27 +1298,13 @@ async def readyz() -> JSONResponse:
             payload["reason"] = f"kill_switch_unavailable: {_ks_exc}"
             return JSONResponse(status_code=503, content=payload)
 
-        # Issue #222: detect legacy↔durable kill-switch divergence.
-        # Reaches here only when durable active_count == 0; if legacy
-        # ``RiskManager.kill_switch_activated=True`` was published from the
-        # stream worker at some point and not yet cleared, we have a
-        # silent-bypass condition (the auto-trip bridge has not converged).
-        # Fail readiness in LIVE so the operator sees it. Configurable via
-        # ``KILL_SWITCH_DIVERGENCE_FAILS_READY`` (default true).
-        # Codex round-1 review (PR #234) P1: previous logic was
-        # INVERTED — the ``else`` branch fired on the HEALTHY non-
-        # divergent state and incorrectly failed readiness, while the
-        # actual divergent case only emitted a warning and continued
-        # as ready. Fix: gate the readiness-fail strictly on
-        # ``div.get("divergent") is True``. Codex P2: use the module-
-        # level ``get_hub_runtime`` (NOT a local re-import) so
-        # monkeypatched test stubs are observed.
+        # Issue #222: detect legacy↔durable kill-switch divergence
+        # FAIL-READINESS path. The divergence was computed above; if
+        # divergent in LIVE, fail readiness here (after the durable-
+        # active check has cleared, so we're in the "durable INACTIVE
+        # but legacy ACTIVE" silent-bypass scenario).
         try:
-            div = get_hub_runtime().compute_kill_switch_divergence()
-            payload["kill_switch_divergence"] = bool(div.get("divergent", False))
-            payload["kill_switch_legacy_active"] = bool(div.get("legacy_active", False))
             if div.get("divergent"):
-                _emit_kill_switch_divergence_alert(div)
                 fails_ready = str(
                     os.getenv("KILL_SWITCH_DIVERGENCE_FAILS_READY", "true") or ""
                 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -1301,10 +1321,6 @@ async def readyz() -> JSONResponse:
                         + age_text
                     )
                     return JSONResponse(status_code=503, content=payload)
-            else:
-                # Healthy: emit one-shot RESOLVED if we previously saw
-                # a divergence; do NOT fail readiness.
-                _maybe_emit_kill_switch_divergence_resolved()
         except Exception as _div_exc:
             # Divergence detection failure is non-fatal — better to keep
             # readyz informative than to flip ready=false on an unrelated

@@ -749,13 +749,20 @@ class RiskManager:
         so /readyz and admin endpoints can detect divergence with the
         durable KillSwitchManager (issue #222).
 
-        Failure-safe: if the hub runtime is not initialised (early
-        startup or non-LIVE), the publish is silently skipped — the
-        consumer will report ``publisher_seen=False`` and divergence
-        defaults to False.
+        PR #234 round-1 review P2: ``get_hub_runtime`` is an
+        ``@lru_cache(maxsize=1)`` singleton. Calling it from the tick
+        path BEFORE the hub runtime has been initialised by
+        ``AppRuntime.start`` would lazily construct the full hub from
+        an unintended call site (the stream worker starts before the
+        hub runtime is fetched in the normal startup order). To avoid
+        that, only publish when the singleton is already present.
         """
         try:
             from app.hub.runtime import get_hub_runtime
+            # Inspect the lru_cache without triggering construction.
+            cache_info = getattr(get_hub_runtime, "cache_info", None)
+            if not callable(cache_info) or cache_info().currsize == 0:
+                return
             runtime = get_hub_runtime()
         except Exception:
             return
