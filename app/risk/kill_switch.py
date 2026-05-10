@@ -719,6 +719,10 @@ def get_kill_switch_state() -> dict:
 
     Pulls from the hub runtime's KillSwitchManager if one is wired; falls back
     to the legacy risk_manager flag so the incident snapshot always has data.
+
+    Issue #222: also includes ``legacy_active`` / ``divergence`` fields so
+    operators can see the legacy stream-path state and any divergence with
+    the durable manager from a single ``GET /admin/kill-switch/state`` call.
     """
     try:
         from app.hub.runtime import get_hub_runtime
@@ -726,13 +730,35 @@ def get_kill_switch_state() -> dict:
         ksm = getattr(runtime, "kill_switch_manager", None)
         if ksm is not None and hasattr(ksm, "to_persistence_dict"):
             records = ksm.to_persistence_dict()
-            return {
+            payload: dict = {
                 "source": "kill_switch_manager",
                 "records": records,
                 "active_count": sum(
                     1 for r in records if r.get("state") not in ("INACTIVE", "CLEARED")
                 ),
             }
+            # Issue #222: enrich with legacy state + divergence detection.
+            try:
+                divergence = runtime.compute_kill_switch_divergence()
+                payload["legacy_kill_switch"] = {
+                    "publisher_seen": bool(divergence.get("publisher_seen", False)),
+                    "active": bool(divergence.get("legacy_active", False)),
+                    "reason": divergence.get("legacy_reason"),
+                    "divergence_age_seconds": divergence.get(
+                        "divergence_age_seconds"
+                    ),
+                }
+                payload["divergence"] = {
+                    "divergent": bool(divergence.get("divergent", False)),
+                    "durable_global_active": divergence.get(
+                        "durable_global_active"
+                    ),
+                }
+            except Exception:
+                # Older runtimes without compute_kill_switch_divergence —
+                # don't break get_kill_switch_state.
+                pass
+            return payload
     except Exception:
         pass
 

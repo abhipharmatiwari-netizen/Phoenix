@@ -744,6 +744,45 @@ class RiskManager:
         # the trip. Stop retrying.
         self._durable_kill_switch_bridge_succeeded = True
 
+    def _publish_legacy_kill_switch_state_to_hub(self) -> None:
+        """Publish the in-memory legacy kill-switch flag to the hub runtime
+        so /readyz and admin endpoints can detect divergence with the
+        durable KillSwitchManager (issue #222).
+
+        PR #234 round-1 review P2: ``get_hub_runtime`` is an
+        ``@lru_cache(maxsize=1)`` singleton. Calling it from the tick
+        path BEFORE the hub runtime has been initialised by
+        ``AppRuntime.start`` would lazily construct the full hub from
+        an unintended call site (the stream worker starts before the
+        hub runtime is fetched in the normal startup order). To avoid
+        that, only publish when the singleton is already present.
+        """
+        try:
+            from app.hub.runtime import get_hub_runtime
+            # Inspect the lru_cache without triggering construction.
+            cache_info = getattr(get_hub_runtime, "cache_info", None)
+            if not callable(cache_info) or cache_info().currsize == 0:
+                return
+            runtime = get_hub_runtime()
+        except Exception:
+            return
+        recorder = getattr(runtime, "record_legacy_kill_switch_state", None)
+        if not callable(recorder):
+            return
+        try:
+            with self._state_lock:
+                active = bool(self.kill_switch_activated)
+            recorder(
+                active=active,
+                reason=(
+                    "legacy_risk_manager_active" if active
+                    else "legacy_risk_manager_inactive"
+                ),
+            )
+        except Exception:
+            # Defensive: never let publishing break account-loss eval.
+            pass
+
     @staticmethod
     def _truncate_log_value(value: Any, limit: int = 512) -> Optional[str]:
         text = " ".join(str(value or "").split())
@@ -1379,7 +1418,14 @@ class RiskManager:
         force: bool = False,
     ) -> Dict[str, Any]:
         now_ts = now or datetime.now(timezone.utc)
+        # Issue #222 (PR #234 review P3): _reset_daily_if_new_day can
+        # flip kill_switch_activated from True to False. Publish the
+        # post-reset state to the hub BEFORE the throttle-skip return
+        # below — otherwise the hub keeps reporting the stale (yesterday's)
+        # legacy_active=True until a forced or unthrottled evaluation
+        # later in the day, surfacing a phantom divergence in /readyz.
         self._reset_daily_if_new_day(now_ts)
+        self._publish_legacy_kill_switch_state_to_hub()
         now_mono = time.monotonic()
         if (
             not force
@@ -1458,6 +1504,12 @@ class RiskManager:
             unrealized_pnl=unrealized_pnl,
             total_pnl=total_pnl,
         )
+        # Issue #222: publish current legacy kill-switch state to the hub
+        # runtime so /readyz and admin endpoints can detect divergence
+        # with the durable KillSwitchManager. Called every evaluate cycle
+        # (including when False) so the timestamp stays fresh and the
+        # publisher is observable as live.
+        self._publish_legacy_kill_switch_state_to_hub()
         if should_activate:
             ltp_lookup = {
                 label: float(price)
@@ -1492,6 +1544,15 @@ class RiskManager:
             self._propagate_kill_switch_to_durable_manager(
                 reasons=hit_reasons, source=source,
             )
+            # Issue #222 (PR #234 round-3 review P2): the bridge call
+            # above can construct the hub runtime singleton on first use
+            # in early startup (before the regular tick path has built
+            # it). Republish legacy state HERE so the freshly-built hub
+            # observes ``legacy_active=True`` immediately — otherwise
+            # /readyz reports ``publisher_seen=false`` / ``legacy_active=
+            # false`` for the exact startup bridge-failure case the
+            # divergence detector is meant to surface.
+            self._publish_legacy_kill_switch_state_to_hub()
             if self.kill_switch_square_off_open_positions and has_open_positions:
                 try:
                     self.square_off_all(
@@ -1523,6 +1584,11 @@ class RiskManager:
             self._propagate_kill_switch_to_durable_manager(
                 reasons=["legacy_already_tripped_retry"], source=source,
             )
+            # PR #234 round-3 review P2: republish after the retry path
+            # too — same rationale as above (the retry can lazily build
+            # the hub runtime; republish so it observes the active
+            # legacy halt immediately).
+            self._publish_legacy_kill_switch_state_to_hub()
         return {
             "kill_switch_activated": bool(self.kill_switch_activated),
             "daily_realized_pnl": float(realized_pnl),

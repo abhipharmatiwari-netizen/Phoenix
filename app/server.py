@@ -15,7 +15,7 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from uuid import uuid4
 
 from fastapi import (
@@ -1020,6 +1020,89 @@ async def health_summary() -> dict:
     return _build_docker_health_summary()
 
 
+# Issue #222: rate-limit kill-switch divergence WARNING events to once per
+# 60s per process. Without this, /readyz polled every 5s would flood logs
+# while a divergence persists.
+# PR #234 review P2: initialize last-emit to a sentinel that ALLOWS the
+# first divergence to emit immediately. Previously initialized to 0.0,
+# which meant a divergence detected within the first 60s of process
+# start (the most likely time to detect it post-restart) was suppressed,
+# missing the warning and the subsequent RESOLVED audit event.
+_KILL_SWITCH_DIVERGENCE_LAST_EMIT_TS: Optional[float] = None
+_KILL_SWITCH_DIVERGENCE_LAST_RESOLVED_LOGGED: bool = True
+
+
+def _emit_kill_switch_divergence_alert(div: dict) -> None:
+    """Emit a rate-limited (1 per 60s) WARNING event whenever readyz
+    detects a legacy↔durable kill-switch divergence (issue #222).
+
+    Also emits a one-shot ``KILL_SWITCH_STATE_RESOLVED`` event when the
+    divergence subsequently clears, so post-incident timelines have
+    a clean entry/exit signal.
+    """
+    global _KILL_SWITCH_DIVERGENCE_LAST_EMIT_TS
+    global _KILL_SWITCH_DIVERGENCE_LAST_RESOLVED_LOGGED
+    import time as _t
+    now_mono = _t.monotonic()
+    # PR #234 round-2 review P2: ALWAYS mark the incident as open
+    # (RESOLVED_LOGGED=False) on a divergence detection — even when
+    # the WARNING itself is rate-limited. Otherwise a divergence that
+    # resolves and recurs within 60s loses both the new warning and
+    # the next RESOLVED audit event.
+    _KILL_SWITCH_DIVERGENCE_LAST_RESOLVED_LOGGED = False
+    # First-emit (None) always proceeds; subsequent emits respect 60s.
+    if (
+        _KILL_SWITCH_DIVERGENCE_LAST_EMIT_TS is None
+        or (now_mono - _KILL_SWITCH_DIVERGENCE_LAST_EMIT_TS) >= 60.0
+    ):
+        _KILL_SWITCH_DIVERGENCE_LAST_EMIT_TS = now_mono
+        try:
+            from app.core.logging_utils import log_event as _log_event
+            _log_event(
+                logger,
+                event_type="KILL_SWITCH_STATE_DIVERGENCE",
+                message=(
+                    "Legacy RiskManager.kill_switch_activated=True but "
+                    "durable KillSwitchManager GLOBAL=INACTIVE. The auto-"
+                    "trip bridge (issue #218) has not yet converged. Hub "
+                    "OrderRouter may still be routing entries despite the "
+                    "legacy halt — this is the silent-bypass condition "
+                    "from incident 2026-05-08."
+                ),
+                level=logging.WARNING,
+                legacy_active=bool(div.get("legacy_active", False)),
+                durable_global_active=bool(div.get("durable_global_active", False)),
+                legacy_reason=div.get("legacy_reason"),
+                divergence_age_seconds=div.get("divergence_age_seconds"),
+                publisher_seen=bool(div.get("publisher_seen", False)),
+            )
+        except Exception:
+            logger.warning(
+                "KILL_SWITCH_STATE_DIVERGENCE legacy=True durable=False"
+            )
+
+
+def _maybe_emit_kill_switch_divergence_resolved() -> None:
+    """Emit a one-shot RESOLVED event the first time divergence clears."""
+    global _KILL_SWITCH_DIVERGENCE_LAST_RESOLVED_LOGGED
+    if _KILL_SWITCH_DIVERGENCE_LAST_RESOLVED_LOGGED:
+        return
+    _KILL_SWITCH_DIVERGENCE_LAST_RESOLVED_LOGGED = True
+    try:
+        from app.core.logging_utils import log_event as _log_event
+        _log_event(
+            logger,
+            event_type="KILL_SWITCH_STATE_RESOLVED",
+            message=(
+                "Legacy↔durable kill-switch divergence resolved (issue "
+                "#222) — both states now agree."
+            ),
+            level=logging.INFO,
+        )
+    except Exception:
+        logger.info("KILL_SWITCH_STATE_RESOLVED")
+
+
 @app.get("/readyz")
 async def readyz() -> JSONResponse:
     """
@@ -1193,6 +1276,41 @@ async def readyz() -> JSONResponse:
         return JSONResponse(status_code=503, content=payload)
 
     if _readiness_trade_mode() == "LIVE":
+        # PR #234 round-2 review P2: compute divergence FIRST (before
+        # the kill-switch active early return) so a divergence that
+        # resolves via the expected bridge path (durable becomes active,
+        # legacy still True) still calls
+        # ``_maybe_emit_kill_switch_divergence_resolved()`` and emits
+        # the RESOLVED audit event. Computing here also means the
+        # divergence fields are available in the payload regardless of
+        # which subsequent gate fails readiness.
+        try:
+            div = get_hub_runtime().compute_kill_switch_divergence()
+            payload["kill_switch_divergence"] = bool(div.get("divergent", False))
+            payload["kill_switch_legacy_active"] = bool(div.get("legacy_active", False))
+            if div.get("divergent"):
+                _emit_kill_switch_divergence_alert(div)
+            elif div.get("durable_global_active") is not None:
+                # Healthy / converged: emit one-shot RESOLVED if we
+                # previously saw a divergence — but only when the
+                # durable KillSwitchManager state is KNOWN. PR #234
+                # round-3 review P2: when ``compute_kill_switch_divergence``
+                # cannot read the durable manager it returns
+                # ``divergent=False`` with ``durable_global_active=None``;
+                # treating that as a clean convergence would emit a
+                # false RESOLVED audit event despite legacy still
+                # potentially being active. Gate on a known durable
+                # state to avoid the spurious resolved entry.
+                _maybe_emit_kill_switch_divergence_resolved()
+        except Exception as _div_exc:
+            # Divergence detection failure is non-fatal here — log so
+            # it is observable; the readyz response can still proceed.
+            logger.warning(
+                "readyz: kill_switch divergence pre-check failed (non-fatal): %s",
+                _div_exc,
+            )
+            div = {"divergent": False}
+
         # §58/§93 — Surface kill-switch state in readyz; block readiness when
         # the durable kill-switch state is active or cannot be verified.
         try:
@@ -1212,6 +1330,38 @@ async def readyz() -> JSONResponse:
             payload["ready"] = False
             payload["reason"] = f"kill_switch_unavailable: {_ks_exc}"
             return JSONResponse(status_code=503, content=payload)
+
+        # Issue #222: detect legacy↔durable kill-switch divergence
+        # FAIL-READINESS path. The divergence was computed above; if
+        # divergent in LIVE, fail readiness here (after the durable-
+        # active check has cleared, so we're in the "durable INACTIVE
+        # but legacy ACTIVE" silent-bypass scenario).
+        try:
+            if div.get("divergent"):
+                fails_ready = str(
+                    os.getenv("KILL_SWITCH_DIVERGENCE_FAILS_READY", "true") or ""
+                ).strip().lower() in {"1", "true", "yes", "on"}
+                if fails_ready:
+                    payload["ready"] = False
+                    age = div.get("divergence_age_seconds")
+                    age_text = (
+                        f" age_s={age:.1f}"
+                        if isinstance(age, (int, float))
+                        else ""
+                    )
+                    payload["reason"] = (
+                        "kill_switch_divergence: legacy=True durable_global=False"
+                        + age_text
+                    )
+                    return JSONResponse(status_code=503, content=payload)
+        except Exception as _div_exc:
+            # Divergence detection failure is non-fatal — better to keep
+            # readyz informative than to flip ready=false on an unrelated
+            # internal error. Log so it is observable.
+            logger.warning(
+                "readyz: kill_switch divergence check failed (non-fatal): %s",
+                _div_exc,
+            )
 
     if _readiness_trade_mode() == "LIVE":
         # §57 / #108 — Gate readiness on restored authoritative position state.
