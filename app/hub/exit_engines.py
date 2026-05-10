@@ -1997,6 +1997,24 @@ class PositionTrailingLockEngine:
     _suppression_log_state: Dict[Tuple[str, str], datetime] = field(
         default_factory=dict, init=False, repr=False
     )
+    # Issue #225: per-(tenant, account, symbol) inflight markers for the
+    # most recently submitted trailing-lock exit. Set after submit;
+    # checked at the start of the next evaluation cycle to block
+    # duplicate trailing-lock submissions while the broker has not yet
+    # confirmed the prior order's terminal state. The 2026-05-08 incident
+    # produced duplicate 3-lot fills (broker_order_ids 842740 + 842946
+    # ~60s apart) because the time-based ``exit_cooldown_seconds`` and
+    # the position-ownership ``exit_already_in_flight`` lock both
+    # released between fires. This per-position marker is the
+    # idempotency safety net.
+    #
+    # Value tuple: (broker_order_id_or_None, monotonic_submitted_at_float).
+    # In-memory only; restart safely resets because the broker order is
+    # no longer in-flight from this process's perspective after restart
+    # (any pending fills are observed via the snapshot polling path).
+    _inflight_markers: Dict[
+        Tuple[str, str, str], Tuple[Optional[str], float]
+    ] = field(default_factory=dict, init=False, repr=False)
 
     def _enabled(self) -> bool:
         return bool(getattr(self.settings, "position_trailing_lock_enabled", False))
@@ -2094,6 +2112,107 @@ class PositionTrailingLockEngine:
             tenant_id=tenant_id,
             broker_account_id=broker_account_id,
         )
+
+    def _inflight_max_seconds(self) -> float:
+        """Issue #225: max age of an inflight trailing-lock marker before
+        it is auto-cleared with an ERROR event. Default 60s — matches the
+        order_ownership exit-lock watchdog floor minus a safety margin so
+        the trailing-lock marker is the FIRST gate to see an in-flight
+        exit (preventing duplicate submissions) and the ownership lock
+        watchdog is the second-line backstop."""
+        # Configurable via Settings; fall back to 60s if absent.
+        return float(
+            getattr(
+                self.settings,
+                "position_trailing_lock_inflight_max_seconds",
+                60.0,
+            )
+        )
+
+    def _is_inflight_blocked(
+        self, *, tenant_id: Any, broker_account_id: Any, symbol: str,
+    ) -> bool:
+        """Return True if a recent trailing-lock submission for this
+        (tenant, account, symbol) is still considered in-flight (younger
+        than ``_inflight_max_seconds``).
+
+        Auto-clears stale markers and emits a structured ERROR event so a
+        marker that never resolves (e.g. the broker order vanished from
+        polling) does not permanently block trailing-lock for the symbol.
+        """
+        import time as _t
+        key = (str(tenant_id), str(broker_account_id), str(symbol))
+        marker = self._inflight_markers.get(key)
+        if marker is None:
+            return False
+        broker_order_id, submitted_at = marker
+        age = _t.monotonic() - float(submitted_at)
+        max_age = self._inflight_max_seconds()
+        if age < max_age:
+            return True
+        # Stale marker — auto-clear and surface as ERROR. Operator can
+        # investigate via broker_order_id; trailing-lock will resume
+        # normal evaluation on the next cycle.
+        self._inflight_markers.pop(key, None)
+        log_event(
+            logger,
+            event_type="POSITION_TRAILING_LOCK_INFLIGHT_TIMEOUT",
+            message=(
+                "Trailing-lock inflight marker exceeded max age — auto-"
+                "clearing. The broker order may not have reached a "
+                "terminal state via the snapshot polling path. "
+                "Investigate broker_order_id and reconcile manually if "
+                "duplicate fills are observed."
+            ),
+            level=logging.ERROR,
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+            symbol=symbol,
+            broker_order_id=broker_order_id,
+            age_seconds=round(age, 2),
+            max_age_seconds=max_age,
+        )
+        return False
+
+    def _maybe_log_inflight_skip(
+        self, *, tenant_id: Any, broker_account_id: Any, symbol: str,
+    ) -> None:
+        """One-shot per-block inflight-skip event so log volume is bounded
+        even on a tight evaluate cadence."""
+        key = (str(tenant_id), str(broker_account_id), str(symbol))
+        marker = self._inflight_markers.get(key)
+        broker_order_id = marker[0] if marker else None
+        log_event(
+            logger,
+            event_type="POSITION_TRAILING_LOCK_SKIPPED_INFLIGHT",
+            message=(
+                "Trailing-lock submission skipped: a recent exit for this "
+                "position is still in-flight (issue #225)."
+            ),
+            level=logging.WARNING,
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+            symbol=symbol,
+            broker_order_id=broker_order_id,
+        )
+
+    def _set_inflight_marker(
+        self,
+        *,
+        tenant_id: Any,
+        broker_account_id: Any,
+        symbol: str,
+        broker_order_id: Optional[str],
+    ) -> None:
+        import time as _t
+        key = (str(tenant_id), str(broker_account_id), str(symbol))
+        self._inflight_markers[key] = (broker_order_id, _t.monotonic())
+
+    def _clear_inflight_marker(
+        self, *, tenant_id: Any, broker_account_id: Any, symbol: str,
+    ) -> None:
+        key = (str(tenant_id), str(broker_account_id), str(symbol))
+        self._inflight_markers.pop(key, None)
 
     @staticmethod
     def _compute_unrealized_pnl(pos: Any, symbol: str) -> Optional[float]:
@@ -2199,12 +2318,36 @@ class PositionTrailingLockEngine:
                 # emits a trailing-lock exit even though its own peak never
                 # armed.
                 self.manager.reset_position(tenant_id, broker_account_id, symbol)
+                # Issue #225: a closed position means our prior in-flight
+                # exit (if any) reached terminal state — clear the marker
+                # so future opens on the same symbol are not blocked.
+                self._clear_inflight_marker(
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    symbol=symbol,
+                )
                 continue
             # Skip the exit-submission path entirely when the kill switch
             # is tripped, but keep iterating positions so the qty==0
             # cleanup branch above continues to fire for every closed
             # position in this cycle.
             if kill_switch_tripped:
+                continue
+            # Issue #225: per-position inflight-marker check. If a recent
+            # trailing-lock submission for this (tenant, account, symbol)
+            # is still considered in-flight, do NOT submit another. This
+            # is the primary defence against the 2026-05-08 duplicate-fill
+            # scenario (broker_order_ids 842740 + 842946 ~60s apart).
+            if self._is_inflight_blocked(
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=symbol,
+            ):
+                self._maybe_log_inflight_skip(
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    symbol=symbol,
+                )
                 continue
             live_symbols.add(symbol)
             unrealized = self._compute_unrealized_pnl(pos, symbol)
@@ -2273,11 +2416,35 @@ class PositionTrailingLockEngine:
             )
             return
         try:
-            await self.order_router.submit_order(
+            submit_result = await self.order_router.submit_order(
                 tenant_id=tenant_id,
                 broker_account_id=broker_account_id,
                 strategy_id=StrategyId("system::position_trailing_lock"),
                 order_req=exit_plan.order_req,
+            )
+            # Issue #225: capture broker_order_id from the submit response
+            # and arm the per-position inflight marker so subsequent
+            # evaluate cycles block duplicate trailing-lock submissions
+            # while the broker has not yet confirmed terminal state.
+            # ``submit_order`` historically returns ``(hub_order_id,
+            # response)``; the response carries ``broker_order_id``.
+            # Defensive about response shape — marker is armed regardless
+            # so blocking is in effect even when broker_order_id is
+            # unavailable for logging.
+            broker_order_id: Optional[str] = None
+            try:
+                if isinstance(submit_result, tuple) and len(submit_result) >= 2:
+                    response = submit_result[1]
+                    boi = getattr(response, "broker_order_id", None)
+                    if boi:
+                        broker_order_id = str(boi)
+            except Exception:  # pragma: no cover - defensive
+                broker_order_id = None
+            self._set_inflight_marker(
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=decision.symbol,
+                broker_order_id=broker_order_id,
             )
             log_event(
                 logger,
