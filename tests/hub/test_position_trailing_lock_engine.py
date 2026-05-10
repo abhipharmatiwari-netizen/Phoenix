@@ -880,7 +880,12 @@ async def test_marker_remains_when_router_raises_post_submit():
 async def test_marker_cleared_when_symbol_disappears_from_snapshot():
     """Codex P2 round 1: state stores can omit closed positions from
     the snapshot entirely. When a fill removes the symbol from the
-    next snapshot, the marker must be swept (after grace period)."""
+    next snapshot, the marker must be swept (after grace period).
+
+    PR #236 round-4 review P1: clearing now requires TWO consecutive
+    missing snapshots — a single OK-but-empty broker poll is
+    ambiguous and must not flush the duplicate-fill guard. This test
+    therefore advances the empty-snapshot evaluation twice."""
     state_store = StateStore()
     state_store.set_positions(
         "A1",
@@ -910,9 +915,18 @@ async def test_marker_cleared_when_symbol_disappears_from_snapshot():
     _t.sleep(5.5)
 
     state_store.set_positions("A1", [])
+    # First missing-symbol observation — round-4 P1 requires a
+    # second consecutive miss before the marker is swept.
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert key in engine._inflight_markers, (
+        "single missing snapshot is ambiguous — marker must persist "
+        "until a second consecutive miss (#236 round-4 P1)"
+    )
+    # Second consecutive missing-symbol observation — now sweep.
     await engine.evaluate_runners([_runner("t-1", "A1")])
     assert key not in engine._inflight_markers, (
-        "marker must be swept when symbol disappears from snapshot (#236 P2)"
+        "marker must be swept after two consecutive missing snapshots "
+        "(#236 round-4 P1)"
     )
 
 
@@ -1060,11 +1074,225 @@ async def test_disappeared_symbol_sweep_also_resets_manager_state():
     import time as _t
     _t.sleep(5.5)  # past grace period
 
-    # Symbol disappears from snapshot.
+    # Symbol disappears from snapshot — PR #236 round-4 P1 requires
+    # TWO consecutive missing snapshots before sweep / state reset.
     state_store.set_positions("A1", [])
-    await engine.evaluate_runners([_runner("t-1", "A1")])
+    await engine.evaluate_runners([_runner("t-1", "A1")])  # 1st miss
+    await engine.evaluate_runners([_runner("t-1", "A1")])  # 2nd miss
 
     assert state_key not in manager._states, (
         "manager peak/armed state must be reset when symbol disappears "
-        "(#236 round-2 P1)"
+        "across two consecutive snapshots (#236 round-2 P1, round-4 P1)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Codex round-4 review on PR #236.
+# ---------------------------------------------------------------------------
+
+
+class _RouterFullResponse:
+    """Router returning FULL — Angel/other broker terminal-fill alias."""
+
+    def __init__(self):
+        self.calls: List[dict] = []
+
+    async def submit_order(
+        self, *, tenant_id, broker_account_id, strategy_id, order_req,
+    ):
+        self.calls.append({"symbol": order_req.symbol})
+        return (
+            "hub-order-id",
+            SimpleNamespace(status="FULL", broker_order_id="BOI-FULL"),
+        )
+
+
+class _RouterExecutedResponse:
+    """Router returning EXECUTED — alternate terminal-fill alias."""
+
+    def __init__(self):
+        self.calls: List[dict] = []
+
+    async def submit_order(
+        self, *, tenant_id, broker_account_id, strategy_id, order_req,
+    ):
+        self.calls.append({"symbol": order_req.symbol})
+        return (
+            "hub-order-id",
+            SimpleNamespace(status="EXECUTED", broker_order_id="BOI-EX"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_marker_cleared_for_full_status():
+    """Round-4 P2: ``FULL`` is a terminal-fill alias accepted by the
+    canonical broker-status classifier — local prefix list must
+    include it so a synchronous fill clears the marker."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterFullResponse()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key not in engine._inflight_markers, (
+        "FULL terminal fill must clear marker (#236 round-4 P2)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_marker_cleared_for_executed_status():
+    """Round-4 P2: ``EXECUTED`` is also a canonical terminal-fill
+    alias — local prefix list must include it."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterExecutedResponse()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key not in engine._inflight_markers, (
+        "EXECUTED terminal fill must clear marker (#236 round-4 P2)"
+    )
+
+
+class _RouterRaisesAfterDelay:
+    """Router that raises an exception — simulates a slow submit_order
+    that fails after potentially placing the broker order."""
+
+    def __init__(self):
+        self.calls: List[dict] = []
+
+    async def submit_order(
+        self, *, tenant_id, broker_account_id, strategy_id, order_req,
+    ):
+        self.calls.append({"symbol": order_req.symbol})
+        raise RuntimeError("simulated broker timeout after submission")
+
+
+@pytest.mark.asyncio
+async def test_exception_path_refreshes_marker_timestamp():
+    """Round-4 P2: when ``submit_order`` raises, the marker must be
+    REFRESHED (timestamp reset) — not left armed at its pre-submit
+    timestamp. A slow broker call that raises near the inflight
+    timeout would otherwise leave a near-stale marker that the next
+    watchdog cycle immediately treats as expired, allowing a duplicate
+    submission against an already-placed order."""
+    import time as _t
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterRaisesAfterDelay()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+    # First evaluate: arm peak.
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    # Second evaluate: giveback breached → _emit_exit fires; router
+    # raises — marker is armed pre-submit (line 2537) then exception
+    # path refreshes the timestamp.
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key in engine._inflight_markers, (
+        "marker must remain armed after router exception (#236 review P1)"
+    )
+    # Manually rewind the marker timestamp to simulate "marker has
+    # been sitting around almost the full inflight window because the
+    # submit was slow".
+    pre_existing = engine._inflight_markers[key]
+    rewound_ts = _t.monotonic() - 100.0  # well past 60s default
+    engine._inflight_markers[key] = (pre_existing[0], rewound_ts)
+    # Third evaluate: another exception — exception path must refresh
+    # the timestamp rather than leave the rewound stale value in place.
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert key in engine._inflight_markers, (
+        "marker must remain armed after router exception (#236 review P1)"
+    )
+    _, refreshed_ts = engine._inflight_markers[key]
+    assert refreshed_ts > rewound_ts + 90.0, (
+        "exception path must refresh marker timestamp so a slow submit "
+        "does not leave a near-stale marker (#236 round-4 P2)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_single_missing_snapshot_does_not_clear_marker():
+    """Round-4 P1: a single OK-but-empty broker poll is ambiguous
+    (transient broker glitch can produce one). The marker must
+    persist across a single missing snapshot and only clear after
+    two consecutive missing observations."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-1")
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key in engine._inflight_markers
+    import time as _t
+    _t.sleep(5.5)  # past grace period
+    # Single transient empty snapshot must NOT clear marker.
+    state_store.set_positions("A1", [])
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert key in engine._inflight_markers, (
+        "single missing snapshot is ambiguous — marker must persist "
+        "(#236 round-4 P1)"
+    )
+    # If the symbol reappears, the miss-counter must reset.
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert key in engine._inflight_markers, (
+        "marker persists when symbol reappears (#236 round-4 P1)"
+    )
+    # Now disappear again — counter restarts at 1, still no clearance.
+    state_store.set_positions("A1", [])
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert key in engine._inflight_markers, (
+        "miss-counter must reset on observed reappearance — single "
+        "subsequent miss must not clear (#236 round-4 P1)"
     )

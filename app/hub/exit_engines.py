@@ -2418,16 +2418,41 @@ class PositionTrailingLockEngine:
         """Issue #225 (PR #236 review P2): clear inflight markers for
         symbols that disappeared from the snapshot entirely. Skips
         markers younger than ``grace_seconds`` to avoid racing the
-        marker just armed earlier in this evaluate cycle."""
+        marker just armed earlier in this evaluate cycle.
+
+        PR #236 round-4 review P1: require at least
+        ``_min_consecutive_missing_for_sweep`` consecutive missing
+        observations before clearing. A single OK-but-empty/incomplete
+        broker poll (transient broker glitch) can otherwise be
+        misinterpreted as proof the prior exit reached terminal state;
+        when the symbol reappears in a later snapshot, trailing-lock
+        could submit another exit while the first broker order is still
+        unresolved. Requiring multiple consecutive misses guards against
+        single-snapshot ambiguity while keeping the timeout safety net
+        as the ultimate backstop.
+        """
         import time as _t
         now_mono = _t.monotonic()
         tenant_key = str(tenant_id)
         account_key = str(broker_account_id)
+        if not hasattr(self, "_disappeared_symbol_miss_counts"):
+            self._disappeared_symbol_miss_counts: Dict[
+                Tuple[str, str, str], int
+            ] = {}
+        min_consecutive_misses = 2
         # Snapshot keys to avoid mutating the dict while iterating.
         keys_to_check = [
             k for k in self._inflight_markers
             if k[0] == tenant_key and k[1] == account_key
         ]
+        # Reset the miss-counter for any symbol present in this
+        # snapshot — once we observe it, we restart the counter so a
+        # later transient miss does not accumulate against an old
+        # streak.
+        for symbol in seen_symbols:
+            self._disappeared_symbol_miss_counts.pop(
+                (tenant_key, account_key, str(symbol)), None
+            )
         for key in keys_to_check:
             symbol = key[2]
             if symbol in seen_symbols:
@@ -2439,7 +2464,18 @@ class PositionTrailingLockEngine:
             if (now_mono - float(submitted_at)) < grace_seconds:
                 # Just-armed in this cycle (or sub-grace) — do not race.
                 continue
+            # Round-4 P1: count consecutive missing snapshots for this
+            # symbol; only clear once we have crossed the threshold.
+            current_misses = self._disappeared_symbol_miss_counts.get(
+                key, 0
+            ) + 1
+            self._disappeared_symbol_miss_counts[key] = current_misses
+            if current_misses < min_consecutive_misses:
+                # Single missing snapshot is ambiguous (could be a
+                # transient broker glitch). Wait for the next cycle.
+                continue
             self._inflight_markers.pop(key, None)
+            self._disappeared_symbol_miss_counts.pop(key, None)
             # Issue #225 (PR #236 round-2 review P1): also reset the
             # persisted ``PositionTrailingLockManager`` state for this
             # symbol. The qty==0 path resets it; the disappeared-symbol
@@ -2462,8 +2498,9 @@ class PositionTrailingLockEngine:
                 logger,
                 event_type="POSITION_TRAILING_LOCK_INFLIGHT_CLEARED_BY_SNAPSHOT",
                 message=(
-                    "Inflight marker cleared because the symbol is no "
-                    "longer present in the broker position snapshot — "
+                    "Inflight marker cleared because the symbol has been "
+                    "absent from the broker position snapshot for "
+                    f"{min_consecutive_misses} consecutive evaluations — "
                     "the prior exit must have reached terminal state. "
                     "Persisted trailing-lock state also reset to prevent "
                     "stale peak/armed bias on a quick re-open."
@@ -2472,6 +2509,7 @@ class PositionTrailingLockEngine:
                 tenant_id=tenant_id,
                 broker_account_id=broker_account_id,
                 symbol=symbol,
+                consecutive_missing_snapshots=min_consecutive_misses,
             )
 
     async def _emit_exit(
@@ -2578,6 +2616,15 @@ class PositionTrailingLockEngine:
             # "complete") via prefix matching after upper-case
             # normalization. The clearance set is conservative — only
             # statuses that are definitely terminal qualify.
+            # PR #236 round-4 review P2: include FULL and EXECUTED so
+            # the local prefix list matches the canonical terminal
+            # classifier. Angel and other brokers can return terminal
+            # fill statuses as ``FULL`` / ``EXECUTED`` (the router /
+            # ``classify_broker_status`` treats those as filled
+            # terminal outcomes); without these prefixes a synchronous
+            # fill leaves the marker armed for the full inflight
+            # window and incorrectly blocks legitimate retries or
+            # same-symbol re-opens.
             terminal_clearable_prefixes = (
                 "REJECTED",
                 "FAILED",
@@ -2586,7 +2633,9 @@ class PositionTrailingLockEngine:
                 "CANCELED",
                 "EXPIRED",
                 "FILLED",
+                "FULL",
                 "COMPLETE",
+                "EXECUTED",
             )
             rejected = any(
                 response_status.startswith(p)
@@ -2649,15 +2698,34 @@ class PositionTrailingLockEngine:
             # _is_inflight_blocked if no terminal observation comes
             # through, surfacing as POSITION_TRAILING_LOCK_INFLIGHT_TIMEOUT
             # for operator action.
+            #
+            # PR #236 round-4 review P2: REFRESH the marker timestamp
+            # here. The marker was timestamped pre-submit; a slow
+            # broker call that raises AFTER possibly placing the order
+            # can consume most of ``inflight_max_seconds`` before the
+            # exception fires, leaving the next watchdog cycle to
+            # immediately treat the marker as stale and submit another
+            # exit even though the broker order may have just become
+            # untracked. Refreshing the timestamp gives the marker a
+            # full timeout window starting from the failure observation,
+            # so operator action / order reconciliation has time to
+            # land before the marker auto-clears.
+            self._set_inflight_marker(
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=decision.symbol,
+                broker_order_id=None,
+            )
             log_event(
                 logger,
                 event_type="POSITION_TRAILING_LOCK_EXIT_ERROR",
                 message=(
                     "position trailing exit submission failed; inflight "
-                    "marker REMAINS armed because the router raised AFTER "
-                    "potentially placing the broker order — preserves "
-                    "idempotency until the marker times out (issue #225 "
-                    "PR #236 review P1)."
+                    "marker REMAINS armed (and timestamp refreshed) "
+                    "because the router raised AFTER potentially placing "
+                    "the broker order — preserves idempotency until the "
+                    "marker times out (issue #225 PR #236 review P1, "
+                    "round-4 review P2)."
                 ),
                 level=logging.ERROR,
                 tenant_id=tenant_id,
