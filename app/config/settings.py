@@ -436,6 +436,23 @@ class Settings(BaseSettings):
         validation_alias="POSITION_TRAILING_LOCK_EXIT_COOLDOWN_SECONDS",
         description="Cooldown between per-position trailing-lock exit attempts for the same symbol.",
     )
+    # Issue #225 (PR #236 review): per-position inflight idempotency
+    # marker max age. Default 120s — must be larger than the watchdog
+    # cadence (``hub_subscription_poll_interval`` default 60s) so the
+    # marker outlives at least one full poll cycle. If this is set
+    # smaller than the watchdog cadence, the marker can time out
+    # BEFORE the next evaluate cycle fires, allowing a duplicate
+    # submission against the same in-flight broker order — recreating
+    # the 2026-05-08 duplicate-fill scenario.
+    position_trailing_lock_inflight_max_seconds: float = Field(
+        default=120.0,
+        validation_alias="POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS",
+        description=(
+            "Max age of an inflight trailing-lock marker before it is "
+            "auto-cleared with an ERROR event (issue #225). MUST be "
+            "larger than the engine's watchdog cadence."
+        ),
+    )
     enable_eod_exit: bool = Field(
         default=False,
         validation_alias="ENABLE_EOD_EXIT",

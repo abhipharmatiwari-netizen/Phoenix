@@ -764,3 +764,171 @@ async def test_inflight_marker_is_isolated_per_symbol():
         "symbol-A marker must NOT block symbol-B submission"
     )
 
+
+
+# ---------------------------------------------------------------------------
+# Codex round-1 review on PR #236: 4 follow-up bugs.
+# ---------------------------------------------------------------------------
+
+
+class _RouterRejectingResponse:
+    """Router that returns a REJECTED response (e.g. policy interceptor
+    rejection or no active runner) — no broker order placed."""
+
+    def __init__(self):
+        self.calls: List[dict] = []
+
+    async def submit_order(
+        self, *, tenant_id, broker_account_id, strategy_id, order_req,
+    ):
+        self.calls.append({"symbol": order_req.symbol, "side": order_req.side})
+        return (
+            "hub-order-id",
+            SimpleNamespace(status="REJECTED", broker_order_id=""),
+        )
+
+
+class _RouterRaisingPostSubmit:
+    """Router that places the broker order then RAISES (e.g. lifecycle
+    persistence failed AFTER broker submitted). Simulates the post-
+    broker-submit failure mode (PR #236 P1)."""
+
+    def __init__(self, broker_order_id: str = "BROKER-RAISED"):
+        self.calls: List[dict] = []
+        self._boi = broker_order_id
+
+    async def submit_order(
+        self, *, tenant_id, broker_account_id, strategy_id, order_req,
+    ):
+        self.calls.append({"symbol": order_req.symbol})
+        raise RuntimeError(
+            f"lifecycle_persist_failed_after_broker_submit boi={self._boi}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_marker_cleared_when_router_rejects_submission():
+    """Codex P2 round 1: only KEEP the marker for accepted broker
+    submissions. A REJECTED router response means no broker order was
+    placed; the marker must be cleared so the next eligible cycle is
+    not blocked by a non-existent in-flight order."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [
+            Position(
+                symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                product_type=ProductType.INTRADAY,
+            )
+        ],
+    )
+    router = _RouterRejectingResponse()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    assert len(router.calls) == 1
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key not in engine._inflight_markers, (
+        "REJECTED router response must clear the inflight marker (#236 P2)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_marker_remains_when_router_raises_post_submit():
+    """Codex P1 round 1: when submit_order raises AFTER potentially
+    placing the broker order, the marker MUST remain armed to preserve
+    idempotency."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [
+            Position(
+                symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                product_type=ProductType.INTRADAY,
+            )
+        ],
+    )
+    router = _RouterRaisingPostSubmit()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key in engine._inflight_markers, (
+        "post-submit raise must NOT clear the marker (#236 P1)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_marker_cleared_when_symbol_disappears_from_snapshot():
+    """Codex P2 round 1: state stores can omit closed positions from
+    the snapshot entirely. When a fill removes the symbol from the
+    next snapshot, the marker must be swept (after grace period)."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [
+            Position(
+                symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                product_type=ProductType.INTRADAY,
+            )
+        ],
+    )
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-1")
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key in engine._inflight_markers
+
+    import time as _t
+    _t.sleep(5.5)
+
+    state_store.set_positions("A1", [])
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert key not in engine._inflight_markers, (
+        "marker must be swept when symbol disappears from snapshot (#236 P2)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_inflight_max_seconds_honours_settings_override():
+    """Codex P1 round 1: position_trailing_lock_inflight_max_seconds
+    must be readable from Settings — operators must be able to raise
+    it above the watchdog cadence to prevent premature timeouts."""
+    state_store = StateStore()
+    router = _RouterReturningBrokerOrderId()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(
+            position_trailing_lock_inflight_max_seconds=300.0,
+        ),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+    assert engine._inflight_max_seconds() == 300.0
