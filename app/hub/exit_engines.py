@@ -2726,9 +2726,12 @@ class PositionTrailingLockEngine:
             # ``EXECUTED``) prefixes. PR #236 round-4 review P3:
             # distinguish the two so a synchronous broker fill is NOT
             # mislabelled as a router rejection in logs/alerts.
-            # PR #236 round-5 review P2: include singular ``CANCEL``
-            # since the canonical classify_broker_status maps that
-            # exact status to a terminal cancelled state.
+            # PR #236 round-6 review P2: ``CANCEL`` (singular, EXACT
+            # match) is a canonical terminal cancellation; ``CANCEL
+            # REQUESTED``/``CANCEL_PENDING`` are non-terminal pending
+            # states and must NOT clear the marker. Use prefix
+            # matching only for statuses where decoration is safe
+            # (e.g. ``REJECTED:reason``).
             terminal_nonfill_prefixes = (
                 "REJECTED",
                 "REJECT",
@@ -2737,8 +2740,10 @@ class PositionTrailingLockEngine:
                 "ERROR",
                 "CANCELLED",
                 "CANCELED",
-                "CANCEL",
                 "EXPIRED",
+            )
+            terminal_nonfill_exact = (
+                "CANCEL",
             )
             terminal_fill_prefixes = (
                 "FILLED",
@@ -2746,9 +2751,12 @@ class PositionTrailingLockEngine:
                 "COMPLETE",
                 "EXECUTED",
             )
-            is_terminal_nonfill = any(
-                response_status.startswith(p)
-                for p in terminal_nonfill_prefixes
+            is_terminal_nonfill = (
+                response_status in terminal_nonfill_exact
+                or any(
+                    response_status.startswith(p)
+                    for p in terminal_nonfill_prefixes
+                )
             )
             is_terminal_fill = any(
                 response_status.startswith(p)

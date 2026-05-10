@@ -104,6 +104,20 @@ def _mark_positions_sync_fresh(
     )
 
 
+def _age_inflight_markers_past_grace(engine: PositionTrailingLockEngine) -> None:
+    """Rewind every inflight marker timestamp so it appears older than
+    the 5-second grace period of ``_sweep_disappeared_symbol_markers``.
+
+    PR #236 round-6 review P3: replaces real ``time.sleep(5.5)`` calls
+    that previously added 30+ seconds to this test module on every CI
+    run. Disappeared-symbol coverage stays deterministic and fast.
+    """
+    import time as _t
+    rewound = _t.monotonic() - 10.0  # well past the 5s grace
+    for key, (broker_order_id, _ts) in list(engine._inflight_markers.items()):
+        engine._inflight_markers[key] = (broker_order_id, rewound)
+
+
 @pytest.mark.asyncio
 async def test_engine_disabled_does_nothing():
     state_store = StateStore()
@@ -931,8 +945,7 @@ async def test_marker_cleared_when_symbol_disappears_from_snapshot():
     key = ("t-1", "A1", "NG22MAY26255CE")
     assert key in engine._inflight_markers
 
-    import time as _t
-    _t.sleep(5.5)
+    _age_inflight_markers_past_grace(engine)
 
     state_store.set_positions("A1", [])
     _mark_positions_sync_fresh(state_store, "A1")
@@ -1093,8 +1106,7 @@ async def test_disappeared_symbol_sweep_also_resets_manager_state():
     state_key = ("t-1", "A1", "NG22MAY26255CE")
     assert state_key in manager._states, "manager state should be present pre-sweep"
 
-    import time as _t
-    _t.sleep(5.5)  # past grace period
+    _age_inflight_markers_past_grace(engine)
 
     # Symbol disappears from snapshot — PR #236 round-4 P1 requires
     # TWO consecutive missing snapshots before sweep / state reset.
@@ -1175,8 +1187,7 @@ async def test_stale_positions_sync_does_not_clear_marker():
     await engine.evaluate_runners([_runner("t-1", "A1")])
     key = ("t-1", "A1", "NG22MAY26255CE")
     assert key in engine._inflight_markers
-    import time as _t
-    _t.sleep(5.5)
+    _age_inflight_markers_past_grace(engine)
     # Positions snapshot is empty AND sync is stale (no last_ok_ts
     # update) — sweep must NOT count this as a missing-symbol
     # observation. Marker must persist across BOTH cycles.
@@ -1395,8 +1406,7 @@ async def test_single_missing_snapshot_does_not_clear_marker():
     await engine.evaluate_runners([_runner("t-1", "A1")])
     key = ("t-1", "A1", "NG22MAY26255CE")
     assert key in engine._inflight_markers
-    import time as _t
-    _t.sleep(5.5)  # past grace period
+    _age_inflight_markers_past_grace(engine)
     # Single transient empty snapshot must NOT clear marker.
     state_store.set_positions("A1", [])
     _mark_positions_sync_fresh(state_store, "A1")
@@ -1459,8 +1469,7 @@ async def test_repeated_evaluation_of_same_snapshot_does_not_count_as_misses():
     await engine.evaluate_runners([_runner("t-1", "A1")])
     key = ("t-1", "A1", "NG22MAY26255CE")
     assert key in engine._inflight_markers
-    import time as _t
-    _t.sleep(5.5)
+    _age_inflight_markers_past_grace(engine)
     state_store.set_positions("A1", [])
     # Mark sync fresh ONCE — both subsequent evaluations see the SAME
     # ``last_ok_ts`` fingerprint, so only ONE miss should be counted.
@@ -1501,8 +1510,7 @@ async def test_non_ok_status_suppresses_disappeared_sweep():
     await engine.evaluate_runners([_runner("t-1", "A1")])
     key = ("t-1", "A1", "NG22MAY26255CE")
     assert key in engine._inflight_markers
-    import time as _t
-    _t.sleep(5.5)
+    _age_inflight_markers_past_grace(engine)
     # Empty snapshot but status reports ERROR — even with a recent
     # last_ok_ts, the sweep must NOT count this evaluation.
     state_store.set_positions("A1", [])
@@ -1560,6 +1568,54 @@ async def test_marker_cleared_for_singular_cancel_status():
     key = ("t-1", "A1", "NG22MAY26255CE")
     assert key not in engine._inflight_markers, (
         "singular CANCEL status must clear marker (#236 round-5 P2)"
+    )
+
+
+class _RouterCancelPendingResponse:
+    """Router returning CANCEL REQUESTED — pending cancellation,
+    NOT a terminal state. Marker must remain armed."""
+
+    def __init__(self):
+        self.calls: List[dict] = []
+
+    async def submit_order(
+        self, *, tenant_id, broker_account_id, strategy_id, order_req,
+    ):
+        self.calls.append({"symbol": order_req.symbol})
+        return (
+            "hub-order-id",
+            SimpleNamespace(status="CANCEL REQUESTED", broker_order_id="BOI-PEND"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_pending_cancel_does_not_clear_marker():
+    """Round-6 P2: ``CANCEL REQUESTED`` / ``CANCEL_PENDING`` are
+    non-terminal pending cancellations (canonical
+    ``classify_broker_status`` maps them to ``CANCEL_REQUESTED``).
+    The marker MUST remain armed — clearing it would let the next
+    watchdog cycle submit another trailing-lock exit while the
+    original order may still be live or fill."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterCancelPendingResponse()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key in engine._inflight_markers, (
+        "pending CANCEL REQUESTED must keep marker armed (#236 round-6 P2)"
     )
 
 
