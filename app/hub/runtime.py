@@ -612,18 +612,39 @@ class HubRuntime:
                 )
                 continue
             for pos in positions:
+                # PR #237 round-2 review P2: include ``net`` alias for
+                # broker-shaped position rows where ``netqty`` is
+                # absent — the Angel parser explicitly falls back from
+                # ``netqty`` to ``net``.
                 qty_raw = _first_present(
-                    pos, "quantity", "qty", "net_qty", "netqty",
+                    pos, "quantity", "qty", "net_qty", "netqty", "net",
                 )
                 qty = _coerce_int(qty_raw)
                 if qty == 0:
                     continue
+                # PR #237 round-2 review P2: honour broker fallback
+                # average-price fields. Raw Angel rows often carry
+                # ``avgprice=0`` while a valid ``netavgprice`` /
+                # ``netprice`` / ``buyavgprice`` / ``sellavgprice`` is
+                # present — the angel_client and position_sync paths
+                # treat zero as missing and fall back. The audit must
+                # do the same; otherwise a healthy open row like
+                # ``netqty=65, avgprice=0, netavgprice=100`` is
+                # incorrectly reported as corrupt.
                 avg_raw = _first_present(
                     pos,
                     "avg_price", "average_price", "avgPrice", "avgprice",
                     "averageprice", "entry_price",
                 )
                 avg_f = _coerce_float(avg_raw)
+                if avg_f <= 0.0:
+                    # Try broker fallback fields (Angel-shaped rows).
+                    fallback_raw = _first_present(
+                        pos,
+                        "netavgprice", "netprice",
+                        "buyavgprice", "sellavgprice",
+                    )
+                    avg_f = _coerce_float(fallback_raw)
                 if avg_f > 0.0:
                     continue
                 # Found a corrupt record.

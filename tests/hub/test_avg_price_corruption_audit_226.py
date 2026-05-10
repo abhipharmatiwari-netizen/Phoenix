@@ -311,3 +311,60 @@ def test_audit_surfaces_per_account_read_failures():
     assert len(result["read_failures"]) == 1
     assert result["read_failures"][0]["account_id"] == "A1"
     assert "postgres unreachable" in result["read_failures"][0]["error"]
+
+
+# ---------------------------------------------------------------------------
+# Codex round-2 review on PR #237: net + netavgprice fallbacks.
+# ---------------------------------------------------------------------------
+
+
+def test_audit_normalizes_net_quantity_alias():
+    """Codex P2 round 2: ``net`` alias for quantity (Angel falls back
+    from ``netqty`` to ``net``)."""
+    rt = _make_runtime_with_positions(
+        {"A1": [{"tradingsymbol": "X", "net": 65, "avgprice": 0}]}
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 1
+
+
+def test_audit_uses_netavgprice_when_avgprice_is_zero():
+    """Codex P2 round 2: a healthy open row with ``avgprice=0`` but
+    ``netavgprice=100`` must NOT be flagged — the audit must fall
+    back to ``netavgprice`` like angel_client and position_sync do."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "tradingsymbol": "X",
+                    "netqty": 65,
+                    "avgprice": 0,
+                    "netavgprice": 100.5,
+                }
+            ]
+        }
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 0
+
+
+def test_audit_uses_netprice_when_other_fields_zero():
+    """``netprice`` is also a valid fallback."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {"qty": 100, "avgprice": 0, "netprice": 50.0, "symbol": "X"}
+            ]
+        }
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 0
+
+
+def test_audit_uses_buyavgprice_for_long_positions():
+    """Side-specific ``buyavgprice`` for long positions."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {"qty": 100, "avgprice": 0, "buyavgprice": 75.0, "symbol": "X"}
+            ]
+        }
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 0

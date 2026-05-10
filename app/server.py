@@ -1087,6 +1087,40 @@ async def readyz() -> JSONResponse:
             payload["reason"] = f"hub_unavailable:{exc}"
             return JSONResponse(status_code=503, content=payload)
 
+    # Issue #226 (PR #237 round-3 review P2): populate avg_price
+    # corruption audit fields BEFORE the LIVE stream-worker AND
+    # sync-freshness early-return gates. The audit is meant to surface
+    # corruption EXACTLY when broker sync is suppressed/stale or
+    # stream/watchdog is down — but those blocks return 503 first, so
+    # the audit fields would never reach the response if we ran it
+    # later. Population is non-blocking; the readiness-fail decision
+    # happens after the kill-switch gate.
+    #
+    # PR #237 round-3 review P2: keep ``samples`` in a LOCAL variable
+    # rather than the payload, so an earlier 503 path doesn't expose
+    # account/symbol/qty/avg_price details to unauthenticated /readyz
+    # callers. Only counts go in the payload; samples are consumed by
+    # the corruption-fail-readiness reason text.
+    _avg_price_corruption_samples: list = []
+    if _readiness_trade_mode() == "LIVE":
+        try:
+            corruption = get_hub_runtime().audit_position_avg_price_corruption()
+            corrupt_count = int(corruption.get("corrupt_count", 0))
+            payload["avg_price_corrupt_count"] = corrupt_count
+            _avg_price_corruption_samples = (
+                corruption.get("samples") or []
+            )[:5]
+            payload["avg_price_audit_read_failures"] = len(
+                corruption.get("read_failures") or []
+            )
+        except Exception as _corr_exc:
+            logger.warning(
+                "readyz: avg_price corruption audit failed (non-fatal): %s",
+                _corr_exc,
+            )
+            payload["avg_price_corrupt_count"] = -1
+            payload["avg_price_audit_read_failures"] = -1
+
     if _readiness_trade_mode() == "LIVE":
         stream_status = _stream_worker_readiness_snapshot(runtime)
         payload["stream_worker_expected"] = bool(stream_status["expected"])
@@ -1107,32 +1141,6 @@ async def readyz() -> JSONResponse:
                 payload["ready"] = False
                 payload["reason"] = "stream_watchdog_not_running"
                 return JSONResponse(status_code=503, content=payload)
-
-    # Issue #226 (PR #237 round-2 review P2): populate avg_price
-    # corruption audit fields BEFORE the sync-freshness early-return
-    # gates. The audit is meant to surface corruption EXACTLY when
-    # broker sync is suppressed/stale — but the sync-freshness block
-    # below returns 503 first, so the audit fields would never reach
-    # the response if we ran it later. Population is non-blocking; the
-    # readiness-fail decision happens after the kill-switch gate.
-    if _readiness_trade_mode() == "LIVE":
-        try:
-            corruption = get_hub_runtime().audit_position_avg_price_corruption()
-            corrupt_count = int(corruption.get("corrupt_count", 0))
-            payload["avg_price_corrupt_count"] = corrupt_count
-            payload["_avg_price_corruption_samples"] = (
-                corruption.get("samples") or []
-            )[:5]
-            payload["avg_price_audit_read_failures"] = len(
-                corruption.get("read_failures") or []
-            )
-        except Exception as _corr_exc:
-            logger.warning(
-                "readyz: avg_price corruption audit failed (non-fatal): %s",
-                _corr_exc,
-            )
-            payload["avg_price_corrupt_count"] = -1
-            payload["avg_price_audit_read_failures"] = -1
 
     # Sync freshness check — gates readiness on position and orders sync currency
     try:
@@ -1229,7 +1237,6 @@ async def readyz() -> JSONResponse:
         )
         if read_failures_count > 0:
             payload["ready"] = False
-            payload.pop("_avg_price_corruption_samples", None)
             payload["reason"] = (
                 f"avg_price_audit_read_failures: {read_failures_count} "
                 f"account(s) could not be scanned — failing closed in "
@@ -1242,10 +1249,12 @@ async def readyz() -> JSONResponse:
             ).strip().lower() in {"1", "true", "yes", "on"}
             if fails_ready:
                 payload["ready"] = False
-                samples = payload.pop("_avg_price_corruption_samples", []) or []
+                # PR #237 round-3 review P2: samples are kept in the
+                # local variable populated above, never in payload.
+                # Reason text consumes them only at the failure path.
                 sample_text = ",".join(
                     f"{s.get('account_id')}:{s.get('symbol')}"
-                    for s in samples[:3]
+                    for s in _avg_price_corruption_samples[:3]
                 )
                 payload["reason"] = (
                     f"avg_price_corruption: {corrupt_count} record(s) "
@@ -1253,8 +1262,6 @@ async def readyz() -> JSONResponse:
                     f"(samples: {sample_text})"
                 )
                 return JSONResponse(status_code=503, content=payload)
-        # Drop internal sample field if not consumed by the failure path.
-        payload.pop("_avg_price_corruption_samples", None)
 
 
     if _readiness_trade_mode() == "LIVE":
