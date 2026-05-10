@@ -2177,9 +2177,23 @@ class PositionTrailingLockEngine:
     def _maybe_log_inflight_skip(
         self, *, tenant_id: Any, broker_account_id: Any, symbol: str,
     ) -> None:
-        """One-shot per-block inflight-skip event so log volume is bounded
-        even on a tight evaluate cadence."""
+        """Rate-limited (1 per 60s per scope) inflight-skip event.
+
+        PR #236 round-3 review P3: previous version logged every skip,
+        producing one event per evaluate cycle while the marker held —
+        flooding logs while the marker held its full max-age window.
+        Mirror the pattern used by ``_maybe_log_suppression_skip``.
+        """
         key = (str(tenant_id), str(broker_account_id), str(symbol))
+        if not hasattr(self, "_inflight_skip_log_state"):
+            self._inflight_skip_log_state: Dict[
+                Tuple[str, str, str], datetime
+            ] = {}
+        now = self.clock.now_utc()
+        last = self._inflight_skip_log_state.get(key)
+        if last is not None and (now - last).total_seconds() < 60.0:
+            return
+        self._inflight_skip_log_state[key] = now
         marker = self._inflight_markers.get(key)
         broker_order_id = marker[0] if marker else None
         log_event(
@@ -2551,23 +2565,33 @@ class PositionTrailingLockEngine:
                 broker_order_id = None
                 response_status = ""
 
-            # Issue #225 (PR #236 round-2 review P2): treat ALL
-            # terminal non-fill statuses as "no broker order to wait
-            # for" — not just REJECTED/FAILED/ERROR. The router and
-            # lifecycle code classify CANCELLED/CANCELED/EXPIRED as
-            # terminal non-fill outcomes too (and release position
-            # ownership for them). If the broker returns one of those
-            # synchronously with no fill, the marker would otherwise
-            # remain armed until timeout, delaying the next valid
-            # trailing-lock retry.
-            rejected = response_status in {
+            # Issue #225 (PR #236 round-2 review P2 + round-3 review P2):
+            # treat ALL terminal non-fill statuses as "no broker order to
+            # wait for" — and ALSO treat synchronous terminal FILLs as
+            # "no need to track inflight" since the order is already
+            # done. The router/lifecycle classify CANCELLED/CANCELED/
+            # EXPIRED as terminal non-fill outcomes (releasing position
+            # ownership). FILLED/COMPLETE are terminal fills.
+            #
+            # Round-3 P2: also tolerate decorated/normalized status
+            # variants (e.g. "REJECTED:reason", "CANCELLED_AT_BROKER",
+            # "complete") via prefix matching after upper-case
+            # normalization. The clearance set is conservative — only
+            # statuses that are definitely terminal qualify.
+            terminal_clearable_prefixes = (
                 "REJECTED",
                 "FAILED",
                 "ERROR",
                 "CANCELLED",
                 "CANCELED",
                 "EXPIRED",
-            }
+                "FILLED",
+                "COMPLETE",
+            )
+            rejected = any(
+                response_status.startswith(p)
+                for p in terminal_clearable_prefixes
+            )
             if rejected:
                 # Router-rejected submission — no broker order to wait
                 # for. Clear marker so a subsequent eligible cycle is

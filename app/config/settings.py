@@ -583,17 +583,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_position_trailing_lock_inflight_window(self) -> Settings:
-        """Issue #225 (PR #236 round-2 review P2): validate the inflight
-        window is BOTH positive AND larger than the watchdog cadence.
+        """Issue #225 (PR #236 review P2): validate the inflight window.
 
-        If ``POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS`` <= 0, the
-        marker expires immediately and the duplicate-fill protection
-        is silently disabled. If it is <= ``hub_subscription_poll_interval``,
-        the marker can expire BEFORE the next watchdog evaluation
-        cycle fires — recreating the duplicate-submit scenario this
-        change is meant to prevent. Both conditions must fail startup
-        in LIVE mode rather than silently degrade safety.
+        Round-3 review P2: skip validation when trailing-lock is
+        DISABLED — there is no inflight protection to validate, and
+        operators legitimately may not have configured the inflight
+        window when ``POSITION_TRAILING_LOCK_ENABLED=false``.
         """
+        if not bool(getattr(self, "position_trailing_lock_enabled", False)):
+            return self
         inflight_max = float(
             getattr(self, "position_trailing_lock_inflight_max_seconds", 0.0) or 0.0
         )
@@ -602,7 +600,8 @@ class Settings(BaseSettings):
         )
         if inflight_max <= 0.0:
             raise ValueError(
-                "POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS must be > 0; "
+                "POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS must be > 0 "
+                "when POSITION_TRAILING_LOCK_ENABLED=true; "
                 f"got {inflight_max}. Setting it to 0 silently disables "
                 "the trailing-lock duplicate-fill protection (issue #225)."
             )
