@@ -1783,22 +1783,38 @@ class OrderLifecycleService:
             # ``OrderStatus`` (default None) so adapters that don't yet
             # populate them are silently tolerated.
             #
-            # PR #235 review (Codex P2): broker rejection text is
-            # free-form and typically contains spaces and ``=`` chars
-            # (e.g. ``RMS:Margin Exceeds, Required:75000 Available:50000``).
-            # ``log_event`` formats extras as flat ``key=value`` tokens
-            # joined by spaces, so a raw multi-word value is split
-            # across the log line and cannot be filtered as a single
-            # field. JSON-serialise the message to escape spaces /
-            # ``=`` / quotes so it remains a single token in flat
-            # logs and can be parsed cleanly downstream.
-            import json as _json
+            # PR #235 round-1 review (P2): broker rejection text
+            # is free-form and typically contains spaces, ``=``,
+            # and commas (e.g. ``RMS:Margin Exceeds,
+            # Required:75000 Available:50000``). ``log_event``
+            # formats extras as flat ``key=value`` tokens joined
+            # by spaces, so even a JSON-quoted value gets split
+            # across the line during downstream parsing.
+            #
+            # PR #235 round-2 review (P2): use ``urllib.parse.quote``
+            # with empty ``safe`` to percent-encode spaces, ``=``,
+            # commas, and quotes — guarantees the value is a single
+            # whitespace-free token that flat parsers can keep
+            # together. Downstream consumers can ``unquote`` for
+            # human display.
+            #
+            # PR #235 round-2 review (P2): skip None values entirely
+            # so absent diagnostics don't appear as
+            # ``broker_status_message=None`` in logs (which would
+            # match "field exists" filters and obscure real
+            # diagnostics).
+            from urllib.parse import quote as _url_quote
             raw_status_message = getattr(order, "status_message", None)
-            broker_status_message = (
-                _json.dumps(raw_status_message)
-                if raw_status_message is not None else None
-            )
-            broker_error_code = getattr(order, "error_code", None)
+            raw_error_code = getattr(order, "error_code", None)
+            extra_log_fields: dict[str, Any] = {}
+            if raw_status_message:
+                extra_log_fields["broker_status_message"] = _url_quote(
+                    str(raw_status_message), safe="",
+                )
+            if raw_error_code:
+                extra_log_fields["broker_error_code"] = _url_quote(
+                    str(raw_error_code), safe="",
+                )
             log_event(
                 logger,
                 event_type="ORDER_LIFECYCLE_TERMINAL_NON_FILL",
@@ -1811,9 +1827,8 @@ class OrderLifecycleService:
                 transition_source=transition_source,
                 broker_order_id=broker_order_id,
                 status=observed_state.value,
-                broker_status_message=broker_status_message,
-                broker_error_code=broker_error_code,
                 mode=self._stability_flags.order_lifecycle_use_broker_snapshot,
+                **extra_log_fields,
             )
             record = self._ensure_position_record(ctx)
             if record is not None:
