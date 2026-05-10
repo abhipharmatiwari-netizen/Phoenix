@@ -1186,6 +1186,44 @@ async def readyz() -> JSONResponse:
             payload["reason"] = f"kill_switch_unavailable: {_ks_exc}"
             return JSONResponse(status_code=503, content=payload)
 
+        # Issue #226: detect avg_price corruption in internal position
+        # records and surface to readyz. Corruption (qty != 0 with
+        # avg_price <= 0) means Unrealized PnL cannot be computed and
+        # exit engines / risk gates may operate against fiction. The
+        # 2026-05-08 incident logged ``POSITION_VIEW_AVG_PRICE_INVALID
+        # qty=7500 avg_price=0.0`` but only on the dashboard request
+        # path. This periodic-on-readyz audit makes corruption visible
+        # to operators without needing them to open the dashboard.
+        # Configurable via ``AVG_PRICE_CORRUPTION_FAILS_READY`` (default
+        # true).
+        try:
+            from app.hub.runtime import get_hub_runtime as _gh_corr
+            corruption = _gh_corr().audit_position_avg_price_corruption()
+            corrupt_count = int(corruption.get("corrupt_count", 0))
+            payload["avg_price_corrupt_count"] = corrupt_count
+            if corrupt_count > 0:
+                fails_ready = str(
+                    os.getenv("AVG_PRICE_CORRUPTION_FAILS_READY", "true") or ""
+                ).strip().lower() in {"1", "true", "yes", "on"}
+                if fails_ready:
+                    payload["ready"] = False
+                    samples = corruption.get("samples") or []
+                    sample_text = ",".join(
+                        f"{s.get('account_id')}:{s.get('symbol')}"
+                        for s in samples[:3]
+                    )
+                    payload["reason"] = (
+                        f"avg_price_corruption: {corrupt_count} record(s) "
+                        f"with qty != 0 + avg_price <= 0 "
+                        f"(samples: {sample_text})"
+                    )
+                    return JSONResponse(status_code=503, content=payload)
+        except Exception as _corr_exc:
+            logger.warning(
+                "readyz: avg_price corruption audit failed (non-fatal): %s",
+                _corr_exc,
+            )
+
     if _readiness_trade_mode() == "LIVE":
         # §57 / #108 — Gate readiness on restored authoritative position state.
         # Block when ANY of the following is true:

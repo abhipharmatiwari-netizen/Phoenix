@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import os
 from functools import lru_cache
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 from app.config.settings import get_settings
 from app.core.clock import IClock, SystemClock
@@ -512,6 +512,128 @@ class HubRuntime:
             clock=self.clock,
             kill_switch_manager_provider=lambda: self.kill_switch_manager,
         )
+
+    def audit_position_avg_price_corruption(self) -> dict:
+        """Issue #226: scan all account-scoped position views for the
+        ``qty != 0 and avg_price <= 0`` corruption pattern and emit a
+        rate-limited ALERT for each finding.
+
+        Background: ``app/dashboard/tenant_routes.py`` already refuses to
+        compute Unrealized PnL when an open position has avg_price<=0
+        (the 2026-05-08 ``POSITION_VIEW_AVG_PRICE_INVALID qty=7500
+        avg_price=0.0`` log). That defence is reactive (per dashboard
+        request). This audit is proactive — runs on every readiness
+        probe — so corruption cannot hide between dashboard views.
+
+        Returns ``{corrupt_count, samples}``. ``samples`` is a small
+        list of ``{tenant_id, account_id, symbol, quantity, avg_price}``
+        for the first few corrupt rows (capped to keep the payload
+        small).
+        """
+        # Lazy import to avoid heavy hub initialisation cycles in test
+        # contexts that build a HubRuntime-shaped stub.
+        try:
+            hub = getattr(self, "hub", None)
+            state_store = getattr(self, "state_store", None)
+            if hub is None or state_store is None:
+                return {"corrupt_count": 0, "samples": []}
+            account_ids: list = []
+            list_ids = getattr(hub, "list_runner_ids", None)
+            if callable(list_ids):
+                account_ids = [str(a) for a in list_ids()]
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "audit_position_avg_price_corruption: setup failed (%s); "
+                "returning corrupt_count=0", exc,
+            )
+            return {"corrupt_count": 0, "samples": []}
+
+        corrupt: list[dict] = []
+        for account_id in account_ids:
+            try:
+                positions = state_store.get_positions(account_id) or []
+            except Exception:
+                continue
+            for pos in positions:
+                try:
+                    qty = int(getattr(pos, "quantity", 0) or 0)
+                except (TypeError, ValueError):
+                    qty = 0
+                if qty == 0:
+                    continue
+                avg_price = getattr(pos, "avg_price", None)
+                if avg_price is None:
+                    avg_price = getattr(pos, "average_price", None)
+                try:
+                    avg_f = float(avg_price) if avg_price is not None else 0.0
+                except (TypeError, ValueError):
+                    avg_f = 0.0
+                if avg_f > 0.0:
+                    continue
+                # Found a corrupt record.
+                symbol = str(getattr(pos, "symbol", "") or "")
+                tenant_id = str(getattr(pos, "tenant_id", "") or "")
+                corrupt.append(
+                    {
+                        "tenant_id": tenant_id,
+                        "account_id": str(account_id),
+                        "symbol": symbol,
+                        "quantity": qty,
+                        "avg_price": avg_f,
+                    }
+                )
+                # Rate-limit alerts per (account, symbol) — once per 60s
+                # to avoid flooding logs while corruption persists.
+                self._maybe_emit_avg_price_corruption_alert(
+                    account_id=str(account_id),
+                    symbol=symbol,
+                    quantity=qty,
+                    avg_price=avg_f,
+                )
+        return {
+            "corrupt_count": len(corrupt),
+            "samples": corrupt[:5],  # cap payload
+        }
+
+    def _maybe_emit_avg_price_corruption_alert(
+        self, *, account_id: str, symbol: str, quantity: int, avg_price: float,
+    ) -> None:
+        """Issue #226: rate-limited (1 per 60s per scope) ALERT-level
+        event for each detected corruption."""
+        from datetime import datetime as _dt, timezone as _tz
+        if not hasattr(self, "_avg_price_alert_log_state"):
+            self._avg_price_alert_log_state: Dict[Tuple[str, str], Any] = {}
+        key = (account_id, symbol)
+        now = _dt.now(_tz.utc)
+        last = self._avg_price_alert_log_state.get(key)
+        if last is not None and (now - last).total_seconds() < 60.0:
+            return
+        self._avg_price_alert_log_state[key] = now
+        try:
+            from app.core.logging_utils import log_event as _log_event
+            import logging as _logging
+            _log_event(
+                logger,
+                event_type="POSITION_AVG_PRICE_CORRUPTION",
+                message=(
+                    "Internal position record has qty != 0 but avg_price "
+                    "<= 0 — Unrealized PnL cannot be computed and exit "
+                    "engines / risk gates may operate on fiction. "
+                    "Verify broker-side position and reconcile internal "
+                    "records (issue #226)."
+                ),
+                level=_logging.ERROR,
+                broker_account_id=account_id,
+                instrument=symbol,
+                quantity=quantity,
+                avg_price=avg_price,
+            )
+        except Exception:
+            logger.error(
+                "POSITION_AVG_PRICE_CORRUPTION account=%s symbol=%s "
+                "qty=%d avg_price=%s",
+                account_id, symbol, quantity, avg_price,
+            )
 
     def update_volatility(self, volatility_proxy: float) -> None:
         """Feed current volatility (e.g. India VIX) into the circuit breaker.
