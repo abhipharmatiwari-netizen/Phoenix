@@ -368,3 +368,108 @@ def test_audit_uses_buyavgprice_for_long_positions():
         }
     )
     assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 0
+
+
+def test_audit_flags_negative_primary_avg_price_even_with_positive_fallback():
+    """Round-3 P2: a row with ``avg_price=-5`` must be flagged as
+    corrupt regardless of any positive fallback price — broker would
+    never legitimately send a negative average price for an open
+    position, so fallback-substitution must NOT hide it."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": 65,
+                    "avg_price": -5.0,
+                    "netavgprice": 100.0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    result = rt.audit_position_avg_price_corruption()
+    assert result["corrupt_count"] == 1
+    assert result["samples"][0]["avg_price"] == -5.0
+
+
+def test_audit_keeps_scanning_primary_aliases_after_zero():
+    """Round-3 P2: a mixed row like ``{'avg_price': 0, 'avgPrice': 100}``
+    must stay healthy — the audit must not stop at the first present
+    zero alias and treat the row as corrupt; positive primary alias
+    proves the row is healthy even when an earlier alias is zero."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": 65,
+                    "avg_price": 0,
+                    "avgPrice": 100.0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 0
+
+
+def test_audit_uses_camelcase_broker_fallbacks():
+    """Round-3 P2: camelCase broker fallback fields ``netAvgPrice``,
+    ``netPrice``, ``buyAvgPrice``, ``sellAvgPrice`` must be honoured
+    (the angel_client and position_sync paths accept these casings)."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": 65,
+                    "avgprice": 0,
+                    "netAvgPrice": 100.0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 0
+
+
+def test_audit_does_not_use_buyavgprice_for_short_positions():
+    """Round-3 P2: side-specific fallbacks. A short row (qty<0) with
+    ``avg_price=0`` and stale ``buyavgprice=80`` (from prior intraday
+    long activity) must NOT be treated as healthy — only sell-side
+    fallbacks apply for shorts."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": -50,
+                    "avgprice": 0,
+                    "buyavgprice": 80.0,
+                    "sellavgprice": 0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    result = rt.audit_position_avg_price_corruption()
+    assert result["corrupt_count"] == 1
+
+
+def test_audit_does_not_use_sellavgprice_for_long_positions():
+    """Round-3 P2: side-specific fallbacks. A long row (qty>0) with
+    ``avg_price=0``, stale ``sellavgprice=80`` (from prior closed
+    sell activity), and zero buy-side averages must be flagged as
+    corrupt — only buy-side fallbacks apply for longs."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": 50,
+                    "avgprice": 0,
+                    "buyavgprice": 0,
+                    "sellavgprice": 80.0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    result = rt.audit_position_avg_price_corruption()
+    assert result["corrupt_count"] == 1

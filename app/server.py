@@ -1231,10 +1231,23 @@ async def readyz() -> JSONResponse:
         # mean the audit could NOT verify those accounts are clean — in
         # LIVE we must fail closed rather than silently report
         # corrupt_count=0 for un-scanned accounts.
+        # PR #237 round-3 review P2: also fail closed when the audit
+        # itself raised (corrupt_count == -1 / read_failures == -1).
+        # An unexpected position shape or audit regression must NOT be
+        # indistinguishable from a clean account; corruption cannot be
+        # allowed to hide behind an exception.
         corrupt_count = int(payload.get("avg_price_corrupt_count", 0) or 0)
         read_failures_count = int(
             payload.get("avg_price_audit_read_failures", 0) or 0
         )
+        if corrupt_count < 0 or read_failures_count < 0:
+            payload["ready"] = False
+            payload["reason"] = (
+                "avg_price_audit_failed: audit raised an unexpected "
+                "exception — failing closed in LIVE so corruption "
+                "cannot hide behind an audit error"
+            )
+            return JSONResponse(status_code=503, content=payload)
         if read_failures_count > 0:
             payload["ready"] = False
             payload["reason"] = (

@@ -566,12 +566,35 @@ class HubRuntime:
                         return v
             return None
 
+        def _all_present_floats(p, *keys) -> list[float]:
+            """Collect every alias that is present (not None) and
+            coerces to a float. Used by the avg_price scan so that a
+            mixed row like ``{'avg_price': 0, 'avgPrice': 100}`` does
+            not stop at the first zero alias and incorrectly flag the
+            row as corrupt — and conversely so that an explicit
+            negative primary (e.g. ``avg_price=-5``) is still flagged
+            even when a positive fallback is present.
+            """
+            out: list[float] = []
+            for k in keys:
+                if isinstance(p, dict):
+                    if k in p and p[k] is not None:
+                        out.append(_coerce_float(p[k]))
+                else:
+                    v = getattr(p, k, None)
+                    if v is not None:
+                        out.append(_coerce_float(v))
+            return out
+
         # Issue #226 (PR #237 round-2 review P2/P3): comprehensive alias
         # support + decimal-string coercion. Aliases observed in this
         # repo:
-        #   quantity: quantity, qty, net_qty, netqty
+        #   quantity: quantity, qty, net_qty, netqty, net
         #   avg_price: avg_price, average_price, avgPrice, avgprice,
         #              averageprice, entry_price
+        #   broker fallback: netavgprice/netAvgPrice, netprice/netPrice,
+        #                    buyavgprice/buyAvgPrice (qty>0 only),
+        #                    sellavgprice/sellAvgPrice (qty<0 only)
         #   symbol:    symbol, tradingsymbol, trading_symbol
         # Decimal strings like "65.0" must coerce via int(float(v))
         # rather than int(v) directly — otherwise the audit silently
@@ -588,6 +611,10 @@ class HubRuntime:
 
         def _coerce_float(value) -> float:
             try:
+                if isinstance(value, str):
+                    value = value.strip()
+                    if not value:
+                        return 0.0
                 return float(value) if value is not None else 0.0
             except (TypeError, ValueError):
                 return 0.0
@@ -598,6 +625,12 @@ class HubRuntime:
         # exception leaves the audit with corrupt_count=0 and /readyz
         # passes despite that account never being scanned.
         read_failures: list[dict] = []
+        # PR #237 round-3 review P3: rate-limit per-account read-failure
+        # ERRORs so a persistent state-store outage cannot flood logs
+        # on every readiness probe; the structured ``read_failures``
+        # list still flows back to /readyz which fails closed in LIVE.
+        if not hasattr(self, "_avg_price_audit_read_failure_log_state"):
+            self._avg_price_audit_read_failure_log_state: Dict[str, Any] = {}
         for account_id in account_ids:
             try:
                 positions = state_store.get_positions(account_id) or []
@@ -605,11 +638,20 @@ class HubRuntime:
                 read_failures.append(
                     {"account_id": str(account_id), "error": repr(exc)}
                 )
-                logger.error(
-                    "audit_position_avg_price_corruption: get_positions "
-                    "failed for account=%s — account NOT scanned (%s)",
-                    account_id, exc,
+                from datetime import datetime as _dt, timezone as _tz
+                _now = _dt.now(_tz.utc)
+                _last = self._avg_price_audit_read_failure_log_state.get(
+                    str(account_id)
                 )
+                if _last is None or (_now - _last).total_seconds() >= 60.0:
+                    self._avg_price_audit_read_failure_log_state[
+                        str(account_id)
+                    ] = _now
+                    logger.error(
+                        "audit_position_avg_price_corruption: get_positions "
+                        "failed for account=%s — account NOT scanned (%s)",
+                        account_id, exc,
+                    )
                 continue
             for pos in positions:
                 # PR #237 round-2 review P2: include ``net`` alias for
@@ -622,31 +664,60 @@ class HubRuntime:
                 qty = _coerce_int(qty_raw)
                 if qty == 0:
                     continue
-                # PR #237 round-2 review P2: honour broker fallback
-                # average-price fields. Raw Angel rows often carry
-                # ``avgprice=0`` while a valid ``netavgprice`` /
-                # ``netprice`` / ``buyavgprice`` / ``sellavgprice`` is
-                # present — the angel_client and position_sync paths
-                # treat zero as missing and fall back. The audit must
-                # do the same; otherwise a healthy open row like
-                # ``netqty=65, avgprice=0, netavgprice=100`` is
-                # incorrectly reported as corrupt.
-                avg_raw = _first_present(
+                # PR #237 round-3 review P2: SCAN ALL primary aliases
+                # rather than stopping at the first non-None value.
+                # A mixed row like ``{'avg_price': 0, 'avgPrice': 100}``
+                # must stay healthy (positive primary present) but a
+                # row with ``avg_price=-5`` must be flagged even when
+                # a positive fallback is also present (negative primary
+                # avg_price is corruption regardless of fallbacks).
+                primary_values = _all_present_floats(
                     pos,
                     "avg_price", "average_price", "avgPrice", "avgprice",
                     "averageprice", "entry_price",
                 )
-                avg_f = _coerce_float(avg_raw)
-                if avg_f <= 0.0:
-                    # Try broker fallback fields (Angel-shaped rows).
-                    fallback_raw = _first_present(
-                        pos,
-                        "netavgprice", "netprice",
-                        "buyavgprice", "sellavgprice",
+                # Negative primary is always corrupt — broker would
+                # never legitimately send a negative average price for
+                # an open position.
+                negative_primary = next(
+                    (v for v in primary_values if v < 0.0), None
+                )
+                if negative_primary is not None:
+                    avg_f_for_report = negative_primary
+                else:
+                    positive_primary = next(
+                        (v for v in primary_values if v > 0.0), None
                     )
-                    avg_f = _coerce_float(fallback_raw)
-                if avg_f > 0.0:
-                    continue
+                    if positive_primary is not None:
+                        # Healthy.
+                        continue
+                    # All primaries are missing or zero — try
+                    # side-specific broker fallback fields. The
+                    # angel_client / position_sync normalizers only use
+                    # buy-side averages for long positions and sell-side
+                    # for short positions, so honour the same gate here.
+                    fallback_keys: list[str] = [
+                        "netavgprice", "netAvgPrice",
+                        "netprice", "netPrice",
+                    ]
+                    if qty > 0:
+                        fallback_keys.extend(
+                            ["buyavgprice", "buyAvgPrice"]
+                        )
+                    elif qty < 0:
+                        fallback_keys.extend(
+                            ["sellavgprice", "sellAvgPrice"]
+                        )
+                    fallback_values = _all_present_floats(
+                        pos, *fallback_keys
+                    )
+                    positive_fallback = next(
+                        (v for v in fallback_values if v > 0.0), None
+                    )
+                    if positive_fallback is not None:
+                        # Healthy via broker fallback.
+                        continue
+                    avg_f_for_report = 0.0
                 # Found a corrupt record.
                 symbol = str(
                     _first_present(
@@ -660,7 +731,7 @@ class HubRuntime:
                         "account_id": str(account_id),
                         "symbol": symbol,
                         "quantity": qty,
-                        "avg_price": avg_f,
+                        "avg_price": avg_f_for_report,
                     }
                 )
                 # Rate-limit alerts per (account, symbol) — once per 60s
@@ -669,7 +740,7 @@ class HubRuntime:
                     account_id=str(account_id),
                     symbol=symbol,
                     quantity=qty,
-                    avg_price=avg_f,
+                    avg_price=avg_f_for_report,
                 )
         return {
             "corrupt_count": len(corrupt),
