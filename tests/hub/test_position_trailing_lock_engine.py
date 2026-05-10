@@ -1424,3 +1424,214 @@ async def test_single_missing_snapshot_does_not_clear_marker():
         "miss-counter must reset on observed reappearance — single "
         "subsequent miss must not clear (#236 round-4 P1)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Codex round-5 review on PR #236.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_repeated_evaluation_of_same_snapshot_does_not_count_as_misses():
+    """Round-5 P2: the disappeared-symbol miss-counter must only
+    increment on DISTINCT successful syncs (different ``last_ok_ts``).
+    With ``HUB_SUBSCRIPTION_POLL_INTERVAL`` smaller than the broker
+    positions sync interval, two watchdog ticks can observe the same
+    snapshot before another sync runs — counting both as missing
+    observations would clear the marker without a fresh broker
+    confirmation."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-1")
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key in engine._inflight_markers
+    import time as _t
+    _t.sleep(5.5)
+    state_store.set_positions("A1", [])
+    # Mark sync fresh ONCE — both subsequent evaluations see the SAME
+    # ``last_ok_ts`` fingerprint, so only ONE miss should be counted.
+    _mark_positions_sync_fresh(state_store, "A1")
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert key in engine._inflight_markers, (
+        "two evaluations of the SAME snapshot must not reach the "
+        "two-miss threshold — distinct successful syncs are required "
+        "(#236 round-5 P2)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_ok_status_suppresses_disappeared_sweep():
+    """Round-5 P2: when positions sync status is not OK (e.g. ERROR
+    or BLOCKED), the disappeared-symbol sweep must NOT count
+    evaluations as misses. ``StateStore.update_positions_status``
+    keeps the OLD ``last_ok_ts`` when a later sync reports ERROR, so
+    timestamp-only freshness can be misleading after a failed sync."""
+    from datetime import datetime, timezone
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-1")
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key in engine._inflight_markers
+    import time as _t
+    _t.sleep(5.5)
+    # Empty snapshot but status reports ERROR — even with a recent
+    # last_ok_ts, the sweep must NOT count this evaluation.
+    state_store.set_positions("A1", [])
+    state_store.update_positions_status(
+        "A1",
+        status="ERROR",
+        last_ok_ts=datetime.now(timezone.utc).isoformat(),
+        last_count=None,
+        error_reason="broker_5xx",
+        blocked_ts=None,
+        retry_after_seconds=None,
+    )
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert key in engine._inflight_markers, (
+        "non-OK status must suppress the disappeared-symbol sweep "
+        "(#236 round-5 P2)"
+    )
+
+
+class _RouterCancelSingularResponse:
+    def __init__(self):
+        self.calls: List[dict] = []
+
+    async def submit_order(
+        self, *, tenant_id, broker_account_id, strategy_id, order_req,
+    ):
+        self.calls.append({"symbol": order_req.symbol})
+        return ("hub-order-id", SimpleNamespace(status="CANCEL", broker_order_id=""))
+
+
+@pytest.mark.asyncio
+async def test_marker_cleared_for_singular_cancel_status():
+    """Round-5 P2: the canonical ``classify_broker_status`` maps the
+    bare status ``CANCEL`` to a terminal cancelled state; the local
+    prefix list must include it too so a CANCEL response clears the
+    marker rather than leaving it armed until timeout."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterCancelSingularResponse()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key not in engine._inflight_markers, (
+        "singular CANCEL status must clear marker (#236 round-5 P2)"
+    )
+
+
+class _RouterPaddedFilledResponse:
+    def __init__(self):
+        self.calls: List[dict] = []
+
+    async def submit_order(
+        self, *, tenant_id, broker_account_id, strategy_id, order_req,
+    ):
+        self.calls.append({"symbol": order_req.symbol})
+        # Padded with whitespace — must still match terminal-fill prefix.
+        return ("hub-order-id", SimpleNamespace(status=" FILLED", broker_order_id="BOI-1"))
+
+
+@pytest.mark.asyncio
+async def test_padded_terminal_status_strips_before_matching():
+    """Round-5 P2: broker statuses with leading/trailing whitespace
+    (e.g. `` FILLED``) must match the canonical terminal classifier
+    by stripping before upper-casing."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterPaddedFilledResponse()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key not in engine._inflight_markers, (
+        "padded FILLED status must strip before matching (#236 round-5 P2)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_synchronous_fill_resets_persisted_trailing_state():
+    """Round-5 P2: when a synchronous terminal fill clears the
+    inflight marker, the persisted ``PositionTrailingLockManager``
+    state must ALSO be reset. OrderLifecycleService projects the
+    fill into the state store immediately, so the disappeared-symbol
+    sweep never sees the position again to do this cleanup."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    manager = PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend())
+    router = _RouterFilledResponse()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=manager,
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    state_key = ("t-1", "A1", "NG22MAY26255CE")
+    assert state_key in manager._states, "manager state present pre-fill"
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert state_key not in manager._states, (
+        "manager state must be reset on synchronous fill so a "
+        "same-symbol re-open does not inherit stale peak/armed "
+        "(#236 round-5 P2)"
+    )

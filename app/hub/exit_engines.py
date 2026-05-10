@@ -2400,14 +2400,15 @@ class PositionTrailingLockEngine:
         # and incorrectly block a quick re-open. The grace period
         # (5s) prevents clearing a marker that was just armed in this
         # same cycle.
-        # PR #236 round-4 review P2: pass the broker positions sync
-        # freshness signal so the disappeared-symbol sweep does NOT
-        # count a stale snapshot as evidence the symbol vanished.
-        # Without this, a transient OK-but-empty positions response
-        # left in StateStore can be observed twice in a row by the
-        # watchdog before the next successful sync replaces it,
-        # incorrectly clearing the marker.
-        positions_status_fresh = self._is_positions_status_fresh(
+        # PR #236 round-4/round-5 review P2: pass the broker positions
+        # sync FINGERPRINT (last_ok_ts when status==OK and recent) so
+        # the disappeared-symbol sweep only counts misses against a
+        # snapshot from a DISTINCT successful sync. None means the
+        # snapshot is stale or sync is not currently OK — sweep is
+        # suppressed entirely. A non-None value that matches the
+        # previous fingerprint also suppresses (same snapshot already
+        # observed in a prior cycle).
+        positions_sync_fingerprint = self._get_positions_sync_fingerprint(
             broker_account_id=broker_account_id,
         )
         self._sweep_disappeared_symbol_markers(
@@ -2415,48 +2416,52 @@ class PositionTrailingLockEngine:
             broker_account_id=broker_account_id,
             seen_symbols=seen_symbols,
             grace_seconds=5.0,
-            positions_status_fresh=positions_status_fresh,
+            positions_sync_fingerprint=positions_sync_fingerprint,
         )
 
-    def _is_positions_status_fresh(
+    def _get_positions_sync_fingerprint(
         self, *, broker_account_id: Any,
-    ) -> bool:
-        """Return True if the broker positions snapshot in StateStore
-        was last updated by a SUCCESSFUL sync within the watchdog's
-        own poll cadence.
+    ) -> Optional[str]:
+        """Return the current ``last_ok_ts`` for the broker positions
+        snapshot, or None if positions sync has never succeeded or
+        the current ``status`` is not OK.
 
-        PR #236 round-4 review P2: the disappeared-symbol sweep must
-        only count snapshots that were ACTUALLY refreshed by a recent
-        sync. If the sync has been failing (or has not run since the
-        marker was armed), repeated evaluations of the SAME stale
-        snapshot must not all count as missing-symbol observations.
+        PR #236 round-5 review P2: the disappeared-symbol sweep must
+        require BOTH a current OK status AND a fresh ``last_ok_ts``.
+        ``StateStore.update_positions_status`` keeps ``last_ok_ts``
+        when a later sync reports ERROR/BLOCKED, so timestamp-only
+        freshness can be misleading after a failed sync. The returned
+        timestamp is also used as a per-evaluation fingerprint — the
+        miss-counter only increments when the fingerprint CHANGES
+        from the previous evaluation (distinct successful sync), so
+        two watchdog ticks observing the SAME OK-but-empty snapshot
+        cannot reach the two-miss threshold without a fresh broker
+        sync in between.
         """
         try:
             get_status = getattr(
                 self.state_store, "get_positions_status", None,
             )
             if not callable(get_status):
-                # State store does not expose freshness — be permissive
-                # (fall back to monotonic-clock-only behaviour, which
-                # is the round-3 behaviour).
-                return True
+                return None
             status = get_status(broker_account_id) or {}
+            current_status = str(status.get("status") or "").strip().upper()
+            if current_status != "OK":
+                return None
             last_ok_iso = status.get("last_ok_ts")
             if not last_ok_iso:
-                return False
+                return None
             from datetime import datetime, timezone
             try:
                 last_ok = datetime.fromisoformat(
                     str(last_ok_iso).replace("Z", "+00:00")
                 )
             except ValueError:
-                return False
+                return None
             now = self.clock.now_utc()
             if last_ok.tzinfo is None:
                 last_ok = last_ok.replace(tzinfo=timezone.utc)
             age = (now - last_ok).total_seconds()
-            # Fresh iff last successful sync is no older than 2× the
-            # poll interval (giving the sync one cycle of grace).
             poll_interval = float(
                 getattr(
                     self.settings,
@@ -2465,9 +2470,11 @@ class PositionTrailingLockEngine:
                 ) or 60.0
             )
             max_fresh_age = max(poll_interval * 2.0, 30.0)
-            return age <= max_fresh_age
+            if age > max_fresh_age:
+                return None
+            return str(last_ok_iso)
         except Exception:  # pragma: no cover - defensive
-            return False
+            return None
 
     def _sweep_disappeared_symbol_markers(
         self,
@@ -2476,7 +2483,7 @@ class PositionTrailingLockEngine:
         broker_account_id: Any,
         seen_symbols: set,
         grace_seconds: float,
-        positions_status_fresh: bool = True,
+        positions_sync_fingerprint: Optional[str] = None,
     ) -> None:
         """Issue #225 (PR #236 review P2): clear inflight markers for
         symbols that disappeared from the snapshot entirely. Skips
@@ -2487,19 +2494,16 @@ class PositionTrailingLockEngine:
         ``_min_consecutive_missing_for_sweep`` consecutive missing
         observations before clearing. A single OK-but-empty/incomplete
         broker poll (transient broker glitch) can otherwise be
-        misinterpreted as proof the prior exit reached terminal state;
-        when the symbol reappears in a later snapshot, trailing-lock
-        could submit another exit while the first broker order is still
-        unresolved. Requiring multiple consecutive misses guards against
-        single-snapshot ambiguity while keeping the timeout safety net
-        as the ultimate backstop.
+        misinterpreted as proof the prior exit reached terminal state.
 
-        PR #236 round-4 review P2: ``positions_status_fresh`` must be
-        True for the miss to count. A stale positions snapshot (sync
-        failing or not yet run since the marker was armed) can be
-        observed twice in a row without ever being refreshed by the
-        broker — counting both as missing observations would clear
-        the guard while the broker order may still be unresolved.
+        PR #236 round-5 review P2: ``positions_sync_fingerprint`` is
+        the ``last_ok_ts`` of the broker positions snapshot when the
+        current status is OK (None otherwise). The miss-counter only
+        increments when the fingerprint is non-None AND DIFFERENT from
+        the previously-observed fingerprint for the same key — a
+        repeated evaluation of the SAME snapshot does not count, so
+        the two-miss threshold can only be reached after two DISTINCT
+        successful syncs have observed the symbol absent.
         """
         import time as _t
         now_mono = _t.monotonic()
@@ -2509,25 +2513,29 @@ class PositionTrailingLockEngine:
             self._disappeared_symbol_miss_counts: Dict[
                 Tuple[str, str, str], int
             ] = {}
+        if not hasattr(self, "_disappeared_symbol_last_fingerprint"):
+            self._disappeared_symbol_last_fingerprint: Dict[
+                Tuple[str, str, str], str
+            ] = {}
         min_consecutive_misses = 2
         # Snapshot keys to avoid mutating the dict while iterating.
         keys_to_check = [
             k for k in self._inflight_markers
             if k[0] == tenant_key and k[1] == account_key
         ]
-        # Reset the miss-counter for any symbol present in this
-        # snapshot — once we observe it, we restart the counter so a
-        # later transient miss does not accumulate against an old
-        # streak.
+        # Reset the miss-counter (and fingerprint memory) for any
+        # symbol present in this snapshot — once we observe it, we
+        # restart the counter so a later transient miss does not
+        # accumulate against an old streak.
         for symbol in seen_symbols:
-            self._disappeared_symbol_miss_counts.pop(
-                (tenant_key, account_key, str(symbol)), None
-            )
-        # PR #236 round-4 review P2: if the underlying positions
-        # snapshot is stale, do NOT count this evaluation against the
-        # miss threshold. The stale snapshot could be the same data
-        # observed in the previous cycle.
-        if not positions_status_fresh:
+            sym_key = (tenant_key, account_key, str(symbol))
+            self._disappeared_symbol_miss_counts.pop(sym_key, None)
+            self._disappeared_symbol_last_fingerprint.pop(sym_key, None)
+        # PR #236 round-5 review P2: if the underlying positions
+        # snapshot is stale (no fingerprint) OR the current status is
+        # not OK, do NOT count this evaluation against the miss
+        # threshold.
+        if positions_sync_fingerprint is None:
             return
         for key in keys_to_check:
             symbol = key[2]
@@ -2540,6 +2548,18 @@ class PositionTrailingLockEngine:
             if (now_mono - float(submitted_at)) < grace_seconds:
                 # Just-armed in this cycle (or sub-grace) — do not race.
                 continue
+            # PR #236 round-5 review P2: only count this evaluation as
+            # a miss if the positions-sync fingerprint is DISTINCT
+            # from the previously-observed fingerprint for this key.
+            # Repeated evaluations of the SAME snapshot do not count.
+            previous_fingerprint = self._disappeared_symbol_last_fingerprint.get(
+                key
+            )
+            if previous_fingerprint == positions_sync_fingerprint:
+                continue
+            self._disappeared_symbol_last_fingerprint[key] = (
+                positions_sync_fingerprint
+            )
             # Round-4 P1: count consecutive missing snapshots for this
             # symbol; only clear once we have crossed the threshold.
             current_misses = self._disappeared_symbol_miss_counts.get(
@@ -2552,6 +2572,7 @@ class PositionTrailingLockEngine:
                 continue
             self._inflight_markers.pop(key, None)
             self._disappeared_symbol_miss_counts.pop(key, None)
+            self._disappeared_symbol_last_fingerprint.pop(key, None)
             # Issue #225 (PR #236 round-2 review P1): also reset the
             # persisted ``PositionTrailingLockManager`` state for this
             # symbol. The qty==0 path resets it; the disappeared-symbol
@@ -2672,9 +2693,14 @@ class PositionTrailingLockEngine:
                     boi = getattr(response, "broker_order_id", None)
                     if boi:
                         broker_order_id = str(boi)
+                    # PR #236 round-5 review P2: STRIP whitespace
+                    # before upper-casing so padded broker statuses
+                    # like " FILLED" / " CANCELLED" / " REJECTED"
+                    # match the canonical classifier set. Mirror
+                    # ``classify_broker_status`` semantics exactly.
                     response_status = str(
                         getattr(response, "status", "") or ""
-                    ).upper()
+                    ).strip().upper()
             except Exception:  # pragma: no cover - defensive
                 broker_order_id = None
                 response_status = ""
@@ -2700,6 +2726,9 @@ class PositionTrailingLockEngine:
             # ``EXECUTED``) prefixes. PR #236 round-4 review P3:
             # distinguish the two so a synchronous broker fill is NOT
             # mislabelled as a router rejection in logs/alerts.
+            # PR #236 round-5 review P2: include singular ``CANCEL``
+            # since the canonical classify_broker_status maps that
+            # exact status to a terminal cancelled state.
             terminal_nonfill_prefixes = (
                 "REJECTED",
                 "REJECT",
@@ -2708,6 +2737,7 @@ class PositionTrailingLockEngine:
                 "ERROR",
                 "CANCELLED",
                 "CANCELED",
+                "CANCEL",
                 "EXPIRED",
             )
             terminal_fill_prefixes = (
@@ -2761,6 +2791,24 @@ class PositionTrailingLockEngine:
                     broker_account_id=broker_account_id,
                     symbol=decision.symbol,
                 )
+                # PR #236 round-5 review P2: ALSO reset the persisted
+                # trailing-lock manager state for this symbol —
+                # OrderLifecycleService projects the fill into the
+                # state store immediately for synchronous responses,
+                # which means the disappeared-symbol sweep will not
+                # see this position again to do the cleanup. Without
+                # this reset, a same-symbol re-open is evaluated
+                # against the stale peak/armed state.
+                try:
+                    self.manager.reset_position(
+                        tenant_id, broker_account_id, decision.symbol,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "trailing-lock state reset failed after "
+                        "synchronous fill for %s (non-fatal): %s",
+                        decision.symbol, exc,
+                    )
                 log_event(
                     logger,
                     event_type="POSITION_TRAILING_LOCK_EXIT_SUBMITTED",
