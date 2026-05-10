@@ -1782,7 +1782,22 @@ class OrderLifecycleService:
             # actionable diagnostic. The fields are optional on
             # ``OrderStatus`` (default None) so adapters that don't yet
             # populate them are silently tolerated.
-            broker_status_message = getattr(order, "status_message", None)
+            #
+            # PR #235 review (Codex P2): broker rejection text is
+            # free-form and typically contains spaces and ``=`` chars
+            # (e.g. ``RMS:Margin Exceeds, Required:75000 Available:50000``).
+            # ``log_event`` formats extras as flat ``key=value`` tokens
+            # joined by spaces, so a raw multi-word value is split
+            # across the log line and cannot be filtered as a single
+            # field. JSON-serialise the message to escape spaces /
+            # ``=`` / quotes so it remains a single token in flat
+            # logs and can be parsed cleanly downstream.
+            import json as _json
+            raw_status_message = getattr(order, "status_message", None)
+            broker_status_message = (
+                _json.dumps(raw_status_message)
+                if raw_status_message is not None else None
+            )
             broker_error_code = getattr(order, "error_code", None)
             log_event(
                 logger,

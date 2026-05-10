@@ -1019,22 +1019,38 @@ class AngelBrokerClient(BrokerClient):
             # so the lifecycle log on the snapshot polling path can
             # surface diagnostics for REJECTED / CANCELLED orders. Angel
             # returns these as ``text`` and ``errorcode`` (sometimes
-            # ``rejectionreason`` for legacy responses). Defensive about
-            # which fields are populated — adapters returning None are
-            # fine; the fields default to None on the dataclass.
-            status_message = str(
-                order.get("text")
-                or order.get("rejectionreason")
-                or order.get("rejection_reason")
-                or order.get("status_message")
-                or order.get("statusmessage")
-                or ""
-            ).strip() or None
-            error_code = str(
-                order.get("errorcode")
-                or order.get("error_code")
-                or ""
-            ).strip() or None
+            # ``rejectionreason`` for legacy responses).
+            #
+            # PR #235 review (Codex P2): the previous ``or`` chain was
+            # broken — a whitespace-only ``text=" "`` was selected by
+            # ``or`` (truthy as a string) BEFORE trimming, then the
+            # whole expression collapsed to None when stripped, dropping
+            # any actual rejection text in subsequent fallback fields.
+            # Fix: trim/test each candidate before choosing the first
+            # non-empty value. Also include ``errorCode`` (camelCase)
+            # which is used elsewhere in the codebase for Angel
+            # payloads (see app/core/angel_login.py).
+            def _first_non_empty(*candidates):
+                for c in candidates:
+                    if c is None:
+                        continue
+                    s = str(c).strip()
+                    if s:
+                        return s
+                return None
+
+            status_message = _first_non_empty(
+                order.get("text"),
+                order.get("rejectionreason"),
+                order.get("rejection_reason"),
+                order.get("status_message"),
+                order.get("statusmessage"),
+            )
+            error_code = _first_non_empty(
+                order.get("errorcode"),
+                order.get("errorCode"),
+                order.get("error_code"),
+            )
             results.append(
                 OrderStatus(
                     order_id=order_id,

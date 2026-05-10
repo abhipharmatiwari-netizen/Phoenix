@@ -360,3 +360,53 @@ def test_place_order_unregistered_ip_returns_rejected_and_sets_cooldown():
     assert "Unregistered IP address" in resp.message
     assert client._orders_blocked_count == 1
     assert client._orders_blocked_until > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Codex round-1 review on PR #235: 3 follow-up bugs.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_orders_skips_blank_text_to_use_rejectionreason_fallback(monkeypatch):
+    """Codex P2 round 1: a whitespace-only ``text=" "`` previously was
+    selected by the ``or`` chain, then collapsed to None on strip — losing
+    the actual rejection text in fallback fields. Trim each candidate
+    before choosing the first non-empty value."""
+    monkeypatch.setenv("ORDER_SNAPSHOT_PRESERVE_TERMINAL", "true")
+    client = AngelBrokerClient(_dummy_account(), _dummy_secrets())
+
+    row = _raw_rejected_row(text="   ", errorcode="AB1009")
+    row["rejectionreason"] = "Insufficient holdings to cover SELL"
+    orders = client._parse_orders({"data": [row]})
+
+    assert len(orders) == 1
+    assert orders[0].status_message == "Insufficient holdings to cover SELL"
+
+
+def test_parse_orders_recognizes_camelCase_errorCode(monkeypatch):
+    """Codex P2 round 1: ``errorCode`` (camelCase) is the form Angel
+    uses elsewhere in the codebase — must be normalized."""
+    monkeypatch.setenv("ORDER_SNAPSHOT_PRESERVE_TERMINAL", "true")
+    client = AngelBrokerClient(_dummy_account(), _dummy_secrets())
+
+    row = _raw_rejected_row(text="Margin Exceeds", errorcode="")
+    row["errorCode"] = "AB1009"
+    orders = client._parse_orders({"data": [row]})
+
+    assert len(orders) == 1
+    assert orders[0].error_code == "AB1009"
+
+
+def test_parse_orders_blank_errorCode_falls_back_to_lowercase(monkeypatch):
+    """If multiple casings carry partial values, the first non-empty
+    after trim wins."""
+    monkeypatch.setenv("ORDER_SNAPSHOT_PRESERVE_TERMINAL", "true")
+    client = AngelBrokerClient(_dummy_account(), _dummy_secrets())
+
+    row = _raw_rejected_row(text="error", errorcode="")
+    row["errorCode"] = "  "  # whitespace
+    row["error_code"] = "AB1004"
+    orders = client._parse_orders({"data": [row]})
+
+    assert len(orders) == 1
+    assert orders[0].error_code == "AB1004"
