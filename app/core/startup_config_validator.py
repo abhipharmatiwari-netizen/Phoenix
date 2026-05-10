@@ -73,6 +73,61 @@ def _truthy(value: object) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _float_or_default(value: object, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _live_low_daily_loss_check(
+    *,
+    settings: Any,
+    env: Mapping[str, Any],
+) -> str | None:
+    trade_mode = str(env.get("TRADE_MODE", "PAPER") or "PAPER").strip().upper()
+    if trade_mode != "LIVE" or not bool(getattr(settings, "risk_enable_daily_loss", False)):
+        return None
+
+    floor = _float_or_default(
+        env.get(
+            "RISK_LIVE_MIN_DAILY_LOSS_INR",
+            getattr(settings, "risk_live_min_daily_loss_inr", 5000.0),
+        ),
+        5000.0,
+    )
+    if floor <= 0:
+        return None
+
+    try:
+        daily_loss = float(getattr(settings, "risk_max_daily_loss", None))
+    except (TypeError, ValueError):
+        return None
+    if daily_loss >= floor:
+        return None
+
+    action = str(
+        env.get(
+            "RISK_LIVE_LOW_DAILY_LOSS_ACTION",
+            getattr(settings, "risk_live_low_daily_loss_action", "warn"),
+        )
+        or "warn"
+    ).strip().lower()
+    if action not in {"warn", "warning", "error"}:
+        action = "warn"
+
+    message = (
+        f"TRADE_MODE=LIVE RISK_MAX_DAILY_LOSS={daily_loss:g} is below "
+        f"RISK_LIVE_MIN_DAILY_LOSS_INR={floor:g}. Size the limit explicitly "
+        "per account capital tier; operator policy is daily loss = 1% of capital."
+    )
+    if action == "error":
+        return message
+
+    logger.warning("startup.risk_daily_loss_low: %s", message)
+    return None
+
+
 def _normalized_backend(value: object) -> str:
     return str(value or "").strip().lower()
 
@@ -358,6 +413,9 @@ def validate_runtime_startup_settings(
         errors.append(
             "RISK_ENABLE_DAILY_LOSS=true requires RISK_MAX_DAILY_LOSS > 0"
         )
+    low_daily_loss_error = _live_low_daily_loss_check(settings=settings, env=env)
+    if low_daily_loss_error:
+        errors.append(low_daily_loss_error)
 
     app_env = str(
         getattr(runtime_cfg, "app_env", None)
@@ -951,3 +1009,7 @@ def validate_startup_config(
     if errors:
         details = "\n".join(f"- {e}" for e in errors)
         raise ValueError(f"Startup configuration validation failed:\n{details}")
+
+
+# Backwards-compatible alias used by legacy tests and callers.
+validate_runtime_settings = validate_runtime_startup_settings

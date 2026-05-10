@@ -59,6 +59,35 @@ Required values:
 
 Secrets are files under `/run/secrets/`, not values committed to env templates.
 
+## Sizing daily-loss limit by capital tier
+
+`RISK_MAX_DAILY_LOSS` is an operator-owned LIVE value and must not be inherited
+from repo defaults. The current production sizing policy is:
+
+```text
+RISK_MAX_DAILY_LOSS = 1% of account capital
+```
+
+Use the funded account capital for the tenant/broker account that will carry the
+positions, then round deliberately to an auditable INR amount. Examples:
+
+| Account capital | 1% daily-loss limit | Example setting |
+| ---: | ---: | --- |
+| ₹5,00,000 | ₹5,000 | `RISK_MAX_DAILY_LOSS=5000` |
+| ₹20,00,000 | ₹20,000 | `RISK_MAX_DAILY_LOSS=20000` |
+| ₹50,00,000 | ₹50,000 | `RISK_MAX_DAILY_LOSS=50000` |
+| ₹2,00,00,000 | ₹2,00,000 | `RISK_MAX_DAILY_LOSS=200000` |
+
+Operational notes:
+
+- Record the capital tier and selected `RISK_MAX_DAILY_LOSS` in the deploy notes
+  before restarting the LIVE backend.
+- Keep `RISK_LIVE_MIN_DAILY_LOSS_INR` at or above the smallest approved capital
+  tier's 1% limit; the default floor is ₹5,000.
+- Leave `RISK_LIVE_LOW_DAILY_LOSS_ACTION=warn` only during rollout. Set it to
+  `error` once all LIVE profiles have an approved capital-tier value so startup
+  fails closed on suspiciously low daily-loss limits.
+
 ## Building and Pushing a New Image
 
 Two scripts are available. Use only one per deployment.

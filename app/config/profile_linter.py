@@ -38,6 +38,15 @@ def _parse_float(value: object) -> float | None:
         return None
 
 
+def _is_placeholder_value(value: object) -> bool:
+    return str(value or "").strip().upper().startswith("CHANGE_ME")
+
+
+def _risk_live_min_daily_loss(env: dict[str, str]) -> float:
+    parsed = _parse_float(env.get("RISK_LIVE_MIN_DAILY_LOSS_INR"))
+    return parsed if parsed is not None and parsed > 0 else 5000.0
+
+
 def parse_env_file(path: Path | str) -> dict[str, str]:
     resolved = Path(path)
     payload = dotenv_values(resolved)
@@ -62,7 +71,15 @@ def _build_lint_settings(env: dict[str, str]) -> SimpleNamespace:
             env.get("RISK_ENABLE_DAILY_LOSS"),
             default=False,
         ),
-        risk_max_daily_loss=_parse_float(env.get("RISK_MAX_DAILY_LOSS")),
+        risk_max_daily_loss=(
+            _risk_live_min_daily_loss(env)
+            if _is_placeholder_value(env.get("RISK_MAX_DAILY_LOSS"))
+            else _parse_float(env.get("RISK_MAX_DAILY_LOSS"))
+        ),
+        risk_live_min_daily_loss_inr=_risk_live_min_daily_loss(env),
+        risk_live_low_daily_loss_action=str(
+            env.get("RISK_LIVE_LOW_DAILY_LOSS_ACTION", "warn") or "warn"
+        ),
         admin_api_key=env.get("ADMIN_API_KEY") or env.get("ADMIN_API_KEY_SECRET") or None,
         dashboard_hmac_auth_enabled=_parse_bool(
             env.get("DASHBOARD_HMAC_AUTH_ENABLED"),
@@ -211,6 +228,18 @@ def lint_env_profile(path: Path | str) -> list[str]:
     ):
         errors.append("TRADE_MODE=LIVE requires DISABLE_TRADING_WINDOW_FILTER=false")
     if trade_mode == "LIVE":
+        risk_daily_loss = _parse_float(env.get("RISK_MAX_DAILY_LOSS"))
+        risk_daily_loss_floor = _risk_live_min_daily_loss(env)
+        if (
+            _parse_bool(env.get("RISK_ENABLE_DAILY_LOSS"), default=False)
+            and risk_daily_loss is not None
+            and risk_daily_loss < risk_daily_loss_floor
+        ):
+            errors.append(
+                f"TRADE_MODE=LIVE forbids suspiciously low RISK_MAX_DAILY_LOSS={risk_daily_loss:g}; "
+                f"set at least RISK_LIVE_MIN_DAILY_LOSS_INR={risk_daily_loss_floor:g} "
+                "or use a CHANGE_ME placeholder in templates"
+            )
         broker_secret_backend = str(
             env.get("BROKER_SECRET_BACKEND", "") or ""
         ).strip().lower()

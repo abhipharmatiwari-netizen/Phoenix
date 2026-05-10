@@ -195,3 +195,15 @@ class TestStartupValidator:
             disable_trading_window_filter=False,
             known_strategy_names=[],
         )
+
+    def test_live_low_daily_loss_emits_startup_warning(self, caplog):
+        from app.core.startup_config_validator import validate_runtime_startup_settings
+        from tests.config.test_settings_daily_loss import _env, _runtime, _settings
+
+        validate_runtime_startup_settings(
+            settings=_settings(),
+            runtime_cfg=_runtime(),
+            env=_env(),
+        )
+
+        assert "startup.risk_daily_loss_low" in caplog.text

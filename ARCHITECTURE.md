@@ -1450,6 +1450,13 @@ Every order created via the hub router must have a corresponding `DecisionLineag
 | `STRATEGY_ENABLE` / `STRATEGY_DISABLE` | toggling a strategy in LIVE |
 | `GENERAL_CONFIG` | other runtime config changes |
 
+LIVE deployments must set `RISK_MAX_DAILY_LOSS` explicitly per account capital
+tier. The current operator policy is a daily-loss limit of 1% of capital; repo
+templates use `CHANGE_ME_DAILY_LOSS_INR` placeholders rather than executable
+production defaults. Startup validation warns when LIVE daily-loss is below the
+configured `RISK_LIVE_MIN_DAILY_LOSS_INR` floor and can be escalated with
+`RISK_LIVE_LOW_DAILY_LOSS_ACTION=error`.
+
 ### Approval states
 
 `PENDING → APPROVED | REJECTED | SUPERSEDED | WITHDRAWN`

@@ -346,6 +346,18 @@ class Settings(BaseSettings):
         validation_alias="RISK_MAX_DAILY_LOSS",
         description="Absolute daily loss limit per account.",
     )
+    risk_live_min_daily_loss_inr: float = Field(
+        default=5000.0,
+        validation_alias="RISK_LIVE_MIN_DAILY_LOSS_INR",
+        description="Suspiciously-low floor for LIVE RISK_MAX_DAILY_LOSS validation.",
+    )
+    risk_live_low_daily_loss_action: str = Field(
+        default="warn",
+        validation_alias="RISK_LIVE_LOW_DAILY_LOSS_ACTION",
+        description=(
+            "Action for LIVE daily-loss values below the configured floor: warn or error."
+        ),
+    )
     risk_fail_open_on_missing_pnl: bool = Field(
         default=False,
         validation_alias="RISK_FAIL_OPEN_ON_MISSING_PNL",

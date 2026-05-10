@@ -498,3 +498,28 @@ def test_linter_accepts_live_profile_with_hub_default_tenant_id(tmp_path):
     errors = lint_env_profile(profile_path)
     tenant_errors = [e for e in errors if "HUB_DEFAULT_TENANT_ID" in e]
     assert tenant_errors == [], f"Unexpected HUB_DEFAULT_TENANT_ID errors: {tenant_errors}"
+
+
+def test_linter_rejects_suspiciously_low_live_daily_loss(tmp_path):
+    profile_path = tmp_path / "low-daily-loss-live.env"
+    profile_path.write_text(
+        "APP_ENV=production\n"
+        "TRADE_MODE=LIVE\n"
+        "BROKER_SECRET_BACKEND=postgres\n"
+        "ADMIN_API_KEY=test-admin\n"
+        "CONTROL_PLANE_BACKEND=postgres\n"
+        "SWEEP_STATE_BACKEND=postgres\n"
+        "ENABLE_RISK_CHECKS=true\n"
+        "RISK_ENABLE_DAILY_LOSS=true\n"
+        "RISK_MAX_DAILY_LOSS=2000\n"
+        "RISK_LIVE_MIN_DAILY_LOSS_INR=5000\n"
+        "POSITION_SYNC_INTERVAL_SECONDS=30\n"
+        "ORDERS_SYNC_INTERVAL_SECONDS=90\n"
+        "APP_RUNTIME_STARTUP_VALIDATE=true\n"
+        "SCHEMA_CHECK_MODE=strict\n",
+        encoding="utf-8",
+    )
+
+    errors = lint_env_profile(profile_path)
+
+    assert any("RISK_MAX_DAILY_LOSS=2000" in error for error in errors)
