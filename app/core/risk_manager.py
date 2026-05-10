@@ -744,6 +744,38 @@ class RiskManager:
         # the trip. Stop retrying.
         self._durable_kill_switch_bridge_succeeded = True
 
+    def _publish_legacy_kill_switch_state_to_hub(self) -> None:
+        """Publish the in-memory legacy kill-switch flag to the hub runtime
+        so /readyz and admin endpoints can detect divergence with the
+        durable KillSwitchManager (issue #222).
+
+        Failure-safe: if the hub runtime is not initialised (early
+        startup or non-LIVE), the publish is silently skipped — the
+        consumer will report ``publisher_seen=False`` and divergence
+        defaults to False.
+        """
+        try:
+            from app.hub.runtime import get_hub_runtime
+            runtime = get_hub_runtime()
+        except Exception:
+            return
+        recorder = getattr(runtime, "record_legacy_kill_switch_state", None)
+        if not callable(recorder):
+            return
+        try:
+            with self._state_lock:
+                active = bool(self.kill_switch_activated)
+            recorder(
+                active=active,
+                reason=(
+                    "legacy_risk_manager_active" if active
+                    else "legacy_risk_manager_inactive"
+                ),
+            )
+        except Exception:
+            # Defensive: never let publishing break account-loss eval.
+            pass
+
     @staticmethod
     def _truncate_log_value(value: Any, limit: int = 512) -> Optional[str]:
         text = " ".join(str(value or "").split())
@@ -1458,6 +1490,12 @@ class RiskManager:
             unrealized_pnl=unrealized_pnl,
             total_pnl=total_pnl,
         )
+        # Issue #222: publish current legacy kill-switch state to the hub
+        # runtime so /readyz and admin endpoints can detect divergence
+        # with the durable KillSwitchManager. Called every evaluate cycle
+        # (including when False) so the timestamp stays fresh and the
+        # publisher is observable as live.
+        self._publish_legacy_kill_switch_state_to_hub()
         if should_activate:
             ltp_lookup = {
                 label: float(price)
