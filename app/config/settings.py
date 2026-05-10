@@ -582,6 +582,43 @@ class Settings(BaseSettings):
     )
 
     @model_validator(mode="after")
+    def validate_position_trailing_lock_inflight_window(self) -> Settings:
+        """Issue #225 (PR #236 round-2 review P2): validate the inflight
+        window is BOTH positive AND larger than the watchdog cadence.
+
+        If ``POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS`` <= 0, the
+        marker expires immediately and the duplicate-fill protection
+        is silently disabled. If it is <= ``hub_subscription_poll_interval``,
+        the marker can expire BEFORE the next watchdog evaluation
+        cycle fires — recreating the duplicate-submit scenario this
+        change is meant to prevent. Both conditions must fail startup
+        in LIVE mode rather than silently degrade safety.
+        """
+        inflight_max = float(
+            getattr(self, "position_trailing_lock_inflight_max_seconds", 0.0) or 0.0
+        )
+        poll_interval = float(
+            getattr(self, "hub_subscription_poll_interval", 0.0) or 0.0
+        )
+        if inflight_max <= 0.0:
+            raise ValueError(
+                "POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS must be > 0; "
+                f"got {inflight_max}. Setting it to 0 silently disables "
+                "the trailing-lock duplicate-fill protection (issue #225)."
+            )
+        if poll_interval > 0.0 and inflight_max <= poll_interval:
+            raise ValueError(
+                "POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS "
+                f"({inflight_max}) must be larger than "
+                f"HUB_SUBSCRIPTION_POLL_INTERVAL ({poll_interval}); "
+                "otherwise the inflight marker can expire before the next "
+                "watchdog evaluation, recreating the 2026-05-08 duplicate-"
+                "fill scenario (issue #225). Set the inflight window to "
+                f"at least {poll_interval + 30} seconds."
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_profit_sweep_settings(self) -> Settings:
         """Validate profit sweep configuration."""
         configured_profit_sweep_fields = {

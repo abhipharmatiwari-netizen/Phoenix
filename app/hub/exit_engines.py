@@ -2426,13 +2426,33 @@ class PositionTrailingLockEngine:
                 # Just-armed in this cycle (or sub-grace) — do not race.
                 continue
             self._inflight_markers.pop(key, None)
+            # Issue #225 (PR #236 round-2 review P1): also reset the
+            # persisted ``PositionTrailingLockManager`` state for this
+            # symbol. The qty==0 path resets it; the disappeared-symbol
+            # path was previously omitting this. Without the reset, a
+            # quick same-symbol re-open is evaluated against the stale
+            # peak/armed state and can immediately emit another
+            # trailing-lock exit even though the new position never
+            # armed.
+            try:
+                self.manager.reset_position(
+                    tenant_id, broker_account_id, symbol,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "trailing-lock state reset failed for disappeared "
+                    "symbol %s (non-fatal): %s",
+                    symbol, exc,
+                )
             log_event(
                 logger,
                 event_type="POSITION_TRAILING_LOCK_INFLIGHT_CLEARED_BY_SNAPSHOT",
                 message=(
                     "Inflight marker cleared because the symbol is no "
                     "longer present in the broker position snapshot — "
-                    "the prior exit must have reached terminal state."
+                    "the prior exit must have reached terminal state. "
+                    "Persisted trailing-lock state also reset to prevent "
+                    "stale peak/armed bias on a quick re-open."
                 ),
                 level=logging.INFO,
                 tenant_id=tenant_id,
@@ -2531,7 +2551,23 @@ class PositionTrailingLockEngine:
                 broker_order_id = None
                 response_status = ""
 
-            rejected = response_status in {"REJECTED", "FAILED", "ERROR"}
+            # Issue #225 (PR #236 round-2 review P2): treat ALL
+            # terminal non-fill statuses as "no broker order to wait
+            # for" — not just REJECTED/FAILED/ERROR. The router and
+            # lifecycle code classify CANCELLED/CANCELED/EXPIRED as
+            # terminal non-fill outcomes too (and release position
+            # ownership for them). If the broker returns one of those
+            # synchronously with no fill, the marker would otherwise
+            # remain armed until timeout, delaying the next valid
+            # trailing-lock retry.
+            rejected = response_status in {
+                "REJECTED",
+                "FAILED",
+                "ERROR",
+                "CANCELLED",
+                "CANCELED",
+                "EXPIRED",
+            }
             if rejected:
                 # Router-rejected submission — no broker order to wait
                 # for. Clear marker so a subsequent eligible cycle is

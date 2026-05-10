@@ -932,3 +932,139 @@ async def test_inflight_max_seconds_honours_settings_override():
         manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
     )
     assert engine._inflight_max_seconds() == 300.0
+
+
+# ---------------------------------------------------------------------------
+# Codex round-2 review on PR #236: 3 follow-up bugs.
+# ---------------------------------------------------------------------------
+
+
+class _RouterCancelledResponse:
+    """Router that returns CANCELLED — also a terminal non-fill outcome."""
+
+    def __init__(self):
+        self.calls: List[dict] = []
+
+    async def submit_order(
+        self, *, tenant_id, broker_account_id, strategy_id, order_req,
+    ):
+        self.calls.append({"symbol": order_req.symbol})
+        return (
+            "hub-order-id",
+            SimpleNamespace(status="CANCELLED", broker_order_id=""),
+        )
+
+
+class _RouterExpiredResponse:
+    def __init__(self):
+        self.calls: List[dict] = []
+
+    async def submit_order(
+        self, *, tenant_id, broker_account_id, strategy_id, order_req,
+    ):
+        self.calls.append({"symbol": order_req.symbol})
+        return (
+            "hub-order-id",
+            SimpleNamespace(status="EXPIRED", broker_order_id=""),
+        )
+
+
+@pytest.mark.asyncio
+async def test_marker_cleared_for_cancelled_status():
+    """Codex P2 round 2: CANCELLED is a terminal non-fill outcome —
+    the marker must be cleared so the next eligible cycle is not
+    blocked."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterCancelledResponse()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key not in engine._inflight_markers, (
+        "CANCELLED router response must clear the inflight marker (#236 round-2 P2)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_marker_cleared_for_expired_status():
+    """Codex P2 round 2: EXPIRED is also a terminal non-fill outcome."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterExpiredResponse()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key not in engine._inflight_markers, (
+        "EXPIRED router response must clear the inflight marker (#236 round-2 P2)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_disappeared_symbol_sweep_also_resets_manager_state():
+    """Codex P1 round 2: when a marker is swept because the symbol
+    disappeared from the snapshot, the persisted
+    PositionTrailingLockManager state must ALSO be reset. Without this,
+    a quick same-symbol re-open evaluates against the prior peak/armed
+    state and can immediately emit another trailing-lock exit."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    manager = PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend())
+    router = _RouterReturningBrokerOrderId()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=manager,
+    )
+
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    state_key = ("t-1", "A1", "NG22MAY26255CE")
+    assert state_key in manager._states, "manager state should be present pre-sweep"
+
+    import time as _t
+    _t.sleep(5.5)  # past grace period
+
+    # Symbol disappears from snapshot.
+    state_store.set_positions("A1", [])
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    assert state_key not in manager._states, (
+        "manager peak/armed state must be reset when symbol disappears "
+        "(#236 round-2 P1)"
+    )
