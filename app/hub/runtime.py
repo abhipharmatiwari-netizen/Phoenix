@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import os
 from functools import lru_cache
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 from app.config.settings import get_settings
 from app.core.clock import IClock, SystemClock
@@ -535,6 +535,385 @@ class HubRuntime:
             clock=self.clock,
             kill_switch_manager_provider=lambda: self.kill_switch_manager,
         )
+
+    def audit_position_avg_price_corruption(self) -> dict:
+        """Issue #226: scan all account-scoped position views for the
+        ``qty != 0 and avg_price <= 0`` corruption pattern and emit a
+        rate-limited ALERT for each finding.
+
+        Background: ``app/dashboard/tenant_routes.py`` already refuses to
+        compute Unrealized PnL when an open position has avg_price<=0
+        (the 2026-05-08 ``POSITION_VIEW_AVG_PRICE_INVALID qty=7500
+        avg_price=0.0`` log). That defence is reactive (per dashboard
+        request). This audit is proactive — runs on every readiness
+        probe — so corruption cannot hide between dashboard views.
+
+        Returns ``{corrupt_count, samples}``. ``samples`` is a small
+        list of ``{tenant_id, account_id, symbol, quantity, avg_price}``
+        for the first few corrupt rows (capped to keep the payload
+        small).
+        """
+        # Lazy import to avoid heavy hub initialisation cycles in test
+        # contexts that build a HubRuntime-shaped stub.
+        # PR #237 round-4 review P2: when account enumeration raises
+        # we MUST surface that as an audit error rather than silently
+        # returning ``corrupt_count=0``; otherwise /readyz can pass
+        # with no accounts ever scanned.
+        try:
+            hub = getattr(self, "hub", None)
+            state_store = getattr(self, "state_store", None)
+            if hub is None or state_store is None:
+                return {
+                    "corrupt_count": 0,
+                    "samples": [],
+                    "read_failures": [],
+                    "setup_error": None,
+                }
+            account_ids: list = []
+            list_ids = getattr(hub, "list_runner_ids", None)
+            if callable(list_ids):
+                account_ids = [str(a) for a in list_ids()]
+        except Exception as exc:
+            logger.error(
+                "audit_position_avg_price_corruption: account enumeration "
+                "failed (%s) — failing closed in caller", exc,
+            )
+            return {
+                "corrupt_count": 0,
+                "samples": [],
+                "read_failures": [],
+                "setup_error": repr(exc),
+            }
+
+        # Issue #226 (PR #237 review P2): dict/alias normalization.
+        # Some adapters / test harnesses store positions as dicts with
+        # field aliases (``qty``/``net_qty`` for quantity, ``avgPrice``/
+        # ``entry_price`` for avg_price) — the same shapes the dashboard
+        # normalizer accepts. Without this, the audit misses exactly the
+        # corrupt rows that the dashboard's reactive defence already
+        # surfaces.
+        def _first_present(p, *keys):
+            """Return the first key whose value is present (not None
+            and not a blank string). PR #237 round-5 review P2/P3:
+            blank strings are treated as MISSING so a row carrying
+            ``{'netqty': '', 'net': '65', ...}`` falls through to
+            ``net``, matching the angel_client normalizer; same for a
+            blank ``symbol`` field falling through to ``tradingsymbol``.
+            """
+            for k in keys:
+                if isinstance(p, dict):
+                    if k in p:
+                        v = p[k]
+                        if v is not None and not (
+                            isinstance(v, str) and not v.strip()
+                        ):
+                            return v
+                else:
+                    v = getattr(p, k, None)
+                    if v is not None and not (
+                        isinstance(v, str) and not v.strip()
+                    ):
+                        return v
+            return None
+
+        def _pick_nonzero(*values) -> Optional[float]:
+            """Return the first non-zero, non-None float in the list.
+            Mirrors ``app/core/position_sync.py::_pick_nonzero_price``
+            so the audit's broker-fallback handling matches the
+            production normalizer exactly."""
+            for v in values:
+                if v is None:
+                    continue
+                if isinstance(v, str) and not v.strip():
+                    continue
+                f = _coerce_float(v)
+                if f != 0.0:
+                    return f
+            return None
+
+        # Issue #226 (PR #237 round-2 review P2/P3): comprehensive alias
+        # support + decimal-string coercion. Aliases observed in this
+        # repo:
+        #   quantity: quantity, qty, net_qty, netqty, net
+        #   avg_price: avg_price, average_price, avgPrice, avgprice,
+        #              averageprice, entry_price
+        #   broker fallback: netavgprice/netAvgPrice, netprice/netPrice,
+        #                    buyavgprice/buyAvgPrice (qty>0 only),
+        #                    sellavgprice/sellAvgPrice (qty<0 only)
+        #   symbol:    symbol, tradingsymbol, trading_symbol
+        # Decimal strings like "65.0" must coerce via int(float(v))
+        # rather than int(v) directly — otherwise the audit silently
+        # drops corrupt records that have serialized numeric quantities.
+        def _coerce_int(value) -> int:
+            try:
+                if isinstance(value, str):
+                    value = value.strip()
+                    if not value:
+                        return 0
+                return int(float(value))
+            except (TypeError, ValueError):
+                return 0
+
+        def _coerce_float(value) -> float:
+            try:
+                if isinstance(value, str):
+                    value = value.strip()
+                    if not value:
+                        return 0.0
+                return float(value) if value is not None else 0.0
+            except (TypeError, ValueError):
+                return 0.0
+
+        corrupt: list[dict] = []
+        # Issue #226 (PR #237 round-2 review P2): per-account read
+        # failures must be SURFACED — otherwise a get_positions
+        # exception leaves the audit with corrupt_count=0 and /readyz
+        # passes despite that account never being scanned.
+        read_failures: list[dict] = []
+        # PR #237 round-3 review P3: rate-limit per-account read-failure
+        # ERRORs so a persistent state-store outage cannot flood logs
+        # on every readiness probe; the structured ``read_failures``
+        # list still flows back to /readyz which fails closed in LIVE.
+        if not hasattr(self, "_avg_price_audit_read_failure_log_state"):
+            self._avg_price_audit_read_failure_log_state: Dict[str, Any] = {}
+        for account_id in account_ids:
+            try:
+                positions = state_store.get_positions(account_id) or []
+            except Exception as exc:
+                read_failures.append(
+                    {"account_id": str(account_id), "error": repr(exc)}
+                )
+                from datetime import datetime as _dt, timezone as _tz
+                _now = _dt.now(_tz.utc)
+                _last = self._avg_price_audit_read_failure_log_state.get(
+                    str(account_id)
+                )
+                if _last is None or (_now - _last).total_seconds() >= 60.0:
+                    self._avg_price_audit_read_failure_log_state[
+                        str(account_id)
+                    ] = _now
+                    logger.error(
+                        "audit_position_avg_price_corruption: get_positions "
+                        "failed for account=%s — account NOT scanned (%s)",
+                        account_id, exc,
+                    )
+                continue
+            def _maybe_get(p, key):
+                if isinstance(p, dict):
+                    return p.get(key)
+                return getattr(p, key, None)
+
+            def _alias_is_present_skip_blank(value) -> bool:
+                """True iff value is non-None and not a blank string."""
+                if value is None:
+                    return False
+                if isinstance(value, str) and not value.strip():
+                    return False
+                return True
+
+            for pos in positions:
+                # PR #237 round-2/round-6 review P2: resolve quantity
+                # via FIRST-NON-ZERO across all known qty aliases so a
+                # broker-shaped row like ``{'qty': 0, 'netqty': 65}``
+                # detects the open position. Order matches the Angel
+                # parser (``netqty``→``net``) and falls back to the
+                # dataclass / normalized aliases.
+                qty_value = _pick_nonzero(
+                    _maybe_get(pos, "netqty"),
+                    _maybe_get(pos, "net"),
+                    _maybe_get(pos, "quantity"),
+                    _maybe_get(pos, "qty"),
+                    _maybe_get(pos, "net_qty"),
+                )
+                if qty_value is None:
+                    continue
+                qty = _coerce_int(qty_value)
+                if qty == 0:
+                    continue
+
+                # PR #237 round-4/round-5/round-6 review P2: tiered
+                # avg-price resolution.
+                #
+                #   Tier 1 — normalized authoritative ``avg_price``
+                #   (snake_case): if PRESENT (including blank string,
+                #   which dashboard ``_first_present`` treats as
+                #   present and coerces to 0), apply dashboard
+                #   semantics — zero or negative is corrupt regardless
+                #   of any other alias. This preserves the existing
+                #   POSITION_VIEW_AVG_PRICE_INVALID signal.
+                #
+                #   Tier 2-3 — broker primary + net chain (single
+                #   first-non-zero across all aliases, ordering matches
+                #   ``app/core/position_sync.py::_extract_broker_avg_price``
+                #   exactly: ``avgprice`` first, then ``avgPrice``,
+                #   ``average_price``, ``averageprice``, then
+                #   ``netprice``, ``netPrice``, ``netavgprice``,
+                #   ``netAvgPrice``). A negative result is corrupt
+                #   regardless of any later fallback.
+                #
+                #   Tier 4 — side-specific fallback gated by qty sign:
+                #     qty>0: ``buyavgprice``/``buyAvgPrice``/
+                #            ``buyaverageprice``/``buyAveragePrice``
+                #     qty<0: ``sellavgprice``/``sellAvgPrice``/
+                #            ``sellaverageprice``/``sellAveragePrice``
+                #
+                #   Tier 5 — final fallback ``entry_price`` ONLY when
+                #   no broker chain alias was present at all (any
+                #   broker alias being present at zero already makes
+                #   the row corrupt — entry_price cannot mask it).
+
+                # Tier 1: snake_case avg_price authoritative when
+                # present. Match dashboard ``_first_present``: only
+                # ``None`` is missing — blank strings, zero, and
+                # negatives are PRESENT and govern the verdict.
+                snake_case_avg = _maybe_get(pos, "avg_price")
+                if snake_case_avg is not None:
+                    snake_f = _coerce_float(snake_case_avg)
+                    if snake_f > 0.0:
+                        continue  # healthy via snake_case
+                    avg_f_for_report = snake_f
+                else:
+                    # Tier 2-3: production broker chain (primary then
+                    # net), single first-non-zero in production order.
+                    broker_chain_keys = (
+                        "avgprice", "avgPrice",
+                        "average_price", "averageprice",
+                        "netprice", "netPrice",
+                        "netavgprice", "netAvgPrice",
+                    )
+                    broker_chain_values = [
+                        _maybe_get(pos, k) for k in broker_chain_keys
+                    ]
+                    broker_chain_present = any(
+                        _alias_is_present_skip_blank(v)
+                        for v in broker_chain_values
+                    )
+                    broker_value = _pick_nonzero(*broker_chain_values)
+                    if broker_value is not None and broker_value < 0.0:
+                        # Negative broker avg → corrupt regardless of
+                        # any later fallback (entry_price must not
+                        # mask a negative net/primary).
+                        avg_f_for_report = broker_value
+                    elif broker_value is not None and broker_value > 0.0:
+                        continue  # healthy via broker chain
+                    else:
+                        # broker_value is None — broker chain returned
+                        # no non-zero value. Try side-specific fallback.
+                        if qty > 0:
+                            side_keys = (
+                                "buyavgprice", "buyAvgPrice",
+                                "buyaverageprice", "buyAveragePrice",
+                            )
+                        elif qty < 0:
+                            side_keys = (
+                                "sellavgprice", "sellAvgPrice",
+                                "sellaverageprice", "sellAveragePrice",
+                            )
+                        else:
+                            side_keys = ()
+                        side_values = [
+                            _maybe_get(pos, k) for k in side_keys
+                        ]
+                        side_present = any(
+                            _alias_is_present_skip_blank(v)
+                            for v in side_values
+                        )
+                        side_value = _pick_nonzero(*side_values)
+                        if side_value is not None and side_value < 0.0:
+                            # Negative side-specific avg → corrupt.
+                            avg_f_for_report = side_value
+                        elif side_value is not None and side_value > 0.0:
+                            continue  # healthy via side fallback
+                        elif broker_chain_present or side_present:
+                            # Some broker alias was PRESENT but all
+                            # were zero — corrupt. entry_price must
+                            # not mask a broker-explicit zero.
+                            avg_f_for_report = 0.0
+                        else:
+                            # No broker alias at all → tier 5.
+                            entry_raw = _maybe_get(pos, "entry_price")
+                            if _alias_is_present_skip_blank(entry_raw):
+                                entry_f = _coerce_float(entry_raw)
+                                if entry_f > 0.0:
+                                    continue  # healthy via entry_price
+                                avg_f_for_report = entry_f
+                            else:
+                                # Truly nothing — corrupt.
+                                avg_f_for_report = 0.0
+                # Found a corrupt record.
+                symbol = str(
+                    _first_present(
+                        pos, "symbol", "tradingsymbol", "trading_symbol",
+                    ) or ""
+                )
+                tenant_id = str(_first_present(pos, "tenant_id") or "")
+                corrupt.append(
+                    {
+                        "tenant_id": tenant_id,
+                        "account_id": str(account_id),
+                        "symbol": symbol,
+                        "quantity": qty,
+                        "avg_price": avg_f_for_report,
+                    }
+                )
+                # Rate-limit alerts per (account, symbol) — once per 60s
+                # to avoid flooding logs while corruption persists.
+                self._maybe_emit_avg_price_corruption_alert(
+                    account_id=str(account_id),
+                    symbol=symbol,
+                    quantity=qty,
+                    avg_price=avg_f_for_report,
+                )
+        return {
+            "corrupt_count": len(corrupt),
+            "samples": corrupt[:5],  # cap payload
+            # Issue #226 (PR #237 round-2 review P2): surface per-account
+            # read failures so /readyz can fail closed when accounts
+            # were not scanned. Empty list means every account was
+            # successfully scanned.
+            "read_failures": read_failures,
+            "setup_error": None,
+        }
+
+    def _maybe_emit_avg_price_corruption_alert(
+        self, *, account_id: str, symbol: str, quantity: int, avg_price: float,
+    ) -> None:
+        """Issue #226: rate-limited (1 per 60s per scope) ALERT-level
+        event for each detected corruption."""
+        from datetime import datetime as _dt, timezone as _tz
+        if not hasattr(self, "_avg_price_alert_log_state"):
+            self._avg_price_alert_log_state: Dict[Tuple[str, str], Any] = {}
+        key = (account_id, symbol)
+        now = _dt.now(_tz.utc)
+        last = self._avg_price_alert_log_state.get(key)
+        if last is not None and (now - last).total_seconds() < 60.0:
+            return
+        self._avg_price_alert_log_state[key] = now
+        try:
+            from app.core.logging_utils import log_event as _log_event
+            import logging as _logging
+            _log_event(
+                logger,
+                event_type="POSITION_AVG_PRICE_CORRUPTION",
+                message=(
+                    "Internal position record has qty != 0 but avg_price "
+                    "<= 0 — Unrealized PnL cannot be computed and exit "
+                    "engines / risk gates may operate on fiction. "
+                    "Verify broker-side position and reconcile internal "
+                    "records (issue #226)."
+                ),
+                level=_logging.ERROR,
+                broker_account_id=account_id,
+                instrument=symbol,
+                quantity=quantity,
+                avg_price=avg_price,
+            )
+        except Exception:
+            logger.error(
+                "POSITION_AVG_PRICE_CORRUPTION account=%s symbol=%s "
+                "qty=%d avg_price=%s",
+                account_id, symbol, quantity, avg_price,
+            )
 
     def update_volatility(self, volatility_proxy: float) -> None:
         """Feed current volatility (e.g. India VIX) into the circuit breaker.

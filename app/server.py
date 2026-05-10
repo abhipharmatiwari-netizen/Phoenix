@@ -1119,6 +1119,58 @@ async def readyz() -> JSONResponse:
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     payload: dict = {"timestamp": now}
 
+    # Issue #226 (PR #237 round-5 review P2): populate the avg_price
+    # corruption audit FIRST — before any LIVE early-return gates
+    # (leader-lease, startup-recovery, multi-hub runner gates,
+    # stream-worker, sync-freshness). The audit doc says it runs on
+    # every readiness probe to catch corruption proactively; if any
+    # earlier gate returns 503 first, the corruption signal is lost.
+    # Population is non-blocking; the readiness-fail decision happens
+    # after the kill-switch gate.
+    #
+    # ``samples`` are kept in a LOCAL variable rather than the payload
+    # so the unauthenticated /readyz never echoes account/symbol/qty
+    # details (PR #237 round-3/round-4 review P2). Counts only.
+    #
+    # PR #237 round-5 review P2: ``get_hub_runtime()`` runs INSIDE
+    # the try block so a hub initialisation failure cannot crash the
+    # readyz handler — the structured 503/fail-closed payload is
+    # always preserved.
+    _avg_price_corruption_samples: list = []
+    _avg_price_audit_setup_error: Optional[str] = None
+    if _readiness_trade_mode() == "LIVE":
+        try:
+            _hub_runtime_for_audit = get_hub_runtime()
+            _audit_method = getattr(
+                _hub_runtime_for_audit,
+                "audit_position_avg_price_corruption",
+                None,
+            )
+            if not callable(_audit_method):
+                # PR #237 round-4 review P3: tolerate readyz runtime
+                # stubs that don't expose the audit method.
+                payload["avg_price_corrupt_count"] = 0
+                payload["avg_price_audit_read_failures"] = 0
+            else:
+                corruption = _audit_method()
+                corrupt_count = int(corruption.get("corrupt_count", 0))
+                payload["avg_price_corrupt_count"] = corrupt_count
+                _avg_price_corruption_samples = (
+                    corruption.get("samples") or []
+                )[:5]
+                payload["avg_price_audit_read_failures"] = len(
+                    corruption.get("read_failures") or []
+                )
+                _avg_price_audit_setup_error = corruption.get("setup_error")
+        except Exception as _corr_exc:
+            logger.warning(
+                "readyz: avg_price corruption audit failed (non-fatal): %s",
+                _corr_exc,
+            )
+            payload["avg_price_corrupt_count"] = -1
+            payload["avg_price_audit_read_failures"] = -1
+            _avg_price_audit_setup_error = repr(_corr_exc)
+
     if _readiness_trade_mode() == "LIVE":
         leader_lease_snapshot = _leader_lease_readiness_snapshot(runtime)
         payload["leader_lease_status"] = leader_lease_snapshot
@@ -1196,6 +1248,12 @@ async def readyz() -> JSONResponse:
             payload["ready"] = False
             payload["reason"] = f"hub_unavailable:{exc}"
             return JSONResponse(status_code=503, content=payload)
+
+    # Issue #226: avg_price corruption audit is now populated at the
+    # very top of /readyz (before any LIVE early-return gates) — see
+    # the ``_avg_price_corruption_samples`` block above. The
+    # readiness-fail decision based on those counts happens after the
+    # kill-switch gate below.
 
     if _readiness_trade_mode() == "LIVE":
         stream_status = _stream_worker_readiness_snapshot(runtime)
@@ -1299,8 +1357,7 @@ async def readyz() -> JSONResponse:
                 # ``divergent=False`` with ``durable_global_active=None``;
                 # treating that as a clean convergence would emit a
                 # false RESOLVED audit event despite legacy still
-                # potentially being active. Gate on a known durable
-                # state to avoid the spurious resolved entry.
+                # potentially being active.
                 _maybe_emit_kill_switch_divergence_resolved()
         except Exception as _div_exc:
             # Divergence detection failure is non-fatal here — log so
@@ -1362,6 +1419,66 @@ async def readyz() -> JSONResponse:
                 "readyz: kill_switch divergence check failed (non-fatal): %s",
                 _div_exc,
             )
+
+        # Issue #226: now that both kill-switch gates have cleared,
+        # decide whether avg_price corruption (or audit read failures)
+        # should fail readiness. Audit fields were populated at the
+        # very top of /readyz so the signal is always present.
+        # PR #237 round-2 review P2: per-account get_positions failures
+        # mean the audit could NOT verify those accounts are clean — in
+        # LIVE we must fail closed rather than silently report
+        # corrupt_count=0 for un-scanned accounts.
+        # PR #237 round-3 review P2: also fail closed when the audit
+        # itself raised (corrupt_count == -1 / read_failures == -1).
+        corrupt_count = int(payload.get("avg_price_corrupt_count", 0) or 0)
+        read_failures_count = int(
+            payload.get("avg_price_audit_read_failures", 0) or 0
+        )
+        if corrupt_count < 0 or read_failures_count < 0:
+            payload["ready"] = False
+            payload["reason"] = (
+                "avg_price_audit_failed: audit raised an unexpected "
+                "exception — failing closed in LIVE so corruption "
+                "cannot hide behind an audit error"
+            )
+            return JSONResponse(status_code=503, content=payload)
+        if _avg_price_audit_setup_error:
+            # PR #237 round-4 review P2: account enumeration failed
+            # before any account could be scanned; the audit returned
+            # corrupt_count=0 but with no actual coverage. Fail closed
+            # so /readyz cannot pass with no accounts ever scanned.
+            payload["ready"] = False
+            payload["reason"] = (
+                "avg_price_audit_setup_failed: hub.list_runner_ids() "
+                "raised — no accounts were scanned, failing closed"
+            )
+            return JSONResponse(status_code=503, content=payload)
+        if read_failures_count > 0:
+            payload["ready"] = False
+            payload["reason"] = (
+                f"avg_price_audit_read_failures: {read_failures_count} "
+                f"account(s) could not be scanned — failing closed in "
+                f"LIVE so corruption cannot hide behind a read error"
+            )
+            return JSONResponse(status_code=503, content=payload)
+        if corrupt_count > 0:
+            fails_ready = str(
+                os.getenv("AVG_PRICE_CORRUPTION_FAILS_READY", "true") or ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if fails_ready:
+                payload["ready"] = False
+                # PR #237 round-4 review P2: keep the public /readyz
+                # response COUNT-ONLY. Samples (account_id:symbol) are
+                # consumed only by the structured corruption-alert log
+                # emitted from the audit path, never echoed to the
+                # unauthenticated readiness probe.
+                payload["reason"] = (
+                    f"avg_price_corruption: {corrupt_count} record(s) "
+                    f"with qty != 0 + avg_price <= 0 — see "
+                    "POSITION_AVG_PRICE_CORRUPTION alerts in the "
+                    "structured log for affected scopes"
+                )
+                return JSONResponse(status_code=503, content=payload)
 
     if _readiness_trade_mode() == "LIVE":
         # §57 / #108 — Gate readiness on restored authoritative position state.
