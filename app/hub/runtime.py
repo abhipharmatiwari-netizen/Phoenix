@@ -675,37 +675,58 @@ class HubRuntime:
                         account_id, exc,
                     )
                 continue
+            def _maybe_get(p, key):
+                if isinstance(p, dict):
+                    return p.get(key)
+                return getattr(p, key, None)
+
+            def _alias_is_present_skip_blank(value) -> bool:
+                """True iff value is non-None and not a blank string."""
+                if value is None:
+                    return False
+                if isinstance(value, str) and not value.strip():
+                    return False
+                return True
+
             for pos in positions:
-                # PR #237 round-2 review P2: include ``net`` alias for
-                # broker-shaped position rows where ``netqty`` is
-                # absent — the Angel parser explicitly falls back from
-                # ``netqty`` to ``net``.
-                qty_raw = _first_present(
-                    pos, "quantity", "qty", "net_qty", "netqty", "net",
+                # PR #237 round-2/round-6 review P2: resolve quantity
+                # via FIRST-NON-ZERO across all known qty aliases so a
+                # broker-shaped row like ``{'qty': 0, 'netqty': 65}``
+                # detects the open position. Order matches the Angel
+                # parser (``netqty``→``net``) and falls back to the
+                # dataclass / normalized aliases.
+                qty_value = _pick_nonzero(
+                    _maybe_get(pos, "netqty"),
+                    _maybe_get(pos, "net"),
+                    _maybe_get(pos, "quantity"),
+                    _maybe_get(pos, "qty"),
+                    _maybe_get(pos, "net_qty"),
                 )
-                qty = _coerce_int(qty_raw)
+                if qty_value is None:
+                    continue
+                qty = _coerce_int(qty_value)
                 if qty == 0:
                     continue
-                # PR #237 round-4/round-5 review P2: tiered avg-price
-                # resolution.
+
+                # PR #237 round-4/round-5/round-6 review P2: tiered
+                # avg-price resolution.
                 #
                 #   Tier 1 — normalized authoritative ``avg_price``
-                #   (snake_case): if PRESENT, treat as the dashboard
-                #   defence does (zero or negative = corrupt regardless
-                #   of any other alias). This preserves the existing
-                #   POSITION_VIEW_AVG_PRICE_INVALID signal that the
-                #   dashboard emits at request time.
+                #   (snake_case): if PRESENT (including blank string,
+                #   which dashboard ``_first_present`` treats as
+                #   present and coerces to 0), apply dashboard
+                #   semantics — zero or negative is corrupt regardless
+                #   of any other alias. This preserves the existing
+                #   POSITION_VIEW_AVG_PRICE_INVALID signal.
                 #
-                #   Tier 2 — broker primary aliases: when ``avg_price``
-                #   snake_case is missing, raw broker rows carry the
-                #   value under ``avgPrice``/``avgprice``/
-                #   ``average_price``/``averageprice``. Production
-                #   normalizers (angel_client, position_sync) use
-                #   FIRST-NON-ZERO across this set, so a row like
-                #   ``{'avgPrice': 0, 'avgprice': 250.5}`` is healthy.
-                #
-                #   Tier 3 — broker net fallback (``netavgprice``,
-                #   ``netAvgPrice``, ``netprice``, ``netPrice``).
+                #   Tier 2-3 — broker primary + net chain (single
+                #   first-non-zero across all aliases, ordering matches
+                #   ``app/core/position_sync.py::_extract_broker_avg_price``
+                #   exactly: ``avgprice`` first, then ``avgPrice``,
+                #   ``average_price``, ``averageprice``, then
+                #   ``netprice``, ``netPrice``, ``netavgprice``,
+                #   ``netAvgPrice``). A negative result is corrupt
+                #   regardless of any later fallback.
                 #
                 #   Tier 4 — side-specific fallback gated by qty sign:
                 #     qty>0: ``buyavgprice``/``buyAvgPrice``/
@@ -713,89 +734,89 @@ class HubRuntime:
                 #     qty<0: ``sellavgprice``/``sellAvgPrice``/
                 #            ``sellaverageprice``/``sellAveragePrice``
                 #
-                #   Tier 5 — final fallback ``entry_price`` (only used
-                #   when no other alias is populated).
-                def _maybe_get(p, key):
-                    if isinstance(p, dict):
-                        return p.get(key)
-                    return getattr(p, key, None)
+                #   Tier 5 — final fallback ``entry_price`` ONLY when
+                #   no broker chain alias was present at all (any
+                #   broker alias being present at zero already makes
+                #   the row corrupt — entry_price cannot mask it).
 
-                # Tier 1: snake_case avg_price is authoritative when
-                # present. ``avg_price=0`` is corrupt; ``avg_price=-X``
-                # is corrupt; ``avg_price=Y>0`` is healthy.
+                # Tier 1: snake_case avg_price authoritative when
+                # present. Match dashboard ``_first_present``: only
+                # ``None`` is missing — blank strings, zero, and
+                # negatives are PRESENT and govern the verdict.
                 snake_case_avg = _maybe_get(pos, "avg_price")
-                snake_case_present = (
-                    snake_case_avg is not None
-                    and not (
-                        isinstance(snake_case_avg, str)
-                        and not snake_case_avg.strip()
-                    )
-                )
-                if snake_case_present:
+                if snake_case_avg is not None:
                     snake_f = _coerce_float(snake_case_avg)
                     if snake_f > 0.0:
                         continue  # healthy via snake_case
                     avg_f_for_report = snake_f
                 else:
-                    # Tier 2: broker primary aliases (first-non-zero).
-                    broker_primary = _pick_nonzero(
-                        _maybe_get(pos, "avgPrice"),
-                        _maybe_get(pos, "avgprice"),
-                        _maybe_get(pos, "average_price"),
-                        _maybe_get(pos, "averageprice"),
+                    # Tier 2-3: production broker chain (primary then
+                    # net), single first-non-zero in production order.
+                    broker_chain_keys = (
+                        "avgprice", "avgPrice",
+                        "average_price", "averageprice",
+                        "netprice", "netPrice",
+                        "netavgprice", "netAvgPrice",
                     )
-                    if broker_primary is not None and broker_primary < 0.0:
-                        avg_f_for_report = broker_primary
-                    elif broker_primary is not None and broker_primary > 0.0:
-                        continue  # healthy via broker primary
+                    broker_chain_values = [
+                        _maybe_get(pos, k) for k in broker_chain_keys
+                    ]
+                    broker_chain_present = any(
+                        _alias_is_present_skip_blank(v)
+                        for v in broker_chain_values
+                    )
+                    broker_value = _pick_nonzero(*broker_chain_values)
+                    if broker_value is not None and broker_value < 0.0:
+                        # Negative broker avg → corrupt regardless of
+                        # any later fallback (entry_price must not
+                        # mask a negative net/primary).
+                        avg_f_for_report = broker_value
+                    elif broker_value is not None and broker_value > 0.0:
+                        continue  # healthy via broker chain
                     else:
-                        # Tier 3: broker net fallback.
-                        net_value = _pick_nonzero(
-                            _maybe_get(pos, "netavgprice"),
-                            _maybe_get(pos, "netAvgPrice"),
-                            _maybe_get(pos, "netprice"),
-                            _maybe_get(pos, "netPrice"),
-                        )
-                        # Tier 4: side-specific fallback.
-                        side_value: Optional[float] = None
+                        # broker_value is None — broker chain returned
+                        # no non-zero value. Try side-specific fallback.
                         if qty > 0:
-                            side_value = _pick_nonzero(
-                                _maybe_get(pos, "buyavgprice"),
-                                _maybe_get(pos, "buyAvgPrice"),
-                                _maybe_get(pos, "buyaverageprice"),
-                                _maybe_get(pos, "buyAveragePrice"),
+                            side_keys = (
+                                "buyavgprice", "buyAvgPrice",
+                                "buyaverageprice", "buyAveragePrice",
                             )
                         elif qty < 0:
-                            side_value = _pick_nonzero(
-                                _maybe_get(pos, "sellavgprice"),
-                                _maybe_get(pos, "sellAvgPrice"),
-                                _maybe_get(pos, "sellaverageprice"),
-                                _maybe_get(pos, "sellAveragePrice"),
+                            side_keys = (
+                                "sellavgprice", "sellAvgPrice",
+                                "sellaverageprice", "sellAveragePrice",
                             )
-                        broker_fallback = (
-                            net_value
-                            if net_value is not None
-                            else side_value
+                        else:
+                            side_keys = ()
+                        side_values = [
+                            _maybe_get(pos, k) for k in side_keys
+                        ]
+                        side_present = any(
+                            _alias_is_present_skip_blank(v)
+                            for v in side_values
                         )
-                        if broker_fallback is not None and broker_fallback > 0.0:
-                            continue  # healthy via broker fallback
-                        # Tier 5: final entry_price fallback (only when
-                        # no other alias contributed).
-                        entry_raw = _maybe_get(pos, "entry_price")
-                        entry_present = (
-                            entry_raw is not None
-                            and not (
-                                isinstance(entry_raw, str)
-                                and not entry_raw.strip()
-                            )
-                        )
-                        if entry_present:
-                            entry_f = _coerce_float(entry_raw)
-                            if entry_f > 0.0:
-                                continue  # healthy via entry_price
-                        # Genuinely corrupt: qty != 0 with no positive
-                        # avg_price across any tier.
-                        avg_f_for_report = 0.0
+                        side_value = _pick_nonzero(*side_values)
+                        if side_value is not None and side_value < 0.0:
+                            # Negative side-specific avg → corrupt.
+                            avg_f_for_report = side_value
+                        elif side_value is not None and side_value > 0.0:
+                            continue  # healthy via side fallback
+                        elif broker_chain_present or side_present:
+                            # Some broker alias was PRESENT but all
+                            # were zero — corrupt. entry_price must
+                            # not mask a broker-explicit zero.
+                            avg_f_for_report = 0.0
+                        else:
+                            # No broker alias at all → tier 5.
+                            entry_raw = _maybe_get(pos, "entry_price")
+                            if _alias_is_present_skip_blank(entry_raw):
+                                entry_f = _coerce_float(entry_raw)
+                                if entry_f > 0.0:
+                                    continue  # healthy via entry_price
+                                avg_f_for_report = entry_f
+                            else:
+                                # Truly nothing — corrupt.
+                                avg_f_for_report = 0.0
                 # Found a corrupt record.
                 symbol = str(
                     _first_present(

@@ -705,3 +705,165 @@ def test_audit_uses_entry_price_only_as_final_fallback():
         }
     )
     assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# PR #237 round-6: broker normalizer precedence, blank snake_case as
+# corrupt, entry_price cannot mask broker zero/negative.
+# ---------------------------------------------------------------------------
+
+
+def test_audit_blank_snake_case_avg_price_is_corrupt():
+    """Round-6 P2: dashboard ``_first_present`` treats blank ``''``
+    as PRESENT and coerces to 0; the resulting ``avg_price <= 0``
+    fires ``POSITION_VIEW_AVG_PRICE_INVALID``. The proactive audit
+    must match — a row like
+    ``{'qty': 65, 'avg_price': '', 'avgPrice': 100}`` is corrupt
+    even though a positive later alias exists."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": 65,
+                    "avg_price": "",
+                    "avgPrice": 100.0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 1
+
+
+def test_audit_avgprice_precedence_matches_position_sync():
+    """Round-6 P2: production normalizer reads ``avgprice`` BEFORE
+    ``avgPrice``. A row like ``{'qty': 1, 'avgprice': -5,
+    'avgPrice': 100}`` would yield negative avg via production; the
+    audit must treat it as corrupt rather than letting the positive
+    later alias mask it."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": 1,
+                    "avgprice": -5.0,
+                    "avgPrice": 100.0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    result = rt.audit_position_avg_price_corruption()
+    assert result["corrupt_count"] == 1
+    # First-non-zero across the broker chain returns -5.
+    assert result["samples"][0]["avg_price"] == -5.0
+
+
+def test_audit_netprice_precedence_matches_position_sync():
+    """Round-6 P2: ``netprice`` precedes ``netavgprice`` per the
+    production normalizer. A row like ``{'qty': 1, 'netprice': -5,
+    'netavgprice': 100, 'avgprice': 0}`` must be flagged corrupt."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": 1,
+                    "avgprice": 0,
+                    "netprice": -5.0,
+                    "netavgprice": 100.0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    result = rt.audit_position_avg_price_corruption()
+    assert result["corrupt_count"] == 1
+    assert result["samples"][0]["avg_price"] == -5.0
+
+
+def test_audit_entry_price_does_not_mask_broker_zero():
+    """Round-6 P2: when a broker primary alias is PRESENT at zero
+    plus a positive ``entry_price``, the row must be CORRUPT — the
+    dashboard treats ``avgprice=0`` as the corruption signal and
+    ``entry_price`` cannot rescue it."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": 65,
+                    "avgprice": 0,
+                    "entry_price": 100.0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 1
+
+
+def test_audit_entry_price_does_not_mask_negative_net_fallback():
+    """Round-6 P2: when net-fallback aliases are negative, the row
+    must be flagged as corrupt regardless of any positive
+    ``entry_price``. Production normalizer would derive the negative
+    avg, so the proactive audit must agree."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": 65,
+                    "avgprice": 0,
+                    "netavgprice": -5.0,
+                    "entry_price": 100.0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    result = rt.audit_position_avg_price_corruption()
+    assert result["corrupt_count"] == 1
+    assert result["samples"][0]["avg_price"] == -5.0
+
+
+def test_audit_quantity_uses_netqty_over_zero_qty():
+    """Round-6 P2: ``{'qty': 0, 'netqty': 65, 'avgprice': 0}`` —
+    Angel parser uses ``netqty``→``net``, ignoring a zero ``qty``
+    alias. The audit must do the same; the open broker position is
+    corrupt and must be flagged."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": 0,
+                    "netqty": 65,
+                    "avgprice": 0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    result = rt.audit_position_avg_price_corruption()
+    assert result["corrupt_count"] == 1
+    assert result["samples"][0]["quantity"] == 65
+
+
+def test_audit_negative_side_specific_fallback_is_corrupt():
+    """Round-6 P2: a negative side-specific buy/sell avg (e.g.
+    ``buyavgprice=-5`` for a long position) must NOT be hidden by a
+    positive ``entry_price``. Production normalizer returns the
+    negative side avg; the audit must agree."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": 65,
+                    "avgprice": 0,
+                    "buyavgprice": -5.0,
+                    "entry_price": 100.0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    result = rt.audit_position_avg_price_corruption()
+    assert result["corrupt_count"] == 1
+    assert result["samples"][0]["avg_price"] == -5.0
