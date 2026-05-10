@@ -392,11 +392,13 @@ def test_audit_flags_negative_primary_avg_price_even_with_positive_fallback():
     assert result["samples"][0]["avg_price"] == -5.0
 
 
-def test_audit_keeps_scanning_primary_aliases_after_zero():
-    """Round-3 P2: a mixed row like ``{'avg_price': 0, 'avgPrice': 100}``
-    must stay healthy — the audit must not stop at the first present
-    zero alias and treat the row as corrupt; positive primary alias
-    proves the row is healthy even when an earlier alias is zero."""
+def test_audit_preserves_explicit_zero_avg_price_as_corrupt():
+    """Round-4 P2: dashboard ``_first_present`` semantics — an explicit
+    ``avg_price=0`` plus a positive later alias like ``avgPrice=100`` is
+    CORRUPT. The dashboard's reactive defence
+    (POSITION_VIEW_AVG_PRICE_INVALID) preserves the zero, and the
+    proactive audit must match that behaviour so corruption is not
+    masked by a later alias."""
     rt = _make_runtime_with_positions(
         {
             "A1": [
@@ -409,7 +411,28 @@ def test_audit_keeps_scanning_primary_aliases_after_zero():
             ]
         }
     )
-    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 0
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 1
+
+
+def test_audit_does_not_let_entry_price_hide_zero_avg_price():
+    """Round-4 P2: ``entry_price`` comes after ``avg_price`` in the
+    dashboard's first-present list, so an explicit ``avg_price=0``
+    plus a positive ``entry_price=100`` must still be flagged corrupt.
+    Aligns with ``app/dashboard/tenant_routes.py::_first_present``
+    docstring (issue #204 fix)."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": 65,
+                    "avg_price": 0,
+                    "entry_price": 100.0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 1
 
 
 def test_audit_uses_camelcase_broker_fallbacks():
@@ -473,3 +496,82 @@ def test_audit_does_not_use_sellavgprice_for_long_positions():
     )
     result = rt.audit_position_avg_price_corruption()
     assert result["corrupt_count"] == 1
+
+
+def test_audit_honours_buyaverageprice_full_spelling():
+    """Round-4 P2: angel_client and position_sync accept the full-word
+    ``buyaverageprice``/``buyAveragePrice`` fallbacks. The audit must
+    too — otherwise a healthy long row with avgprice=0 and only the
+    full-word fallback populated is incorrectly flagged corrupt."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": 50,
+                    "avgprice": 0,
+                    "buyaverageprice": 100.0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 0
+
+
+def test_audit_honours_camelcase_buyAveragePrice_full_spelling():
+    """Round-4 P2: same as above but for the camelCase variant."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": 50,
+                    "avgprice": 0,
+                    "buyAveragePrice": 100.0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 0
+
+
+def test_audit_honours_sellaverageprice_full_spelling_for_shorts():
+    """Round-4 P2: full-word ``sellaverageprice`` fallback for short
+    positions."""
+    rt = _make_runtime_with_positions(
+        {
+            "A1": [
+                {
+                    "qty": -50,
+                    "avgprice": 0,
+                    "sellaverageprice": 100.0,
+                    "symbol": "X",
+                }
+            ]
+        }
+    )
+    assert rt.audit_position_avg_price_corruption()["corrupt_count"] == 0
+
+
+def test_audit_surfaces_setup_error_when_list_runner_ids_raises():
+    """Round-4 P2: when ``hub.list_runner_ids()`` raises, the audit
+    must surface that as ``setup_error`` so /readyz can fail closed —
+    silently returning corrupt_count=0 with no accounts scanned would
+    let LIVE readiness pass while no positions were verified."""
+    from app.hub.runtime import HubRuntime
+    failing_hub = SimpleNamespace(
+        list_runner_ids=lambda: (_ for _ in ()).throw(
+            RuntimeError("hub registry unreachable")
+        ),
+    )
+    rt = SimpleNamespace(
+        hub=failing_hub,
+        state_store=SimpleNamespace(get_positions=lambda _: []),
+    )
+    rt.audit_position_avg_price_corruption = (
+        HubRuntime.audit_position_avg_price_corruption.__get__(rt, HubRuntime)
+    )
+    result = rt.audit_position_avg_price_corruption()
+    assert result["corrupt_count"] == 0
+    assert result["setup_error"] is not None
+    assert "hub registry unreachable" in result["setup_error"]

@@ -532,21 +532,35 @@ class HubRuntime:
         """
         # Lazy import to avoid heavy hub initialisation cycles in test
         # contexts that build a HubRuntime-shaped stub.
+        # PR #237 round-4 review P2: when account enumeration raises
+        # we MUST surface that as an audit error rather than silently
+        # returning ``corrupt_count=0``; otherwise /readyz can pass
+        # with no accounts ever scanned.
         try:
             hub = getattr(self, "hub", None)
             state_store = getattr(self, "state_store", None)
             if hub is None or state_store is None:
-                return {"corrupt_count": 0, "samples": []}
+                return {
+                    "corrupt_count": 0,
+                    "samples": [],
+                    "read_failures": [],
+                    "setup_error": None,
+                }
             account_ids: list = []
             list_ids = getattr(hub, "list_runner_ids", None)
             if callable(list_ids):
                 account_ids = [str(a) for a in list_ids()]
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                "audit_position_avg_price_corruption: setup failed (%s); "
-                "returning corrupt_count=0", exc,
+        except Exception as exc:
+            logger.error(
+                "audit_position_avg_price_corruption: account enumeration "
+                "failed (%s) — failing closed in caller", exc,
             )
-            return {"corrupt_count": 0, "samples": []}
+            return {
+                "corrupt_count": 0,
+                "samples": [],
+                "read_failures": [],
+                "setup_error": repr(exc),
+            }
 
         # Issue #226 (PR #237 review P2): dict/alias normalization.
         # Some adapters / test harnesses store positions as dicts with
@@ -566,25 +580,18 @@ class HubRuntime:
                         return v
             return None
 
-        def _all_present_floats(p, *keys) -> list[float]:
-            """Collect every alias that is present (not None) and
-            coerces to a float. Used by the avg_price scan so that a
-            mixed row like ``{'avg_price': 0, 'avgPrice': 100}`` does
-            not stop at the first zero alias and incorrectly flag the
-            row as corrupt — and conversely so that an explicit
-            negative primary (e.g. ``avg_price=-5``) is still flagged
-            even when a positive fallback is present.
-            """
-            out: list[float] = []
-            for k in keys:
-                if isinstance(p, dict):
-                    if k in p and p[k] is not None:
-                        out.append(_coerce_float(p[k]))
-                else:
-                    v = getattr(p, k, None)
-                    if v is not None:
-                        out.append(_coerce_float(v))
-            return out
+        def _pick_nonzero(*values) -> Optional[float]:
+            """Return the first non-zero, non-None float in the list.
+            Mirrors ``app/core/position_sync.py::_pick_nonzero_price``
+            so the audit's broker-fallback handling matches the
+            production normalizer exactly."""
+            for v in values:
+                if v is None:
+                    continue
+                f = _coerce_float(v)
+                if f != 0.0:
+                    return f
+            return None
 
         # Issue #226 (PR #237 round-2 review P2/P3): comprehensive alias
         # support + decimal-string coercion. Aliases observed in this
@@ -664,60 +671,97 @@ class HubRuntime:
                 qty = _coerce_int(qty_raw)
                 if qty == 0:
                     continue
-                # PR #237 round-3 review P2: SCAN ALL primary aliases
-                # rather than stopping at the first non-None value.
-                # A mixed row like ``{'avg_price': 0, 'avgPrice': 100}``
-                # must stay healthy (positive primary present) but a
-                # row with ``avg_price=-5`` must be flagged even when
-                # a positive fallback is also present (negative primary
-                # avg_price is corruption regardless of fallbacks).
-                primary_values = _all_present_floats(
+                # PR #237 round-4 review P2: use FIRST-PRESENT primary
+                # alias (matching dashboard ``_first_present`` semantics
+                # in ``app/dashboard/tenant_routes.py``). Dashboard
+                # preserves an explicit zero ``avg_price`` as the
+                # corruption signal — POSITION_VIEW_AVG_PRICE_INVALID
+                # is the existing reactive defence — so the audit must
+                # do the same. Order matches dashboard exactly so a row
+                # like ``{'avg_price': 0, 'avgPrice': 100}`` returns 0
+                # (corrupt) and ``{'entry_price': 100}`` returns 100
+                # (healthy via documented fallback).
+                primary_raw = _first_present(
                     pos,
-                    "avg_price", "average_price", "avgPrice", "avgprice",
-                    "averageprice", "entry_price",
+                    "avg_price", "avgPrice", "average_price", "avgprice",
+                    "entry_price",
                 )
-                # Negative primary is always corrupt — broker would
-                # never legitimately send a negative average price for
-                # an open position.
-                negative_primary = next(
-                    (v for v in primary_values if v < 0.0), None
-                )
-                if negative_primary is not None:
-                    avg_f_for_report = negative_primary
+                if primary_raw is None:
+                    primary_f: Optional[float] = None
                 else:
-                    positive_primary = next(
-                        (v for v in primary_values if v > 0.0), None
-                    )
-                    if positive_primary is not None:
-                        # Healthy.
-                        continue
-                    # All primaries are missing or zero — try
-                    # side-specific broker fallback fields. The
-                    # angel_client / position_sync normalizers only use
-                    # buy-side averages for long positions and sell-side
-                    # for short positions, so honour the same gate here.
-                    fallback_keys: list[str] = [
-                        "netavgprice", "netAvgPrice",
-                        "netprice", "netPrice",
-                    ]
-                    if qty > 0:
-                        fallback_keys.extend(
-                            ["buyavgprice", "buyAvgPrice"]
+                    primary_f = _coerce_float(primary_raw)
+
+                if primary_f is not None and primary_f < 0.0:
+                    # Negative primary is always corrupt — broker would
+                    # never legitimately send a negative average price
+                    # for an open position; broker fallbacks must NOT
+                    # mask it.
+                    avg_f_for_report = primary_f
+                elif primary_f is not None and primary_f > 0.0:
+                    # Healthy via primary alias.
+                    continue
+                else:
+                    # primary_f is None (no primary alias present) OR
+                    # 0.0 (raw broker rows often carry ``avgprice=0``
+                    # while a valid net/side fallback is populated).
+                    # Try the broker normalizer's fallback chain — same
+                    # ordering / first-non-zero semantics as
+                    # ``app/core/position_sync.py::_extract_broker_avg_price``.
+                    if isinstance(pos, dict):
+                        net_value = _pick_nonzero(
+                            pos.get("netavgprice"),
+                            pos.get("netAvgPrice"),
+                            pos.get("netprice"),
+                            pos.get("netPrice"),
                         )
-                    elif qty < 0:
-                        fallback_keys.extend(
-                            ["sellavgprice", "sellAvgPrice"]
+                        side_value: Optional[float] = None
+                        if qty > 0:
+                            side_value = _pick_nonzero(
+                                pos.get("buyavgprice"),
+                                pos.get("buyAvgPrice"),
+                                pos.get("buyaverageprice"),
+                                pos.get("buyAveragePrice"),
+                            )
+                        elif qty < 0:
+                            side_value = _pick_nonzero(
+                                pos.get("sellavgprice"),
+                                pos.get("sellAvgPrice"),
+                                pos.get("sellaverageprice"),
+                                pos.get("sellAveragePrice"),
+                            )
+                    else:
+                        net_value = _pick_nonzero(
+                            getattr(pos, "netavgprice", None),
+                            getattr(pos, "netAvgPrice", None),
+                            getattr(pos, "netprice", None),
+                            getattr(pos, "netPrice", None),
                         )
-                    fallback_values = _all_present_floats(
-                        pos, *fallback_keys
+                        side_value = None
+                        if qty > 0:
+                            side_value = _pick_nonzero(
+                                getattr(pos, "buyavgprice", None),
+                                getattr(pos, "buyAvgPrice", None),
+                                getattr(pos, "buyaverageprice", None),
+                                getattr(pos, "buyAveragePrice", None),
+                            )
+                        elif qty < 0:
+                            side_value = _pick_nonzero(
+                                getattr(pos, "sellavgprice", None),
+                                getattr(pos, "sellAvgPrice", None),
+                                getattr(pos, "sellaverageprice", None),
+                                getattr(pos, "sellAveragePrice", None),
+                            )
+                    fallback_value = (
+                        net_value if net_value is not None else side_value
                     )
-                    positive_fallback = next(
-                        (v for v in fallback_values if v > 0.0), None
-                    )
-                    if positive_fallback is not None:
+                    if fallback_value is not None and fallback_value > 0.0:
                         # Healthy via broker fallback.
                         continue
-                    avg_f_for_report = 0.0
+                    # Genuinely corrupt: qty != 0 + no positive
+                    # avg_price found anywhere.
+                    avg_f_for_report = (
+                        primary_f if primary_f is not None else 0.0
+                    )
                 # Found a corrupt record.
                 symbol = str(
                     _first_present(
@@ -750,6 +794,7 @@ class HubRuntime:
             # were not scanned. Empty list means every account was
             # successfully scanned.
             "read_failures": read_failures,
+            "setup_error": None,
         }
 
     def _maybe_emit_avg_price_corruption_alert(
