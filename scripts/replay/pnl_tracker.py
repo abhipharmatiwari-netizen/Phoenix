@@ -12,6 +12,7 @@ import io
 import json
 import logging
 import math
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -129,7 +130,7 @@ class PnLTracker:
     def __init__(self, fee_model: bool = True) -> None:
         self.fills: List[ReplayFill] = []
         self.trades: List[ReplayTrade] = []
-        self._open_positions: Dict[str, ReplayFill] = {}  # key: strategy_id:underlying
+        self._open_positions: Dict[str, deque[ReplayFill]] = {}
         self._trade_counter = 0
         self._fee_model = fee_model
 
@@ -144,9 +145,9 @@ class PnLTracker:
             pos_key = self._position_key(fill)
 
             if fill.purpose == "ENTRY":
-                self._open_positions[pos_key] = fill
+                self._open_positions.setdefault(pos_key, deque()).append(fill)
             elif fill.purpose == "EXIT":
-                entry_fill = self._open_positions.pop(pos_key, None)
+                entry_fill = self._pop_open_position(pos_key, fill)
                 if entry_fill is None:
                     logger.warning(
                         "EXIT fill without matching ENTRY: %s at %s",
@@ -160,12 +161,13 @@ class PnLTracker:
                 logger.warning("Unknown fill purpose: %s", fill.purpose)
 
         # Any open positions at end are unterminated trades
-        for pos_key, entry_fill in self._open_positions.items():
-            logger.info(
-                "Unterminated position: %s entered at %s (no exit fill)",
-                pos_key,
-                entry_fill.timestamp,
-            )
+        for pos_key, entries in self._open_positions.items():
+            for entry_fill in entries:
+                logger.info(
+                    "Unterminated position: %s entered at %s (no exit fill)",
+                    pos_key,
+                    entry_fill.timestamp,
+                )
 
         return self.trades
 
@@ -268,8 +270,6 @@ class PnLTracker:
     def _position_key(fill: ReplayFill) -> str:
         strategy_id = str(fill.strategy_id)
         underlying = str(fill.underlying)
-        if strategy_id == "ema20_strategy":
-            return f"{strategy_id}:{underlying}:__single_leg__"
         replay_ctx = {}
         if isinstance(fill.strategy_context, dict):
             replay_ctx = dict(fill.strategy_context.get("_replay") or {})
@@ -279,6 +279,39 @@ class PnLTracker:
             or str(getattr(fill, "tag", "") or "").strip()
         )
         return f"{strategy_id}:{underlying}:{label}"
+
+    def _pop_open_position(self, pos_key: str, fill: ReplayFill) -> Optional[ReplayFill]:
+        queue = self._open_positions.get(pos_key)
+        if queue:
+            entry = queue.popleft()
+            if not queue:
+                self._open_positions.pop(pos_key, None)
+            return entry
+
+        fallback_key = self._fallback_exit_key(fill)
+        if fallback_key is None:
+            return None
+        queue = self._open_positions.get(fallback_key)
+        if not queue:
+            return None
+        entry = queue.popleft()
+        if not queue:
+            self._open_positions.pop(fallback_key, None)
+        return entry
+
+    def _fallback_exit_key(self, fill: ReplayFill) -> Optional[str]:
+        strategy_id = str(fill.strategy_id)
+        if strategy_id != "ema20_strategy":
+            return None
+        prefix = f"{strategy_id}:{fill.underlying}:"
+        candidates = [
+            key
+            for key, entries in self._open_positions.items()
+            if key.startswith(prefix) and entries
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
 
     def compute_metrics(
         self,

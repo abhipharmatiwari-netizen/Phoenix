@@ -52,6 +52,7 @@ from scripts.replay.schema import (
 logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 UTC = timezone.utc
+_NIFTY_TUESDAY_EXPIRY_EFFECTIVE = date(2025, 9, 1)
 
 _REQUIRED_COLUMNS = (
     "ts_start",
@@ -793,6 +794,7 @@ class ReplayEngine:
                 strategy_id=cfg.strategy_id,
             )
             bars = list(batch)
+            self._bars_by_timeframe[int(tf)] = list(bars)
             if cfg.filter_regime:
                 wanted = _normalize_regime_name(cfg.filter_regime)
                 bars = [
@@ -800,8 +802,6 @@ class ReplayEngine:
                     for bar in bars
                     if _normalize_regime_name(bar.regime) == wanted
                 ]
-                for idx, bar in enumerate(bars):
-                    bar.series_index = idx
             profile = dict(getattr(batch, "replay_profile", {}) or {})
             db_bar_count_by_timeframe[int(tf)] = len(bars)
             merged_profile["bars_loaded_by_timeframe"][str(int(tf))] = len(bars)
@@ -817,7 +817,6 @@ class ReplayEngine:
             available_columns = set(merged_profile.get("available_columns") or [])
             available_columns.update(profile.get("available_columns") or [])
             merged_profile["available_columns"] = sorted(available_columns)
-            self._bars_by_timeframe[int(tf)] = bars
             all_bars.extend(bars)
 
         self.recorder.set_db_bar_counts(db_bar_count_by_timeframe)
@@ -1132,10 +1131,11 @@ def _option_proxy_price(
 
 
 def _next_weekly_expiry(session_date: date) -> date:
-    # NIFTY weekly expiry is Thursday. If replay is already past Thursday for
-    # the week, roll to the next one.
-    days_until_thursday = (3 - session_date.weekday()) % 7
-    return session_date + timedelta(days=days_until_thursday)
+    # NSE NIFTY weekly expiry moved from Thursday to Tuesday for contracts
+    # expiring on or after 2025-09-01.
+    expiry_weekday = 1 if session_date >= _NIFTY_TUESDAY_EXPIRY_EFFECTIVE else 3
+    days_until_expiry = (expiry_weekday - session_date.weekday()) % 7
+    return session_date + timedelta(days=days_until_expiry)
 
 
 def build_nifty_spread_instrument_meta(

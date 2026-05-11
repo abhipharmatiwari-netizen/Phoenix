@@ -411,8 +411,10 @@ class MockExecutionRecorder:
         ).upper()
 
         price = context.current_price
+        instrument_price_matched = False
         if position_label and position_label in context.instrument_prices:
             price = context.instrument_prices[position_label]
+            instrument_price_matched = True
         elif symbol and symbol in context.instrument_prices:
             price = context.instrument_prices[symbol]
 
@@ -426,6 +428,12 @@ class MockExecutionRecorder:
                 if self.execution_config.reject_entries_without_future_bar:
                     return context.timestamp, None, "missing_future_bar"
                 return context.timestamp, price, "bar_close_fallback"
+            if instrument_price_matched:
+                return (
+                    context.next_open_ts or context.timestamp,
+                    float(price),
+                    "next_bar_open_option_proxy",
+                )
             return (
                 context.next_open_ts or context.timestamp,
                 float(context.next_open_price),

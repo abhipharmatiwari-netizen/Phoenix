@@ -2987,8 +2987,8 @@ def stream_multi_instruments(
     selector_context_builders: Dict[str, MarketContextBuilder] = {}
     selector_eval_timeframes: Dict[str, set[int]] = {}
     selector_regime_classifiers: Dict[str, RegimeClassifier] = {}
-    regime_context_builders: Dict[tuple[str, int], MarketContextBuilder] = {}
-    regime_classifiers: Dict[tuple[str, int], RegimeClassifier] = {}
+    regime_context_builders: Dict[tuple[str, int, str], MarketContextBuilder] = {}
+    regime_classifiers: Dict[tuple[str, int, str], RegimeClassifier] = {}
 
     def _selector_strategy_timeframes(instance: Any) -> set[int]:
         out: set[int] = set()
@@ -3149,6 +3149,40 @@ def stream_multi_instruments(
             "chop_index": context.chop_index,
         }
 
+    def _dynamic_policy_config_for_instance(instance: Any) -> Any:
+        direct = getattr(instance, "_dynamic_policy_cfg", None)
+        if direct is not None:
+            return direct
+        adaptive = getattr(instance, "_adaptive_policy", None)
+        return getattr(adaptive, "policy_config", None)
+
+    def _regime_classifier_specs_for_bar(
+        *,
+        underlying_label: str,
+        timeframe_seconds: int,
+    ) -> list[tuple[str, Any]]:
+        specs: dict[str, Any] = {CLASSIFIER_VERSION: None}
+        target = str(underlying_label or "").strip().upper()
+        tf = int(timeframe_seconds)
+        for row in strategies:
+            row_underlying = str(row.get("underlying") or "").strip().upper()
+            if row_underlying != target:
+                continue
+            instance = row.get("instance")
+            timeframes = _selector_strategy_timeframes(instance)
+            if timeframes and tf not in timeframes:
+                continue
+            policy_cfg = _dynamic_policy_config_for_instance(instance)
+            if policy_cfg is None or not bool(getattr(policy_cfg, "enabled", False)):
+                continue
+            policy_hash = str(getattr(policy_cfg, "policy_hash", "") or "").strip()
+            policy_id = str(getattr(policy_cfg, "policy_id", "") or "").strip()
+            suffix = policy_hash or policy_id
+            if not suffix:
+                continue
+            specs[f"{CLASSIFIER_VERSION}:{suffix}"] = getattr(policy_cfg, "thresholds", None)
+        return list(specs.items())
+
     def _persist_regime_for_bar(
         *,
         label: str,
@@ -3161,30 +3195,42 @@ def stream_multi_instruments(
         key = (str(label or "").strip().upper(), int(timeframe_seconds))
         if not key[0]:
             return None
-        builder = regime_context_builders.setdefault(key, MarketContextBuilder())
-        classifier = regime_classifiers.setdefault(key, RegimeClassifier())
-        context = builder.build(
-            candle=candle,
-            indicators=indicators if isinstance(indicators, dict) else {},
-        )
-        regime = classifier.update(context)
-        try:
-            persister.persist_regime(
-                label,
-                timeframe_seconds,
-                candle,
-                regime=regime.value,
-                classifier_version=CLASSIFIER_VERSION,
-                signals=_regime_signals(context),
+        first_regime: Optional[Regime] = None
+        for classifier_version, thresholds in _regime_classifier_specs_for_bar(
+            underlying_label=label,
+            timeframe_seconds=timeframe_seconds,
+        ):
+            state_key = (key[0], key[1], classifier_version)
+            builder = regime_context_builders.setdefault(state_key, MarketContextBuilder())
+            classifier = regime_classifiers.setdefault(
+                state_key,
+                RegimeClassifier(thresholds=thresholds),
             )
-        except Exception:
-            logger.debug(
-                "Bar regime persistence failed for %s tf=%s",
-                key[0],
-                timeframe_seconds,
-                exc_info=True,
+            context = builder.build(
+                candle=candle,
+                indicators=indicators if isinstance(indicators, dict) else {},
             )
-        return regime
+            regime = classifier.update(context)
+            if first_regime is None:
+                first_regime = regime
+            try:
+                persister.persist_regime(
+                    label,
+                    timeframe_seconds,
+                    candle,
+                    regime=regime.value,
+                    classifier_version=classifier_version,
+                    signals=_regime_signals(context),
+                )
+            except Exception:
+                logger.debug(
+                    "Bar regime persistence failed for %s tf=%s classifier=%s",
+                    key[0],
+                    timeframe_seconds,
+                    classifier_version,
+                    exc_info=True,
+                )
+        return first_regime
 
     def _update_strategy_selection_for_bar(
         *,

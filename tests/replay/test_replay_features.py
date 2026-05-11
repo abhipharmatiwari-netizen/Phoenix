@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from app.brokers.base import (
     OrderPurpose,
+    OrderResponse,
     OrderRequest,
     OrderSide,
     OrderType,
@@ -14,10 +15,11 @@ from app.brokers.base import (
 from app.core.identifiers import StrategyId
 from app.orders.strategy_bridge import place_order_via_bridge
 from scripts.replay.execution_models import ExecutionConfig
-from scripts.replay.mock_execution import MockExecutionRecorder, ReplayFill
+from scripts.replay.mock_execution import MockExecutionRecorder, ReplayFill, ReplayMarketContext
 from scripts.replay.optimizer import walk_forward_validate
 from scripts.replay.pnl_tracker import PnLTracker
 from scripts.replay.replay_engine import BarRow, ReplayConfig, ReplayEngine, bar_to_indicators
+from app.strategies.nifty_weekly_credit_spreads import NiftyWeeklyCreditSpreadStrategy
 from scripts.replay.schema import ReplayTableSchema
 import scripts.replay.optimizer_runtime as optimizer_runtime_mod
 import scripts.replay.replay_runtime as replay_runtime_mod
@@ -565,7 +567,7 @@ def test_next_bar_open_fill_uses_following_bar_open(monkeypatch):
     assert recorder.fills[0].fill_note == "next_bar_open"
 
 
-def test_next_bar_open_fill_reindexes_after_regime_filter(monkeypatch):
+def test_next_bar_open_fill_uses_chronological_bar_after_regime_filter(monkeypatch):
     base_ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
     bars = [
         _bar(base_ts, close=99.0, open_=98.0),
@@ -593,7 +595,7 @@ def test_next_bar_open_fill_reindexes_after_regime_filter(monkeypatch):
     ).run()
 
     assert len(recorder.fills) == 1
-    assert recorder.fills[0].fill_price == 105.0
+    assert recorder.fills[0].fill_price == 101.0
     assert recorder.fills[0].fill_note == "next_bar_open"
 
 
@@ -631,6 +633,169 @@ def test_pnl_tracker_pairs_ema20_exit_without_position_label():
     assert len(trades) == 1
     assert trades[0].gross_pnl == 10.0
     assert trades[0].exit_reason == "TARGET"
+
+
+def test_pnl_tracker_pairs_overlapping_same_label_fifo():
+    ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
+    fills = [
+        ReplayFill(
+            timestamp=ts,
+            strategy_id="nifty_weekly_credit_spreads",
+            underlying="NIFTY",
+            side="SELL",
+            purpose="ENTRY",
+            tag="PUT_SPREAD_SHORT",
+            quantity=1,
+            fill_price=100.0,
+            strategy_context={"_replay": {"position_label": "NIFTY_PE_19800"}},
+            symbol="NIFTY_PE_19800",
+        ),
+        ReplayFill(
+            timestamp=ts + timedelta(minutes=1),
+            strategy_id="nifty_weekly_credit_spreads",
+            underlying="NIFTY",
+            side="SELL",
+            purpose="ENTRY",
+            tag="PUT_SPREAD_SHORT",
+            quantity=1,
+            fill_price=105.0,
+            strategy_context={"_replay": {"position_label": "NIFTY_PE_19800"}},
+            symbol="NIFTY_PE_19800",
+        ),
+        ReplayFill(
+            timestamp=ts + timedelta(minutes=2),
+            strategy_id="nifty_weekly_credit_spreads",
+            underlying="NIFTY",
+            side="BUY",
+            purpose="EXIT",
+            tag="EXIT",
+            quantity=1,
+            fill_price=90.0,
+            strategy_context={"_replay": {"position_label": "NIFTY_PE_19800"}},
+            symbol="NIFTY_PE_19800",
+        ),
+        ReplayFill(
+            timestamp=ts + timedelta(minutes=3),
+            strategy_id="nifty_weekly_credit_spreads",
+            underlying="NIFTY",
+            side="BUY",
+            purpose="EXIT",
+            tag="EXIT",
+            quantity=1,
+            fill_price=95.0,
+            strategy_context={"_replay": {"position_label": "NIFTY_PE_19800"}},
+            symbol="NIFTY_PE_19800",
+        ),
+    ]
+
+    trades = PnLTracker(fee_model=False).process_fills(fills)
+
+    assert [trade.gross_pnl for trade in trades] == [10.0, 10.0]
+    assert trades[0].entry_price == 100.0
+    assert trades[1].entry_price == 105.0
+
+
+def test_next_bar_open_option_entry_keeps_option_proxy_price():
+    ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
+    recorder = MockExecutionRecorder(
+        execution_config=ExecutionConfig(fill_mode="next_bar_open_fill")
+    )
+    recorder.set_market_context(
+        ReplayMarketContext(
+            timestamp=ts,
+            underlying="NIFTY",
+            current_price=20000.0,
+            phase="bar_close",
+            next_open_price=20100.0,
+            next_open_ts=ts + timedelta(minutes=5),
+            instrument_prices={"NIFTY_CE_20000": 123.0},
+        )
+    )
+
+    recorder.record_order(
+        strategy_id="nifty_weekly_credit_spreads",
+        underlying="NIFTY",
+        order_req=OrderRequest(
+            symbol="NIFTY_CE_20000",
+            quantity=1,
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            product_type=ProductType.INTRADAY,
+            time_in_force=TimeInForce.DAY,
+            purpose=OrderPurpose.ENTRY,
+            tag="ENTRY",
+            position_label="NIFTY_CE_20000",
+        ),
+    )
+
+    assert recorder.fills[0].timestamp == ts + timedelta(minutes=5)
+    assert recorder.fills[0].fill_price == 123.0
+    assert recorder.fills[0].fill_note == "next_bar_open_option_proxy"
+
+
+def test_nifty_weekly_expiry_switches_to_tuesday_from_september_2025():
+    assert replay_runtime_mod._next_weekly_expiry(date(2025, 8, 28)) == date(2025, 8, 28)
+    assert replay_runtime_mod._next_weekly_expiry(date(2025, 9, 1)) == date(2025, 9, 2)
+    assert replay_runtime_mod._next_weekly_expiry(date(2026, 3, 3)) == date(2026, 3, 3)
+
+
+def test_nifty_spread_replay_clock_drives_entry_ids(monkeypatch):
+    fixed_now = datetime(2026, 3, 3, 10, 15, tzinfo=replay_runtime_mod.IST)
+    meta = replay_runtime_mod.build_nifty_spread_instrument_meta(
+        "NIFTY_IDX",
+        65,
+        min_strike=19600,
+        max_strike=19800,
+    )
+    strategy = NiftyWeeklyCreditSpreadStrategy(
+        meta,
+        order_client=None,
+        risk_manager=None,
+        env_prefix="NIFTY_",
+        underlying_label="NIFTY_IDX",
+        params={"account_equity": 100000.0, "lot_size": 65},
+    )
+    strategy._now_ist = lambda: fixed_now
+    strategy.last_price.update(
+        {
+            "NIFTY_PE_19800": 100.0,
+            "NIFTY_PE_19600": 70.0,
+        }
+    )
+
+    def _accepted(**kwargs):
+        del kwargs
+        return OrderResponse(
+            broker_order_id="REPLAY",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=65,
+            average_price=1.0,
+        )
+
+    monkeypatch.setattr(strategy, "_place_order", _accepted)
+
+    assert strategy._enter_spread(
+        "PUT_SPREAD",
+        "NIFTY_PE_19800",
+        "NIFTY_PE_19600",
+        credit=30.0,
+        width_pts=200.0,
+        expiry=fixed_now.date(),
+    )
+    assert strategy._enter_spread(
+        "PUT_SPREAD",
+        "NIFTY_PE_19800",
+        "NIFTY_PE_19600",
+        credit=30.0,
+        width_pts=200.0,
+        expiry=fixed_now.date(),
+    )
+
+    spread_ids = sorted(strategy.open_spreads)
+    assert len(spread_ids) == 2
+    assert str(int(fixed_now.timestamp() * 1000)) in spread_ids[0]
+    assert spread_ids[0] != spread_ids[1]
 
 
 def test_synthetic_regimes_feed_persisted_rows_into_classifier_state(monkeypatch):

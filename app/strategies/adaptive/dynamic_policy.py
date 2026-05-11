@@ -413,14 +413,11 @@ class DynamicPolicyEngine:
         return effective
 
     def _profile_for_regime(self, regime: Regime) -> Mapping[str, Any]:
-        if regime in self.config.explicit_profiles:
-            return self.config.profiles.get(regime) or {}
-        profile = self.config.profiles.get(regime)
-        if profile:
-            return profile
         if regime in {Regime.TRENDING_UP, Regime.TRENDING_DOWN}:
+            if regime in self.config.explicit_profiles:
+                return self.config.profiles.get(regime) or {}
             return self.config.profiles.get(Regime.TRENDING) or {}
-        return profile or {}
+        return self.config.profiles.get(regime) or {}
 
     def _apply_computed_overrides(
         self,
