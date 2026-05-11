@@ -71,6 +71,7 @@ def test_regime_trending_down_when_price_and_di_are_bearish():
             di_spread=10.0,
             plus_di=12.0,
             minus_di=28.0,
+            ema_slope=-0.01,
             ema_value=101.0,
             last_price=100.0,
         )
@@ -94,6 +95,27 @@ def test_regime_di_cross_with_low_adx_is_not_directional_trending():
         )
     )
     assert reg == Regime.NORMAL
+
+
+def test_regime_direction_falls_back_when_ema_slope_disagrees():
+    clf = RegimeClassifier(RegimeThresholds(hold_bars=1))
+    ts = datetime(2025, 1, 1, 9, 30, tzinfo=timezone.utc)
+
+    up = clf.update(
+        _ctx(
+            ts=ts,
+            atr_norm=1.1,
+            adx14=30.0,
+            di_spread=10.0,
+            plus_di=28.0,
+            minus_di=12.0,
+            ema_slope=-0.01,
+            ema_value=99.0,
+            last_price=100.0,
+        )
+    )
+
+    assert up == Regime.TRENDING
 
 
 def test_regime_choppy_when_adx_low():

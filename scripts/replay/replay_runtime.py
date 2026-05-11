@@ -274,6 +274,11 @@ def load_bars_from_postgres(
     synthetic_counts: Dict[str, int] = {}
     if str(strategy_id or "") == "exclusive_nifty_ce_buy":
         synthetic_counts.update(_backfill_exclusive_ce_ema(rows))
+    _precompute_derived_indicator_history(
+        rows,
+        strategy_id=strategy_id,
+        strategy_params=strategy_params,
+    )
     synthetic_counts.update(_attach_synthetic_regimes(rows))
 
     profile = {
@@ -332,7 +337,15 @@ def _replay_regime_classifier_versions(
     params = strategy_params if isinstance(strategy_params, dict) else {}
     policy_cfg = parse_dynamic_policy_config(params.get("dynamic_policy") or {})
     if policy_cfg.enabled and policy_cfg.policy_hash:
-        return (f"{CLASSIFIER_VERSION}:{policy_cfg.policy_hash}", CLASSIFIER_VERSION)
+        try:
+            ema_period = max(2, int(params.get("ema_period", 20) or 20))
+        except (TypeError, ValueError):
+            ema_period = 20
+        return (
+            f"{CLASSIFIER_VERSION}:{policy_cfg.policy_hash}:ema{ema_period}",
+            f"{CLASSIFIER_VERSION}:{policy_cfg.policy_hash}",
+            CLASSIFIER_VERSION,
+        )
     return (CLASSIFIER_VERSION,)
 
 

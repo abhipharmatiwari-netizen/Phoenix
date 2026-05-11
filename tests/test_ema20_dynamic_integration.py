@@ -115,7 +115,7 @@ def test_dynamic_mode_on_changes_effective_params_by_regime(monkeypatch):
     # Warm up ATR median, then allow entry under directional TRENDING regime.
     for i in range(60):
         candle = _make_candle(base_ts + timedelta(minutes=5 * i), 90.0, open_=90.0)
-        strategy.on_bar("NG_FUT", 300, candle, _bar_indicators())
+        strategy.on_bar("NG_FUT", 300, candle, _bar_indicators(ema=100.0 - (i * 0.05)))
         if strategy.position:
             break
 
@@ -199,7 +199,7 @@ def test_dynamic_metrics_emit_with_labels(monkeypatch):
     base_ts = datetime(2025, 1, 1, 4, 0, tzinfo=timezone.utc)
     for i in range(60):
         candle = _make_candle(base_ts + timedelta(minutes=5 * i), 90.0, open_=90.0)
-        strategy.on_bar("NG_FUT", 300, candle, _bar_indicators())
+        strategy.on_bar("NG_FUT", 300, candle, _bar_indicators(ema=100.0 - (i * 0.05)))
         if strategy.position:
             break
 

@@ -3184,7 +3184,7 @@ def stream_multi_instruments(
                 ema_period = int(getattr(instance, "ema_period", 20) or 20)
             except (TypeError, ValueError):
                 ema_period = 20
-            specs[f"{CLASSIFIER_VERSION}:{suffix}"] = (
+            specs[f"{CLASSIFIER_VERSION}:{suffix}:ema{max(2, ema_period)}"] = (
                 getattr(policy_cfg, "thresholds", None),
                 max(2, ema_period),
             )

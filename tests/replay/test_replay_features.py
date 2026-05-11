@@ -557,7 +557,8 @@ def test_replay_regime_versions_prefer_dynamic_policy_hash():
     )
 
     assert versions[0].startswith(f"{replay_runtime_mod.CLASSIFIER_VERSION}:")
-    assert versions[1] == replay_runtime_mod.CLASSIFIER_VERSION
+    assert versions[0].endswith(":ema20")
+    assert versions[-1] == replay_runtime_mod.CLASSIFIER_VERSION
 
 
 def test_next_bar_open_fill_uses_following_bar_open(monkeypatch):

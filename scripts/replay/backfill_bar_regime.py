@@ -48,6 +48,14 @@ def main() -> None:
     if not args.dsn:
         print("ERROR: --dsn or REPLAY_PG_DSN is required", file=sys.stderr)
         raise SystemExit(1)
+    if str(args.classifier_version) != CLASSIFIER_VERSION:
+        print(
+            "ERROR: policy-specific classifier versions require policy thresholds and EMA period; "
+            "backfill_bar_regime currently supports only "
+            f"{CLASSIFIER_VERSION!r}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
     table, _ = normalize_table_name(args.table)
     regime_table, _ = regime_sidecar_table_name(args.table)

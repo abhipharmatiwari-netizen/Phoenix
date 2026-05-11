@@ -128,11 +128,12 @@ class RegimeClassifier:
             or ctx.minus_di is None
             or ctx.last_price is None
             or ctx.ema_value is None
+            or ctx.ema_slope is None
         ):
             return None
-        if ctx.last_price > ctx.ema_value and ctx.plus_di > ctx.minus_di:
+        if ctx.last_price > ctx.ema_value and ctx.plus_di > ctx.minus_di and ctx.ema_slope > 0:
             return Regime.TRENDING_UP
-        if ctx.last_price < ctx.ema_value and ctx.minus_di > ctx.plus_di:
+        if ctx.last_price < ctx.ema_value and ctx.minus_di > ctx.plus_di and ctx.ema_slope < 0:
             return Regime.TRENDING_DOWN
         return None
 
