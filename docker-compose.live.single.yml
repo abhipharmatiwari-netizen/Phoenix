@@ -114,7 +114,13 @@ x-live-backend-env: &live-backend-env
 
   ENABLE_RISK_CHECKS: "true"
   RISK_ENABLE_DAILY_LOSS: "true"
-  RISK_MAX_DAILY_LOSS: "${RISK_MAX_DAILY_LOSS:-2000}"
+  # Issue #221: ``RISK_MAX_DAILY_LOSS`` must be set explicitly per deployment
+  # — no fallback. A ₹2000 placeholder default tripped the kill switch on a
+  # ~1.6-point adverse move on a single NG_FUT lot on 2026-05-08. Operators
+  # must size this per capital tier (see docs/runbooks/oci_live_deployment.md).
+  # LIVE startup additionally fails closed if the value is below
+  # RISK_MAX_DAILY_LOSS_LIVE_FLOOR (default ₹5,000).
+  RISK_MAX_DAILY_LOSS: "${RISK_MAX_DAILY_LOSS:?Set RISK_MAX_DAILY_LOSS (e.g. 10000 for a small account; see docs/runbooks/oci_live_deployment.md)}"
   RISK_FAIL_OPEN_ON_MISSING_PNL: "false"
 
   ENABLE_PROFIT_CHECKS: "true"

@@ -690,6 +690,36 @@ def validate_runtime_startup_settings(
             )
         if not _positive_float(getattr(settings, "risk_max_daily_loss", None), minimum=0.0):
             errors.append("TRADE_MODE=LIVE requires RISK_MAX_DAILY_LOSS > 0")
+        else:
+            # Issue #221: a 2000 placeholder default tripped the kill switch
+            # on a ~1.6-point adverse move on a single NG_FUT lot on
+            # 2026-05-08, making the daily-loss limit operationally
+            # meaningless. Fail closed in LIVE if the value is below a
+            # sane floor so an obvious placeholder cannot ship to
+            # production. Floor is overridable for very small-capital
+            # accounts via RISK_MAX_DAILY_LOSS_LIVE_FLOOR (default
+            # ₹5,000 INR). Setting the floor to 0 disables the gate.
+            import os as _os
+            try:
+                _floor = float(
+                    str(_os.getenv("RISK_MAX_DAILY_LOSS_LIVE_FLOOR", "5000")).strip()
+                    or "5000"
+                )
+            except (TypeError, ValueError):
+                _floor = 5000.0
+            _configured = float(getattr(settings, "risk_max_daily_loss", 0) or 0)
+            if _floor > 0 and _configured < _floor:
+                errors.append(
+                    "TRADE_MODE=LIVE requires RISK_MAX_DAILY_LOSS >= "
+                    f"{_floor:.0f} (got {_configured:.0f}). A value below this "
+                    "floor trips the kill switch on routine intraday noise and "
+                    "is almost always a placeholder. Size per capital tier — "
+                    "see docs/runbooks/oci_live_deployment.md \"Sizing the "
+                    "daily-loss limit by capital tier\" (issue #221). To "
+                    "deliberately accept a sub-floor value (e.g. for a very "
+                    "small account), lower RISK_MAX_DAILY_LOSS_LIVE_FLOOR "
+                    "explicitly."
+                )
         if not _positive_float(getattr(settings, "profit_daily_target", None), minimum=0.0):
             errors.append("TRADE_MODE=LIVE requires PROFIT_DAILY_TARGET > 0")
         else:

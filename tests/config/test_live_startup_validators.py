@@ -50,7 +50,12 @@ def _base_live_env(**overrides):
         "CAPITAL_LIMITS_JSON": '{"tenant-1:A1":{"max_notional_per_order":500000}}',
         "ENABLE_RISK_CHECKS": "true",
         "RISK_ENABLE_DAILY_LOSS": "true",
-        "RISK_MAX_DAILY_LOSS": "2000",
+        # Issue #221: LIVE validator now requires
+        # RISK_MAX_DAILY_LOSS >= RISK_MAX_DAILY_LOSS_LIVE_FLOOR
+        # (default ₹5,000) so a sub-floor placeholder cannot ship.
+        # The previous 2000 fixture would now trip the new gate;
+        # bump to a sane sample value.
+        "RISK_MAX_DAILY_LOSS": "10000",
         "ENABLE_PROFIT_CHECKS": "true",
         "PROFIT_ENABLE_DAILY_TARGET": "true",
         "PROFIT_DAILY_TARGET": "10000",

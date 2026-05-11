@@ -34,7 +34,10 @@ def _valid_runtime_settings(**overrides):
         "capital_fail_closed_on_missing_notional_price": True,
         "enable_risk_checks": True,
         "risk_enable_daily_loss": True,
-        "risk_max_daily_loss": 1000.0,
+        # Issue #221: LIVE validator now floors RISK_MAX_DAILY_LOSS at
+        # RISK_MAX_DAILY_LOSS_LIVE_FLOOR (default ₹5,000). Use ₹10,000
+        # so the default fixture continues to pass LIVE-path tests.
+        "risk_max_daily_loss": 10000.0,
         "enable_profit_checks": True,
         "profit_enable_daily_target": True,
         "profit_daily_target": 1200.0,
