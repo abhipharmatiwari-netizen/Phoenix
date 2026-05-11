@@ -20,21 +20,31 @@ const Safety: React.FC = () => {
     let active = true;
     const fetchData = async () => {
       try {
-        const [healthResp, breakGlassResp, killSwitchResp] = await Promise.all([
+        const [healthResp, breakGlassResp, killSwitchResp, cancelAllResp] = await Promise.all([
           DefaultService.getHealthSummary(),
           AuditService.getAuditLog({ action: 'break_glass', limit: 20 }).catch(() => ({ events: [], count: 0 })),
           // Issue #238: surface every kill-switch toggle attempt in the
           // audit table so operators see who tripped/cleared/rearmed and
           // what reason was recorded.
           AuditService.getAuditLog({ resource_type: 'kill_switch', limit: 50 }).catch(() => ({ events: [], count: 0 })),
+          // PR #240 round-1 review P2: cancel-all emits
+          // ``resource_type=broker_orders`` (not kill_switch) so it must
+          // be queried separately; otherwise bulk cancel attempts are
+          // missing from the Safety Audit Trail even though the runbook
+          // says they are merged there.
+          AuditService.getAuditLog({ resource_type: 'broker_orders', limit: 50 }).catch(() => ({ events: [], count: 0 })),
         ]);
         if (active) {
           setHealth(healthResp);
-          // Merge the two audit feeds; de-duplicate by audit_id when
+          // Merge the audit feeds; de-duplicate by audit_id when
           // present, otherwise by timestamp+action+resource_id.
           const merged: AuditEvent[] = [];
           const seen = new Set<string>();
-          [...(killSwitchResp.events || []), ...(breakGlassResp.events || [])].forEach((e) => {
+          [
+            ...(killSwitchResp.events || []),
+            ...(cancelAllResp.events || []),
+            ...(breakGlassResp.events || []),
+          ].forEach((e) => {
             const key = (e as { audit_id?: string }).audit_id
               || `${e.timestamp}|${e.action}|${e.resource_id}`;
             if (seen.has(key)) return;

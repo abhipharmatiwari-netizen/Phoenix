@@ -1260,7 +1260,7 @@ def _get_kill_switch_manager():
         raise HTTPException(status_code=503, detail=f"KillSwitchManager unavailable: {exc}") from exc
 
 
-def _save_kill_switch_state(ksm) -> None:
+def _save_kill_switch_state(ksm, *, rollback=None) -> None:
     """Persist KillSwitchManager state to Postgres.
 
     Issue #238 acceptance: in LIVE mode the kill-switch state MUST be
@@ -1269,6 +1269,15 @@ def _save_kill_switch_state(ksm) -> None:
     rehydrate from Postgres and find INACTIVE — defeating the
     durability guarantee. Fail closed in LIVE so the API call surfaces
     a 500 to the dashboard instead of misleading the operator.
+
+    PR #240 round-1 review P1: when LIVE persistence fails the in-
+    memory record has ALREADY been mutated (the endpoints call
+    ``ksm.trip()`` / ``ksm.rearm()`` etc. before invoking this helper),
+    so a running process would still consider the kill switch e.g.
+    INACTIVE after a failed rearm. The optional ``rollback`` callable
+    is invoked BEFORE raising the 500 to restore the prior in-memory
+    state. Best-effort: any exception from the rollback is logged and
+    swallowed so the original HTTP 500 always reaches the operator.
 
     In non-LIVE modes the existing non-fatal warning is preserved so
     local/dev runs without a control-plane Postgres do not crash.
@@ -1286,16 +1295,46 @@ def _save_kill_switch_state(ksm) -> None:
                 "kill_switch.save_state failed in LIVE — failing closed "
                 "so the operator does not see a phantom toggle: %s", exc,
             )
+            if rollback is not None:
+                try:
+                    rollback()
+                except Exception as rb_exc:
+                    _log.getLogger(__name__).warning(
+                        "kill_switch state rollback after LIVE persist "
+                        "failure also failed (best-effort): %s", rb_exc,
+                    )
             raise HTTPException(
                 status_code=500,
                 detail=(
                     "Kill-switch state could not be persisted to Postgres. "
-                    "The toggle has NOT taken durable effect. Resolve the "
-                    "control-plane outage and retry. "
-                    f"Underlying error: {exc}"
+                    "The toggle has NOT taken durable effect — in-memory "
+                    "state has been rolled back. Resolve the control-plane "
+                    f"outage and retry. Underlying error: {exc}"
                 ),
             ) from exc
         _log.getLogger(__name__).warning("kill_switch.save_state failed (non-fatal): %s", exc)
+
+
+def _kill_switch_rollback_factory(ksm, scope, scope_id):
+    """Capture the current in-memory ``KillSwitchRecord`` for the given
+    (scope, scope_id) and return a callable that restores it.
+
+    PR #240 round-1 review P1: used by trip / rearm / clear endpoints
+    so an LIVE persist failure can undo the in-memory mutation before
+    surfacing the 500.
+    """
+    key = ksm._key(scope, scope_id)  # KSM uses tuple(scope, scope_id) keys
+    import copy as _copy
+    prior_snapshot = _copy.deepcopy(ksm._records.get(key))
+
+    def _rollback() -> None:
+        with ksm._lock:
+            if prior_snapshot is None:
+                ksm._records.pop(key, None)
+            else:
+                ksm._records[key] = prior_snapshot
+
+    return _rollback
 
 
 class KillSwitchTripRequest(BaseModel):
@@ -1368,6 +1407,9 @@ def kill_switch_trip(
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
     ksm = _get_kill_switch_manager()
+    # PR #240 round-1 review P1: capture prior record so a LIVE persist
+    # failure can roll back the in-memory trip mutation.
+    rollback = _kill_switch_rollback_factory(ksm, scope, payload.scope_id)
     upgraded = False
     try:
         record = ksm.trip(
@@ -1414,7 +1456,7 @@ def kill_switch_trip(
                 ),
             )
         upgraded = True
-    _save_kill_switch_state(ksm)
+    _save_kill_switch_state(ksm, rollback=rollback)
     emit_audit_event(
         actor=ctx.caller,
         action=(
@@ -1482,6 +1524,7 @@ def kill_switch_request_clear(
             pass
         return KillSwitchClearValidation(passed=len(failures) == 0, failures=failures)
 
+    rollback = _kill_switch_rollback_factory(ksm, scope, payload.scope_id)
     try:
         record, validation = ksm.request_clear(clear_req, _validation_fn)
     except (KeyError, ValueError) as exc:
@@ -1491,7 +1534,7 @@ def kill_switch_request_clear(
             status_code=409,
             detail=f"Clear request denied: {validation.failures}",
         )
-    _save_kill_switch_state(ksm)
+    _save_kill_switch_state(ksm, rollback=rollback)
     emit_audit_event(
         actor=ctx.caller,
         action="kill_switch_request_clear",
@@ -1516,11 +1559,12 @@ def kill_switch_confirm_clear(
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
     ksm = _get_kill_switch_manager()
+    rollback = _kill_switch_rollback_factory(ksm, scope, payload.scope_id)
     try:
         record = ksm.confirm_clear(scope, payload.scope_id)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-    _save_kill_switch_state(ksm)
+    _save_kill_switch_state(ksm, rollback=rollback)
     emit_audit_event(
         actor=ctx.caller,
         action="kill_switch_confirm_clear",
@@ -1577,11 +1621,12 @@ def kill_switch_rearm(
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
     ksm = _get_kill_switch_manager()
+    rollback = _kill_switch_rollback_factory(ksm, scope, payload.scope_id)
     try:
         record = ksm.rearm(scope, payload.scope_id, actor=ctx.caller)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-    _save_kill_switch_state(ksm)
+    _save_kill_switch_state(ksm, rollback=rollback)
     emit_audit_event(
         actor=ctx.caller,
         action="kill_switch_rearm",
@@ -1665,8 +1710,22 @@ async def kill_switch_cancel_all(
 
     # Collect target runners. When broker_account_id is provided, scope
     # to that single account; otherwise iterate every registered runner.
+    # PR #240 round-1 review P1: enforce broker-account scoping. A
+    # bearer-authenticated admin with a restricted ``broker_account_ids``
+    # entitlement must not be able to cancel orders for accounts they
+    # cannot otherwise manage — whether by omitting the field (which
+    # would otherwise expand to every registered runner) or by passing
+    # an out-of-scope id explicitly.
     target_runner_ids: list = []
     if payload.broker_account_id:
+        if not ctx.can_access_broker_account(payload.broker_account_id):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"broker_account_id {payload.broker_account_id!r} is "
+                    "outside this admin's scope"
+                ),
+            )
         runner = hub.get_runner(payload.broker_account_id)
         if runner is None:
             raise HTTPException(
@@ -1678,22 +1737,40 @@ async def kill_switch_cancel_all(
             )
         target_runner_ids = [payload.broker_account_id]
     else:
-        target_runner_ids = list(hub.list_runner_ids())
+        target_runner_ids = [
+            acct_id for acct_id in hub.list_runner_ids()
+            if ctx.can_access_broker_account(str(acct_id))
+        ]
 
     per_account_results: list[dict] = []
     aggregate_attempted = 0
     aggregate_cancelled = 0
     aggregate_failed = 0
     aggregate_skipped = 0
+    aggregate_raced_filled = 0
 
-    # ``_TERMINAL_BROKER_STATUSES`` lists statuses for which there is
-    # nothing left to cancel — we count those as "skipped" rather than
-    # attempting a no-op cancel that the broker would reject anyway.
+    # Statuses for which there is nothing left to cancel — counted as
+    # ``skipped`` rather than attempting a no-op cancel.
     _TERMINAL_BROKER_STATUSES = {
         "FILLED", "FULL", "COMPLETE", "EXECUTED",
         "CANCELLED", "CANCELED", "CANCEL", "EXPIRED",
         "REJECTED", "REJECT", "FAILED", "FAILURE", "ERROR",
     }
+    _CANCELLED_RESPONSE_STATUSES = {"CANCELLED", "CANCELED", "CANCEL"}
+    # PR #240 round-1 review P2: a broker that races the cancel with a
+    # FILL is NOT a successful cancel — it changes exposure. Track
+    # these separately so the operator can see they may need to flatten.
+    _FILLED_RACE_RESPONSE_STATUSES = {"FILLED", "FULL", "COMPLETE", "EXECUTED"}
+    # PR #240 round-1 review P1: only treat genuinely-idempotent
+    # rejections (already-cancelled / unknown order) as ``skipped``.
+    # The Angel adapter returns ``status="ERROR"`` for genuine cancel
+    # failures (e.g. ``cancel_failed:...``); those MUST surface as
+    # failed so the dashboard doesn't show ``failed=0`` during an
+    # incident.
+    _IDEMPOTENT_REJECTION_STATUSES = {
+        "REJECTED", "REJECT", "EXPIRED",
+    }
+    _CANCEL_FAILURE_STATUSES = {"FAILED", "FAILURE", "ERROR"}
 
     for acct_id in target_runner_ids:
         runner = hub.get_runner(acct_id)
@@ -1705,16 +1782,11 @@ async def kill_switch_cancel_all(
                 "cancelled": 0,
                 "failed": 0,
                 "skipped": 0,
+                "raced_filled": 0,
                 "errors": [],
             })
             continue
         broker_client = getattr(runner, "_broker_client", None)
-        last_orders = list(getattr(runner, "_last_orders", None) or [])
-        attempted = 0
-        cancelled = 0
-        failed = 0
-        skipped = 0
-        errors: list[dict] = []
         cancel_fn = getattr(broker_client, "cancel_order", None)
         if not callable(cancel_fn):
             per_account_results.append({
@@ -1724,14 +1796,66 @@ async def kill_switch_cancel_all(
                 "cancelled": 0,
                 "failed": 0,
                 "skipped": 0,
+                "raced_filled": 0,
                 "errors": [],
             })
             continue
-        for order in last_orders:
-            broker_order_id = str(getattr(order, "broker_order_id", "") or "")
-            order_status = str(getattr(order, "status", "") or "").strip().upper()
-            symbol = getattr(order, "symbol", None)
-            if not broker_order_id:
+
+        # PR #240 round-1 review P1: refresh broker orders before
+        # iterating so the cancel-all does not work from a 90s-stale
+        # ``_last_orders`` cache. Fall back to the cached list when the
+        # broker refresh fails so we still attempt cancellation of
+        # whatever we last knew about.
+        get_orders_fn = getattr(broker_client, "get_orders", None)
+        live_orders = None
+        refresh_error: Optional[str] = None
+        if callable(get_orders_fn):
+            try:
+                live_orders = list(await get_orders_fn() or [])
+                runner._last_orders = live_orders
+            except Exception as exc:
+                refresh_error = repr(exc)
+                live_orders = None
+        if live_orders is None:
+            live_orders = list(getattr(runner, "_last_orders", None) or [])
+
+        attempted = 0
+        cancelled = 0
+        failed = 0
+        skipped = 0
+        raced_filled = 0
+        errors: list[dict] = []
+        if refresh_error is not None:
+            errors.append({"broker_orders_refresh_error": refresh_error})
+
+        for order in live_orders:
+            # PR #240 round-1 review P1: ``OrderStatus.order_id`` is the
+            # broker id; the field ``broker_order_id`` does not exist
+            # on this dataclass. Fall back to several known aliases for
+            # broker-shaped dicts.
+            order_id = ""
+            for alias in ("order_id", "broker_order_id", "orderid", "id"):
+                candidate = getattr(order, alias, None)
+                if candidate is None and isinstance(order, dict):
+                    candidate = order.get(alias)
+                if candidate:
+                    order_id = str(candidate).strip()
+                    if order_id:
+                        break
+            order_status = str(getattr(order, "status", None) or (
+                order.get("status") if isinstance(order, dict) else ""
+            ) or "").strip().upper()
+            symbol = getattr(order, "symbol", None) or (
+                order.get("symbol") if isinstance(order, dict) else None
+            )
+            # PR #240 round-1 review P2: pass the order's broker
+            # ``variety`` (NORMAL / AMO / STOPLOSS / ...) so the
+            # broker adapter does not default to NORMAL and fail to
+            # cancel AMO/STOPLOSS orders.
+            variety = getattr(order, "variety", None) or (
+                order.get("variety") if isinstance(order, dict) else None
+            )
+            if not order_id:
                 skipped += 1
                 continue
             if order_status in _TERMINAL_BROKER_STATUSES:
@@ -1739,55 +1863,83 @@ async def kill_switch_cancel_all(
                 continue
             attempted += 1
             try:
-                resp = await cancel_fn(broker_order_id, symbol=symbol)
+                resp = await cancel_fn(order_id, symbol=symbol, variety=variety)
             except Exception as exc:
                 failed += 1
                 errors.append({
-                    "broker_order_id": broker_order_id,
+                    "order_id": order_id,
                     "error": repr(exc),
                 })
                 continue
             resp_status = str(getattr(resp, "status", "") or "").strip().upper()
-            if resp_status in {"CANCELLED", "CANCELED", "CANCEL"}:
+            if resp_status in _CANCELLED_RESPONSE_STATUSES:
                 cancelled += 1
-            elif resp_status in {"FILLED", "FULL", "COMPLETE", "EXECUTED"}:
-                # Already terminal — broker raced us; idempotent OK.
-                cancelled += 1
-            elif resp_status in {"REJECTED", "REJECT", "FAILED", "FAILURE", "ERROR"}:
-                # Idempotent: a cancel of an already-cancelled or
-                # unknown order frequently yields REJECTED. Treat as
-                # skipped so an operator-driven double-click doesn't
-                # surface as a hard failure.
+            elif resp_status in _FILLED_RACE_RESPONSE_STATUSES:
+                # PR #240 round-1 review P2: broker raced us with a
+                # fill — NOT a successful cancel; the operator may
+                # need to flatten this new exposure.
+                raced_filled += 1
+                errors.append({
+                    "order_id": order_id,
+                    "broker_status": resp_status,
+                    "note": (
+                        "filled before cancel could land — new exposure "
+                        "may need manual flatten"
+                    ),
+                })
+            elif resp_status in _IDEMPOTENT_REJECTION_STATUSES:
+                # Cancel of already-cancelled / unknown order; broker
+                # frequently returns REJECTED for these. Idempotent
+                # success — operator double-click should not raise.
                 resp_message = str(getattr(resp, "message", "") or "")
                 skipped += 1
                 if resp_message:
                     errors.append({
-                        "broker_order_id": broker_order_id,
+                        "order_id": order_id,
                         "broker_status": resp_status,
                         "broker_message": resp_message,
                     })
-            else:
-                # Unknown / pending status from the broker.
+            elif resp_status in _CANCEL_FAILURE_STATUSES:
+                # PR #240 round-1 review P1: real broker cancel failure.
+                # Must NOT be silently treated as idempotent.
                 failed += 1
                 errors.append({
-                    "broker_order_id": broker_order_id,
+                    "order_id": order_id,
+                    "broker_status": resp_status,
+                    "broker_message": str(getattr(resp, "message", "") or ""),
+                })
+            else:
+                # Unknown / pending status — be conservative, count
+                # as failed so the operator investigates.
+                failed += 1
+                errors.append({
+                    "order_id": order_id,
                     "broker_status": resp_status or "unknown",
                 })
+        per_account_status = (
+            "ok" if (failed == 0 and raced_filled == 0) else "partial"
+        )
         per_account_results.append({
             "broker_account_id": str(acct_id),
-            "status": "ok" if failed == 0 else "partial",
+            "status": per_account_status,
             "attempted": attempted,
             "cancelled": cancelled,
             "failed": failed,
             "skipped": skipped,
+            "raced_filled": raced_filled,
             "errors": errors[:20],  # cap for payload size
         })
         aggregate_attempted += attempted
         aggregate_cancelled += cancelled
         aggregate_failed += failed
         aggregate_skipped += skipped
+        aggregate_raced_filled += raced_filled
 
-    overall_status = "ok" if aggregate_failed == 0 else "partial"
+    overall_status = (
+        "ok"
+        if (aggregate_failed == 0 and aggregate_raced_filled == 0)
+        else "partial"
+    )
     emit_audit_event(
         actor=ctx.caller,
         action="kill_switch_cancel_all",
@@ -1800,6 +1952,7 @@ async def kill_switch_cancel_all(
             "cancelled": aggregate_cancelled,
             "failed": aggregate_failed,
             "skipped": aggregate_skipped,
+            "raced_filled": aggregate_raced_filled,
             "overall_status": overall_status,
             "per_account": [
                 {
@@ -1809,6 +1962,7 @@ async def kill_switch_cancel_all(
                     "cancelled": r["cancelled"],
                     "failed": r["failed"],
                     "skipped": r["skipped"],
+                    "raced_filled": r["raced_filled"],
                 }
                 for r in per_account_results
             ],
@@ -1820,6 +1974,7 @@ async def kill_switch_cancel_all(
         "cancelled": aggregate_cancelled,
         "failed": aggregate_failed,
         "skipped": aggregate_skipped,
+        "raced_filled": aggregate_raced_filled,
         "per_account": per_account_results,
     }
 

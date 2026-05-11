@@ -525,6 +525,10 @@ export interface KillSwitchCancelAllPerAccount {
   cancelled: number;
   failed: number;
   skipped: number;
+  // PR #240 round-1 review P2: broker-side fill race during cancel —
+  // counted separately from ``cancelled`` because it represents NEW
+  // exposure that may need manual flattening.
+  raced_filled?: number;
   errors: Array<Record<string, unknown>>;
 }
 
@@ -534,6 +538,7 @@ export interface KillSwitchCancelAllResponse {
   cancelled: number;
   failed: number;
   skipped: number;
+  raced_filled?: number;
   per_account: KillSwitchCancelAllPerAccount[];
 }
 

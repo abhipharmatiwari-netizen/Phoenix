@@ -128,6 +128,30 @@ const KillSwitchPanel: React.FC = () => {
     });
   };
 
+  // PR #240 round-1 review P2: dedicated handler for the "Upgrade
+  // SOFT → HARD" button. The generic trip dialog defaulted ``hard``
+  // to false, which either 409s on an existing SOFT trip or
+  // accidentally downgrades a HARD trip back to SOFT. This handler
+  // forces ``block_exits=true`` and hides the SOFT/HARD checkbox so
+  // confirming the dialog reliably upgrades to HARD.
+  const onUpgradeToHard = () => {
+    setConfirmDialog({
+      title: 'Upgrade SOFT → HARD',
+      prompt: 'Switches the existing TRIPPED kill switch from SOFT (entries-only) to HARD (blocks ALL orders including exits). Operator must manually flatten broker positions after this.',
+      reasonLabel: 'Reason',
+      hardOption: false,
+      onConfirm: async (reason) => {
+        await KillSwitchService.trip({
+          scope: 'GLOBAL',
+          scope_id: 'GLOBAL',
+          reason,
+          block_exits: true,
+        });
+        setActionFeedback('Kill switch upgraded to HARD. All orders now blocked.');
+      },
+    });
+  };
+
   const onRequestClear = () => {
     setConfirmDialog({
       title: 'Request CLEAR for GLOBAL kill switch',
@@ -185,15 +209,21 @@ const KillSwitchPanel: React.FC = () => {
   };
 
   const onCancelAll = () => {
+    // PR #240 round-1 review P2: clear any stale prior cancel-all
+    // result BEFORE opening the dialog so an operator doesn't see a
+    // green summary next to a red error from this attempt.
+    setCancelResult(null);
     setConfirmDialog({
       title: 'Cancel ALL open broker orders',
-      prompt: 'Iterates every registered runner and cancels every non-terminal order via the broker adapter. Idempotent — already-cancelled orders are skipped, not failed.',
+      prompt: 'Iterates every registered runner and cancels every non-terminal order via the broker adapter. Idempotent — already-cancelled orders are skipped, not failed. Broker-side FILL races are reported separately as raced_filled so the operator knows new exposure may need manual flattening.',
       reasonLabel: 'Reason',
       onConfirm: async (reason) => {
         const resp = await KillSwitchService.cancelAll({ reason });
         setCancelResult(resp);
         setActionFeedback(
-          `Cancel-all ${resp.status}: attempted=${resp.attempted}, cancelled=${resp.cancelled}, failed=${resp.failed}, skipped=${resp.skipped}.`,
+          `Cancel-all ${resp.status}: attempted=${resp.attempted}, `
+          + `cancelled=${resp.cancelled}, failed=${resp.failed}, `
+          + `skipped=${resp.skipped}, raced_filled=${resp.raced_filled ?? 0}.`,
         );
       },
     });
@@ -312,14 +342,19 @@ const KillSwitchPanel: React.FC = () => {
         )}
         {globalState === 'TRIPPED' && (
           <>
-            <button
-              type="button"
-              onClick={onTrip}
-              disabled={busy}
-              style={btnStyle('#dc2626')}
-            >
-              Upgrade SOFT → HARD
-            </button>
+            {/* PR #240 round-1 review P2: only show the upgrade
+                button when the current trip is SOFT — once HARD,
+                upgrading again is a no-op / risk of downgrade. */}
+            {!globalRecord?.block_exits && (
+              <button
+                type="button"
+                onClick={onUpgradeToHard}
+                disabled={busy}
+                style={btnStyle('#dc2626')}
+              >
+                Upgrade SOFT → HARD
+              </button>
+            )}
             <button
               type="button"
               onClick={onRequestClear}
@@ -375,14 +410,28 @@ const KillSwitchPanel: React.FC = () => {
           <div>
             <strong>Last cancel-all result:</strong> attempted=
             {cancelResult.attempted}, cancelled={cancelResult.cancelled},
-            failed={cancelResult.failed}, skipped={cancelResult.skipped}
+            failed={cancelResult.failed}, skipped={cancelResult.skipped},
+            raced_filled={cancelResult.raced_filled ?? 0}
           </div>
+          {(cancelResult.raced_filled ?? 0) > 0 && (
+            <div style={{
+              marginTop: '0.25rem',
+              padding: '0.25rem 0.5rem',
+              borderLeft: '3px solid #f59e0b',
+              backgroundColor: '#fffbeb',
+              color: '#92400e',
+            }}>
+              <strong>⚠ {cancelResult.raced_filled} order(s) filled before the cancel landed.</strong>
+              {' '}New exposure may need manual flattening — check per-account details below.
+            </div>
+          )}
           {cancelResult.per_account.length > 0 && (
             <ul style={{ margin: '0.25rem 0 0 1rem', padding: 0 }}>
               {cancelResult.per_account.map((a) => (
                 <li key={a.broker_account_id}>
                   {a.broker_account_id}: {a.status} (att={a.attempted},
-                  ok={a.cancelled}, fail={a.failed}, skip={a.skipped})
+                  ok={a.cancelled}, fail={a.failed}, skip={a.skipped},
+                  raced_filled={a.raced_filled ?? 0})
                 </li>
               ))}
             </ul>
