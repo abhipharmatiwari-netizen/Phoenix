@@ -177,6 +177,7 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
         self._order_identity_by_label: Dict[str, Dict[str, Optional[str]]] = {}
         self.last_5m_closes: List[float] = []
         self.open_spreads: Dict[str, OpenSpread] = {}
+        self._spread_id_seq = 0
         self.timeframe_seconds = 300  # 5m
         self._exit_in_flight_spreads: set[str] = set()
         self._next_exit_retry_mono_by_spread: Dict[str, float] = {}
@@ -210,12 +211,15 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
         self._restore_spreads_from_risk_manager()
 
     # ---- base hooks ----
+    def _now_ist(self) -> datetime:
+        return datetime.now(tz=IST)
+
     # Handle tick updates and manage exits.
     def on_tick(self, label: str, ltp: float) -> None:
         if not hasattr(self, "last_price"):
             self.last_price = {}
         self.last_price[label] = ltp
-        now = datetime.now(tz=IST)
+        now = self._now_ist()
         if label == self.underlying_label:
             self._maybe_manage_exits(now, underlying_close=ltp)
 
@@ -901,7 +905,7 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
             entry_time=(
                 min(entry_times).astimezone(IST)
                 if entry_times
-                else datetime.now(tz=IST)
+                else self._now_ist()
             ),
             expiry=expiry,
             short_exit_done=sell_item is None,
@@ -910,7 +914,7 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
 
     # Find the nearest valid expiry date for NIFTY options.
     def _current_expiry_and_chain(self) -> Optional[date]:
-        today = datetime.now(tz=IST).date()
+        today = self._now_ist().date()
         expiries = []
         for meta in self.instrument_meta.values():
             if str(meta.get("underlying", "")).upper() != "NIFTY":
@@ -1562,8 +1566,12 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
                 long_price_set=long_price is not None,
             )
             return False
-        entry_time = datetime.now(tz=IST)
-        spread_id = f"{spread_type}_{short_label}_{long_label}_{int(entry_time.timestamp())}"
+        entry_time = self._now_ist()
+        self._spread_id_seq += 1
+        spread_id = (
+            f"{spread_type}_{short_label}_{long_label}_"
+            f"{int(entry_time.timestamp() * 1000)}_{self._spread_id_seq}"
+        )
         short_symbol, short_exchange, short_token = self._resolve_order_identity(short_label)
         long_symbol, long_exchange, long_token = self._resolve_order_identity(long_label)
         max_loss_rupees = (width_pts - credit) * qty

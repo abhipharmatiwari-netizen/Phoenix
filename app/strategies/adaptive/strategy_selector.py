@@ -396,6 +396,10 @@ class StrategySelector:
             selected = regime_map.get(regime)
             if selected is not None:
                 return selected
+            if regime in {Regime.TRENDING_UP, Regime.TRENDING_DOWN}:
+                selected = regime_map.get(Regime.TRENDING)
+                if selected is not None:
+                    return selected
         return None
 
 

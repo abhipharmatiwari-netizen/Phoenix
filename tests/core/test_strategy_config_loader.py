@@ -101,6 +101,42 @@ def test_loader_accepts_strategy_instrument_override_rows(tmp_path):
     assert cfg["strategies"][0]["instruments"][1] == "BANKNIFTY_IDX"
 
 
+def test_loader_accepts_directional_regime_keys_in_selector_and_profiles(tmp_path):
+    mod = importlib.import_module(MODULE_PATH)
+    yaml_path = tmp_path / "strategy_env_directional_regime.yaml"
+    yaml_path.write_text(
+        "strategies:\n"
+        "  - name: ema20_strategy\n"
+        "    enabled: true\n"
+        "    instruments: [\"NIFTY_IDX\"]\n"
+        "    params:\n"
+        "      dynamic_policy:\n"
+        "        enabled: true\n"
+        "        policy_id: test_policy\n"
+        "        profiles:\n"
+        "          TRENDING_UP:\n"
+        "            qty_mult: 1.1\n"
+        "          TRENDING_DOWN:\n"
+        "            qty_mult: 0.8\n"
+        "strategy_selection:\n"
+        "  enabled: true\n"
+        "  mapping:\n"
+        "    NIFTY_IDX:\n"
+        "      TRENDING_UP: [\"exclusive_nifty_ce_buy\"]\n"
+        "      TRENDING_DOWN: [\"put_momentum_scalper\"]\n",
+        encoding="utf-8",
+    )
+
+    cfg = mod.load_strategy_env_from_yaml(yaml_path)
+
+    profiles = cfg["strategies"][0]["params"]["dynamic_policy"]["profiles"]
+    assert "TRENDING_UP" in profiles
+    assert "TRENDING_DOWN" in profiles
+    assert cfg["strategy_selection"]["mapping"]["NIFTY_IDX"]["TRENDING_UP"] == [
+        "exclusive_nifty_ce_buy"
+    ]
+
+
 def test_loader_rejects_invalid_strategy_schema(tmp_path):
     mod = importlib.import_module(MODULE_PATH)
     yaml_path = tmp_path / "invalid_strategy_env.yaml"

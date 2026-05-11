@@ -2,6 +2,7 @@
 
 import csv
 import hashlib
+import json
 import logging
 import os
 import re
@@ -92,6 +93,7 @@ class BarPersister:
         self._bq_table_ref = None
         self._pg_conn = None
         self._pg_table_sql: Optional[str] = None
+        self._pg_regime_table_sql: Optional[str] = None
         self._pg_last_retention_prune_mono = 0.0
 
         if self.sqlite_path:
@@ -209,6 +211,9 @@ class BarPersister:
         return max(0.0, parsed)
 
     def _quoted_postgres_table(self) -> str:
+        return ".".join(f'"{part}"' for part in self._postgres_table_parts())
+
+    def _postgres_table_parts(self) -> tuple[str, ...]:
         raw = (self.postgres_table or "indicator_bars").strip()
         parts = [p for p in raw.split(".") if p]
         if not parts or len(parts) > 2:
@@ -216,7 +221,32 @@ class BarPersister:
         for part in parts:
             if not self._POSTGRES_NAME_PART.match(part):
                 raise ValueError(f"Invalid postgres table identifier: {part!r}")
-        return ".".join(f'"{part}"' for part in parts)
+        return tuple(parts)
+
+    def _postgres_regime_sidecar_parts(self) -> tuple[str, ...]:
+        parts = self._postgres_table_parts()
+        source_table = parts[-1]
+        if source_table == "indicator_bars":
+            sidecar_table = "bar_regime"
+        else:
+            sidecar_table = self._postgres_derived_identifier(source_table, "bar_regime")
+        return tuple([*parts[:-1], sidecar_table])
+
+    def _quoted_postgres_regime_sidecar_table(self) -> str:
+        return ".".join(f'"{part}"' for part in self._postgres_regime_sidecar_parts())
+
+    @classmethod
+    def _postgres_derived_identifier(cls, base: str, suffix: str) -> str:
+        candidate = f"{base}_{suffix}"
+        if len(candidate) <= cls._POSTGRES_IDENTIFIER_MAX_LEN:
+            return candidate
+        digest = hashlib.sha1(candidate.encode("ascii", "ignore")).hexdigest()[:8]
+        keep = cls._POSTGRES_IDENTIFIER_MAX_LEN - len(digest) - 1
+        return f"{candidate[:keep]}_{digest}"
+
+    def _postgres_regime_index_identifier(self, suffix: str) -> str:
+        sidecar_table = self._postgres_regime_sidecar_parts()[-1]
+        return self._postgres_derived_identifier(sidecar_table, suffix)
 
     @staticmethod
     def _quote_postgres_identifier(identifier: str) -> str:
@@ -290,6 +320,7 @@ class BarPersister:
             return
         try:
             self._pg_table_sql = self._quoted_postgres_table()
+            self._pg_regime_table_sql = self._quoted_postgres_regime_sidecar_table()
             self._pg_conn = connect_with_retry(
                 self.postgres_dsn,
                 autocommit=True,
@@ -373,11 +404,39 @@ class BarPersister:
                         self.postgres_retention_months,
                         self.postgres_retention_prune_interval_seconds,
                     )
+                try:
+                    cur.execute(
+                        f"""
+                        CREATE TABLE IF NOT EXISTS {self._pg_regime_table_sql} (
+                            bar_id BIGINT NOT NULL REFERENCES {self._pg_table_sql}(id) ON DELETE CASCADE,
+                            regime TEXT NOT NULL,
+                            classifier_version TEXT NOT NULL,
+                            signals JSONB,
+                            classified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                            PRIMARY KEY (bar_id, classifier_version)
+                        )
+                        """
+                    )
+                    cur.execute(
+                        f"""
+                        CREATE INDEX IF NOT EXISTS {self._quote_postgres_identifier(self._postgres_regime_index_identifier("classifier_ts"))}
+                        ON {self._pg_regime_table_sql} (classifier_version, classified_at DESC)
+                        """
+                    )
+                    cur.execute(
+                        f"""
+                        CREATE INDEX IF NOT EXISTS {self._quote_postgres_identifier(self._postgres_regime_index_identifier("regime_classifier_idx"))}
+                        ON {self._pg_regime_table_sql} (regime, classifier_version)
+                        """
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to ensure bar_regime table: %s", exc)
             self._maybe_prune_postgres_retention(force=True)
         except Exception as exc:
             logger.error("Failed to init Postgres indicator table: %s", exc)
             self._pg_conn = None
             self._pg_table_sql = None
+            self._pg_regime_table_sql = None
 
     # ---------- BigQuery ----------
 
@@ -544,6 +603,58 @@ class BarPersister:
         self._to_sqlite(row)
         self._to_postgres(row)
         self._to_bigquery(row)
+
+    def persist_regime(
+        self,
+        label: str,
+        timeframe_seconds: int,
+        candle,
+        *,
+        regime: str,
+        classifier_version: str,
+        signals: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not self._pg_conn or not self._pg_table_sql or not self._pg_regime_table_sql:
+            return
+        try:
+            ts_start = getattr(candle, "start_ts", None)
+            if hasattr(ts_start, "isoformat"):
+                ts_start_param = ts_start
+            else:
+                ts_start_param = str(ts_start or "")
+            with self._pg_conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    INSERT INTO {self._pg_regime_table_sql} (
+                        bar_id, regime, classifier_version, signals, classified_at
+                    )
+                    SELECT id, %s, %s, %s::jsonb, CURRENT_TIMESTAMP
+                    FROM {self._pg_table_sql}
+                    WHERE label = %s
+                      AND timeframe_seconds = %s
+                      AND ts_start = %s
+                    ON CONFLICT (bar_id, classifier_version) DO UPDATE SET
+                        regime = EXCLUDED.regime,
+                        signals = EXCLUDED.signals,
+                        classified_at = EXCLUDED.classified_at
+                    """,
+                    (
+                        str(regime),
+                        str(classifier_version),
+                        json.dumps(signals or {}, sort_keys=True, default=str),
+                        str(label),
+                        int(timeframe_seconds),
+                        ts_start_param,
+                    ),
+                )
+        except Exception:
+            logger.debug(
+                "Failed to persist bar regime label=%s tf=%s regime=%s",
+                label,
+                timeframe_seconds,
+                regime,
+                exc_info=True,
+            )
 
     def _to_csv(self, row: Dict[str, Any]) -> None:
         if not self.csv_path:

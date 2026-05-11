@@ -42,6 +42,62 @@ def test_strategy_selector_uses_mapping_and_max_active_limit():
     )
 
 
+def test_strategy_selector_directional_trending_falls_back_to_legacy_mapping():
+    cfg = StrategySelectorConfig.from_raw(
+        {
+            "enabled": True,
+            "max_active_per_underlying": 2,
+            "min_hold_seconds": 0,
+            "mapping": {
+                "NIFTY": {
+                    "TRENDING": ["put_momentum_scalper", "exclusive_nifty_ce_buy"],
+                }
+            },
+        }
+    )
+    selector = StrategySelector(cfg)
+
+    decision = selector.select(
+        underlying="NIFTY_IDX",
+        regime=Regime.TRENDING_DOWN,
+        allowed_strategies=["put_momentum_scalper", "exclusive_nifty_ce_buy"],
+        now=_ts(0),
+    )
+
+    assert decision.selected_strategies == (
+        "put_momentum_scalper",
+        "exclusive_nifty_ce_buy",
+    )
+    assert decision.reason == "mapping"
+
+
+def test_strategy_selector_uses_directional_mapping_when_present():
+    cfg = StrategySelectorConfig.from_raw(
+        {
+            "enabled": True,
+            "max_active_per_underlying": 2,
+            "min_hold_seconds": 0,
+            "mapping": {
+                "NIFTY": {
+                    "TRENDING": ["put_momentum_scalper", "exclusive_nifty_ce_buy"],
+                    "TRENDING_UP": ["exclusive_nifty_ce_buy"],
+                    "TRENDING_DOWN": ["put_momentum_scalper"],
+                }
+            },
+        }
+    )
+    selector = StrategySelector(cfg)
+
+    up = selector.select(
+        underlying="NIFTY_IDX",
+        regime=Regime.TRENDING_UP,
+        allowed_strategies=["put_momentum_scalper", "exclusive_nifty_ce_buy"],
+        now=_ts(0),
+    )
+
+    assert up.selected_strategies == ("exclusive_nifty_ce_buy",)
+
+
 def test_strategy_selector_honors_hold_window_before_switching():
     cfg = StrategySelectorConfig.from_raw(
         {

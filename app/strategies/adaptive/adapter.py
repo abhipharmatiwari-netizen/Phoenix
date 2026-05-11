@@ -216,7 +216,7 @@ class AdaptivePolicyAdapter:
             ),
         )
 
-        profile = self._policy_cfg.profiles.get(self._current_regime) or {}
+        profile = self._policy_engine._profile_for_regime(self._current_regime)
         self._selected_profile = dict(profile)
         extra_overrides = self._sanitize_extra_overrides(profile)
         effective.update(extra_overrides)

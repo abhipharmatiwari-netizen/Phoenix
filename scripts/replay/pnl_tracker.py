@@ -12,6 +12,7 @@ import io
 import json
 import logging
 import math
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -129,7 +130,7 @@ class PnLTracker:
     def __init__(self, fee_model: bool = True) -> None:
         self.fills: List[ReplayFill] = []
         self.trades: List[ReplayTrade] = []
-        self._open_positions: Dict[str, ReplayFill] = {}  # key: strategy_id:underlying
+        self._open_positions: Dict[str, deque[ReplayFill]] = {}
         self._trade_counter = 0
         self._fee_model = fee_model
 
@@ -141,12 +142,12 @@ class PnLTracker:
         self._trade_counter = 0
 
         for fill in fills:
-            pos_key = f"{fill.strategy_id}:{fill.underlying}"
+            pos_key = self._position_key(fill)
 
             if fill.purpose == "ENTRY":
-                self._open_positions[pos_key] = fill
+                self._open_positions.setdefault(pos_key, deque()).append(fill)
             elif fill.purpose == "EXIT":
-                entry_fill = self._open_positions.pop(pos_key, None)
+                entry_fill = self._pop_open_position(pos_key, fill)
                 if entry_fill is None:
                     logger.warning(
                         "EXIT fill without matching ENTRY: %s at %s",
@@ -160,13 +161,16 @@ class PnLTracker:
                 logger.warning("Unknown fill purpose: %s", fill.purpose)
 
         # Any open positions at end are unterminated trades
-        for pos_key, entry_fill in self._open_positions.items():
-            logger.info(
-                "Unterminated position: %s entered at %s (no exit fill)",
-                pos_key,
-                entry_fill.timestamp,
-            )
+        for pos_key, entries in self._open_positions.items():
+            for entry_fill in entries:
+                logger.info(
+                    "Unterminated position: %s entered at %s (no exit fill)",
+                    pos_key,
+                    entry_fill.timestamp,
+                )
 
+        self.trades = self._aggregate_spread_trades(self.trades)
+        self._renumber_trades(self.trades)
         return self.trades
 
     def _pair_fills(self, entry: ReplayFill, exit_fill: ReplayFill) -> ReplayTrade:
@@ -210,6 +214,7 @@ class PnLTracker:
         replay_ctx = {}
         if isinstance(entry.strategy_context, dict):
             replay_ctx = dict(entry.strategy_context.get("_replay") or {})
+        persisted_regime = str(replay_ctx.get("regime") or "").strip()
         adx_regime = "unknown"
         adx_val = replay_ctx.get("adx")
         try:
@@ -260,8 +265,148 @@ class PnLTracker:
             execution_mode=str(replay_ctx.get("fill_mode") or entry.execution_mode or ""),
             entry_time_bucket=str(replay_ctx.get("time_bucket") or ""),
             entry_time_of_day=str(replay_ctx.get("time_of_day") or ""),
-            entry_regime=f"{adx_regime}|{atr_regime}",
+            entry_regime=persisted_regime or f"{adx_regime}|{atr_regime}",
         )
+
+    @staticmethod
+    def _position_key(fill: ReplayFill) -> str:
+        strategy_id = str(fill.strategy_id)
+        underlying = str(fill.underlying)
+        replay_ctx = {}
+        if isinstance(fill.strategy_context, dict):
+            replay_ctx = dict(fill.strategy_context.get("_replay") or {})
+        label = (
+            str(replay_ctx.get("position_label") or "").strip()
+            or str(getattr(fill, "symbol", "") or "").strip()
+            or str(getattr(fill, "tag", "") or "").strip()
+        )
+        return f"{strategy_id}:{underlying}:{label}"
+
+    def _pop_open_position(self, pos_key: str, fill: ReplayFill) -> Optional[ReplayFill]:
+        queue = self._open_positions.get(pos_key)
+        if queue:
+            entry = queue.popleft()
+            if not queue:
+                self._open_positions.pop(pos_key, None)
+            return entry
+
+        fallback_key = self._fallback_exit_key(fill)
+        if fallback_key is None:
+            return None
+        queue = self._open_positions.get(fallback_key)
+        if not queue:
+            return None
+        entry = queue.popleft()
+        if not queue:
+            self._open_positions.pop(fallback_key, None)
+        return entry
+
+    def _fallback_exit_key(self, fill: ReplayFill) -> Optional[str]:
+        strategy_id = str(fill.strategy_id)
+        if strategy_id != "ema20_strategy":
+            return None
+        prefix = f"{strategy_id}:{fill.underlying}:"
+        candidates = [
+            key
+            for key, entries in self._open_positions.items()
+            if key.startswith(prefix) and entries
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
+    @staticmethod
+    def _spread_id_from_trade(trade: ReplayTrade) -> str:
+        if not isinstance(trade.strategy_context, dict):
+            return ""
+        spread_id = str(trade.strategy_context.get("spread_id") or "").strip()
+        if spread_id:
+            return spread_id
+        replay_ctx = trade.strategy_context.get("_replay")
+        if isinstance(replay_ctx, dict):
+            return str(replay_ctx.get("spread_id") or "").strip()
+        return ""
+
+    def _aggregate_spread_trades(self, trades: List[ReplayTrade]) -> List[ReplayTrade]:
+        spread_groups: Dict[tuple[str, str, str], List[ReplayTrade]] = {}
+        passthrough: List[ReplayTrade] = []
+        for trade in trades:
+            spread_id = self._spread_id_from_trade(trade)
+            if trade.strategy_id != "nifty_weekly_credit_spreads" or not spread_id:
+                passthrough.append(trade)
+                continue
+            spread_groups.setdefault(
+                (trade.strategy_id, trade.underlying, spread_id),
+                [],
+            ).append(trade)
+
+        aggregated = list(passthrough)
+        for (strategy_id, underlying, spread_id), legs in spread_groups.items():
+            if not legs:
+                continue
+            legs.sort(key=lambda item: (item.entry_time, item.exit_time or item.entry_time, item.trade_id))
+            first = legs[0]
+            last_exit = max(
+                (leg.exit_time for leg in legs if leg.exit_time is not None),
+                default=first.exit_time,
+            )
+            signed_entry_value = 0.0
+            signed_exit_debit = 0.0
+            total_qty = 0
+            for leg in legs:
+                qty = max(1, int(leg.quantity))
+                total_qty += qty
+                if leg.entry_side == "SELL":
+                    signed_entry_value += float(leg.entry_price) * qty
+                    signed_exit_debit += float(leg.exit_price or 0.0) * qty
+                else:
+                    signed_entry_value -= float(leg.entry_price) * qty
+                    signed_exit_debit -= float(leg.exit_price or 0.0) * qty
+            strategy_context = dict(first.strategy_context or {})
+            replay_ctx = dict(strategy_context.get("_replay") or {})
+            replay_ctx["spread_id"] = spread_id
+            replay_ctx["spread_legs"] = len(legs)
+            strategy_context["_replay"] = replay_ctx
+            strategy_context["spread_id"] = spread_id
+            aggregated.append(
+                ReplayTrade(
+                    trade_id=first.trade_id,
+                    strategy_id=strategy_id,
+                    underlying=underlying,
+                    entry_time=min(leg.entry_time for leg in legs),
+                    entry_price=signed_entry_value,
+                    entry_side="SPREAD",
+                    entry_tag=f"SPREAD_ENTRY:{spread_id}",
+                    exit_time=last_exit,
+                    exit_price=signed_exit_debit,
+                    exit_tag=f"SPREAD_EXIT:{spread_id}",
+                    exit_reason=first.exit_reason,
+                    quantity=max(1, total_qty),
+                    gross_pnl=sum(float(leg.gross_pnl) for leg in legs),
+                    fees=sum(float(leg.fees) for leg in legs),
+                    net_pnl=sum(float(leg.net_pnl) for leg in legs),
+                    duration_seconds=(
+                        (last_exit - min(leg.entry_time for leg in legs)).total_seconds()
+                        if last_exit is not None
+                        else 0.0
+                    ),
+                    r_multiple=None,
+                    entry_atr=first.entry_atr,
+                    strategy_context=strategy_context,
+                    execution_mode=first.execution_mode,
+                    entry_time_bucket=first.entry_time_bucket,
+                    entry_time_of_day=first.entry_time_of_day,
+                    entry_regime=first.entry_regime,
+                )
+            )
+
+        aggregated.sort(key=lambda item: (item.entry_time, item.exit_time or item.entry_time, item.trade_id))
+        return aggregated
+
+    @staticmethod
+    def _renumber_trades(trades: List[ReplayTrade]) -> None:
+        for idx, trade in enumerate(trades, start=1):
+            trade.trade_id = idx
 
     def compute_metrics(
         self,

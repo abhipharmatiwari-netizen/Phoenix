@@ -105,6 +105,7 @@ class DynamicPolicyConfig:
     min_regime_hold_minutes: int = 0
     thresholds: RegimeThresholds = field(default_factory=RegimeThresholds)
     profiles: dict[Regime, dict[str, Any]] = field(default_factory=dict)
+    explicit_profiles: frozenset[Regime] = field(default_factory=frozenset)
     policy_hash: str = ""
 
     def is_runtime_updatable(self, key: str) -> bool:
@@ -202,6 +203,8 @@ def _regime_from_name(name: str) -> Optional[Regime]:
 def _default_profiles() -> dict[Regime, dict[str, Any]]:
     return {
         Regime.TRENDING: {},
+        Regime.TRENDING_UP: {},
+        Regime.TRENDING_DOWN: {},
         Regime.NORMAL: {},
         Regime.CHOPPY: {},
         Regime.HIGH_VOL: {},
@@ -278,12 +281,14 @@ def parse_dynamic_policy_config(
     )
 
     profiles = _default_profiles()
+    explicit_profiles: set[Regime] = set()
     raw_profiles = payload.get("profiles", {})
     if isinstance(raw_profiles, dict):
         for name, values in raw_profiles.items():
             regime = _regime_from_name(str(name))
             if regime is None or not isinstance(values, dict):
                 continue
+            explicit_profiles.add(regime)
             profiles[regime] = dict(values)
 
     policy_dict = {
@@ -310,6 +315,7 @@ def parse_dynamic_policy_config(
             "chop_index_high": thresholds.chop_index_high,
         },
         "profiles": {reg.value: values for reg, values in profiles.items()},
+        "explicit_profiles": sorted(reg.value for reg in explicit_profiles),
     }
     return DynamicPolicyConfig(
         enabled=enabled,
@@ -321,6 +327,7 @@ def parse_dynamic_policy_config(
         min_regime_hold_minutes=min_regime_hold_minutes,
         thresholds=thresholds,
         profiles=profiles,
+        explicit_profiles=frozenset(explicit_profiles),
         policy_hash=build_policy_hash(policy_dict),
     )
 
@@ -393,7 +400,7 @@ class DynamicPolicyEngine:
                         effective[key] = value
             return effective
 
-        profile = self.config.profiles.get(regime) or {}
+        profile = self._profile_for_regime(regime)
         sanitized = self._sanitize_overrides(profile)
         effective.update(sanitized)
         self._apply_computed_overrides(effective=effective, context=context)
@@ -404,6 +411,13 @@ class DynamicPolicyEngine:
                 if key in frozen and key not in set(self.config.allow_runtime_updates_for):
                     effective[key] = frozen[key]
         return effective
+
+    def _profile_for_regime(self, regime: Regime) -> Mapping[str, Any]:
+        if regime in {Regime.TRENDING_UP, Regime.TRENDING_DOWN}:
+            if regime in self.config.explicit_profiles:
+                return self.config.profiles.get(regime) or {}
+            return self.config.profiles.get(Regime.TRENDING) or {}
+        return self.config.profiles.get(regime) or {}
 
     def _apply_computed_overrides(
         self,

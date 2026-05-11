@@ -244,6 +244,7 @@ def run_grid_search(
     execution: Optional[ExecutionConfig] = None,
     min_trade_count: int = 5,
     strategy_env_path: Optional[str] = None,
+    filter_regime: Optional[str] = None,
 ) -> List[OptimizationResult]:
     """Run replay grid search and sort by robustness."""
 
@@ -276,6 +277,7 @@ def run_grid_search(
             table=table,
             chunk_size=chunk_size,
             execution=execution,
+            filter_regime=filter_regime,
         )
         tracker = PnLTracker()
         tracker.process_fills(recorder.fills)
@@ -356,6 +358,7 @@ def walk_forward_validate(
     train_days: int = 60,
     test_days: int = 20,
     step_days: int = 20,
+    filter_regime: Optional[str] = None,
 ) -> Tuple[float, List[StrategyMetrics]]:
     """Evaluate a candidate only on out-of-sample windows."""
 
@@ -382,6 +385,7 @@ def walk_forward_validate(
             table=table,
             chunk_size=chunk_size,
             execution=execution,
+            filter_regime=filter_regime,
         )
         tracker = PnLTracker()
         tracker.process_fills(recorder.fills)

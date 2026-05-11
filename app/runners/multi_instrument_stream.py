@@ -66,7 +66,7 @@ from app.strategies.put_buy_live import PutBuyLiveStrategy
 from app.strategies.naming import canonicalize_strategy_name
 from app.strategies.validators import validate_strategy_list
 from app.strategies.adaptive.market_context import MarketContextBuilder
-from app.strategies.adaptive.regime import Regime, RegimeClassifier
+from app.strategies.adaptive.regime import CLASSIFIER_VERSION, Regime, RegimeClassifier
 from app.strategies.adaptive.strategy_selector import (
     StrategySelector,
     StrategySelectorConfig,
@@ -2987,6 +2987,20 @@ def stream_multi_instruments(
     selector_context_builders: Dict[str, MarketContextBuilder] = {}
     selector_eval_timeframes: Dict[str, set[int]] = {}
     selector_regime_classifiers: Dict[str, RegimeClassifier] = {}
+    regime_context_builders: Dict[tuple[str, int, str, str], MarketContextBuilder] = {}
+    regime_classifiers: Dict[tuple[str, int, str, str], RegimeClassifier] = {}
+    context_builder_defaults: Dict[str, Any] = {
+        "atr_median_lookback": 200,
+        "min_median_samples": 50,
+        "epsilon": 1e-9,
+        "ema_period": 20,
+        "atr_norm_min": 0.5,
+        "atr_norm_max": 2.5,
+        "slope_shift_bars": 3,
+        "slope_smoothing_span": 3,
+        "enable_chop_index": False,
+        "chop_lookback": 14,
+    }
 
     def _selector_strategy_timeframes(instance: Any) -> set[int]:
         out: set[int] = set()
@@ -3131,6 +3145,227 @@ def stream_multi_instruments(
                 else None
             ),
         )
+
+    def _regime_signals(context: Any) -> dict:
+        return {
+            "atr14": context.atr14,
+            "atr_norm": context.atr_norm,
+            "adx14": context.adx14,
+            "di_spread": context.di_spread,
+            "plus_di": context.plus_di,
+            "minus_di": context.minus_di,
+            "ema_slope": context.ema_slope,
+            "ema_value": context.ema_value,
+            "last_price": context.last_price,
+            "gap_ratio": context.gap_ratio,
+            "chop_index": context.chop_index,
+        }
+
+    def _dynamic_policy_config_for_instance(instance: Any) -> Any:
+        direct = getattr(instance, "_dynamic_policy_cfg", None)
+        if direct is not None:
+            return direct
+        adaptive = getattr(instance, "_adaptive_policy", None)
+        return getattr(adaptive, "policy_config", None)
+
+    def _normalize_regime_builder_kwargs(
+        builder_kwargs: Mapping[str, Any],
+        *,
+        ema_period: int,
+    ) -> Dict[str, Any]:
+        raw = dict(context_builder_defaults)
+        raw.update(dict(builder_kwargs or {}))
+        raw["ema_period"] = raw.get("ema_period", ema_period)
+        normalized: Dict[str, Any] = {}
+        int_keys = {
+            "atr_median_lookback",
+            "min_median_samples",
+            "ema_period",
+            "slope_shift_bars",
+            "slope_smoothing_span",
+            "chop_lookback",
+        }
+        float_keys = {"epsilon", "atr_norm_min", "atr_norm_max"}
+        for cfg_key, default_value in context_builder_defaults.items():
+            value = raw.get(cfg_key, default_value)
+            if cfg_key in int_keys:
+                try:
+                    normalized[cfg_key] = int(value)
+                except (TypeError, ValueError):
+                    normalized[cfg_key] = int(default_value)
+            elif cfg_key in float_keys:
+                try:
+                    normalized[cfg_key] = float(value)
+                except (TypeError, ValueError):
+                    normalized[cfg_key] = float(default_value)
+            elif cfg_key == "enable_chop_index":
+                normalized[cfg_key] = bool(value)
+            else:
+                normalized[cfg_key] = value
+        normalized["ema_period"] = max(2, int(normalized["ema_period"]))
+        normalized["atr_median_lookback"] = max(2, int(normalized["atr_median_lookback"]))
+        normalized["min_median_samples"] = max(2, int(normalized["min_median_samples"]))
+        normalized["slope_shift_bars"] = max(1, int(normalized["slope_shift_bars"]))
+        normalized["slope_smoothing_span"] = max(0, int(normalized["slope_smoothing_span"]))
+        normalized["chop_lookback"] = max(2, int(normalized["chop_lookback"]))
+        return normalized
+
+    def _context_builder_version_suffix(
+        builder_kwargs: Mapping[str, Any],
+        *,
+        ema_period: int,
+    ) -> str:
+        normalized = _normalize_regime_builder_kwargs(
+            builder_kwargs,
+            ema_period=ema_period,
+        )
+        default = _normalize_regime_builder_kwargs(
+            {"ema_period": ema_period},
+            ema_period=ema_period,
+        )
+        non_default = {
+            cfg_key: normalized[cfg_key]
+            for cfg_key in sorted(normalized)
+            if normalized.get(cfg_key) != default.get(cfg_key)
+        }
+        if not non_default:
+            return ""
+        encoded = json.dumps(
+            non_default,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        return f":ctx{hashlib.sha256(encoded).hexdigest()[:8]}"
+
+    def _context_builder_kwargs_for_instance(
+        instance: Any,
+        *,
+        ema_period: int,
+        thresholds: Any,
+    ) -> Dict[str, Any]:
+        raw: Dict[str, Any] = {"ema_period": max(2, int(ema_period))}
+        builder = getattr(instance, "_context_builder", None)
+        if builder is None:
+            adaptive = getattr(instance, "_adaptive_policy", None)
+            builder = getattr(adaptive, "_context_builder", None)
+        for cfg_key in context_builder_defaults:
+            if builder is not None and hasattr(builder, cfg_key):
+                raw[cfg_key] = getattr(builder, cfg_key)
+        if thresholds is not None and bool(getattr(thresholds, "use_chop_index", False)):
+            raw["enable_chop_index"] = True
+        return _normalize_regime_builder_kwargs(raw, ema_period=ema_period)
+
+    def _regime_classifier_specs_for_bar(
+        *,
+        underlying_label: str,
+        timeframe_seconds: int,
+    ) -> list[tuple[str, Any, Dict[str, Any]]]:
+        specs: dict[str, tuple[Any, Dict[str, Any]]] = {
+            CLASSIFIER_VERSION: (
+                None,
+                _normalize_regime_builder_kwargs({"ema_period": 20}, ema_period=20),
+            )
+        }
+        target = str(underlying_label or "").strip().upper()
+        tf = int(timeframe_seconds)
+        for row in strategies:
+            row_underlying = str(row.get("underlying") or "").strip().upper()
+            if row_underlying != target:
+                continue
+            instance = row.get("instance")
+            timeframes = _selector_strategy_timeframes(instance)
+            if timeframes and tf not in timeframes:
+                continue
+            policy_cfg = _dynamic_policy_config_for_instance(instance)
+            if policy_cfg is None or not bool(getattr(policy_cfg, "enabled", False)):
+                continue
+            policy_hash = str(getattr(policy_cfg, "policy_hash", "") or "").strip()
+            policy_id = str(getattr(policy_cfg, "policy_id", "") or "").strip()
+            suffix = policy_hash or policy_id
+            if not suffix:
+                continue
+            try:
+                ema_period = int(getattr(instance, "ema_period", 20) or 20)
+            except (TypeError, ValueError):
+                ema_period = 20
+            thresholds = getattr(policy_cfg, "thresholds", None)
+            builder_kwargs = _context_builder_kwargs_for_instance(
+                instance,
+                ema_period=max(2, ema_period),
+                thresholds=thresholds,
+            )
+            builder_ema_period = int(builder_kwargs.get("ema_period", max(2, ema_period)))
+            classifier_version = (
+                f"{CLASSIFIER_VERSION}:{suffix}:ema{builder_ema_period}"
+                f"{_context_builder_version_suffix(builder_kwargs, ema_period=builder_ema_period)}"
+            )
+            specs[classifier_version] = (
+                thresholds,
+                builder_kwargs,
+            )
+        return [
+            (classifier_version, thresholds, dict(builder_kwargs))
+            for classifier_version, (thresholds, builder_kwargs) in specs.items()
+        ]
+
+    def _persist_regime_for_bar(
+        *,
+        label: str,
+        timeframe_seconds: int,
+        candle: Any,
+        indicators: dict,
+    ) -> Optional[Regime]:
+        if not hasattr(persister, "persist_regime"):
+            return None
+        key = (str(label or "").strip().upper(), int(timeframe_seconds))
+        if not key[0]:
+            return None
+        first_regime: Optional[Regime] = None
+        for classifier_version, thresholds, builder_kwargs in _regime_classifier_specs_for_bar(
+            underlying_label=label,
+            timeframe_seconds=timeframe_seconds,
+        ):
+            builder_key = json.dumps(
+                builder_kwargs,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            state_key = (key[0], key[1], classifier_version, builder_key)
+            builder = regime_context_builders.setdefault(
+                state_key,
+                MarketContextBuilder(**builder_kwargs),
+            )
+            classifier = regime_classifiers.setdefault(
+                state_key,
+                RegimeClassifier(thresholds=thresholds),
+            )
+            context = builder.build(
+                candle=candle,
+                indicators=indicators if isinstance(indicators, dict) else {},
+            )
+            regime = classifier.update(context)
+            if first_regime is None:
+                first_regime = regime
+            try:
+                persister.persist_regime(
+                    label,
+                    timeframe_seconds,
+                    candle,
+                    regime=regime.value,
+                    classifier_version=classifier_version,
+                    signals=_regime_signals(context),
+                )
+            except Exception:
+                logger.debug(
+                    "Bar regime persistence failed for %s tf=%s classifier=%s",
+                    key[0],
+                    timeframe_seconds,
+                    classifier_version,
+                    exc_info=True,
+                )
+        return first_regime
 
     def _update_strategy_selection_for_bar(
         *,
@@ -3589,6 +3824,12 @@ def stream_multi_instruments(
         )
         dashboard_bus.record_bar(label, timeframe_seconds, candle, indicators)
         persister.persist_bar(label, timeframe_seconds, candle, indicators)
+        _persist_regime_for_bar(
+            label=label,
+            timeframe_seconds=timeframe_seconds,
+            candle=candle,
+            indicators=indicators,
+        )
 
         # Only drive strategies from underlying instruments
         meta = instrument_state["instrument_meta"].get(label)

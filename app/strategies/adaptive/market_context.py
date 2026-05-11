@@ -41,6 +41,9 @@ class MarketContext:
     ema_slope: Optional[float]
     gap_ratio: float
     chop_index: Optional[float] = None
+    plus_di: Optional[float] = None
+    minus_di: Optional[float] = None
+    ema_value: Optional[float] = None
 
     def validate(self) -> bool:
         numeric_fields = (
@@ -52,6 +55,9 @@ class MarketContext:
             self.ema_slope,
             self.gap_ratio,
             self.chop_index,
+            self.plus_di,
+            self.minus_di,
+            self.ema_value,
         )
         for value in numeric_fields:
             if value is None:
@@ -65,6 +71,8 @@ class MarketContext:
             self.di_spread,
             self.gap_ratio,
             self.chop_index,
+            self.plus_di,
+            self.minus_di,
         )
         for value in non_negative_fields:
             if value is None:
@@ -245,6 +253,9 @@ class MarketContextBuilder:
             ema_slope=ema_slope,
             gap_ratio=gap_ratio,
             chop_index=chop_index,
+            plus_di=plus_di,
+            minus_di=minus_di,
+            ema_value=ema_now,
         )
 
 
