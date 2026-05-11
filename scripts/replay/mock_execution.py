@@ -82,6 +82,7 @@ class ReplayMarketContext:
     next_open_ts: Optional[datetime] = None
     indicators: Dict[str, Any] = field(default_factory=dict)
     instrument_prices: Dict[str, float] = field(default_factory=dict)
+    next_instrument_prices: Dict[str, float] = field(default_factory=dict)
 
 
 class MockExecutionRecorder:
@@ -412,11 +413,15 @@ class MockExecutionRecorder:
 
         price = context.current_price
         instrument_price_matched = False
+        instrument_key = ""
         if position_label and position_label in context.instrument_prices:
+            instrument_key = position_label
             price = context.instrument_prices[position_label]
             instrument_price_matched = True
         elif symbol and symbol in context.instrument_prices:
+            instrument_key = symbol
             price = context.instrument_prices[symbol]
+            instrument_price_matched = _looks_like_option_symbol(symbol)
 
         use_future_open = (
             self.execution_config.fill_mode == FILL_MODE_NEXT_BAR_OPEN
@@ -429,9 +434,10 @@ class MockExecutionRecorder:
                     return context.timestamp, None, "missing_future_bar"
                 return context.timestamp, price, "bar_close_fallback"
             if instrument_price_matched:
+                next_price = context.next_instrument_prices.get(instrument_key)
                 return (
                     context.next_open_ts or context.timestamp,
-                    float(price),
+                    float(next_price if next_price is not None else price),
                     "next_bar_open_option_proxy",
                 )
             return (
@@ -462,6 +468,11 @@ class MockExecutionRecorder:
             "app.orders.strategy_bridge.place_order_via_bridge",
             side_effect=self.mock_place_order,
         )
+
+
+def _looks_like_option_symbol(value: str) -> bool:
+    text = str(value or "").strip().upper()
+    return bool("_CE_" in text or "_PE_" in text or text.endswith("CE") or text.endswith("PE"))
 
 
 class MockRiskManager:

@@ -544,6 +544,22 @@ def test_load_bars_from_postgres_uses_custom_regime_sidecar(monkeypatch):
     assert batch.replay_profile["regime_sidecar_available"] is True
 
 
+def test_replay_regime_versions_prefer_dynamic_policy_hash():
+    versions = replay_runtime_mod._replay_regime_classifier_versions(
+        strategy_id="ema20_strategy",
+        strategy_params={
+            "dynamic_policy": {
+                "enabled": True,
+                "policy_id": "ema20_custom",
+                "thresholds": {"adx_trend": 30.0},
+            }
+        },
+    )
+
+    assert versions[0].startswith(f"{replay_runtime_mod.CLASSIFIER_VERSION}:")
+    assert versions[1] == replay_runtime_mod.CLASSIFIER_VERSION
+
+
 def test_next_bar_open_fill_uses_following_bar_open(monkeypatch):
     base_ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
     bars = [_bar(base_ts, close=100.0, open_=99.0), _bar(base_ts + timedelta(minutes=5), close=106.0, open_=105.0)]
@@ -597,6 +613,24 @@ def test_next_bar_open_fill_uses_chronological_bar_after_regime_filter(monkeypat
     assert len(recorder.fills) == 1
     assert recorder.fills[0].fill_price == 101.0
     assert recorder.fills[0].fill_note == "next_bar_open"
+
+
+def test_derived_indicators_are_precomputed_from_unfiltered_history():
+    base_ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
+    rows = [
+        _bar(base_ts + timedelta(minutes=5 * idx), close=100.0 + idx)
+        for idx in range(3)
+    ]
+    for row in rows:
+        row.ema_20 = None
+
+    replay_runtime_mod._precompute_derived_indicator_history(
+        rows,
+        strategy_id="ema20_strategy",
+        strategy_params={"ema_period": 3},
+    )
+
+    assert rows[2].derived_indicators["ema_3"] == 101.25
 
 
 def test_pnl_tracker_pairs_ema20_exit_without_position_label():
@@ -709,6 +743,7 @@ def test_next_bar_open_option_entry_keeps_option_proxy_price():
             next_open_price=20100.0,
             next_open_ts=ts + timedelta(minutes=5),
             instrument_prices={"NIFTY_CE_20000": 123.0},
+            next_instrument_prices={"NIFTY_CE_20000": 150.0},
         )
     )
 
@@ -729,14 +764,15 @@ def test_next_bar_open_option_entry_keeps_option_proxy_price():
     )
 
     assert recorder.fills[0].timestamp == ts + timedelta(minutes=5)
-    assert recorder.fills[0].fill_price == 123.0
+    assert recorder.fills[0].fill_price == 150.0
     assert recorder.fills[0].fill_note == "next_bar_open_option_proxy"
 
 
 def test_nifty_weekly_expiry_switches_to_tuesday_from_september_2025():
     assert replay_runtime_mod._next_weekly_expiry(date(2025, 8, 28)) == date(2025, 8, 28)
+    assert replay_runtime_mod._next_weekly_expiry(date(2025, 8, 29)) == date(2025, 9, 2)
     assert replay_runtime_mod._next_weekly_expiry(date(2025, 9, 1)) == date(2025, 9, 2)
-    assert replay_runtime_mod._next_weekly_expiry(date(2026, 3, 3)) == date(2026, 3, 3)
+    assert replay_runtime_mod._next_weekly_expiry(date(2026, 3, 2)) == date(2026, 3, 2)
 
 
 def test_nifty_spread_replay_clock_drives_entry_ids(monkeypatch):

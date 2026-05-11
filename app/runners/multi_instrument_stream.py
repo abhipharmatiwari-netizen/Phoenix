@@ -2987,8 +2987,8 @@ def stream_multi_instruments(
     selector_context_builders: Dict[str, MarketContextBuilder] = {}
     selector_eval_timeframes: Dict[str, set[int]] = {}
     selector_regime_classifiers: Dict[str, RegimeClassifier] = {}
-    regime_context_builders: Dict[tuple[str, int, str], MarketContextBuilder] = {}
-    regime_classifiers: Dict[tuple[str, int, str], RegimeClassifier] = {}
+    regime_context_builders: Dict[tuple[str, int, str, int], MarketContextBuilder] = {}
+    regime_classifiers: Dict[tuple[str, int, str, int], RegimeClassifier] = {}
 
     def _selector_strategy_timeframes(instance: Any) -> set[int]:
         out: set[int] = set()
@@ -3160,8 +3160,8 @@ def stream_multi_instruments(
         *,
         underlying_label: str,
         timeframe_seconds: int,
-    ) -> list[tuple[str, Any]]:
-        specs: dict[str, Any] = {CLASSIFIER_VERSION: None}
+    ) -> list[tuple[str, Any, int]]:
+        specs: dict[str, tuple[Any, int]] = {CLASSIFIER_VERSION: (None, 20)}
         target = str(underlying_label or "").strip().upper()
         tf = int(timeframe_seconds)
         for row in strategies:
@@ -3180,8 +3180,18 @@ def stream_multi_instruments(
             suffix = policy_hash or policy_id
             if not suffix:
                 continue
-            specs[f"{CLASSIFIER_VERSION}:{suffix}"] = getattr(policy_cfg, "thresholds", None)
-        return list(specs.items())
+            try:
+                ema_period = int(getattr(instance, "ema_period", 20) or 20)
+            except (TypeError, ValueError):
+                ema_period = 20
+            specs[f"{CLASSIFIER_VERSION}:{suffix}"] = (
+                getattr(policy_cfg, "thresholds", None),
+                max(2, ema_period),
+            )
+        return [
+            (classifier_version, thresholds, ema_period)
+            for classifier_version, (thresholds, ema_period) in specs.items()
+        ]
 
     def _persist_regime_for_bar(
         *,
@@ -3196,12 +3206,15 @@ def stream_multi_instruments(
         if not key[0]:
             return None
         first_regime: Optional[Regime] = None
-        for classifier_version, thresholds in _regime_classifier_specs_for_bar(
+        for classifier_version, thresholds, ema_period in _regime_classifier_specs_for_bar(
             underlying_label=label,
             timeframe_seconds=timeframe_seconds,
         ):
-            state_key = (key[0], key[1], classifier_version)
-            builder = regime_context_builders.setdefault(state_key, MarketContextBuilder())
+            state_key = (key[0], key[1], classifier_version, int(ema_period))
+            builder = regime_context_builders.setdefault(
+                state_key,
+                MarketContextBuilder(ema_period=int(ema_period)),
+            )
             classifier = regime_classifiers.setdefault(
                 state_key,
                 RegimeClassifier(thresholds=thresholds),
