@@ -89,8 +89,23 @@ const KillSwitchPanel: React.FC = () => {
     return anyGlobal || null;
   }, [stateResp]);
 
-  const globalState: KillSwitchRecord['state'] = globalRecord?.state || 'INACTIVE';
+  // PR #240 round-3 review P2: when the durable manager has no GLOBAL
+  // record but the legacy stream-path kill switch is active (issue
+  // #222 divergence), surface "TRIPPED" so the panel doesn't mislead
+  // the operator into thinking no protection is in place. The
+  // backend ``state`` response already includes ``legacy_kill_switch``
+  // and ``divergence`` for exactly this case.
+  const legacyActive = Boolean(stateResp?.legacy_kill_switch?.legacy_active);
+  const divergent = Boolean(stateResp?.divergence?.divergent);
+  const globalState: KillSwitchRecord['state'] = globalRecord?.state
+    || (legacyActive || divergent ? 'TRIPPED' : 'INACTIVE');
   const colours = STATE_COLOURS[globalState];
+
+  // PR #240 round-3 review P2: only require a step-up token when the
+  // backend will actually enforce it (LIVE mode). In PAPER/SHADOW the
+  // backend explicitly accepts an empty token, so the UI must not
+  // block the operator's recovery flow.
+  const isLive = String(stateResp?.trade_mode || '').toUpperCase() === 'LIVE';
 
   const closeDialog = () => {
     setConfirmDialog(null);
@@ -128,15 +143,20 @@ const KillSwitchPanel: React.FC = () => {
     }
   };
 
-  // PR #240 round-2 review P1: instructions for obtaining a step-up
-  // token via a separate ceremony. Shown to the operator alongside
-  // the token-input field so the LIVE protection is not defeated by
-  // auto-minting from the existing admin session.
+  // PR #240 round-2/round-3 review P1: instructions for obtaining a
+  // step-up token via a separate ceremony. The token is ACTOR-BOUND
+  // (consumed with ``actor=ctx.caller``), so the operator must issue
+  // it with THEIR OWN admin bearer token — using a different
+  // operator's token causes an actor-mismatch rejection. The curl
+  // must also include ``Content-Type: application/json`` because the
+  // ``-d`` flag defaults to form-encoded.
   const stepUpInstructions = (actionClass: string) =>
     `In LIVE mode this action requires a separately-issued step-up token.
-Obtain one via the operator runbook — typically:
+Obtain one via the operator runbook — use YOUR OWN admin token
+(tokens are actor-bound; a different operator's token will be rejected):
   curl -X POST $PHOENIX/admin/step-up/issue \\
-       -H "Authorization: Bearer $OPERATOR_TOKEN" \\
+       -H "Authorization: Bearer $YOUR_ADMIN_TOKEN" \\
+       -H "Content-Type: application/json" \\
        -d '{"action_class":"${actionClass}","resource_id":"GLOBAL"}'
 Paste the returned token_id below.`;
 
@@ -200,23 +220,27 @@ Paste the returned token_id below.`;
   };
 
   const onConfirmClear = () => {
-    // PR #240 round-2 review P1: confirm-clear is the transition that
-    // restores LIVE entry eligibility, so it requires the same
-    // step-up ceremony as rearm — the operator MUST paste a token
-    // obtained independently from this session. The backend
-    // validates the token against the ``kill_switch_clear`` action
-    // class.
+    // PR #240 round-2/round-3 review P1+P2: confirm-clear restores
+    // LIVE entry eligibility, so LIVE requires a separately-issued
+    // step-up token. In PAPER/SHADOW the backend accepts an empty
+    // token; gate the UI requirement on the actual ``trade_mode``
+    // returned by the state endpoint.
     setConfirmDialog({
       title: 'Confirm CLEAR for GLOBAL kill switch',
-      prompt: 'Moves CLEAR_PENDING → CLEARED. This is the transition that re-allows new entry orders in LIVE mode, so it requires a separately-issued step-up token.',
+      prompt: isLive
+        ? 'Moves CLEAR_PENDING → CLEARED. This re-allows new entry orders in LIVE mode and requires a separately-issued step-up token.'
+        : 'Moves CLEAR_PENDING → CLEARED. After this, rearm to return to INACTIVE.',
       reasonLabel: 'Reason / acknowledgement',
-      requireStepUpToken: true,
-      stepUpInstructions: stepUpInstructions('kill_switch_clear'),
+      requireStepUpToken: isLive,
+      stepUpInstructions: isLive ? stepUpInstructions('kill_switch_clear') : undefined,
       onConfirm: async (reason, _hard, stepUpToken) => {
+        // PR #240 round-3 review P2: send the operator-entered
+        // reason so the audit event records the typed justification.
         await KillSwitchService.confirmClear({
           scope: 'GLOBAL',
           scope_id: 'GLOBAL',
           step_up_token: stepUpToken || null,
+          reason,
         });
         setActionFeedback('Clear confirmed. State now CLEARED. Use Rearm to return to INACTIVE.');
       },
@@ -224,21 +248,20 @@ Paste the returned token_id below.`;
   };
 
   const onRearm = () => {
-    // PR #240 round-2 review P1: do NOT auto-mint a step-up token
-    // from the existing admin session — that defeats the LIVE
-    // protection. The operator must paste a token obtained via the
-    // separate operator-runbook ceremony.
     setConfirmDialog({
       title: 'Rearm GLOBAL kill switch',
-      prompt: 'Moves CLEARED → INACTIVE. In LIVE mode this requires a separately-issued step-up token.',
+      prompt: isLive
+        ? 'Moves CLEARED → INACTIVE. In LIVE mode this requires a separately-issued step-up token.'
+        : 'Moves CLEARED → INACTIVE.',
       reasonLabel: 'Reason / acknowledgement',
-      requireStepUpToken: true,
-      stepUpInstructions: stepUpInstructions('kill_switch_rearm'),
+      requireStepUpToken: isLive,
+      stepUpInstructions: isLive ? stepUpInstructions('kill_switch_rearm') : undefined,
       onConfirm: async (reason, _hard, stepUpToken) => {
         await KillSwitchService.rearm({
           scope: 'GLOBAL',
           scope_id: 'GLOBAL',
           step_up_token: stepUpToken || null,
+          reason,
         });
         setActionFeedback('Rearmed. State now INACTIVE.');
       },
@@ -465,7 +488,8 @@ Paste the returned token_id below.`;
             <strong>Last cancel-all result:</strong> attempted=
             {cancelResult.attempted}, cancelled={cancelResult.cancelled},
             failed={cancelResult.failed}, skipped={cancelResult.skipped},
-            raced_filled={cancelResult.raced_filled ?? 0}
+            raced_filled={cancelResult.raced_filled ?? 0},
+            refresh_failures={cancelResult.refresh_failures ?? 0}
           </div>
           {(cancelResult.raced_filled ?? 0) > 0 && (
             <div style={{
@@ -479,13 +503,32 @@ Paste the returned token_id below.`;
               {' '}New exposure may need manual flattening — check per-account details below.
             </div>
           )}
+          {/* PR #240 round-3 review P2: surface refresh failures
+              explicitly so the operator sees that partial status is
+              due to broker get_orders() failing — fresh broker orders
+              not in the cache may still be live. */}
+          {(cancelResult.refresh_failures ?? 0) > 0 && (
+            <div style={{
+              marginTop: '0.25rem',
+              padding: '0.25rem 0.5rem',
+              borderLeft: '3px solid #f59e0b',
+              backgroundColor: '#fffbeb',
+              color: '#92400e',
+            }}>
+              <strong>⚠ Could not verify broker open-order set for {cancelResult.refresh_failures} account(s).</strong>
+              {' '}Fresh broker orders not in the cache may still be live — investigate manually.
+            </div>
+          )}
           {cancelResult.per_account.length > 0 && (
             <ul style={{ margin: '0.25rem 0 0 1rem', padding: 0 }}>
               {cancelResult.per_account.map((a) => (
                 <li key={a.broker_account_id}>
                   {a.broker_account_id}: {a.status} (att={a.attempted},
                   ok={a.cancelled}, fail={a.failed}, skip={a.skipped},
-                  raced_filled={a.raced_filled ?? 0})
+                  raced_filled={a.raced_filled ?? 0}
+                  {a.broker_orders_refresh_failed
+                    ? ', refresh_failed=true'
+                    : ''})
                 </li>
               ))}
             </ul>

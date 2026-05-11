@@ -36,6 +36,40 @@ def _mk_admin(role: AdminRole = AdminRole.ADMIN) -> AdminContext:
     return AdminContext(caller="admin@phoenix.com", role=role)
 
 
+def _mk_request() -> Any:
+    """Stand-in for FastAPI ``Request`` — used by ``check_rate_limit``."""
+    return SimpleNamespace(
+        headers={"X-Request-Id": "req-test-1"},
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+
+
+def _patch_cancel_all_preconditions(monkeypatch):
+    """Bypass ``check_rate_limit`` and stub the durable kill switch
+    as TRIPPED so the new server-side trip-before-cancel gate
+    (PR #240 round-3 review P2) does not block tests."""
+    monkeypatch.setattr(
+        "app.dashboard.admin_routes.check_rate_limit",
+        lambda _request: None,
+    )
+    from app.risk.kill_switch import KillSwitchScope, KillSwitchState
+    fake_record = SimpleNamespace(
+        scope=KillSwitchScope.GLOBAL,
+        scope_id="GLOBAL",
+        state=KillSwitchState.TRIPPED,
+        block_exits=False,
+    )
+    fake_ksm = SimpleNamespace(
+        get_record=lambda scope, scope_id: (
+            fake_record if scope == KillSwitchScope.GLOBAL else None
+        ),
+    )
+    monkeypatch.setattr(
+        admin_routes, "_get_kill_switch_manager",
+        lambda: fake_ksm,
+    )
+
+
 class _FakeBroker:
     """Records cancel_order + get_orders calls and returns configurable
     responses. PR #240 round-1 review: cancel-all now refreshes
@@ -160,6 +194,7 @@ def test_cancel_all_requires_admin_role(monkeypatch):
         _run(
             kill_switch_cancel_all(
                 KillSwitchCancelAllRequest(reason="x"),
+                _mk_request(),
                 _mk_admin(AdminRole.OPERATOR),
             )
         )
@@ -173,6 +208,7 @@ def test_cancel_all_requires_non_empty_reason(monkeypatch):
         _run(
             kill_switch_cancel_all(
                 KillSwitchCancelAllRequest(reason="   "),
+                _mk_request(),
                 _mk_admin(),
             )
         )
@@ -196,9 +232,11 @@ def test_cancel_all_cancels_each_open_order_across_runners(monkeypatch):
         admin_routes, "emit_audit_event",
         lambda **kw: captured.append(kw),
     )
+    _patch_cancel_all_preconditions(monkeypatch)
     resp = _run(kill_switch_cancel_all(
-        KillSwitchCancelAllRequest(reason="panic stop"),
-        _mk_admin(),
+            KillSwitchCancelAllRequest(reason="panic stop"),
+            _mk_request(),
+            _mk_admin(),
     ))
     assert resp["status"] == "ok"
     assert resp["attempted"] == 3
@@ -228,9 +266,11 @@ def test_cancel_all_skips_terminal_orders(monkeypatch):
     }
     monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime(runners))
     monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
     resp = _run(kill_switch_cancel_all(
-        KillSwitchCancelAllRequest(reason="drain"),
-        _mk_admin(),
+            KillSwitchCancelAllRequest(reason="drain"),
+            _mk_request(),
+            _mk_admin(),
     ))
     assert resp["attempted"] == 1
     assert resp["cancelled"] == 1
@@ -257,9 +297,11 @@ def test_cancel_all_idempotent_on_rejected_response(monkeypatch):
     }
     monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime(runners))
     monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
     resp = _run(kill_switch_cancel_all(
-        KillSwitchCancelAllRequest(reason="retry"),
-        _mk_admin(),
+            KillSwitchCancelAllRequest(reason="retry"),
+            _mk_request(),
+            _mk_admin(),
     ))
     assert resp["attempted"] == 1
     assert resp["cancelled"] == 0
@@ -277,9 +319,11 @@ def test_cancel_all_records_broker_exception_as_failed(monkeypatch):
     }
     monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime(runners))
     monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
     resp = _run(kill_switch_cancel_all(
-        KillSwitchCancelAllRequest(reason="emergency"),
-        _mk_admin(),
+            KillSwitchCancelAllRequest(reason="emergency"),
+            _mk_request(),
+            _mk_admin(),
     ))
     assert resp["attempted"] == 2
     assert resp["cancelled"] == 1
@@ -295,9 +339,11 @@ def test_cancel_all_404_when_specific_broker_account_unknown(monkeypatch):
     runners = {"A1": _mk_runner("A1", [], _FakeBroker())}
     monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime(runners))
     monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
     with pytest.raises(HTTPException) as exc:
         _run(kill_switch_cancel_all(
             KillSwitchCancelAllRequest(reason="x", broker_account_id="UNKNOWN"),
+            _mk_request(),
             _mk_admin(),
         ))
     assert exc.value.status_code == 404
@@ -312,9 +358,11 @@ def test_cancel_all_scopes_to_specific_broker_account(monkeypatch):
     }
     monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime(runners))
     monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
     resp = _run(kill_switch_cancel_all(
-        KillSwitchCancelAllRequest(reason="targeted", broker_account_id="A1"),
-        _mk_admin(),
+            KillSwitchCancelAllRequest(reason="targeted", broker_account_id="A1"),
+            _mk_request(),
+            _mk_admin(),
     ))
     assert resp["attempted"] == 1
     assert len(broker_a.calls) == 1
@@ -338,9 +386,11 @@ def test_cancel_all_no_cancel_api_runner_is_failed_partial(monkeypatch):
     runners = {"A_NOAPI": runner}
     monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime(runners))
     monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
     resp = _run(kill_switch_cancel_all(
-        KillSwitchCancelAllRequest(reason="check_noapi"),
-        _mk_admin(),
+            KillSwitchCancelAllRequest(reason="check_noapi"),
+            _mk_request(),
+            _mk_admin(),
     ))
     assert resp["attempted"] == 0
     assert resp["failed"] == 1
@@ -404,9 +454,11 @@ def test_cancel_all_refreshes_broker_orders_before_iterating(monkeypatch):
     )
     monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
     monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
     resp = _run(kill_switch_cancel_all(
-        KillSwitchCancelAllRequest(reason="fresh"),
-        _mk_admin(),
+            KillSwitchCancelAllRequest(reason="fresh"),
+            _mk_request(),
+            _mk_admin(),
     ))
     assert broker.get_orders_calls == 1
     assert resp["attempted"] == 1
@@ -427,9 +479,11 @@ def test_cancel_all_falls_back_to_cached_orders_on_refresh_failure(monkeypatch):
     runner = _mk_runner("A1", [_order("cached-o1")], broker)
     monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
     monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
     resp = _run(kill_switch_cancel_all(
-        KillSwitchCancelAllRequest(reason="fallback"),
-        _mk_admin(),
+            KillSwitchCancelAllRequest(reason="fallback"),
+            _mk_request(),
+            _mk_admin(),
     ))
     assert broker.get_orders_calls == 1
     assert resp["attempted"] == 1
@@ -458,9 +512,11 @@ def test_cancel_all_passes_order_variety_to_broker(monkeypatch):
     )
     monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
     monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
     _run(kill_switch_cancel_all(
-        KillSwitchCancelAllRequest(reason="variety"),
-        _mk_admin(),
+            KillSwitchCancelAllRequest(reason="variety"),
+            _mk_request(),
+            _mk_admin(),
     ))
     varieties_sent = [c["variety"] for c in broker.calls]
     assert varieties_sent == ["AMO", "STOPLOSS", "NORMAL"]
@@ -482,9 +538,11 @@ def test_cancel_all_error_status_counts_as_failed_not_skipped(monkeypatch):
     runner = _mk_runner("A1", [_order("o1")], broker)
     monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
     monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
     resp = _run(kill_switch_cancel_all(
-        KillSwitchCancelAllRequest(reason="incident"),
-        _mk_admin(),
+            KillSwitchCancelAllRequest(reason="incident"),
+            _mk_request(),
+            _mk_admin(),
     ))
     assert resp["attempted"] == 1
     assert resp["failed"] == 1
@@ -509,9 +567,11 @@ def test_cancel_all_filled_race_counts_as_raced_filled_not_cancelled(monkeypatch
     runner = _mk_runner("A1", [_order("o1")], broker)
     monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
     monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
     resp = _run(kill_switch_cancel_all(
-        KillSwitchCancelAllRequest(reason="race"),
-        _mk_admin(),
+            KillSwitchCancelAllRequest(reason="race"),
+            _mk_request(),
+            _mk_admin(),
     ))
     assert resp["attempted"] == 1
     assert resp["cancelled"] == 0
@@ -537,9 +597,11 @@ def test_cancel_all_rejected_status_remains_idempotent_skip(monkeypatch):
     runner = _mk_runner("A1", [_order("o1")], broker)
     monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
     monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
     resp = _run(kill_switch_cancel_all(
-        KillSwitchCancelAllRequest(reason="retry"),
-        _mk_admin(),
+            KillSwitchCancelAllRequest(reason="retry"),
+            _mk_request(),
+            _mk_admin(),
     ))
     assert resp["failed"] == 0
     assert resp["skipped"] == 1
@@ -553,6 +615,7 @@ def test_cancel_all_rejects_out_of_scope_broker_account(monkeypatch):
     broker = _FakeBroker()
     runners = {"OTHER_ACCT": _mk_runner("OTHER_ACCT", [_order("o1")], broker)}
     monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime(runners))
+    _patch_cancel_all_preconditions(monkeypatch)
     scoped_admin = AdminContext(
         caller="scoped@phoenix.com",
         role=AdminRole.ADMIN,
@@ -562,6 +625,7 @@ def test_cancel_all_rejects_out_of_scope_broker_account(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         _run(kill_switch_cancel_all(
             KillSwitchCancelAllRequest(reason="x", broker_account_id="OTHER_ACCT"),
+            _mk_request(),
             scoped_admin,
         ))
     assert exc.value.status_code == 403
@@ -578,6 +642,7 @@ def test_cancel_all_filters_runners_to_scoped_accounts(monkeypatch):
     }
     monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime(runners))
     monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
     scoped_admin = AdminContext(
         caller="scoped@phoenix.com",
         role=AdminRole.ADMIN,
@@ -585,8 +650,9 @@ def test_cancel_all_filters_runners_to_scoped_accounts(monkeypatch):
         all_tenants=False,
     )
     resp = _run(kill_switch_cancel_all(
-        KillSwitchCancelAllRequest(reason="x"),
-        scoped_admin,
+            KillSwitchCancelAllRequest(reason="x"),
+            _mk_request(),
+            scoped_admin,
     ))
     assert len(resp["per_account"]) == 1
     assert resp["per_account"][0]["broker_account_id"] == "ALLOWED"
@@ -641,9 +707,11 @@ def test_cancel_all_rejected_cancel_failed_counts_as_failed(monkeypatch):
     runner = _mk_runner("A1", [_order("o1")], broker)
     monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
     monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
     resp = _run(kill_switch_cancel_all(
-        KillSwitchCancelAllRequest(reason="incident"),
-        _mk_admin(),
+            KillSwitchCancelAllRequest(reason="incident"),
+            _mk_request(),
+            _mk_admin(),
     ))
     assert resp["attempted"] == 1
     assert resp["failed"] == 1
@@ -675,8 +743,10 @@ def test_cancel_all_rejected_already_cancelled_counts_as_skipped(monkeypatch):
         runner = _mk_runner("A1", [_order("o1")], broker)
         monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
         monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+        _patch_cancel_all_preconditions(monkeypatch)
         resp = _run(kill_switch_cancel_all(
             KillSwitchCancelAllRequest(reason="retry"),
+            _mk_request(),
             _mk_admin(),
         ))
         assert resp["failed"] == 0, f"message {msg!r} should be idempotent skip"
@@ -692,6 +762,7 @@ def test_cancel_all_endpoint_requires_admin_not_operator(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         _run(kill_switch_cancel_all(
             KillSwitchCancelAllRequest(reason="x"),
+            _mk_request(),
             _mk_admin(AdminRole.OPERATOR),
         ))
     assert exc.value.status_code == 403
@@ -765,8 +836,219 @@ def test_kill_switch_confirm_clear_passes_through_in_non_live(monkeypatch):
     monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: SimpleNamespace(kill_switch_manager=fake_ksm))
     monkeypatch.setattr(admin_routes, "_save_kill_switch_state", lambda *_a, **_kw: None)
     monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    # NB: this test does NOT call cancel-all so the precondition
+    # patch is intentionally omitted; confirm_clear has its own
+    # kill-switch manager fixture above.
     resp = kill_switch_confirm_clear(
         KillSwitchRearmRequest(scope="GLOBAL", scope_id="GLOBAL"),
         _mk_admin(),
     )
     assert resp["status"] == "cleared"
+
+
+# ---- PR #240 round-3 review additions ----------------------------------
+
+
+def test_cancel_all_rejected_when_kill_switch_inactive(monkeypatch):
+    """Round-3 P2: cancel-all must reject when GLOBAL durable
+    kill switch is INACTIVE / CLEARED. Otherwise Phoenix is free to
+    place fresh orders during the bulk-cancel window."""
+    runner = _mk_runner("A1", [_order("o1")], _FakeBroker())
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
+    monkeypatch.setattr(
+        "app.dashboard.admin_routes.check_rate_limit",
+        lambda _request: None,
+    )
+    # Stub KSM with INACTIVE GLOBAL state (no record).
+    fake_ksm = SimpleNamespace(get_record=lambda *_a: None)
+    monkeypatch.setattr(admin_routes, "_get_kill_switch_manager", lambda: fake_ksm)
+    with pytest.raises(HTTPException) as exc:
+        _run(kill_switch_cancel_all(
+            KillSwitchCancelAllRequest(reason="x"),
+            _mk_request(),
+            _mk_admin(),
+        ))
+    assert exc.value.status_code == 409
+    assert "trip" in str(exc.value.detail).lower()
+
+
+def test_cancel_all_rejected_when_kill_switch_cleared(monkeypatch):
+    """Round-3 P2: CLEARED state also lets new placements through, so
+    cancel-all must reject in that state too."""
+    runner = _mk_runner("A1", [_order("o1")], _FakeBroker())
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
+    monkeypatch.setattr(
+        "app.dashboard.admin_routes.check_rate_limit",
+        lambda _request: None,
+    )
+    from app.risk.kill_switch import KillSwitchScope, KillSwitchState
+    fake_record = SimpleNamespace(
+        scope=KillSwitchScope.GLOBAL,
+        scope_id="GLOBAL",
+        state=KillSwitchState.CLEARED,
+        block_exits=False,
+    )
+    fake_ksm = SimpleNamespace(get_record=lambda *_a: fake_record)
+    monkeypatch.setattr(admin_routes, "_get_kill_switch_manager", lambda: fake_ksm)
+    with pytest.raises(HTTPException) as exc:
+        _run(kill_switch_cancel_all(
+            KillSwitchCancelAllRequest(reason="x"),
+            _mk_request(),
+            _mk_admin(),
+        ))
+    assert exc.value.status_code == 409
+
+
+def test_cancel_all_rate_limit_enforced(monkeypatch):
+    """Round-3 P2: cancel-all calls ``check_rate_limit(request)``
+    like every other state-changing admin endpoint."""
+    runner = _mk_runner("A1", [_order("o1")], _FakeBroker())
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
+    monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
+    rate_limit_calls: List[Any] = []
+    monkeypatch.setattr(
+        "app.dashboard.admin_routes.check_rate_limit",
+        lambda request: rate_limit_calls.append(request),
+    )
+    _run(kill_switch_cancel_all(
+        KillSwitchCancelAllRequest(reason="rl"),
+        _mk_request(),
+        _mk_admin(),
+    ))
+    assert len(rate_limit_calls) == 1, (
+        "cancel-all must invoke check_rate_limit on the request"
+    )
+
+
+def test_cancel_all_disappeared_runner_counted_as_failed(monkeypatch):
+    """Round-3 P2: list_runner_ids returns id but get_runner returns
+    None — surface as failed=1 rather than ok with no_runner+failed=0."""
+    hub = SimpleNamespace(
+        list_runner_ids=lambda: ["A_GONE"],
+        get_runner=lambda _: None,  # disappeared race
+    )
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: SimpleNamespace(hub=hub))
+    monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
+    resp = _run(kill_switch_cancel_all(
+        KillSwitchCancelAllRequest(reason="race"),
+        _mk_request(),
+        _mk_admin(),
+    ))
+    assert resp["status"] == "partial"
+    assert resp["failed"] == 1
+    per = resp["per_account"][0]
+    assert per["status"] == "no_runner"
+    assert per["failed"] == 1
+
+
+def test_cancel_all_state_store_fallback_when_broker_and_cache_empty(monkeypatch):
+    """Round-3 P2: when broker get_orders() fails AND _last_orders
+    cache is empty, fall back to runner.state_store.get_orders()."""
+    broker = _FakeBroker(get_orders_raises=True)
+    state_store = SimpleNamespace(
+        get_orders=lambda _acct: [_order("persisted-o1")],
+    )
+    runner = SimpleNamespace(
+        broker_account_id="A1",
+        is_running=True,
+        state_store=state_store,
+    )
+    runner._broker_client = broker
+    runner._last_orders = []  # cache empty
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
+    monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
+    resp = _run(kill_switch_cancel_all(
+        KillSwitchCancelAllRequest(reason="state-store-fallback"),
+        _mk_request(),
+        _mk_admin(),
+    ))
+    # Persisted order was cancelled even though broker refresh
+    # failed and the in-memory cache was empty.
+    assert resp["attempted"] == 1
+    assert resp["cancelled"] == 1
+    assert broker.calls[0]["order_id"] == "persisted-o1"
+
+
+def test_kill_switch_confirm_clear_passes_scope_id_to_step_up(monkeypatch):
+    """Round-3 P1: confirm-clear in LIVE must pass ``resource_id=
+    payload.scope_id`` to ``consume_step_up_token`` so a token issued
+    for one scope cannot clear another."""
+    from app.dashboard.admin_routes import (
+        KillSwitchRearmRequest, kill_switch_confirm_clear,
+    )
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    captured: List[dict] = []
+    monkeypatch.setattr(
+        "app.security.step_up.consume_step_up_token",
+        lambda **kw: (captured.append(kw), True)[1],
+    )
+    fake_record = SimpleNamespace(id="rec", state=SimpleNamespace(value="CLEARED"))
+    fake_ksm = SimpleNamespace(
+        confirm_clear=lambda *a: fake_record,
+        _key=lambda *a: ("k",),
+        _records={},
+        _lock=__import__("threading").RLock(),
+    )
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: SimpleNamespace(kill_switch_manager=fake_ksm))
+    monkeypatch.setattr(admin_routes, "_save_kill_switch_state", lambda *_a, **_kw: None)
+    monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    kill_switch_confirm_clear(
+        KillSwitchRearmRequest(
+            scope="ACCOUNT",
+            scope_id="A1",
+            step_up_token="tok-123",
+            reason="ack",
+        ),
+        _mk_admin(),
+    )
+    assert captured, "step-up token must be consumed"
+    assert captured[-1]["resource_id"] == "A1"
+    assert captured[-1]["token_id"] == "tok-123"
+
+
+def test_kill_switch_confirm_clear_persists_reason_in_audit(monkeypatch):
+    """Round-3 P2: the operator-entered reason on confirm-clear is
+    persisted in audit metadata."""
+    from app.dashboard.admin_routes import (
+        KillSwitchRearmRequest, kill_switch_confirm_clear,
+    )
+    monkeypatch.setenv("TRADE_MODE", "PAPER")
+    fake_record = SimpleNamespace(id="rec", state=SimpleNamespace(value="CLEARED"))
+    fake_ksm = SimpleNamespace(
+        confirm_clear=lambda *a: fake_record,
+        _key=lambda *a: ("k",),
+        _records={},
+        _lock=__import__("threading").RLock(),
+    )
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: SimpleNamespace(kill_switch_manager=fake_ksm))
+    monkeypatch.setattr(admin_routes, "_save_kill_switch_state", lambda *_a, **_kw: None)
+    captured: List[dict] = []
+    monkeypatch.setattr(
+        admin_routes, "emit_audit_event",
+        lambda **kw: captured.append(kw),
+    )
+    kill_switch_confirm_clear(
+        KillSwitchRearmRequest(
+            scope="GLOBAL", scope_id="GLOBAL",
+            reason="acknowledged incident X resolved",
+        ),
+        _mk_admin(),
+    )
+    assert captured, "audit event must be emitted"
+    assert captured[-1]["metadata"]["reason"] == "acknowledged incident X resolved"
+
+
+def test_kill_switch_state_includes_trade_mode(monkeypatch):
+    """Round-3 P2: state endpoint returns ``trade_mode`` so the
+    dashboard can conditionally require step-up tokens."""
+    from app.dashboard.admin_routes import get_kill_switch_state_endpoint
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    monkeypatch.setattr(
+        "app.risk.kill_switch.get_kill_switch_state",
+        lambda: {"records": [], "active_count": 0},
+    )
+    resp = get_kill_switch_state_endpoint(_mk_admin(AdminRole.OPERATOR))
+    assert resp["trade_mode"] == "LIVE"

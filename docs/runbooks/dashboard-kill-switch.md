@@ -91,10 +91,40 @@ A2: ok (att=1, ok=0, fail=0, skip=1)
 
 ## Step-up token (LIVE only)
 
-Rearm in LIVE mode requires a single-use, 5-minute, actor-bound
-step-up token. The dashboard fetches it automatically by calling
-`POST /admin/step-up/issue` with `action_class=kill_switch_rearm`
-right before the rearm. No manual ceremony is required.
+In LIVE mode both **Confirm Clear** and **Rearm** require a
+single-use, 5-minute, actor-bound step-up token. PR #240 round-2/3
+explicitly removed the dashboard auto-mint — the operator must
+obtain a token via a **separate ceremony** and paste it into the
+dialog. Auto-minting from the already-authenticated admin session
+defeated the protection step-up was meant to add.
+
+### How to obtain a step-up token (LIVE)
+
+Tokens are bound to:
+- the **actor** consuming them (i.e. the admin logged into the
+  dashboard — use **your own** admin bearer token to issue, not a
+  shared / different operator's token, otherwise the consume call
+  will fail with an actor mismatch),
+- the **action class** (`kill_switch_clear` for Confirm Clear,
+  `kill_switch_rearm` for Rearm), and
+- the **resource_id** (`GLOBAL` for the GLOBAL scope; a tenant id /
+  account id for narrower scopes).
+
+```bash
+curl -X POST $PHOENIX/admin/step-up/issue \
+     -H "Authorization: Bearer $YOUR_ADMIN_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"action_class": "kill_switch_clear", "resource_id": "GLOBAL"}'
+# → {"token_id": "...", "expires_at": "...", "action_class": "kill_switch_clear"}
+```
+
+Paste the returned `token_id` into the Step-up token field in the
+dashboard dialog. The dashboard surfaces an in-line copy of this
+command alongside the input.
+
+In **non-LIVE** (PAPER / SHADOW), the dashboard does **not** prompt
+for a token — the backend accepts an empty value and the local
+recovery flow proceeds without ceremony.
 
 ## LIVE durability
 

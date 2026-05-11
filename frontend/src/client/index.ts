@@ -470,6 +470,10 @@ export interface KillSwitchStateResponse {
   source: string;
   records: KillSwitchRecord[];
   active_count: number;
+  // PR #240 round-3 review P2: backend now surfaces trade_mode so
+  // the dashboard can conditionally require step-up tokens
+  // (LIVE-only) instead of unconditionally blocking non-LIVE flows.
+  trade_mode?: 'LIVE' | 'PAPER' | 'SHADOW' | string;
   legacy_kill_switch?: {
     legacy_active: boolean;
     legacy_reason?: string | null;
@@ -511,6 +515,10 @@ export interface KillSwitchRearmPayload {
   scope: 'GLOBAL' | 'TENANT' | 'ACCOUNT' | 'STRATEGY';
   scope_id: string;
   step_up_token?: string | null;
+  // PR #240 round-3 review P2: operator-entered reason persisted
+  // in the audit event metadata. Required by the dashboard, but the
+  // backend treats it as optional for CLI compatibility.
+  reason?: string | null;
 }
 
 export interface KillSwitchCancelAllPayload {
@@ -529,6 +537,10 @@ export interface KillSwitchCancelAllPerAccount {
   // counted separately from ``cancelled`` because it represents NEW
   // exposure that may need manual flattening.
   raced_filled?: number;
+  // PR #240 round-3 review P2: surface broker get_orders refresh
+  // failure so the dashboard renders the specific reason a
+  // per-account result is partial.
+  broker_orders_refresh_failed?: boolean;
   errors: Array<Record<string, unknown>>;
 }
 
@@ -539,6 +551,10 @@ export interface KillSwitchCancelAllResponse {
   failed: number;
   skipped: number;
   raced_filled?: number;
+  // PR #240 round-3 review P2: aggregate count of accounts where
+  // ``broker.get_orders()`` failed so the dashboard can show
+  // "could not verify broker open-order set" specifically.
+  refresh_failures?: number;
   per_account: KillSwitchCancelAllPerAccount[];
 }
 

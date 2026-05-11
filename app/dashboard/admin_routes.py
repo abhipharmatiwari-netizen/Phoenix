@@ -1286,9 +1286,26 @@ def _save_kill_switch_state(ksm, *, rollback=None) -> None:
     import os as _os
     trade_mode = str(_os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper()
     try:
+        # PR #240 round-3 review P1: use an EXPLICIT transaction for
+        # LIVE persistence so a multi-record save is atomic. With
+        # autocommit, a failure midway through ``save_state`` (which
+        # upserts every kill-switch record) can leave Postgres with
+        # some rows updated and others not — after a process restart
+        # the durable state may resurrect a toggle the dashboard was
+        # told failed. A transaction lets Postgres roll back the
+        # partial write so the durable state matches the in-memory
+        # rollback we perform below.
         from app.data.postgres import connect_with_retry, get_control_plane_dsn
-        with connect_with_retry(get_control_plane_dsn(), autocommit=True) as conn:
-            ksm.save_state(conn)
+        with connect_with_retry(get_control_plane_dsn(), autocommit=False) as conn:
+            try:
+                ksm.save_state(conn)
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
     except Exception as exc:
         if trade_mode == "LIVE":
             _log.getLogger(__name__).error(
@@ -1303,6 +1320,31 @@ def _save_kill_switch_state(ksm, *, rollback=None) -> None:
                         "kill_switch state rollback after LIVE persist "
                         "failure also failed (best-effort): %s", rb_exc,
                     )
+            # PR #240 round-3 review P2: emit a compensating audit
+            # event so reviewers can see that the manager's earlier
+            # ``kill_switch.*`` audit entry (which the manager emitted
+            # before this helper attempted persistence) does NOT
+            # represent durable state. Append-only audit logs cannot
+            # delete the prior entry, but this compensating record
+            # makes the rollback visible during incident review.
+            try:
+                emit_audit_event(
+                    actor="system",
+                    action="kill_switch_persist_failed_rollback",
+                    resource_type="kill_switch",
+                    resource_id="",
+                    metadata={
+                        "error": str(exc),
+                        "trade_mode": trade_mode,
+                        "note": (
+                            "in-memory state restored; preceding "
+                            "kill_switch.* audit entry from the "
+                            "manager does NOT reflect durable state"
+                        ),
+                    },
+                )
+            except Exception:
+                pass  # best-effort
             raise HTTPException(
                 status_code=500,
                 detail=(
@@ -1374,6 +1416,19 @@ class KillSwitchRearmRequest(BaseModel):
         description=(
             "Required in LIVE mode. Obtain via POST /admin/step-up/issue "
             "with action_class=kill_switch_rearm before calling this endpoint."
+        ),
+    )
+    # PR #240 round-3 review P2: capture the operator-entered reason
+    # so confirm-clear and rearm audit events carry the typed
+    # justification the dashboard already prompts for. Optional for
+    # backward compatibility with existing CLI scripts.
+    reason: Optional[str] = Field(
+        None,
+        description=(
+            "Operator-entered reason / acknowledgement, persisted in "
+            "the audit event metadata. The dashboard requires a non-"
+            "empty value before enabling the Confirm button; CLI "
+            "scripts may omit it for backward compatibility."
         ),
     )
 
@@ -1578,7 +1633,17 @@ def kill_switch_confirm_clear(
     """
     ctx.require_role(AdminRole.ADMIN)
 
+    # Parse scope FIRST so we can scope the step-up token check.
+    from app.risk.kill_switch import KillSwitchScope
+    try:
+        scope = KillSwitchScope(payload.scope.upper())
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
+
     # §15.4 step-up gate (LIVE only).
+    # PR #240 round-3 review P1: pass ``resource_id=payload.scope_id``
+    # so a token issued for one scope cannot be reused to clear a
+    # different scope (the token issuer contract binds the resource).
     import os as _os
     if str(_os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper() == "LIVE":
         if not payload.step_up_token:
@@ -1588,7 +1653,7 @@ def kill_switch_confirm_clear(
                     "step_up_token is required to confirm-clear a kill "
                     "switch in LIVE mode. Issue one first: "
                     "POST /admin/step-up/issue {\"action_class\": "
-                    "\"kill_switch_clear\", \"resource_id\": \"<scope_id>\"}."
+                    f"\"kill_switch_clear\", \"resource_id\": \"{payload.scope_id}\"}}."
                 ),
             )
         from app.security.step_up import DangerousActionClass, consume_step_up_token
@@ -1596,21 +1661,18 @@ def kill_switch_confirm_clear(
             token_id=payload.step_up_token,
             actor=ctx.caller,
             action_class=DangerousActionClass.KILL_SWITCH_CLEAR,
+            resource_id=str(payload.scope_id),
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
                     "step_up_token is invalid, expired, already used, or was not "
-                    "issued to the current actor for kill_switch_clear. Issue a "
-                    "new token via POST /admin/step-up/issue and retry."
+                    f"issued to the current actor for kill_switch_clear on "
+                    f"scope_id={payload.scope_id!r}. Issue a new token via "
+                    "POST /admin/step-up/issue and retry."
                 ),
             )
 
-    from app.risk.kill_switch import KillSwitchScope
-    try:
-        scope = KillSwitchScope(payload.scope.upper())
-    except ValueError:
-        raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
     ksm = _get_kill_switch_manager()
     rollback = _kill_switch_rollback_factory(ksm, scope, payload.scope_id)
     try:
@@ -1623,7 +1685,15 @@ def kill_switch_confirm_clear(
         action="kill_switch_confirm_clear",
         resource_type="kill_switch",
         resource_id=str(payload.scope_id),
-        metadata={"scope": payload.scope, "scope_id": payload.scope_id},
+        metadata={
+            "scope": payload.scope,
+            "scope_id": payload.scope_id,
+            # PR #240 round-3 review P2: persist the operator
+            # acknowledgement reason so the audit trail carries the
+            # justification for the transition that restores LIVE
+            # entry eligibility.
+            "reason": payload.reason or "",
+        },
     )
     return {"status": "cleared", "record_id": record.id, "state": record.state.value}
 
@@ -1653,21 +1723,25 @@ def kill_switch_rearm(
                 detail=(
                     "step_up_token is required to rearm a kill switch in LIVE mode. "
                     "Issue one first: POST /admin/step-up/issue "
-                    "{\"action_class\": \"kill_switch_rearm\", \"resource_id\": \"<scope_id>\"}."
+                    f"{{\"action_class\": \"kill_switch_rearm\", \"resource_id\": \"{payload.scope_id}\"}}."
                 ),
             )
         from app.security.step_up import DangerousActionClass, consume_step_up_token
+        # PR #240 round-3 review P1: bind the token to ``scope_id`` so
+        # one scope's token cannot rearm a different scope.
         if not consume_step_up_token(
             token_id=payload.step_up_token,
             actor=ctx.caller,
             action_class=DangerousActionClass.KILL_SWITCH_REARM,
+            resource_id=str(payload.scope_id),
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
                     "step_up_token is invalid, expired, already used, or was not issued "
-                    "to the current actor for kill_switch_rearm. "
-                    "Issue a new token via POST /admin/step-up/issue and retry."
+                    f"to the current actor for kill_switch_rearm on scope_id="
+                    f"{payload.scope_id!r}. Issue a new token via "
+                    "POST /admin/step-up/issue and retry."
                 ),
             )
 
@@ -1688,17 +1762,32 @@ def kill_switch_rearm(
         action="kill_switch_rearm",
         resource_type="kill_switch",
         resource_id=str(payload.scope_id),
-        metadata={"scope": payload.scope, "scope_id": payload.scope_id},
+        metadata={
+            "scope": payload.scope,
+            "scope_id": payload.scope_id,
+            # PR #240 round-3 review P2: persist operator reason.
+            "reason": payload.reason or "",
+        },
     )
     return {"status": "inactive", "record_id": record.id, "state": record.state.value}
 
 
 @router.get("/kill-switch/state")
 def get_kill_switch_state_endpoint(ctx: AdminContext = Depends(get_admin_context)) -> dict:
-    """Return current kill switch state for all non-INACTIVE scopes. Requires OPERATOR role."""
+    """Return current kill switch state for all non-INACTIVE scopes.
+
+    PR #240 round-3 review P2: include ``trade_mode`` so the dashboard
+    can render the step-up token field conditionally (LIVE-only).
+    Without this, the UI either always shows the token field
+    (blocking non-LIVE confirm-clear/rearm) or never shows it
+    (defeating the LIVE protection). Requires OPERATOR role.
+    """
     ctx.require_role(AdminRole.OPERATOR)
+    import os as _os
     from app.risk.kill_switch import get_kill_switch_state
-    return get_kill_switch_state()
+    state = get_kill_switch_state()
+    state["trade_mode"] = str(_os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper()
+    return state
 
 
 class KillSwitchCancelAllRequest(BaseModel):
@@ -1723,32 +1812,75 @@ class KillSwitchCancelAllRequest(BaseModel):
 @router.post("/kill-switch/cancel-all")
 async def kill_switch_cancel_all(
     payload: KillSwitchCancelAllRequest,
+    request: Request,
     ctx: AdminContext = Depends(get_admin_context),
 ) -> dict:
     """Cancel every open broker order across registered account runners.
 
-    Issue #238: dashboard-driven safety control. Iterates each runner's
-    last-known broker order list and calls the broker adapter's
-    ``cancel_order`` per pending order. Cancellation is idempotent on the
-    broker side — a missing or already-cancelled order returns a
-    REJECTED ``OrderResponse`` which is recorded but does NOT fail the
-    batch. Per-broker results are aggregated and returned so the
-    dashboard can surface per-account success / failure.
+    Issue #238 + PR #240 round-3: dashboard-driven safety control.
+    Cancellation is idempotent on the broker side; per-broker results
+    are aggregated and returned.
 
-    This endpoint does NOT trip the durable kill switch — call
-    ``/admin/kill-switch/trip`` separately for that. The dashboard flow
-    is: trip first (block new placements), then cancel-all (drain open
-    orders), then optionally manual flatten via break-glass.
+    Server-side preconditions enforced (PR #240 round-3 review P2):
+      * ADMIN role
+      * Non-empty reason
+      * Rate-limited via the standard dashboard limiter
+      * The durable GLOBAL kill switch must be actively blocking new
+        placements (TRIPPED or CLEAR_PENDING). Otherwise Phoenix is
+        free to place fresh orders during the bulk-cancel window,
+        defeating the documented emergency-drain sequence.
 
-    Requires ADMIN role (stricter than ``trip``/``rearm`` which allow
-    OPERATOR) because bulk cancellation affects every account at once.
+    The endpoint does NOT trip the durable switch — operators must
+    call ``/admin/kill-switch/trip`` first.
     """
     ctx.require_role(AdminRole.ADMIN)
+    # PR #240 round-3 review P2: rate-limit destructive bulk cancel
+    # the same way as every other state-changing admin endpoint.
+    check_rate_limit(request)
     if not str(payload.reason or "").strip():
         raise HTTPException(
             status_code=422,
             detail="reason is required and must be non-empty",
         )
+
+    # PR #240 round-3 review P2: enforce trip-before-cancel on the
+    # server even though the UI also disables the button. A direct
+    # API/BFF call must be rejected when the durable kill switch is
+    # INACTIVE / CLEARED, because new placements are still allowed in
+    # those states.
+    try:
+        _precheck_ksm = _get_kill_switch_manager()
+        from app.risk.kill_switch import KillSwitchScope, KillSwitchState
+        _global_record = _precheck_ksm.get_record(
+            KillSwitchScope.GLOBAL, "GLOBAL",
+        )
+        _global_state = (
+            _global_record.state if _global_record is not None else None
+        )
+        if _global_state not in (
+            KillSwitchState.TRIPPED, KillSwitchState.CLEAR_PENDING,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "cancel-all requires the GLOBAL kill switch to be "
+                    "actively blocking new placements (TRIPPED or "
+                    "CLEAR_PENDING). Current state: "
+                    f"{_global_state.value if _global_state else 'INACTIVE'}. "
+                    "Trip the kill switch first via POST "
+                    "/admin/kill-switch/trip."
+                ),
+            )
+    except HTTPException:
+        raise
+    except Exception as _ksm_exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not verify durable kill-switch state before "
+                f"cancel-all: {_ksm_exc}"
+            ),
+        ) from _ksm_exc
 
     try:
         runtime = get_hub_runtime()
@@ -1832,16 +1964,21 @@ async def kill_switch_cancel_all(
     for acct_id in target_runner_ids:
         runner = hub.get_runner(acct_id)
         if runner is None:
+            # PR #240 round-3 review P2: a runner that disappeared
+            # between ``list_runner_ids()`` and ``get_runner()`` has
+            # NOT been drained — surface as failed so the aggregate
+            # verdict is partial and operators see the gap.
             per_account_results.append({
                 "broker_account_id": str(acct_id),
                 "status": "no_runner",
                 "attempted": 0,
                 "cancelled": 0,
-                "failed": 0,
+                "failed": 1,
                 "skipped": 0,
                 "raced_filled": 0,
-                "errors": [],
+                "errors": [{"no_runner_race": True}],
             })
+            aggregate_failed += 1
             continue
         broker_client = getattr(runner, "_broker_client", None)
         cancel_fn = getattr(broker_client, "cancel_order", None)
@@ -1870,6 +2007,14 @@ async def kill_switch_cancel_all(
         # ``_last_orders`` cache. Fall back to the cached list when the
         # broker refresh fails so we still attempt cancellation of
         # whatever we last knew about.
+        #
+        # PR #240 round-3 review P2: when both the broker refresh AND
+        # the in-memory cache are empty (e.g. immediately after a
+        # process restart), also consult ``runner.state_store`` /
+        # ``runner._state_store`` for persisted orders. This mirrors
+        # ``AccountRunner.cancel_open_orders``'s own fallback so an
+        # operator-driven cancel-all does not silently report
+        # attempted=0 while persisted open orders are still live.
         get_orders_fn = getattr(broker_client, "get_orders", None)
         live_orders = None
         refresh_error: Optional[str] = None
@@ -1880,8 +2025,31 @@ async def kill_switch_cancel_all(
             except Exception as exc:
                 refresh_error = repr(exc)
                 live_orders = None
-        if live_orders is None:
-            live_orders = list(getattr(runner, "_last_orders", None) or [])
+        if not live_orders:
+            cached = list(getattr(runner, "_last_orders", None) or [])
+            if cached:
+                live_orders = cached
+            else:
+                # State-store fallback. The runner exposes its store
+                # under either ``state_store`` (public) or
+                # ``_state_store`` (private); accept either.
+                state_store = (
+                    getattr(runner, "state_store", None)
+                    or getattr(runner, "_state_store", None)
+                )
+                state_get_orders = getattr(state_store, "get_orders", None)
+                if callable(state_get_orders):
+                    try:
+                        live_orders = list(state_get_orders(acct_id) or [])
+                    except Exception as ss_exc:
+                        # Best-effort — if even the state store
+                        # cannot enumerate, fall through to the empty
+                        # path which will surface the refresh error.
+                        if refresh_error is None:
+                            refresh_error = repr(ss_exc)
+                        live_orders = []
+                else:
+                    live_orders = []
 
         attempted = 0
         cancelled = 0
