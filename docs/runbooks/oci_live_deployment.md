@@ -47,7 +47,7 @@ Required values:
 - `HUB_DEFAULT_TENANT_ID` — default tenant used by hub routing, strategy_bridge, and trade_records when no tenant is provided by the caller. Must match the production tenant UUID. Required in LIVE (startup validation rejects empty value). The bundled compose example defaults to `tenant-1`; set it explicitly in your `phoenix-deploy.env`.
 - `HUB_DEFAULT_BROKER_ACCOUNT_ID`
 - `CAPITAL_LIMITS_JSON`
-- `RISK_MAX_DAILY_LOSS` — absolute daily realised+unrealised drawdown ceiling in INR. **Must be sized per capital tier** — see [Sizing the daily-loss limit by capital tier](#sizing-the-daily-loss-limit-by-capital-tier) below. LIVE startup fails closed when this is below `RISK_MAX_DAILY_LOSS_LIVE_FLOOR` (default ₹5,000) — set explicitly in `/opt/phoenix/phoenix-deploy.env`. The committed `.env.example`/`cloudrun.env` placeholders are `CHANGE_ME_DAILY_LOSS_INR` and will not start LIVE.
+- `RISK_MAX_DAILY_LOSS` — one-sided daily realised+unrealised loss cap in INR (trips the kill switch only when the day's running P&L falls **below** `-abs(value)`; profitable days are unaffected). **Must be sized per capital tier** — see [Sizing the daily-loss limit by capital tier](#sizing-the-daily-loss-limit-by-capital-tier) below. LIVE startup fails closed when this is below `RISK_MAX_DAILY_LOSS_LIVE_FLOOR` (default ₹5,000) — set explicitly in `/opt/phoenix/phoenix-deploy.env`. The committed `.env.example`/`cloudrun.env` placeholders are `CHANGE_ME_DAILY_LOSS_INR` and will not start LIVE.
 - `PROFIT_DAILY_TARGET`
 - `CLIENT_LOCAL_IP`
 - `CLIENT_PUBLIC_IP`
@@ -270,7 +270,7 @@ The operator on duty owns:
 
 ## Sizing the daily-loss limit by capital tier
 
-`RISK_MAX_DAILY_LOSS` is the **absolute** realised + unrealised drawdown ceiling in INR for the trading day. When the running |daily P&L| crosses this value, the kill switch trips and blocks new entries (SOFT) or all orders including exits (HARD). The exit engine subsequently squares off open positions per its policy.
+`RISK_MAX_DAILY_LOSS` is the **absolute daily realised + unrealised loss limit in INR** — the one-sided cap on how far the day's running P&L is allowed to fall below zero. The risk engine compares the running P&L against `-abs(RISK_MAX_DAILY_LOSS)` (see [`app/risk/risk_engine.py`](../../app/risk/risk_engine.py) and [`app/core/risk_manager.py`](../../app/core/risk_manager.py)); the kill switch trips only when the running P&L crosses below that negative threshold. A profitable day giving back gains, or a day finishing positive, does **not** trip this gate. Once the gate trips it blocks new entries (SOFT) or all orders including exits (HARD), and the exit engine subsequently squares off open positions per its policy.
 
 **Why this matters (issue #221, 2026-05-08 incident).** The historical committed default of ₹2,000 tripped the kill switch on a ~1.6-point adverse mark-to-market move on a single NG_FUT lot. A limit that fires on routine intraday volatility is operationally meaningless — operators learn to re-arm it, distorting backtests-vs-live and leaving real risk un-bounded.
 

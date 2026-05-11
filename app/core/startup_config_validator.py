@@ -699,12 +699,24 @@ def validate_runtime_startup_settings(
             # production. Floor is overridable for very small-capital
             # accounts via RISK_MAX_DAILY_LOSS_LIVE_FLOOR (default
             # ₹5,000 INR). Setting the floor to 0 disables the gate.
+            #
+            # PR #243 round-1 review P2: read the override from the
+            # supplied ``env`` mapping FIRST, falling back to
+            # ``os.environ`` only when the env mapping did not provide
+            # a value. ``lint_env_profile`` validates a parsed env
+            # file and passes ``env=validator_env``; if we only ever
+            # consulted the reviewer's process env, a profile-local
+            # override (e.g. ``RISK_MAX_DAILY_LOSS_LIVE_FLOOR=1000``
+            # alongside ``RISK_MAX_DAILY_LOSS=1500``) would be
+            # silently ignored during lint.
             import os as _os
+            _floor_raw = ""
+            if isinstance(env, Mapping):
+                _floor_raw = str(env.get("RISK_MAX_DAILY_LOSS_LIVE_FLOOR", "") or "").strip()
+            if not _floor_raw:
+                _floor_raw = str(_os.getenv("RISK_MAX_DAILY_LOSS_LIVE_FLOOR", "5000") or "5000").strip()
             try:
-                _floor = float(
-                    str(_os.getenv("RISK_MAX_DAILY_LOSS_LIVE_FLOOR", "5000")).strip()
-                    or "5000"
-                )
+                _floor = float(_floor_raw or "5000")
             except (TypeError, ValueError):
                 _floor = 5000.0
             _configured = float(getattr(settings, "risk_max_daily_loss", 0) or 0)

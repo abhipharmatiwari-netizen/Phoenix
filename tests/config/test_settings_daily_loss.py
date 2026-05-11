@@ -162,6 +162,29 @@ class TestLiveDailyLossFloor:
             env=_live_env(),
         )
 
+    def test_live_floor_override_via_env_mapping(self, monkeypatch):
+        """Round-1 P2: ``RISK_MAX_DAILY_LOSS_LIVE_FLOOR`` in the supplied
+        ``env`` mapping must be honoured even when the surrounding
+        process env does not set it (used by ``lint_env_profile``)."""
+        monkeypatch.delenv("RISK_MAX_DAILY_LOSS_LIVE_FLOOR", raising=False)
+        validate_runtime_startup_settings(
+            settings=_runtime_settings(risk_max_daily_loss=1500.0),
+            runtime_cfg=_runtime_cfg(),
+            env=_live_env(RISK_MAX_DAILY_LOSS_LIVE_FLOOR="1000"),
+        )
+
+    def test_live_floor_env_mapping_takes_precedence_over_process_env(self, monkeypatch):
+        """When both are set, the supplied ``env`` mapping wins so the
+        validator sees what the profile/lint caller intended."""
+        monkeypatch.setenv("RISK_MAX_DAILY_LOSS_LIVE_FLOOR", "99999")
+        # Process env says floor=99999 (would reject ₹1500); env mapping
+        # says floor=1000 (would accept). The env mapping must win.
+        validate_runtime_startup_settings(
+            settings=_runtime_settings(risk_max_daily_loss=1500.0),
+            runtime_cfg=_runtime_cfg(),
+            env=_live_env(RISK_MAX_DAILY_LOSS_LIVE_FLOOR="1000"),
+        )
+
     def test_live_with_invalid_floor_falls_back_to_default(self, monkeypatch):
         """Garbage in ``RISK_MAX_DAILY_LOSS_LIVE_FLOOR`` falls back to ₹5,000."""
         monkeypatch.setenv("RISK_MAX_DAILY_LOSS_LIVE_FLOOR", "not-a-number")

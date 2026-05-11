@@ -18,6 +18,14 @@ def _make_settings(**overrides):
         # name so circuit-breaker state doesn't bleed across stacks
         # sharing the same Postgres.
         "HUB_INSTANCE_NAME": "phoenix-live-test",
+        # PR #243 round-1 review P2: non-local APP_ENV triggers the
+        # auth gate (``ADMIN_API_KEY must be configured outside
+        # local/dev/test``). A clean test env without this variable
+        # exported would fail the LIVE-validator path with an
+        # unrelated error and mask the gate under test. Hard-coded
+        # placeholder is acceptable because these tests never reach
+        # the network — Settings only needs the field to be non-empty.
+        "ADMIN_API_KEY": "test-admin-placeholder",
         "PROFIT_SWEEP_ENABLED": "false",
         "PROFIT_SWEEP_STRATEGY": "SIMPLE",
         "PROFIT_SIMPLE_ENABLED": "false",

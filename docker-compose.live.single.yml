@@ -121,6 +121,12 @@ x-live-backend-env: &live-backend-env
   # LIVE startup additionally fails closed if the value is below
   # RISK_MAX_DAILY_LOSS_LIVE_FLOOR (default ₹5,000).
   RISK_MAX_DAILY_LOSS: "${RISK_MAX_DAILY_LOSS:?Set RISK_MAX_DAILY_LOSS (e.g. 10000 for a small account; see docs/runbooks/oci_live_deployment.md)}"
+  # Issue #221 / PR #243 round-1 review P2: forward the floor-override
+  # env var into the container so operators can lower the LIVE start-up
+  # floor (default ₹5,000) for very small accounts — or set it to 0 to
+  # disable the gate entirely — without re-rolling the image. Default
+  # empty string ⇒ validator falls back to the built-in ₹5,000 floor.
+  RISK_MAX_DAILY_LOSS_LIVE_FLOOR: "${RISK_MAX_DAILY_LOSS_LIVE_FLOOR:-}"
   RISK_FAIL_OPEN_ON_MISSING_PNL: "false"
 
   ENABLE_PROFIT_CHECKS: "true"
