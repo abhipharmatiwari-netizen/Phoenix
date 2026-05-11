@@ -236,6 +236,7 @@ def run_optimize(
     step_days: int = 20,
     parameter_sensitivity: Optional[Dict[str, Dict[str, Any]]] = None,
     recommendation_payloads: Optional[Dict[str, Dict[str, Any]]] = None,
+    filter_regime: Optional[str] = None,
 ) -> tuple:
     execution_cfg = normalize_execution_config(execution)
     all_opt_results: Dict[str, List[OptimizationResult]] = {}
@@ -255,6 +256,7 @@ def run_optimize(
             chunk_size=chunk_size,
             execution=execution_cfg,
             strategy_env_path=strategy_env_path,
+            filter_regime=filter_regime,
         )
         all_opt_results[key] = results
         parameter_sensitivity and parameter_sensitivity.setdefault(key, analyze_parameter_sensitivity(results))
@@ -279,6 +281,7 @@ def run_optimize(
                 train_days=train_days,
                 test_days=test_days,
                 step_days=step_days,
+                filter_regime=filter_regime,
             )
             best_result.walk_forward_score = walk_forward_score
 
@@ -388,6 +391,7 @@ def main() -> None:
                 step_days=args.step_days,
                 parameter_sensitivity=parameter_sensitivity,
                 recommendation_payloads=recommendation_payloads,
+                filter_regime=args.filter_regime,
             )
             all_opt_results.update(opt_results)
             all_recommendations.update(recs)

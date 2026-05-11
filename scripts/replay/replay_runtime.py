@@ -7,6 +7,8 @@ small compatibility surface for existing imports and tests.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 import os
@@ -27,7 +29,7 @@ from app.orders.replay_context import isolated_replay_order_sink
 from app.strategies.adaptive.dynamic_policy import parse_dynamic_policy_config
 from app.strategies.restart_state import sync_open_position_state as _REAL_SYNC_OPEN_POSITION_STATE
 from app.strategies.adaptive.market_context import MarketContextBuilder
-from app.strategies.adaptive.regime import CLASSIFIER_VERSION, Regime, RegimeClassifier
+from app.strategies.adaptive.regime import CLASSIFIER_VERSION, Regime, RegimeClassifier, RegimeThresholds
 
 from scripts.replay.execution_models import (
     END_POLICY_DAILY_MTM,
@@ -81,6 +83,19 @@ _OPTIONAL_COLUMNS = (
     "minus_di",
     "di_spread",
 )
+
+_CONTEXT_BUILDER_DEFAULTS: Dict[str, Any] = {
+    "atr_median_lookback": 200,
+    "min_median_samples": 50,
+    "epsilon": 1e-9,
+    "ema_period": 20,
+    "atr_norm_min": 0.5,
+    "atr_norm_max": 2.5,
+    "slope_shift_bars": 3,
+    "slope_smoothing_span": 3,
+    "enable_chop_index": False,
+    "chop_lookback": 14,
+}
 
 
 @dataclass
@@ -244,14 +259,17 @@ def load_bars_from_postgres(
         query_params = list(params)
         if regime_sidecar_available:
             version_placeholders = ", ".join(["%s"] * len(regime_versions))
+            version_order = " ".join(
+                f"WHEN %s THEN {idx}" for idx, _version in enumerate(regime_versions)
+            )
             regime_select = (
                 f"(SELECT br.regime FROM {regime_sidecar_table} br "
                 f"WHERE br.bar_id = {normalized_table}.id "
                 f"AND br.classifier_version IN ({version_placeholders}) "
-                "ORDER BY CASE WHEN br.classifier_version = %s THEN 0 ELSE 1 END "
+                f"ORDER BY CASE br.classifier_version {version_order} ELSE {len(regime_versions)} END "
                 "LIMIT 1) AS replay_regime"
             )
-            query_params = [*regime_versions, regime_versions[0], *query_params]
+            query_params = [*regime_versions, *regime_versions, *query_params]
         query = f"""
             SELECT {select_list}, {regime_select}
             FROM {normalized_table}
@@ -279,7 +297,13 @@ def load_bars_from_postgres(
         strategy_id=strategy_id,
         strategy_params=strategy_params,
     )
-    synthetic_counts.update(_attach_synthetic_regimes(rows))
+    synthetic_counts.update(
+        _attach_synthetic_regimes(
+            rows,
+            strategy_id=strategy_id,
+            strategy_params=strategy_params,
+        )
+    )
 
     profile = {
         "label": label,
@@ -333,20 +357,136 @@ def _replay_regime_classifier_versions(
     strategy_id: Optional[str],
     strategy_params: Optional[Dict[str, Any]],
 ) -> tuple[str, ...]:
-    del strategy_id
     params = strategy_params if isinstance(strategy_params, dict) else {}
     policy_cfg = parse_dynamic_policy_config(params.get("dynamic_policy") or {})
     if policy_cfg.enabled and policy_cfg.policy_hash:
-        try:
-            ema_period = max(2, int(params.get("ema_period", 20) or 20))
-        except (TypeError, ValueError):
-            ema_period = 20
-        return (
+        ema_period = _replay_ema_period(strategy_id=strategy_id, strategy_params=params)
+        builder_kwargs = _replay_context_builder_kwargs(
+            strategy_id=strategy_id,
+            strategy_params=params,
+            thresholds=policy_cfg.thresholds,
+        )
+        primary = (
+            f"{CLASSIFIER_VERSION}:{policy_cfg.policy_hash}:ema{ema_period}"
+            f"{_context_builder_version_suffix(builder_kwargs, ema_period=ema_period)}"
+        )
+        versions = (
+            primary,
             f"{CLASSIFIER_VERSION}:{policy_cfg.policy_hash}:ema{ema_period}",
             f"{CLASSIFIER_VERSION}:{policy_cfg.policy_hash}",
             CLASSIFIER_VERSION,
         )
+        return tuple(dict.fromkeys(versions))
     return (CLASSIFIER_VERSION,)
+
+
+def _replay_ema_period(
+    *,
+    strategy_id: Optional[str],
+    strategy_params: Optional[Dict[str, Any]],
+) -> int:
+    params = strategy_params if isinstance(strategy_params, dict) else {}
+    default = 20
+    if str(strategy_id or "") == "ema20_strategy" or "ema_period" in params:
+        try:
+            default = int(params.get("ema_period", 20) or 20)
+        except (TypeError, ValueError):
+            default = 20
+    return max(2, int(default))
+
+
+def _replay_context_builder_kwargs(
+    *,
+    strategy_id: Optional[str],
+    strategy_params: Optional[Dict[str, Any]],
+    thresholds: Optional[RegimeThresholds] = None,
+) -> Dict[str, Any]:
+    ema_period = _replay_ema_period(
+        strategy_id=strategy_id,
+        strategy_params=strategy_params,
+    )
+    builder_kwargs: Dict[str, Any] = {"ema_period": ema_period}
+    if str(strategy_id or "") in {
+        "put_momentum_scalper",
+        "exclusive_nifty_ce_buy",
+        "ce_orb",
+    }:
+        builder_kwargs["min_median_samples"] = 10
+    if thresholds is not None and bool(getattr(thresholds, "use_chop_index", False)):
+        builder_kwargs["enable_chop_index"] = True
+    return _normalize_context_builder_kwargs(builder_kwargs, ema_period=ema_period)
+
+
+def _normalize_context_builder_kwargs(
+    builder_kwargs: Optional[Dict[str, Any]],
+    *,
+    ema_period: int,
+) -> Dict[str, Any]:
+    raw = dict(_CONTEXT_BUILDER_DEFAULTS)
+    raw.update(dict(builder_kwargs or {}))
+    raw["ema_period"] = raw.get("ema_period", ema_period)
+    normalized: Dict[str, Any] = {}
+    int_keys = {
+        "atr_median_lookback",
+        "min_median_samples",
+        "ema_period",
+        "slope_shift_bars",
+        "slope_smoothing_span",
+        "chop_lookback",
+    }
+    float_keys = {"epsilon", "atr_norm_min", "atr_norm_max"}
+    for key, default_value in _CONTEXT_BUILDER_DEFAULTS.items():
+        value = raw.get(key, default_value)
+        if key in int_keys:
+            try:
+                normalized[key] = max(2, int(value)) if key == "ema_period" else int(value)
+            except (TypeError, ValueError):
+                normalized[key] = int(default_value)
+        elif key in float_keys:
+            try:
+                normalized[key] = float(value)
+            except (TypeError, ValueError):
+                normalized[key] = float(default_value)
+        elif key == "enable_chop_index":
+            normalized[key] = bool(value)
+        else:
+            normalized[key] = value
+    normalized["ema_period"] = max(2, int(normalized["ema_period"]))
+    normalized["atr_median_lookback"] = max(2, int(normalized["atr_median_lookback"]))
+    normalized["min_median_samples"] = max(2, int(normalized["min_median_samples"]))
+    normalized["slope_shift_bars"] = max(1, int(normalized["slope_shift_bars"]))
+    normalized["slope_smoothing_span"] = max(0, int(normalized["slope_smoothing_span"]))
+    normalized["chop_lookback"] = max(2, int(normalized["chop_lookback"]))
+    return normalized
+
+
+def _context_builder_version_suffix(
+    builder_kwargs: Optional[Dict[str, Any]],
+    *,
+    ema_period: int,
+) -> str:
+    normalized = _normalize_context_builder_kwargs(
+        builder_kwargs,
+        ema_period=ema_period,
+    )
+    default = _normalize_context_builder_kwargs(
+        {"ema_period": ema_period},
+        ema_period=ema_period,
+    )
+    non_default = {
+        key: normalized[key]
+        for key in sorted(normalized)
+        if normalized.get(key) != default.get(key)
+    }
+    if not non_default:
+        return ""
+    encoded = json.dumps(
+        non_default,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return f":ctx{hashlib.sha256(encoded).hexdigest()[:8]}"
 
 
 def bar_to_candle(bar: BarRow) -> SimpleNamespace:
@@ -1289,9 +1429,12 @@ def _precompute_derived_indicator_history(
     strategy_params: Optional[Dict[str, Any]],
 ) -> None:
     requested_ema_period: Optional[int] = None
-    if str(strategy_id or "") == "ema20_strategy":
-        params = strategy_params if isinstance(strategy_params, dict) else {}
-        requested_ema_period = int(params.get("ema_period", 20))
+    params = strategy_params if isinstance(strategy_params, dict) else {}
+    if str(strategy_id or "") == "ema20_strategy" or "ema_period" in params:
+        requested_ema_period = _replay_ema_period(
+            strategy_id=strategy_id,
+            strategy_params=params,
+        )
     close_history: List[float] = []
     for row in rows:
         indicators = bar_to_indicators(
@@ -1309,17 +1452,35 @@ def _precompute_derived_indicator_history(
         close_history.append(float(row.c))
 
 
-def _attach_synthetic_regimes(rows: Sequence[BarRow]) -> Dict[str, int]:
+def _attach_synthetic_regimes(
+    rows: Sequence[BarRow],
+    *,
+    strategy_id: Optional[str] = None,
+    strategy_params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, int]:
+    params = strategy_params if isinstance(strategy_params, dict) else {}
+    policy_cfg = parse_dynamic_policy_config(params.get("dynamic_policy") or {})
+    thresholds = policy_cfg.thresholds if policy_cfg.enabled else None
+    builder_kwargs = _replay_context_builder_kwargs(
+        strategy_id=strategy_id,
+        strategy_params=params,
+        thresholds=thresholds,
+    )
+    requested_ema_period = int(builder_kwargs.get("ema_period", 20))
     builders: Dict[int, MarketContextBuilder] = {}
     classifiers: Dict[int, RegimeClassifier] = {}
     filled = 0
     for row in rows:
         tf = int(row.timeframe_seconds)
-        builder = builders.setdefault(tf, MarketContextBuilder())
-        classifier = classifiers.setdefault(tf, RegimeClassifier())
+        builder = builders.setdefault(tf, MarketContextBuilder(**builder_kwargs))
+        classifier = classifiers.setdefault(tf, RegimeClassifier(thresholds=thresholds))
         context = builder.build(
             candle=bar_to_candle(row),
-            indicators=bar_to_indicators(row),
+            indicators=bar_to_indicators(
+                row,
+                strategy_id=strategy_id,
+                requested_ema_period=requested_ema_period,
+            ),
         )
         regime = classifier.update(context)
         if row.regime:

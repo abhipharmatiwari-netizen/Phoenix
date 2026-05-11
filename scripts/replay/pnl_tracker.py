@@ -169,6 +169,8 @@ class PnLTracker:
                     entry_fill.timestamp,
                 )
 
+        self.trades = self._aggregate_spread_trades(self.trades)
+        self._renumber_trades(self.trades)
         return self.trades
 
     def _pair_fills(self, entry: ReplayFill, exit_fill: ReplayFill) -> ReplayTrade:
@@ -312,6 +314,99 @@ class PnLTracker:
         if len(candidates) == 1:
             return candidates[0]
         return None
+
+    @staticmethod
+    def _spread_id_from_trade(trade: ReplayTrade) -> str:
+        if not isinstance(trade.strategy_context, dict):
+            return ""
+        spread_id = str(trade.strategy_context.get("spread_id") or "").strip()
+        if spread_id:
+            return spread_id
+        replay_ctx = trade.strategy_context.get("_replay")
+        if isinstance(replay_ctx, dict):
+            return str(replay_ctx.get("spread_id") or "").strip()
+        return ""
+
+    def _aggregate_spread_trades(self, trades: List[ReplayTrade]) -> List[ReplayTrade]:
+        spread_groups: Dict[tuple[str, str, str], List[ReplayTrade]] = {}
+        passthrough: List[ReplayTrade] = []
+        for trade in trades:
+            spread_id = self._spread_id_from_trade(trade)
+            if trade.strategy_id != "nifty_weekly_credit_spreads" or not spread_id:
+                passthrough.append(trade)
+                continue
+            spread_groups.setdefault(
+                (trade.strategy_id, trade.underlying, spread_id),
+                [],
+            ).append(trade)
+
+        aggregated = list(passthrough)
+        for (strategy_id, underlying, spread_id), legs in spread_groups.items():
+            if not legs:
+                continue
+            legs.sort(key=lambda item: (item.entry_time, item.exit_time or item.entry_time, item.trade_id))
+            first = legs[0]
+            last_exit = max(
+                (leg.exit_time for leg in legs if leg.exit_time is not None),
+                default=first.exit_time,
+            )
+            signed_entry_value = 0.0
+            signed_exit_debit = 0.0
+            total_qty = 0
+            for leg in legs:
+                qty = max(1, int(leg.quantity))
+                total_qty += qty
+                if leg.entry_side == "SELL":
+                    signed_entry_value += float(leg.entry_price) * qty
+                    signed_exit_debit += float(leg.exit_price or 0.0) * qty
+                else:
+                    signed_entry_value -= float(leg.entry_price) * qty
+                    signed_exit_debit -= float(leg.exit_price or 0.0) * qty
+            strategy_context = dict(first.strategy_context or {})
+            replay_ctx = dict(strategy_context.get("_replay") or {})
+            replay_ctx["spread_id"] = spread_id
+            replay_ctx["spread_legs"] = len(legs)
+            strategy_context["_replay"] = replay_ctx
+            strategy_context["spread_id"] = spread_id
+            aggregated.append(
+                ReplayTrade(
+                    trade_id=first.trade_id,
+                    strategy_id=strategy_id,
+                    underlying=underlying,
+                    entry_time=min(leg.entry_time for leg in legs),
+                    entry_price=signed_entry_value,
+                    entry_side="SPREAD",
+                    entry_tag=f"SPREAD_ENTRY:{spread_id}",
+                    exit_time=last_exit,
+                    exit_price=signed_exit_debit,
+                    exit_tag=f"SPREAD_EXIT:{spread_id}",
+                    exit_reason=first.exit_reason,
+                    quantity=max(1, total_qty),
+                    gross_pnl=sum(float(leg.gross_pnl) for leg in legs),
+                    fees=sum(float(leg.fees) for leg in legs),
+                    net_pnl=sum(float(leg.net_pnl) for leg in legs),
+                    duration_seconds=(
+                        (last_exit - min(leg.entry_time for leg in legs)).total_seconds()
+                        if last_exit is not None
+                        else 0.0
+                    ),
+                    r_multiple=None,
+                    entry_atr=first.entry_atr,
+                    strategy_context=strategy_context,
+                    execution_mode=first.execution_mode,
+                    entry_time_bucket=first.entry_time_bucket,
+                    entry_time_of_day=first.entry_time_of_day,
+                    entry_regime=first.entry_regime,
+                )
+            )
+
+        aggregated.sort(key=lambda item: (item.entry_time, item.exit_time or item.entry_time, item.trade_id))
+        return aggregated
+
+    @staticmethod
+    def _renumber_trades(trades: List[ReplayTrade]) -> None:
+        for idx, trade in enumerate(trades, start=1):
+            trade.trade_id = idx
 
     def compute_metrics(
         self,

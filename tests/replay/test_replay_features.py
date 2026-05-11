@@ -23,6 +23,7 @@ from app.strategies.nifty_weekly_credit_spreads import NiftyWeeklyCreditSpreadSt
 from scripts.replay.schema import ReplayTableSchema
 import scripts.replay.optimizer_runtime as optimizer_runtime_mod
 import scripts.replay.replay_runtime as replay_runtime_mod
+import scripts.replay.run_replay as run_replay_mod
 import scripts.replay.report as report_mod
 
 
@@ -561,6 +562,185 @@ def test_replay_regime_versions_prefer_dynamic_policy_hash():
     assert versions[-1] == replay_runtime_mod.CLASSIFIER_VERSION
 
 
+def test_replay_regime_versions_include_context_builder_signature():
+    versions = replay_runtime_mod._replay_regime_classifier_versions(
+        strategy_id="put_momentum_scalper",
+        strategy_params={
+            "dynamic_policy": {
+                "enabled": True,
+                "policy_id": "put_custom",
+                "thresholds": {"adx_trend": 18.0},
+            }
+        },
+    )
+
+    assert ":ema20:ctx" in versions[0]
+    assert versions[1].endswith(":ema20")
+    assert versions[-1] == replay_runtime_mod.CLASSIFIER_VERSION
+
+
+def test_load_bars_from_postgres_orders_all_regime_version_fallbacks(monkeypatch):
+    ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
+    row = (
+        ts,
+        ts + timedelta(minutes=5),
+        "NIFTY_IDX",
+        300,
+        100.0,
+        101.0,
+        99.0,
+        100.5,
+        1.0,
+        45.0,
+        None,
+        None,
+        None,
+        100.0,
+        None,
+        None,
+        None,
+        20.0,
+        10.0,
+        8.0,
+        2.0,
+        "TRENDING_UP",
+    )
+    executed = []
+
+    class _Column:
+        def __init__(self, name):
+            self.name = name
+
+    class _Cursor:
+        description = ()
+
+        def execute(self, query, params=None):
+            text = str(query)
+            executed.append((text, tuple(params or ())))
+            self.query = text
+            if "to_regclass" in text:
+                self._fetchone = ("bar_regime",)
+            elif "WHERE FALSE" in text:
+                self.description = [
+                    _Column("bar_id"),
+                    _Column("regime"),
+                    _Column("classifier_version"),
+                ]
+
+        def fetchone(self):
+            return getattr(self, "_fetchone", None)
+
+        def fetchmany(self, size):
+            del size
+            if "FROM indicator_bars" not in getattr(self, "query", ""):
+                return []
+            if "WHERE FALSE" in getattr(self, "query", ""):
+                return []
+            if getattr(self, "_done", False):
+                return []
+            self._done = True
+            return [row]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        replay_runtime_mod,
+        "inspect_table_schema",
+        lambda *args, **kwargs: ReplayTableSchema(
+            normalized_table="indicator_bars",
+            available_columns=(
+                "id",
+                "ts_start",
+                "ts_end",
+                "label",
+                "timeframe_seconds",
+                "o",
+                "h",
+                "l",
+                "c",
+                "atr",
+                "rsi",
+                "ema_20",
+                "adx",
+                "plus_di",
+                "minus_di",
+                "di_spread",
+            ),
+            required_columns=("ts_start", "ts_end", "label", "timeframe_seconds", "o", "h", "l", "c"),
+            optional_columns=replay_runtime_mod._OPTIONAL_COLUMNS,
+        ),
+    )
+    monkeypatch.setattr(replay_runtime_mod.psycopg, "connect", lambda *args, **kwargs: _Conn())
+
+    replay_runtime_mod.load_bars_from_postgres(
+        "postgresql://ignored",
+        "NIFTY_IDX",
+        300,
+        strategy_id="ema20_strategy",
+        strategy_params={
+            "dynamic_policy": {
+                "enabled": True,
+                "policy_id": "ema20_custom",
+                "thresholds": {"adx_trend": 30.0},
+            }
+        },
+    )
+
+    data_query, params = next(
+        (query, params)
+        for query, params in executed
+        if "SELECT" in query and "FROM indicator_bars" in query and "WHERE FALSE" not in query
+    )
+    assert "WHEN %s THEN 0 WHEN %s THEN 1 WHEN %s THEN 2" in data_query
+    assert params[0:3] == params[3:6]
+
+
+def test_synthetic_regimes_use_replay_policy_thresholds():
+    base_ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
+    rows = []
+    for idx in range(14):
+        row = _bar(base_ts + timedelta(minutes=5 * idx), close=110.0 + idx)
+        row.adx = 20.0
+        row.plus_di = 30.0
+        row.minus_di = 10.0
+        row.di_spread = 20.0
+        row.ema_20 = 100.0 + idx
+        rows.append(row)
+
+    replay_runtime_mod._attach_synthetic_regimes(
+        rows,
+        strategy_id="put_momentum_scalper",
+        strategy_params={
+            "dynamic_policy": {
+                "enabled": True,
+                "policy_id": "put_custom",
+                "hold_bars": 1,
+                "thresholds": {
+                    "adx_trend": 15.0,
+                    "di_spread_trend": 5.0,
+                    "ema_slope_trend_min": 0.0,
+                },
+            }
+        },
+    )
+
+    assert rows[-1].regime == "TRENDING_UP"
+
+
 def test_next_bar_open_fill_uses_following_bar_open(monkeypatch):
     base_ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
     bars = [_bar(base_ts, close=100.0, open_=99.0), _bar(base_ts + timedelta(minutes=5), close=106.0, open_=105.0)]
@@ -730,6 +910,68 @@ def test_pnl_tracker_pairs_overlapping_same_label_fifo():
     assert trades[1].entry_price == 105.0
 
 
+def test_pnl_tracker_groups_credit_spread_legs_by_spread_id():
+    ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
+    spread_context = {"spread_id": "spread-1", "spread_type": "PUT_CREDIT"}
+    fills = [
+        ReplayFill(
+            timestamp=ts,
+            strategy_id="nifty_weekly_credit_spreads",
+            underlying="NIFTY",
+            side="SELL",
+            purpose="ENTRY",
+            tag="PUT_SPREAD_SHORT",
+            quantity=1,
+            fill_price=100.0,
+            strategy_context={**spread_context, "_replay": {"position_label": "NIFTY_PE_19800"}},
+            symbol="NIFTY_PE_19800",
+        ),
+        ReplayFill(
+            timestamp=ts,
+            strategy_id="nifty_weekly_credit_spreads",
+            underlying="NIFTY",
+            side="BUY",
+            purpose="ENTRY",
+            tag="PUT_SPREAD_LONG",
+            quantity=1,
+            fill_price=30.0,
+            strategy_context={**spread_context, "_replay": {"position_label": "NIFTY_PE_19700"}},
+            symbol="NIFTY_PE_19700",
+        ),
+        ReplayFill(
+            timestamp=ts + timedelta(minutes=5),
+            strategy_id="nifty_weekly_credit_spreads",
+            underlying="NIFTY",
+            side="BUY",
+            purpose="EXIT",
+            tag="EXIT",
+            quantity=1,
+            fill_price=80.0,
+            strategy_context={"_replay": {"position_label": "NIFTY_PE_19800"}},
+            symbol="NIFTY_PE_19800",
+        ),
+        ReplayFill(
+            timestamp=ts + timedelta(minutes=5),
+            strategy_id="nifty_weekly_credit_spreads",
+            underlying="NIFTY",
+            side="SELL",
+            purpose="EXIT",
+            tag="EXIT",
+            quantity=1,
+            fill_price=20.0,
+            strategy_context={"_replay": {"position_label": "NIFTY_PE_19700"}},
+            symbol="NIFTY_PE_19700",
+        ),
+    ]
+
+    trades = PnLTracker(fee_model=False).process_fills(fills)
+
+    assert len(trades) == 1
+    assert trades[0].strategy_context["spread_id"] == "spread-1"
+    assert trades[0].gross_pnl == 10.0
+    assert trades[0].net_pnl == 10.0
+
+
 def test_next_bar_open_option_entry_keeps_option_proxy_price():
     ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
     recorder = MockExecutionRecorder(
@@ -846,11 +1088,17 @@ def test_synthetic_regimes_feed_persisted_rows_into_classifier_state(monkeypatch
     built = []
 
     class _Builder:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
         def build(self, *, candle, indicators):
             built.append((candle.start_ts, dict(indicators)))
             return SimpleNamespace()
 
     class _Classifier:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
         def update(self, context):
             del context
             return SimpleNamespace(value=f"SYNTH_{len(built)}")
@@ -1072,11 +1320,55 @@ def test_invalid_end_policy_raises_at_config_time():
         normalize_execution_config(end_policy="forced")  # typo of force_exit
 
 
+def test_run_grid_search_threads_filter_regime(monkeypatch):
+    observed = []
+
+    def _fake_run_single_replay(**kwargs):
+        observed.append(kwargs.get("filter_regime"))
+        return MockExecutionRecorder()
+
+    monkeypatch.setattr(optimizer_runtime_mod, "run_single_replay", _fake_run_single_replay)
+
+    optimizer_runtime_mod.run_grid_search(
+        dsn="postgresql://ignored",
+        strategy_id="ema20_strategy",
+        underlying_key="NIFTY",
+        max_combos=1,
+        filter_regime="TRENDING_UP",
+    )
+
+    assert observed
+    assert set(observed) == {"TRENDING_UP"}
+
+
+def test_run_optimize_threads_filter_regime(monkeypatch):
+    observed = []
+
+    def _fake_run_grid_search(**kwargs):
+        observed.append(kwargs.get("filter_regime"))
+        return []
+
+    monkeypatch.setattr(run_replay_mod, "run_grid_search", _fake_run_grid_search)
+
+    run_replay_mod.run_optimize(
+        dsn="postgresql://ignored",
+        combos=[("ema20_strategy", "NIFTY")],
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 1, 31),
+        table="indicator_bars",
+        max_combos=1,
+        walk_forward=False,
+        filter_regime="TRENDING_UP",
+    )
+
+    assert observed == ["TRENDING_UP"]
+
+
 def test_walk_forward_validate_uses_out_of_sample_windows_only(monkeypatch):
     observed = []
 
     def _fake_run_single_replay(**kwargs):
-        observed.append((kwargs["start_date"], kwargs["end_date"]))
+        observed.append((kwargs["start_date"], kwargs["end_date"], kwargs.get("filter_regime")))
         return MockExecutionRecorder()
 
     monkeypatch.setattr(optimizer_runtime_mod, "run_single_replay", _fake_run_single_replay)
@@ -1091,12 +1383,14 @@ def test_walk_forward_validate_uses_out_of_sample_windows_only(monkeypatch):
         train_days=30,
         test_days=10,
         step_days=10,
+        filter_regime="TRENDING_DOWN",
     )
 
     assert score == 0.0
     assert fold_metrics
-    for start_date, end_date in observed:
+    for start_date, end_date, filter_regime in observed:
         assert (end_date - start_date).days == 10
+        assert filter_regime == "TRENDING_DOWN"
 
 
 def test_write_full_report_emits_json_and_yaml_artifacts(tmp_path):
