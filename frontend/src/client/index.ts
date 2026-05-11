@@ -539,7 +539,7 @@ export interface KillSwitchCancelAllPayload {
 
 export interface KillSwitchCancelAllPerAccount {
   broker_account_id: string;
-  status: 'ok' | 'partial' | 'no_runner' | 'broker_no_cancel_api';
+  status: 'ok' | 'partial' | 'no_runner' | 'broker_no_cancel_api' | 'out_of_scope';
   attempted: number;
   cancelled: number;
   failed: number;
@@ -566,6 +566,11 @@ export interface KillSwitchCancelAllResponse {
   // ``broker.get_orders()`` failed so the dashboard can show
   // "could not verify broker open-order set" specifically.
   refresh_failures?: number;
+  // PR #240 round-5/round-6 review P2: aggregate count of runners
+  // that were silently skipped because they were outside the
+  // scoped admin's entitlement. When > 0 the partial verdict is
+  // specifically due to scope-filter rather than broker failures.
+  out_of_scope?: number;
   per_account: KillSwitchCancelAllPerAccount[];
 }
 

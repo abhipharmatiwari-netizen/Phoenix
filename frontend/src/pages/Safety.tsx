@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import Gate from '../auth/Gate';
+import { useAuth } from '../auth/AuthContext';
 import { Role } from '../lib/rbac';
 import { DefaultService, AuditService } from '../client';
 import { HealthSummary } from '../types/health';
@@ -11,6 +12,15 @@ import Card from '../components/shared/Card';
 import KillSwitchPanel from '../components/KillSwitchPanel';
 
 const Safety: React.FC = () => {
+  // PR #240 round-6 review P1: the kill-switch panel hard-codes
+  // every action to ``scope: 'GLOBAL'``. A tenant-scoped admin
+  // (``canAccessAllTenants === false``) using it would therefore
+  // trip/clear/rearm/cancel across every tenant, not just their own.
+  // Until per-tenant scoped controls exist, gate the panel on
+  // ``canAccessAllTenants`` so only top-level admins can see it.
+  const { user } = useAuth();
+  const showGlobalKillSwitchPanel = Boolean(user?.canAccessAllTenants);
+
   const [health, setHealth] = useState<HealthSummary | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -86,6 +96,37 @@ const Safety: React.FC = () => {
       <div>
         <h1>Safety & Emergency Controls</h1>
 
+        {/* PR #240 round-6 review P1: render KillSwitchPanel
+            OUTSIDE the health-fetch error branch so a failing
+            ``/health/summary`` (e.g. timing out during an incident)
+            does not also hide the dashboard panic-stop path. The
+            panel fetches its own state from ``/admin/kill-switch/state``
+            and is independent of health/audit. Admin role + global
+            tenant entitlement (``canAccessAllTenants``) both required
+            because every action targets ``scope: 'GLOBAL'``. */}
+        <Gate requiredRoles={[Role.ADMIN]}>
+          {showGlobalKillSwitchPanel ? (
+            <KillSwitchPanel />
+          ) : (
+            <div style={{
+              border: '1px solid #f59e0b',
+              borderRadius: 8,
+              padding: '0.75rem 1rem',
+              backgroundColor: '#fffbeb',
+              color: '#92400e',
+              fontSize: '0.875rem',
+              marginBottom: '1.5rem',
+            }}>
+              <strong>Global kill-switch controls hidden.</strong>{' '}
+              These controls operate on the GLOBAL scope and require
+              an admin with cross-tenant entitlement. A tenant-scoped
+              admin must coordinate with a global admin to trip /
+              clear / rearm. Per-tenant scoped controls are not yet
+              implemented (see issue #238 follow-up).
+            </div>
+          )}
+        </Gate>
+
         {loading ? <LoadingSpinner /> : error ? (
           <div style={{ color: '#dc2626', padding: '1rem' }}>{error}</div>
         ) : (
@@ -133,15 +174,6 @@ const Safety: React.FC = () => {
                 <span style={{ fontSize: '1.5rem', fontWeight: 700 }}>{health?.tracked_account_count ?? 0}</span>
               </Card>
             </div>
-
-            {/* Issue #238: Kill-switch controls — admin only.
-                Operators see a read-only state line via the audit table; only
-                admins see the trip/clear/rearm/cancel-all buttons. The panel
-                fetches its own state via /admin/kill-switch/state and refreshes
-                after every action so the UI cannot drift from backend. */}
-            <Gate requiredRoles={[Role.ADMIN]}>
-              <KillSwitchPanel />
-            </Gate>
 
             {/* Safety Note */}
             <div style={{

@@ -32,17 +32,24 @@ with READONLY/OPERATOR roles see the audit trail only.
 ## State machine
 
 ```
-INACTIVE  ──(Trip)──▶  TRIPPED  ──(Request Clear)──▶  CLEAR_PENDING
-                          ▲                                  │
-                          │                                  ▼
-                          └──────────(Trip again)──── CLEARED
-                                                         │
-                                                         ▼
-                                                     (Rearm + step-up)
-                                                         │
-                                                         ▼
-                                                      INACTIVE
+INACTIVE ──(Trip)──▶ TRIPPED ──(Request Clear)──▶ CLEAR_PENDING
+   ▲                                                    │
+   │                                                    ▼
+   │                                                CLEARED
+   │                                                    │
+   │                                                    ▼
+   │                                            (Rearm + step-up)
+   │                                                    │
+   └────────────────────────────────────────────────────┘
+                       (INACTIVE)
 ```
+
+**Important:** ``KillSwitchManager.trip()`` rejects any existing
+non-INACTIVE record, so you cannot re-trip directly from CLEARED.
+The correct sequence after a clear cycle is **Confirm Clear →
+Rearm (returns to INACTIVE) → Trip** if another incident needs the
+switch active again. The dashboard buttons surface only the
+state-appropriate action.
 
 The dashboard renders the current state as a coloured pill at the top
 right of the panel:
@@ -75,18 +82,35 @@ placements. The cancel-all flow:
    per remaining order
 5. Aggregate per-account results into the audit event
 
-The cancel call is **idempotent**: a broker `REJECTED` response (e.g.
-order already cancelled or unknown) is counted as `skipped`, not
-`failed`. Only an actual broker exception or unknown-status response
-bumps the `failed` counter.
+The cancel call uses **message-based disambiguation** on broker
+``REJECTED`` responses (PR #240 round-2/round-6 hardening):
+
+- Messages explicitly indicating the order is already gone /
+  cancelled / in a terminal state (e.g. ``order_not_found``,
+  ``already_cancelled``, ``order completed``, ``terminal state``)
+  are counted as ``skipped`` — operator double-clicks remain
+  idempotent.
+- Messages indicating the order was filled before the cancel
+  landed (e.g. ``already filled``, ``already executed``) are
+  counted as ``raced_filled`` and trigger an amber banner — the
+  operator may need to manually flatten the new exposure.
+- Every other ``REJECTED`` (e.g. ``cancel_failed:...`` from Angel's
+  broker outage path) is counted as **failed** so the dashboard
+  shows ``failed>0`` during a real incident.
+- ``ERROR`` / ``FAILURE`` / ``FAILED`` responses are retried up to
+  3× with brief backoff; if all attempts return non-terminal,
+  they are counted as ``failed``.
+- A broker exception (network outage, etc.) is also retried then
+  counted as ``failed``.
 
 The dashboard surfaces per-account success / failure under the panel
 after the action completes:
 
 ```
-attempted=3, cancelled=2, failed=0, skipped=1
-A1: ok (att=2, ok=2, fail=0, skip=0)
-A2: ok (att=1, ok=0, fail=0, skip=1)
+attempted=3, cancelled=2, failed=0, skipped=1, raced_filled=0,
+refresh_failures=0, out_of_scope=0
+A1: ok       (att=2, ok=2, fail=0, skip=0, raced_filled=0)
+A2: ok       (att=1, ok=0, fail=0, skip=1, raced_filled=0)
 ```
 
 ## Step-up token (LIVE only)

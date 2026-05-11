@@ -555,7 +555,8 @@ Paste the returned token_id below.`;
             {cancelResult.attempted}, cancelled={cancelResult.cancelled},
             failed={cancelResult.failed}, skipped={cancelResult.skipped},
             raced_filled={cancelResult.raced_filled ?? 0},
-            refresh_failures={cancelResult.refresh_failures ?? 0}
+            refresh_failures={cancelResult.refresh_failures ?? 0},
+            out_of_scope={cancelResult.out_of_scope ?? 0}
           </div>
           {(cancelResult.raced_filled ?? 0) > 0 && (
             <div style={{
@@ -583,6 +584,22 @@ Paste the returned token_id below.`;
             }}>
               <strong>⚠ Could not verify broker open-order set for {cancelResult.refresh_failures} account(s).</strong>
               {' '}Fresh broker orders not in the cache may still be live — investigate manually.
+            </div>
+          )}
+          {/* PR #240 round-6 review P2: explain scoped-admin partial
+              specifically when accounts were deliberately filtered
+              out — otherwise operators may assume a broker failure. */}
+          {(cancelResult.out_of_scope ?? 0) > 0 && (
+            <div style={{
+              marginTop: '0.25rem',
+              padding: '0.25rem 0.5rem',
+              borderLeft: '3px solid #2563eb',
+              backgroundColor: '#eff6ff',
+              color: '#1e3a8a',
+            }}>
+              <strong>ℹ {cancelResult.out_of_scope} account(s) skipped because they are outside this admin's entitlement.</strong>
+              {' '}This is the reason for the partial verdict — not a broker failure.
+              A global-admin must drain those accounts.
             </div>
           )}
           {cancelResult.per_account.length > 0 && (

@@ -32,8 +32,13 @@ from app.dashboard.auth import AdminContext, AdminRole
 # ---- helpers -----------------------------------------------------------
 
 
-def _mk_admin(role: AdminRole = AdminRole.ADMIN) -> AdminContext:
-    return AdminContext(caller="admin@phoenix.com", role=role)
+def _mk_admin(role: AdminRole = AdminRole.ADMIN, *, all_tenants: bool = True) -> AdminContext:
+    """Default test admin is a CROSS-TENANT (``all_tenants=True``)
+    admin since most tests assume the global-operator code path.
+    PR #240 round-6: tenant-scoped variants must pass
+    ``all_tenants=False`` explicitly along with the scoped
+    ``tenant_ids`` / ``broker_account_ids`` they care about."""
+    return AdminContext(caller="admin@phoenix.com", role=role, all_tenants=all_tenants)
 
 
 def _mk_request() -> Any:
@@ -793,14 +798,16 @@ def test_cancel_all_rejected_cancel_failed_counts_as_failed(monkeypatch):
 
 
 def test_cancel_all_rejected_already_cancelled_counts_as_skipped(monkeypatch):
-    """Round-2 P1: message-based disambiguation. Variants of
-    "already cancelled" / "not found" remain idempotent skips."""
+    """Round-2/round-6 P2: message-based disambiguation. Variants
+    of "already cancelled" / "not found" / "terminal state" remain
+    idempotent skips. Round-6 reclassifies "already filled" / "already
+    executed" as raced_filled (separate test below)."""
     for msg in (
         "Order already cancelled",
         "ORDER NOT FOUND",
         "order does not exist",
-        "already_filled",
         "Terminal state - cannot cancel",
+        "order completed",
     ):
         broker = _FakeBroker(responses=[
             OrderResponse(
@@ -1394,6 +1401,125 @@ def test_cancel_all_accepts_tenant_scoped_trip(monkeypatch):
     ))
     assert resp["status"] == "ok"
     assert resp["attempted"] == 1
+
+
+def test_cancel_all_already_filled_message_routes_to_raced_filled(monkeypatch):
+    """Round-6 P2: a broker REJECTED response with message
+    "already filled" / "already executed" is a fill race, NOT an
+    idempotent skip — exposure was created."""
+    for msg in ("already filled", "already_filled", "already executed", "already_executed"):
+        broker = _FakeBroker(responses=[
+            OrderResponse(
+                broker_order_id="o1",
+                status="REJECTED",
+                message=msg,
+                filled_quantity=0,
+                average_price=None,
+            ),
+        ])
+        runner = _mk_runner("A1", [_order("o1")], broker)
+        monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
+        monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+        _patch_cancel_all_preconditions(monkeypatch)
+        resp = _run(kill_switch_cancel_all(
+            KillSwitchCancelAllRequest(reason="fill-race-msg"),
+            _mk_request(),
+            _mk_admin(),
+        ))
+        assert resp["raced_filled"] == 1, f"{msg!r} should route to raced_filled"
+        assert resp["skipped"] == 0
+        assert resp["status"] == "partial"
+
+
+def test_kill_switch_trip_requires_all_tenants_for_global_scope(monkeypatch):
+    """Round-6 P1: a tenant-scoped admin (``all_tenants=False``)
+    cannot trip the GLOBAL kill switch even with role=ADMIN."""
+    from app.dashboard.admin_routes import (
+        KillSwitchTripRequest, kill_switch_trip,
+    )
+    scoped = AdminContext(
+        caller="scoped@phoenix.com",
+        role=AdminRole.ADMIN,
+        tenant_ids=("TENANT_X",),
+        all_tenants=False,
+    )
+    with pytest.raises(HTTPException) as exc:
+        kill_switch_trip(
+            KillSwitchTripRequest(scope="GLOBAL", scope_id="GLOBAL", reason="x"),
+            scoped,
+        )
+    assert exc.value.status_code == 403
+    assert "global" in str(exc.value.detail).lower()
+
+
+def test_cancel_all_blocks_cross_tenant_for_tenant_scoped_admin(monkeypatch):
+    """Round-6 P1: a bearer admin scoped by ``tenant_ids`` cannot
+    drain another tenant's broker account via cancel-all."""
+    broker = _FakeBroker()
+    other_tenant_runner = SimpleNamespace(
+        broker_account_id="OTHER",
+        is_running=True,
+        tenant_id="TENANT_Y",  # not in admin's tenant_ids
+    )
+    other_tenant_runner._broker_client = broker
+    other_tenant_runner._last_orders = [_order("o1")]
+    broker._get_orders_result = [_order("o1")]
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"OTHER": other_tenant_runner}))
+    _patch_cancel_all_preconditions(monkeypatch)
+    scoped = AdminContext(
+        caller="tenant-x@phoenix.com",
+        role=AdminRole.ADMIN,
+        tenant_ids=("TENANT_X",),
+        all_tenants=False,
+    )
+    with pytest.raises(HTTPException) as exc:
+        _run(kill_switch_cancel_all(
+            KillSwitchCancelAllRequest(reason="cross-tenant", broker_account_id="OTHER"),
+            _mk_request(),
+            scoped,
+        ))
+    assert exc.value.status_code == 403
+
+
+def test_cancel_all_allows_tenant_scoped_admin_within_their_tenant(monkeypatch):
+    """Round-6 P1: a tenant-scoped admin CAN drain accounts of
+    runners belonging to their tenant."""
+    broker = _FakeBroker()
+    my_runner = SimpleNamespace(
+        broker_account_id="MINE",
+        is_running=True,
+        tenant_id="TENANT_X",
+    )
+    my_runner._broker_client = broker
+    my_runner._last_orders = [_order("o1")]
+    broker._get_orders_result = [_order("o1")]
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"MINE": my_runner}))
+    monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
+    scoped = AdminContext(
+        caller="tenant-x@phoenix.com",
+        role=AdminRole.ADMIN,
+        tenant_ids=("TENANT_X",),
+        all_tenants=False,
+    )
+    resp = _run(kill_switch_cancel_all(
+        KillSwitchCancelAllRequest(reason="tenant-internal", broker_account_id="MINE"),
+        _mk_request(),
+        scoped,
+    ))
+    assert resp["status"] == "ok"
+    assert resp["cancelled"] == 1
+
+
+def test_kill_switch_cancel_all_action_in_accountability_report():
+    """Round-6 P2: ``kill_switch_cancel_all`` (and the related
+    rollback / block-exits-upgrade actions) must be counted by
+    ``accountability_report`` so incident reviewers see them."""
+    import inspect
+    import app.core.audit_log as al
+    src = inspect.getsource(al.accountability_report)
+    assert "kill_switch_cancel_all" in src
+    assert "kill_switch_block_exits_upgraded" in src
 
 
 def test_cancel_all_response_includes_out_of_scope_field(monkeypatch):

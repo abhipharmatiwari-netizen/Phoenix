@@ -1247,6 +1247,52 @@ def resolve_expired_contracts(
     return {"dry_run": False, "updated": updated, "symbol_pattern": payload.symbol_pattern}
 
 
+def _require_scope_entitlement(ctx, scope_str: str, scope_id: str) -> None:
+    """PR #240 round-6 review P1: enforce that the admin's tenant
+    entitlement covers the kill-switch scope they are mutating.
+
+    - GLOBAL scope requires ``ctx.all_tenants``.
+    - TENANT scope requires either ``all_tenants`` or
+      ``can_access_tenant(scope_id)``.
+    - ACCOUNT / STRATEGY scope requires either ``all_tenants`` or
+      ``can_access_broker_account(scope_id)``.
+
+    Without this check, a tenant-scoped admin bearer session could
+    use the trip/clear/rearm endpoints (gated only by role=ADMIN)
+    to mutate the GLOBAL kill switch and affect every tenant.
+    """
+    scope_upper = str(scope_str or "").strip().upper()
+    if scope_upper == "GLOBAL":
+        if not ctx.all_tenants:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "GLOBAL-scope kill-switch mutations require an admin "
+                    "with cross-tenant entitlement (all_tenants=true)."
+                ),
+            )
+        return
+    if scope_upper == "TENANT":
+        if ctx.all_tenants or ctx.can_access_tenant(str(scope_id)):
+            return
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"tenant_id={scope_id!r} is outside this admin's tenant entitlement"
+            ),
+        )
+    if scope_upper in ("ACCOUNT", "STRATEGY"):
+        if ctx.all_tenants or ctx.can_access_broker_account(str(scope_id)):
+            return
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"scope_id={scope_id!r} is outside this admin's broker-account entitlement"
+            ),
+        )
+    # Unknown scope — let downstream KillSwitchScope validation 422.
+
+
 def _get_kill_switch_manager():
     """Return the live KillSwitchManager from the hub runtime. Raises 503 if unavailable."""
     try:
@@ -1367,7 +1413,14 @@ def _kill_switch_rollback_factory(ksm, scope, scope_id):
     """
     key = ksm._key(scope, scope_id)  # KSM uses tuple(scope, scope_id) keys
     import copy as _copy
-    prior_snapshot = _copy.deepcopy(ksm._records.get(key))
+    # PR #240 round-6 review P2: capture the pre-mutation snapshot
+    # UNDER the manager's lock so a concurrent successful mutation
+    # cannot land between our snapshot and the caller's mutation.
+    # Without this, two overlapping requests could both observe the
+    # same prior state and either could roll back to a snapshot that
+    # no longer reflects what was actually there at mutation time.
+    with ksm._lock:
+        prior_snapshot = _copy.deepcopy(ksm._records.get(key))
     # PR #240 round-4/round-5 review P2: capture the post-mutation
     # record's identity at the time we wrap the rollback so a
     # CONCURRENT successful request that further mutates the same
@@ -1513,6 +1566,9 @@ def kill_switch_trip(
     gate via direct API/BFF calls.
     """
     ctx.require_role(AdminRole.ADMIN)
+    # PR #240 round-6 review P1: ensure the admin's entitlement
+    # covers the requested scope (GLOBAL requires cross-tenant).
+    _require_scope_entitlement(ctx, payload.scope, payload.scope_id)
     from app.risk.kill_switch import KillSwitchScope
     try:
         scope = KillSwitchScope(payload.scope.upper())
@@ -1608,6 +1664,7 @@ def kill_switch_request_clear(
     the dashboard UI gate so operator sessions cannot bypass.
     """
     ctx.require_role(AdminRole.ADMIN)
+    _require_scope_entitlement(ctx, payload.scope, payload.scope_id)
     from app.risk.kill_switch import KillSwitchScope, KillSwitchClearRequest, KillSwitchClearValidation
     try:
         scope = KillSwitchScope(payload.scope.upper())
@@ -1685,8 +1742,11 @@ def kill_switch_confirm_clear(
     secondary credential.
 
     PR #240 round-2 review P2: also ADMIN-only per #238 acceptance.
+    PR #240 round-6 review P1: also requires the admin's tenant
+    entitlement to cover the scope being mutated.
     """
     ctx.require_role(AdminRole.ADMIN)
+    _require_scope_entitlement(ctx, payload.scope, payload.scope_id)
 
     # Parse scope FIRST so we can scope the step-up token check.
     from app.risk.kill_switch import KillSwitchScope
@@ -1767,8 +1827,11 @@ def kill_switch_rearm(
 
     PR #240 round-2 review P2: ADMIN-only per #238 acceptance — matches
     the dashboard UI gate so operator sessions cannot bypass.
+    PR #240 round-6 review P1: also requires the admin's tenant
+    entitlement to cover the scope being mutated.
     """
     ctx.require_role(AdminRole.ADMIN)
+    _require_scope_entitlement(ctx, payload.scope, payload.scope_id)
 
     # §15.4: Require step-up token in LIVE mode before restoring entry eligibility.
     import os as _os
@@ -1932,20 +1995,50 @@ async def kill_switch_cancel_all(
                 KillSwitchScope.ACCOUNT, str(payload.broker_account_id),
             )
             _scoped_active = _is_active(_account_record)
-            # PR #240 round-5 review P2: TENANT-level trip that
-            # covers this broker account. Resolve the tenant id from
-            # broker_accounts; if any tenant scope exists in the
-            # active records and matches, accept it.
+            # PR #240 round-5/round-6 review P2: TENANT-level trip
+            # that covers this broker account.
+            #
+            # Round-6: prefer the runtime ``runner.tenant_id`` over
+            # the control-plane ``get_broker_account`` lookup. The
+            # hub already knows which tenant owns each runner; using
+            # that avoids losing TENANT-trip coverage during a
+            # control-plane outage (precisely when the emergency
+            # drain is most needed). Fall back to the control-plane
+            # lookup only when the runner is not registered yet.
             if not _scoped_active:
-                try:
-                    from app.tenants.firestore_client import get_broker_account
-                    _ba = get_broker_account(str(payload.broker_account_id))
-                    _tenant_id = (
-                        str(getattr(_ba, "tenant_id", "") or "")
-                        if _ba is not None else ""
-                    )
-                except Exception:
-                    _tenant_id = ""
+                _tenant_id = ""
+                _runtime = get_hub_runtime()
+                _hub = getattr(_runtime, "hub", None)
+                _runner = None
+                if _hub is not None and hasattr(_hub, "get_runner"):
+                    try:
+                        _runner = _hub.get_runner(payload.broker_account_id)
+                    except Exception:
+                        _runner = None
+                if _runner is not None:
+                    _tenant_id = str(getattr(_runner, "tenant_id", "") or "")
+                if not _tenant_id:
+                    try:
+                        from app.tenants.firestore_client import get_broker_account
+                        _ba = get_broker_account(str(payload.broker_account_id))
+                        _tenant_id = (
+                            str(getattr(_ba, "tenant_id", "") or "")
+                            if _ba is not None else ""
+                        )
+                    except Exception as _cp_exc:
+                        # Control-plane outage AND no runtime runner —
+                        # we cannot determine tenant. Fail with a
+                        # clear 503 rather than silently treating an
+                        # active TENANT trip as absent.
+                        raise HTTPException(
+                            status_code=503,
+                            detail=(
+                                "Could not resolve tenant_id for "
+                                f"broker_account_id={payload.broker_account_id!r}: "
+                                f"{_cp_exc}. Retry once the control "
+                                "plane is reachable, or use the GLOBAL trip."
+                            ),
+                        ) from _cp_exc
                 if _tenant_id:
                     _tenant_record = _precheck_ksm.get_record(
                         KillSwitchScope.TENANT, _tenant_id,
@@ -1996,24 +2089,56 @@ async def kill_switch_cancel_all(
 
     # Collect target runners. When broker_account_id is provided, scope
     # to that single account; otherwise iterate every registered runner.
-    # PR #240 round-1 review P1: enforce broker-account scoping. A
-    # bearer-authenticated admin with a restricted ``broker_account_ids``
-    # entitlement must not be able to cancel orders for accounts they
-    # cannot otherwise manage — whether by omitting the field (which
-    # would otherwise expand to every registered runner) or by passing
-    # an out-of-scope id explicitly.
+    # PR #240 round-1/round-6 review P1: enforce both broker-account
+    # AND tenant scoping. A bearer-authenticated admin with restricted
+    # ``tenant_ids`` (but no explicit ``broker_account_ids``) would
+    # otherwise pass ``can_access_broker_account`` for every account
+    # and could drain another tenant's broker orders. We resolve the
+    # runner's tenant_id at runtime and require it to be in the admin's
+    # ``tenant_ids`` unless ``all_tenants`` is True.
+
+    def _admin_can_drain(_runner, acct_id: str) -> bool:
+        """Combined broker-account + tenant scope check.
+
+        Accepts the drain if ANY of:
+          - admin has cross-tenant entitlement (``all_tenants``)
+          - admin is broker-account-scoped and this account is in
+            their entitlement (``broker_account_ids``)
+          - admin is tenant-scoped and this account's runner belongs
+            to a tenant in their entitlement (``tenant_ids``)
+
+        Round-6 review P1: was previously requiring tenant match
+        for ALL scoped admins, which broke pure account-scoped
+        admins who have no tenant restriction.
+        """
+        if ctx.all_tenants:
+            return True
+        if ctx.broker_account_ids and str(acct_id) in ctx.broker_account_ids:
+            return True
+        runner_tenant = str(getattr(_runner, "tenant_id", "") or "")
+        if (
+            ctx.tenant_ids
+            and runner_tenant
+            and runner_tenant in ctx.tenant_ids
+        ):
+            return True
+        return False
+
     target_runner_ids: list = []
     if payload.broker_account_id:
-        if not ctx.can_access_broker_account(payload.broker_account_id):
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    f"broker_account_id {payload.broker_account_id!r} is "
-                    "outside this admin's scope"
-                ),
-            )
         runner = hub.get_runner(payload.broker_account_id)
         if runner is None:
+            # Resolve scope first before exposing 404 vs 403; an
+            # unauthorised admin should not be able to probe whether
+            # an arbitrary account_id has a registered runner.
+            if not ctx.can_access_broker_account(payload.broker_account_id):
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"broker_account_id {payload.broker_account_id!r} is "
+                        "outside this admin's scope"
+                    ),
+                )
             raise HTTPException(
                 status_code=404,
                 detail=(
@@ -2021,24 +2146,33 @@ async def kill_switch_cancel_all(
                     "no registered runner"
                 ),
             )
+        if not _admin_can_drain(runner, payload.broker_account_id):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"broker_account_id {payload.broker_account_id!r} is "
+                    "outside this admin's scope (tenant or broker_account "
+                    "entitlement mismatch)"
+                ),
+            )
         target_runner_ids = [payload.broker_account_id]
         out_of_scope_runner_ids: list = []
     else:
         all_runner_ids = list(hub.list_runner_ids())
-        target_runner_ids = [
-            acct_id for acct_id in all_runner_ids
-            if ctx.can_access_broker_account(str(acct_id))
-        ]
-        # PR #240 round-5 review P2: a scoped admin omitting
-        # ``broker_account_id`` previously got a silent filtered
-        # subset; the UI/audit said "Cancel ALL" but accounts outside
-        # the admin's entitlement were never drained. Surface those
-        # accounts in the response as ``skipped_out_of_scope`` so the
-        # aggregate verdict reflects reality.
-        out_of_scope_runner_ids = [
-            acct_id for acct_id in all_runner_ids
-            if not ctx.can_access_broker_account(str(acct_id))
-        ]
+        target_runner_ids = []
+        out_of_scope_runner_ids = []
+        for acct_id in all_runner_ids:
+            r = hub.get_runner(acct_id)
+            if r is None:
+                # Round-6 review P2: a runner that disappeared
+                # between list_runner_ids and get_runner is NOT a
+                # scope violation — let the main loop handle it as
+                # ``no_runner`` race (failed=1).
+                target_runner_ids.append(acct_id)
+            elif _admin_can_drain(r, str(acct_id)):
+                target_runner_ids.append(acct_id)
+            else:
+                out_of_scope_runner_ids.append(acct_id)
 
     per_account_results: list[dict] = []
     aggregate_attempted = 0
@@ -2284,8 +2418,21 @@ async def kill_switch_cancel_all(
                 # idempotent when the message explicitly indicates the
                 # order is already gone / already cancelled / in a
                 # terminal state.
+                #
+                # PR #240 round-6 review P2: "already filled" /
+                # "already executed" markers are RACED FILLS — the
+                # broker accepted a fill before the cancel could land,
+                # so exposure was created. Route those to
+                # ``raced_filled`` rather than ``skipped`` so the
+                # operator is prompted to flatten the new position.
                 resp_message = str(getattr(resp, "message", "") or "")
                 _msg_lower = resp_message.lower()
+                _filled_race_markers = (
+                    "already filled",
+                    "already_filled",
+                    "already executed",
+                    "already_executed",
+                )
                 _idempotent_markers = (
                     "not found",
                     "not_found",
@@ -2294,17 +2441,30 @@ async def kill_switch_cancel_all(
                     "already canceled",
                     "already_cancelled",
                     "already_canceled",
-                    "already filled",
-                    "already_filled",
-                    "already executed",
-                    "already_executed",
                     "order completed",
                     "order_completed",
                     "terminal state",
                     "terminal_state",
                 )
-                is_idempotent = any(m in _msg_lower for m in _idempotent_markers)
-                if is_idempotent:
+                is_raced_filled = any(
+                    m in _msg_lower for m in _filled_race_markers
+                )
+                is_idempotent = (
+                    not is_raced_filled
+                    and any(m in _msg_lower for m in _idempotent_markers)
+                )
+                if is_raced_filled:
+                    raced_filled += 1
+                    errors.append({
+                        "order_id": order_id,
+                        "broker_status": resp_status,
+                        "broker_message": resp_message,
+                        "note": (
+                            "broker says order already filled/executed — "
+                            "new exposure may need manual flatten"
+                        ),
+                    })
+                elif is_idempotent:
                     skipped += 1
                     if resp_message:
                         errors.append({
