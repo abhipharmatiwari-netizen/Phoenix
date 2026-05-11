@@ -240,7 +240,13 @@ class BarPersister:
         candidate = f"{base}_{suffix}"
         if len(candidate) <= cls._POSTGRES_IDENTIFIER_MAX_LEN:
             return candidate
-        digest = hashlib.sha1(candidate.encode("ascii", "ignore")).hexdigest()[:8]
+        # Non-security: short deterministic suffix to compact a postgres
+        # identifier under the 63-char limit. ``usedforsecurity=False``
+        # signals to bandit/FIPS-strict builds that this SHA-1 is not a
+        # cryptographic use.
+        digest = hashlib.sha1(  # noqa: S324
+            candidate.encode("ascii", "ignore"), usedforsecurity=False,
+        ).hexdigest()[:8]
         keep = cls._POSTGRES_IDENTIFIER_MAX_LEN - len(digest) - 1
         return f"{candidate[:keep]}_{digest}"
 
@@ -262,7 +268,10 @@ class BarPersister:
         candidate = f"{base}_{suffix}"
         if len(candidate) <= self._POSTGRES_IDENTIFIER_MAX_LEN:
             return candidate
-        digest = hashlib.sha1(candidate.encode("ascii", "ignore")).hexdigest()[:8]
+        # Non-security: see ``_postgres_derived_identifier`` above.
+        digest = hashlib.sha1(  # noqa: S324
+            candidate.encode("ascii", "ignore"), usedforsecurity=False,
+        ).hexdigest()[:8]
         keep = self._POSTGRES_IDENTIFIER_MAX_LEN - len(digest) - 1
         return f"{candidate[:keep]}_{digest}"
 

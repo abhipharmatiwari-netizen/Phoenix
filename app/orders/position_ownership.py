@@ -673,7 +673,13 @@ def _derive_instrument_version(
     )
     if not seed:
         return ""
-    return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12]
+    # Non-security: short deterministic content fingerprint for
+    # ownership-key derivation. ``usedforsecurity=False`` signals to
+    # bandit/FIPS-strict builds that this SHA-1 is not a cryptographic
+    # use.
+    return hashlib.sha1(  # noqa: S324
+        seed.encode("utf-8"), usedforsecurity=False,
+    ).hexdigest()[:12]
 
 
 def _extract_contract_metadata(
