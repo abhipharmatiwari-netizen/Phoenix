@@ -18,8 +18,19 @@ const Safety: React.FC = () => {
   // trip/clear/rearm/cancel across every tenant, not just their own.
   // Until per-tenant scoped controls exist, gate the panel on
   // ``canAccessAllTenants`` so only top-level admins can see it.
+  //
+  // PR #240 round-7 review P2: distinguish "entitlement still
+  // loading" (``canAccessAllTenants === undefined`` because the
+  // JWT-decoded fallback user has not been replaced by the
+  // ``/auth/me`` response yet) from "explicit false". Otherwise a
+  // legitimate global admin sees the panic-stop panel hidden
+  // during the entitlement load window — exactly the period
+  // during an incident when the panel is most needed. Render a
+  // neutral loading placeholder while the lookup is pending, then
+  // resolve to either the panel or the coordination warning.
   const { user } = useAuth();
-  const showGlobalKillSwitchPanel = Boolean(user?.canAccessAllTenants);
+  const entitlementUnknown = user?.canAccessAllTenants === undefined;
+  const showGlobalKillSwitchPanel = user?.canAccessAllTenants === true;
 
   const [health, setHealth] = useState<HealthSummary | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
@@ -107,6 +118,21 @@ const Safety: React.FC = () => {
         <Gate requiredRoles={[Role.ADMIN]}>
           {showGlobalKillSwitchPanel ? (
             <KillSwitchPanel />
+          ) : entitlementUnknown ? (
+            <div style={{
+              border: '1px solid #9ca3af',
+              borderRadius: 8,
+              padding: '0.75rem 1rem',
+              backgroundColor: '#f3f4f6',
+              color: '#374151',
+              fontSize: '0.875rem',
+              marginBottom: '1.5rem',
+            }}>
+              <strong>Resolving admin entitlement…</strong>{' '}
+              The Global kill-switch panel will appear once your
+              cross-tenant entitlement is confirmed via /auth/me. If
+              this persists, refresh the page or sign in again.
+            </div>
           ) : (
             <div style={{
               border: '1px solid #f59e0b',

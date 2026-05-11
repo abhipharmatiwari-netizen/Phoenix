@@ -12,8 +12,19 @@ import pytest
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_ctx(role="operator", caller="test-operator"):
-    ctx = SimpleNamespace(caller=caller, role=role)
+def _make_ctx(role="operator", caller="test-operator", *, all_tenants=True):
+    # PR #240 round-6+: kill-switch endpoints now require both ADMIN
+    # role AND scope entitlement (``all_tenants=True`` for GLOBAL).
+    # Default ``all_tenants=True`` so the existing step-up-token tests
+    # (focused on the step-up gate, not the entitlement gate) still
+    # reach the path they were written to exercise.
+    ctx = SimpleNamespace(
+        caller=caller,
+        role=role,
+        all_tenants=all_tenants,
+        tenant_ids=(),
+        broker_account_ids=(),
+    )
 
     def require_role(required):
         hierarchy = {"readonly": 0, "operator": 1, "admin": 2}
@@ -21,7 +32,15 @@ def _make_ctx(role="operator", caller="test-operator"):
             from fastapi import HTTPException, status
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient role")
 
+    def can_access_tenant(_tenant_id):
+        return bool(all_tenants)
+
+    def can_access_broker_account(_account_id):
+        return bool(all_tenants)
+
     ctx.require_role = require_role
+    ctx.can_access_tenant = can_access_tenant
+    ctx.can_access_broker_account = can_access_broker_account
     return ctx
 
 
@@ -80,9 +99,20 @@ class TestStepUpIssueEndpoint:
 
         purge_expired()
         ctx = _make_ctx(role="operator")
+        # PR #240 round-4: kill-switch action classes require a
+        # non-empty ``resource_id``; supply a placeholder so this
+        # smoke test exercises every enum value without tripping the
+        # binding check.
+        _RESOURCE_BOUND = {
+            DangerousActionClass.KILL_SWITCH_CLEAR,
+            DangerousActionClass.KILL_SWITCH_REARM,
+        }
         with patch("app.security.step_up._is_live_mode", return_value=False):
             for ac in DangerousActionClass:
-                req = StepUpIssueRequest(action_class=ac.value)
+                req = StepUpIssueRequest(
+                    action_class=ac.value,
+                    resource_id="GLOBAL" if ac in _RESOURCE_BOUND else "",
+                )
                 result = step_up_issue(req, ctx)
                 assert result["action_class"] == ac.value
 
@@ -124,7 +154,8 @@ class TestKillSwitchRearmStepUp:
         from app.dashboard.admin_routes import KillSwitchRearmRequest, kill_switch_rearm
 
         payload = KillSwitchRearmRequest(scope="GLOBAL", scope_id="GLOBAL")
-        ctx = _make_ctx(role="operator")
+        # PR #240 round-2: kill_switch_rearm requires ADMIN role.
+        ctx = _make_ctx(role="admin")
         ksm = self._make_ksm_mock()
 
         with patch.dict("os.environ", {"TRADE_MODE": "PAPER"}), \
@@ -141,7 +172,8 @@ class TestKillSwitchRearmStepUp:
         from app.dashboard.admin_routes import KillSwitchRearmRequest, kill_switch_rearm
 
         payload = KillSwitchRearmRequest(scope="GLOBAL", scope_id="GLOBAL")
-        ctx = _make_ctx(role="operator")
+        # PR #240 round-2: kill_switch_rearm requires ADMIN role.
+        ctx = _make_ctx(role="admin")
 
         with patch.dict("os.environ", {"TRADE_MODE": "LIVE"}):
             with pytest.raises(HTTPException) as exc_info:
@@ -157,7 +189,8 @@ class TestKillSwitchRearmStepUp:
         payload = KillSwitchRearmRequest(
             scope="GLOBAL", scope_id="GLOBAL", step_up_token="not-a-real-token"
         )
-        ctx = _make_ctx(role="operator")
+        # PR #240 round-2: kill_switch_rearm requires ADMIN role.
+        ctx = _make_ctx(role="admin")
 
         with patch.dict("os.environ", {"TRADE_MODE": "LIVE"}), \
              patch("app.security.step_up._is_live_mode", return_value=False):
@@ -173,7 +206,8 @@ class TestKillSwitchRearmStepUp:
         )
 
         purge_expired()
-        ctx = _make_ctx(role="operator", caller="ops-user")
+        # PR #240 round-2: kill_switch_rearm requires ADMIN role.
+        ctx = _make_ctx(role="admin", caller="ops-user")
         ksm = self._make_ksm_mock()
 
         with patch("app.security.step_up._is_live_mode", return_value=False):
@@ -205,13 +239,17 @@ class TestKillSwitchRearmStepUp:
         )
 
         purge_expired()
-        ctx = _make_ctx(role="operator", caller="ops-user")
+        # PR #240 round-2: kill_switch_rearm requires ADMIN role.
+        ctx = _make_ctx(role="admin", caller="ops-user")
         ksm = self._make_ksm_mock()
 
         with patch("app.security.step_up._is_live_mode", return_value=False):
+            # PR #240 round-4: KILL_SWITCH_REARM tokens require a
+            # non-empty ``resource_id``.
             tok = issue_step_up_token(
                 actor="ops-user",
                 action_class=DangerousActionClass.KILL_SWITCH_REARM,
+                resource_id="GLOBAL",
             )
 
         payload = KillSwitchRearmRequest(

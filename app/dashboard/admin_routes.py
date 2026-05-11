@@ -1254,12 +1254,28 @@ def _require_scope_entitlement(ctx, scope_str: str, scope_id: str) -> None:
     - GLOBAL scope requires ``ctx.all_tenants``.
     - TENANT scope requires either ``all_tenants`` or
       ``can_access_tenant(scope_id)``.
-    - ACCOUNT / STRATEGY scope requires either ``all_tenants`` or
-      ``can_access_broker_account(scope_id)``.
+    - ACCOUNT scope requires either ``all_tenants`` OR an explicit
+      ``broker_account_ids`` match OR (if the admin is tenant-scoped
+      with no explicit account allow-list) a resolved tenant
+      membership.
+    - STRATEGY scope requires either ``all_tenants`` or an explicit
+      ``broker_account_ids`` match (strategy IDs do not map cleanly
+      to a tenant without additional metadata, so fail closed for
+      tenant-only scoped admins).
 
     Without this check, a tenant-scoped admin bearer session could
     use the trip/clear/rearm endpoints (gated only by role=ADMIN)
     to mutate the GLOBAL kill switch and affect every tenant.
+
+    PR #240 round-7 review P1: ``can_access_broker_account`` returns
+    True when ``broker_account_ids`` is empty (auth.py:120-123). That
+    let tenant-scoped admins with no explicit account allow-list pass
+    the ACCOUNT/STRATEGY gate for arbitrary scope_ids and mutate
+    another tenant's account-level kill switch. Replace the bare
+    ``can_access_broker_account`` call with an explicit fail-closed
+    check that requires either an exact account-id match OR a
+    runtime/control-plane resolution that confirms the account
+    belongs to a tenant in ``ctx.tenant_ids``.
     """
     scope_upper = str(scope_str or "").strip().upper()
     if scope_upper == "GLOBAL":
@@ -1281,13 +1297,63 @@ def _require_scope_entitlement(ctx, scope_str: str, scope_id: str) -> None:
                 f"tenant_id={scope_id!r} is outside this admin's tenant entitlement"
             ),
         )
-    if scope_upper in ("ACCOUNT", "STRATEGY"):
-        if ctx.all_tenants or ctx.can_access_broker_account(str(scope_id)):
+    if scope_upper == "ACCOUNT":
+        if ctx.all_tenants:
+            return
+        # Explicit broker-account allow-list — exact match.
+        if ctx.broker_account_ids and str(scope_id) in ctx.broker_account_ids:
+            return
+        # Tenant-scoped admin with no explicit account allow-list —
+        # resolve account → tenant_id and check tenant membership.
+        if ctx.tenant_ids and not ctx.broker_account_ids:
+            resolved_tenant = ""
+            try:
+                _rt = get_hub_runtime()
+                _hub = getattr(_rt, "hub", None)
+                _runner = (
+                    _hub.get_runner(str(scope_id))
+                    if _hub is not None and hasattr(_hub, "get_runner")
+                    else None
+                )
+                if _runner is not None:
+                    resolved_tenant = str(
+                        getattr(_runner, "tenant_id", "") or ""
+                    )
+            except Exception:
+                resolved_tenant = ""
+            if not resolved_tenant:
+                try:
+                    from app.tenants.firestore_client import get_broker_account
+                    _ba = get_broker_account(str(scope_id))
+                    resolved_tenant = (
+                        str(getattr(_ba, "tenant_id", "") or "")
+                        if _ba is not None else ""
+                    )
+                except Exception:
+                    resolved_tenant = ""
+            if resolved_tenant and resolved_tenant in ctx.tenant_ids:
+                return
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"broker_account_id={scope_id!r} is outside this admin's "
+                "broker-account / tenant entitlement"
+            ),
+        )
+    if scope_upper == "STRATEGY":
+        if ctx.all_tenants:
+            return
+        # STRATEGY scope_id does not have a uniform account/tenant
+        # mapping — only allow exact broker_account_ids membership
+        # (covers strategies keyed by account) or fail closed.
+        if ctx.broker_account_ids and str(scope_id) in ctx.broker_account_ids:
             return
         raise HTTPException(
             status_code=403,
             detail=(
-                f"scope_id={scope_id!r} is outside this admin's broker-account entitlement"
+                f"strategy scope_id={scope_id!r} is outside this admin's "
+                "explicit entitlement (STRATEGY scope requires all_tenants "
+                "or an exact broker_account_ids match)"
             ),
         )
     # Unknown scope — let downstream KillSwitchScope validation 422.
@@ -1569,6 +1635,17 @@ def kill_switch_trip(
     # PR #240 round-6 review P1: ensure the admin's entitlement
     # covers the requested scope (GLOBAL requires cross-tenant).
     _require_scope_entitlement(ctx, payload.scope, payload.scope_id)
+    # PR #240 round-7 review P2: reject whitespace-only reasons
+    # server-side. The dashboard enforces non-empty in React but a
+    # direct API/BFF call can still POST ``reason="   "`` and trip
+    # the kill switch with an unusable audit justification. Mirror
+    # the cancel-all endpoint's check so every operator-driven
+    # kill-switch mutation carries a meaningful reason.
+    if not str(payload.reason or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="reason is required and must be non-empty",
+        )
     from app.risk.kill_switch import KillSwitchScope
     try:
         scope = KillSwitchScope(payload.scope.upper())
@@ -1665,6 +1742,14 @@ def kill_switch_request_clear(
     """
     ctx.require_role(AdminRole.ADMIN)
     _require_scope_entitlement(ctx, payload.scope, payload.scope_id)
+    # PR #240 round-7 review P2: reject whitespace-only reason_code
+    # server-side so direct API/BFF callers cannot bypass the
+    # dashboard's non-empty check.
+    if not str(payload.reason_code or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="reason_code is required and must be non-empty",
+        )
     from app.risk.kill_switch import KillSwitchScope, KillSwitchClearRequest, KillSwitchClearValidation
     try:
         scope = KillSwitchScope(payload.scope.upper())
@@ -2197,8 +2282,13 @@ async def kill_switch_cancel_all(
 
     # Statuses for which there is nothing left to cancel — counted as
     # ``skipped`` rather than attempting a no-op cancel.
+    # PR #240 round-7 review P2: include ``COMPLETED`` (matches
+    # ``AccountRunner``'s own terminal set) — Zerodha/dhan style
+    # brokers emit "COMPLETED" rather than the Angel "COMPLETE", so
+    # without this entry a fully-executed order would be re-attempted
+    # and turn a clean drain into a partial/failed result.
     _TERMINAL_BROKER_STATUSES = {
-        "FILLED", "FULL", "COMPLETE", "EXECUTED",
+        "FILLED", "FULL", "COMPLETE", "COMPLETED", "EXECUTED",
         "CANCELLED", "CANCELED", "CANCEL", "EXPIRED",
         "REJECTED", "REJECT", "FAILED", "FAILURE", "ERROR",
     }

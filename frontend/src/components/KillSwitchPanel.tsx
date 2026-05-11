@@ -125,13 +125,29 @@ const KillSwitchPanel: React.FC = () => {
   const isDivergent =
     !durableActivelyBlocking
     && (legacyActive || divergent || legacyFallbackActive);
-  type PanelState = KillSwitchRecord['state'] | 'DIVERGENT';
-  const globalState: PanelState = isDivergent
-    ? 'DIVERGENT'
-    : (globalRecord?.state || 'INACTIVE');
+  type PanelState = KillSwitchRecord['state'] | 'DIVERGENT' | 'UNKNOWN';
+  // PR #240 round-7 review P2: when the state endpoint has not
+  // returned a payload yet (initial load OR a fetch failure), the
+  // panel previously defaulted to ``INACTIVE`` and showed the Trip
+  // button — that misled operators into thinking the kill switch
+  // was definitively off when in fact the durable state was simply
+  // unreadable. Surface a distinct UNKNOWN state instead so the
+  // operator is not given a misleading "no record" affirmation, and
+  // gate state-dependent buttons below until a real snapshot
+  // arrives. ``loading`` covers the initial fetch; ``error``
+  // covers a control-plane outage.
+  const stateUnknown = stateResp == null;
+  const globalState: PanelState = stateUnknown
+    ? 'UNKNOWN'
+    : isDivergent
+      ? 'DIVERGENT'
+      : (globalRecord?.state || 'INACTIVE');
+  const UNKNOWN_COLOURS = { bg: '#f3f4f6', fg: '#4b5563', border: '#9ca3af' };
   const colours = globalState === 'DIVERGENT'
     ? { bg: '#fef2f2', fg: '#7c2d12', border: '#dc2626' }
-    : STATE_COLOURS[globalState as KillSwitchRecord['state']];
+    : globalState === 'UNKNOWN'
+      ? UNKNOWN_COLOURS
+      : STATE_COLOURS[globalState as KillSwitchRecord['state']];
 
   // PR #240 round-3 review P2: only require a step-up token when the
   // backend will actually enforce it (LIVE mode). In PAPER/SHADOW the
@@ -362,6 +378,31 @@ Paste the returned token_id below.`;
         </span>
       </div>
 
+      {/* PR #240 round-7 review P2: when the state endpoint has not
+          yet returned (initial mount or control-plane outage), warn
+          the operator that destructive actions are disabled until a
+          real snapshot is available — better than showing a green
+          INACTIVE pill with a live Trip button that may step on a
+          durable state we cannot read. */}
+      {globalState === 'UNKNOWN' && (
+        <div
+          style={{
+            marginBottom: '0.75rem',
+            padding: '0.5rem 0.75rem',
+            borderLeft: '3px solid #9ca3af',
+            backgroundColor: '#f3f4f6',
+            color: '#374151',
+            fontSize: '0.875rem',
+          }}
+        >
+          <strong>Kill-switch state UNKNOWN</strong> — the durable
+          state endpoint has not returned a snapshot yet. Destructive
+          controls are disabled until the panel can confirm the
+          current durable record. Retry shortly; if this persists,
+          investigate the control-plane Postgres connection.
+        </div>
+      )}
+
       {/* PR #240 round-4 review P2: divergence warning banner. The
           durable manager and legacy stream-path are reporting
           different states; operator should Trip to create the
@@ -445,12 +486,18 @@ Paste the returned token_id below.`;
               </div>
             )}
           </>
+        ) : globalState === 'UNKNOWN' ? (
+          <em>Durable kill-switch state is unavailable — see banner above.</em>
         ) : (
           <em>No active kill-switch record. Switch is INACTIVE.</em>
         )}
       </div>
 
       <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+        {/* PR #240 round-7 review P2: gate state-dependent buttons
+            on ``globalState !== 'UNKNOWN'`` so the dashboard does
+            not show an active Trip control while the durable state
+            could not be read. */}
         {(globalState === 'INACTIVE' || globalState === 'DIVERGENT') && (
           <button
             type="button"
