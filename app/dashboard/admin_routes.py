@@ -1247,6 +1247,118 @@ def resolve_expired_contracts(
     return {"dry_run": False, "updated": updated, "symbol_pattern": payload.symbol_pattern}
 
 
+def _require_scope_entitlement(ctx, scope_str: str, scope_id: str) -> None:
+    """PR #240 round-6 review P1: enforce that the admin's tenant
+    entitlement covers the kill-switch scope they are mutating.
+
+    - GLOBAL scope requires ``ctx.all_tenants``.
+    - TENANT scope requires either ``all_tenants`` or
+      ``can_access_tenant(scope_id)``.
+    - ACCOUNT scope requires either ``all_tenants`` OR an explicit
+      ``broker_account_ids`` match OR (if the admin is tenant-scoped
+      with no explicit account allow-list) a resolved tenant
+      membership.
+    - STRATEGY scope requires either ``all_tenants`` or an explicit
+      ``broker_account_ids`` match (strategy IDs do not map cleanly
+      to a tenant without additional metadata, so fail closed for
+      tenant-only scoped admins).
+
+    Without this check, a tenant-scoped admin bearer session could
+    use the trip/clear/rearm endpoints (gated only by role=ADMIN)
+    to mutate the GLOBAL kill switch and affect every tenant.
+
+    PR #240 round-7 review P1: ``can_access_broker_account`` returns
+    True when ``broker_account_ids`` is empty (auth.py:120-123). That
+    let tenant-scoped admins with no explicit account allow-list pass
+    the ACCOUNT/STRATEGY gate for arbitrary scope_ids and mutate
+    another tenant's account-level kill switch. Replace the bare
+    ``can_access_broker_account`` call with an explicit fail-closed
+    check that requires either an exact account-id match OR a
+    runtime/control-plane resolution that confirms the account
+    belongs to a tenant in ``ctx.tenant_ids``.
+    """
+    scope_upper = str(scope_str or "").strip().upper()
+    if scope_upper == "GLOBAL":
+        if not ctx.all_tenants:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "GLOBAL-scope kill-switch mutations require an admin "
+                    "with cross-tenant entitlement (all_tenants=true)."
+                ),
+            )
+        return
+    if scope_upper == "TENANT":
+        if ctx.all_tenants or ctx.can_access_tenant(str(scope_id)):
+            return
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"tenant_id={scope_id!r} is outside this admin's tenant entitlement"
+            ),
+        )
+    if scope_upper == "ACCOUNT":
+        if ctx.all_tenants:
+            return
+        # Explicit broker-account allow-list — exact match.
+        if ctx.broker_account_ids and str(scope_id) in ctx.broker_account_ids:
+            return
+        # Tenant-scoped admin with no explicit account allow-list —
+        # resolve account → tenant_id and check tenant membership.
+        if ctx.tenant_ids and not ctx.broker_account_ids:
+            resolved_tenant = ""
+            try:
+                _rt = get_hub_runtime()
+                _hub = getattr(_rt, "hub", None)
+                _runner = (
+                    _hub.get_runner(str(scope_id))
+                    if _hub is not None and hasattr(_hub, "get_runner")
+                    else None
+                )
+                if _runner is not None:
+                    resolved_tenant = str(
+                        getattr(_runner, "tenant_id", "") or ""
+                    )
+            except Exception:
+                resolved_tenant = ""
+            if not resolved_tenant:
+                try:
+                    from app.tenants.firestore_client import get_broker_account
+                    _ba = get_broker_account(str(scope_id))
+                    resolved_tenant = (
+                        str(getattr(_ba, "tenant_id", "") or "")
+                        if _ba is not None else ""
+                    )
+                except Exception:
+                    resolved_tenant = ""
+            if resolved_tenant and resolved_tenant in ctx.tenant_ids:
+                return
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"broker_account_id={scope_id!r} is outside this admin's "
+                "broker-account / tenant entitlement"
+            ),
+        )
+    if scope_upper == "STRATEGY":
+        if ctx.all_tenants:
+            return
+        # STRATEGY scope_id does not have a uniform account/tenant
+        # mapping — only allow exact broker_account_ids membership
+        # (covers strategies keyed by account) or fail closed.
+        if ctx.broker_account_ids and str(scope_id) in ctx.broker_account_ids:
+            return
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"strategy scope_id={scope_id!r} is outside this admin's "
+                "explicit entitlement (STRATEGY scope requires all_tenants "
+                "or an exact broker_account_ids match)"
+            ),
+        )
+    # Unknown scope — let downstream KillSwitchScope validation 422.
+
+
 def _get_kill_switch_manager():
     """Return the live KillSwitchManager from the hub runtime. Raises 503 if unavailable."""
     try:
@@ -1260,15 +1372,180 @@ def _get_kill_switch_manager():
         raise HTTPException(status_code=503, detail=f"KillSwitchManager unavailable: {exc}") from exc
 
 
-def _save_kill_switch_state(ksm) -> None:
-    """Persist KillSwitchManager state to Postgres (non-fatal)."""
+def _save_kill_switch_state(ksm, *, rollback=None) -> None:
+    """Persist KillSwitchManager state to Postgres.
+
+    Issue #238 acceptance: in LIVE mode the kill-switch state MUST be
+    persisted durably. A silent in-memory-only save would leave the
+    operator's UI showing TRIPPED while a process restart would
+    rehydrate from Postgres and find INACTIVE — defeating the
+    durability guarantee. Fail closed in LIVE so the API call surfaces
+    a 500 to the dashboard instead of misleading the operator.
+
+    PR #240 round-1 review P1: when LIVE persistence fails the in-
+    memory record has ALREADY been mutated (the endpoints call
+    ``ksm.trip()`` / ``ksm.rearm()`` etc. before invoking this helper),
+    so a running process would still consider the kill switch e.g.
+    INACTIVE after a failed rearm. The optional ``rollback`` callable
+    is invoked BEFORE raising the 500 to restore the prior in-memory
+    state. Best-effort: any exception from the rollback is logged and
+    swallowed so the original HTTP 500 always reaches the operator.
+
+    In non-LIVE modes the existing non-fatal warning is preserved so
+    local/dev runs without a control-plane Postgres do not crash.
+    """
+    import logging as _log
+    import os as _os
+    trade_mode = str(_os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper()
     try:
+        # PR #240 round-3 review P1: use an EXPLICIT transaction for
+        # LIVE persistence so a multi-record save is atomic. With
+        # autocommit, a failure midway through ``save_state`` (which
+        # upserts every kill-switch record) can leave Postgres with
+        # some rows updated and others not — after a process restart
+        # the durable state may resurrect a toggle the dashboard was
+        # told failed. A transaction lets Postgres roll back the
+        # partial write so the durable state matches the in-memory
+        # rollback we perform below.
         from app.data.postgres import connect_with_retry, get_control_plane_dsn
-        with connect_with_retry(get_control_plane_dsn(), autocommit=True) as conn:
-            ksm.save_state(conn)
+        with connect_with_retry(get_control_plane_dsn(), autocommit=False) as conn:
+            try:
+                ksm.save_state(conn)
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
     except Exception as exc:
-        import logging as _log
+        if trade_mode == "LIVE":
+            _log.getLogger(__name__).error(
+                "kill_switch.save_state failed in LIVE — failing closed "
+                "so the operator does not see a phantom toggle: %s", exc,
+            )
+            if rollback is not None:
+                try:
+                    rollback()
+                except Exception as rb_exc:
+                    _log.getLogger(__name__).warning(
+                        "kill_switch state rollback after LIVE persist "
+                        "failure also failed (best-effort): %s", rb_exc,
+                    )
+            # PR #240 round-3 review P2: emit a compensating audit
+            # event so reviewers can see that the manager's earlier
+            # ``kill_switch.*`` audit entry (which the manager emitted
+            # before this helper attempted persistence) does NOT
+            # represent durable state. Append-only audit logs cannot
+            # delete the prior entry, but this compensating record
+            # makes the rollback visible during incident review.
+            try:
+                emit_audit_event(
+                    actor="system",
+                    action="kill_switch_persist_failed_rollback",
+                    resource_type="kill_switch",
+                    resource_id="",
+                    metadata={
+                        "error": str(exc),
+                        "trade_mode": trade_mode,
+                        "note": (
+                            "in-memory state restored; preceding "
+                            "kill_switch.* audit entry from the "
+                            "manager does NOT reflect durable state"
+                        ),
+                    },
+                )
+            except Exception:
+                pass  # best-effort
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Kill-switch state could not be persisted to Postgres. "
+                    "The toggle has NOT taken durable effect — in-memory "
+                    "state has been rolled back. Resolve the control-plane "
+                    f"outage and retry. Underlying error: {exc}"
+                ),
+            ) from exc
         _log.getLogger(__name__).warning("kill_switch.save_state failed (non-fatal): %s", exc)
+
+
+def _kill_switch_rollback_factory(ksm, scope, scope_id):
+    """Capture the current in-memory ``KillSwitchRecord`` for the given
+    (scope, scope_id) and return a callable that restores it.
+
+    PR #240 round-1 review P1: used by trip / rearm / clear endpoints
+    so an LIVE persist failure can undo the in-memory mutation before
+    surfacing the 500.
+    """
+    key = ksm._key(scope, scope_id)  # KSM uses tuple(scope, scope_id) keys
+    import copy as _copy
+    # PR #240 round-6 review P2: capture the pre-mutation snapshot
+    # UNDER the manager's lock so a concurrent successful mutation
+    # cannot land between our snapshot and the caller's mutation.
+    # Without this, two overlapping requests could both observe the
+    # same prior state and either could roll back to a snapshot that
+    # no longer reflects what was actually there at mutation time.
+    with ksm._lock:
+        prior_snapshot = _copy.deepcopy(ksm._records.get(key))
+    # PR #240 round-4/round-5 review P2: capture the post-mutation
+    # record's identity at the time we wrap the rollback so a
+    # CONCURRENT successful request that further mutates the same
+    # scope is not clobbered.
+    #
+    # Round-4 used only ``record.id`` for the comparison, but
+    # ``KillSwitchManager.request_clear`` / ``confirm_clear`` /
+    # ``rearm`` mutate the existing record IN PLACE without changing
+    # ``id``. An id-only guard therefore cannot detect a newer
+    # successful transition on the same scope. Round-5 expands the
+    # fingerprint to include ``state.value``, ``block_exits``, and
+    # ``updated_at`` so any concurrent state-changing mutation is
+    # observed and the rollback is suppressed.
+    expected_post_fingerprint: list = []  # mutable cell
+
+    def _record_fingerprint(record) -> Optional[tuple]:
+        if record is None:
+            return None
+        state = getattr(record, "state", None)
+        state_val = getattr(state, "value", state)
+        return (
+            getattr(record, "id", None),
+            state_val,
+            bool(getattr(record, "block_exits", False)),
+            getattr(record, "updated_at", None),
+        )
+
+    def _rollback() -> None:
+        with ksm._lock:
+            current = ksm._records.get(key)
+            current_fp = _record_fingerprint(current)
+            expected_fp = (
+                expected_post_fingerprint[0]
+                if expected_post_fingerprint
+                else None
+            )
+            if expected_fp is not None and current_fp != expected_fp:
+                # A concurrent request has further mutated this scope
+                # (different id, state, block_exits, or updated_at).
+                # Suppress rollback to avoid clobbering newer state.
+                _log.getLogger(__name__).warning(
+                    "kill_switch rollback suppressed — concurrent mutation "
+                    "on scope (%s, %s): expected=%s current=%s",
+                    scope, scope_id, expected_fp, current_fp,
+                )
+                return
+            if prior_snapshot is None:
+                ksm._records.pop(key, None)
+            else:
+                ksm._records[key] = prior_snapshot
+
+    def _set_expected(record) -> None:
+        expected_post_fingerprint.append(_record_fingerprint(record))
+
+    _rollback.set_expected_post_record = _set_expected  # type: ignore[attr-defined]
+    return _rollback
+
+
+import logging as _log  # noqa: E402 — used by ``_rollback``'s concurrent-mutation warning
 
 
 class KillSwitchTripRequest(BaseModel):
@@ -1310,6 +1587,19 @@ class KillSwitchRearmRequest(BaseModel):
             "with action_class=kill_switch_rearm before calling this endpoint."
         ),
     )
+    # PR #240 round-3 review P2: capture the operator-entered reason
+    # so confirm-clear and rearm audit events carry the typed
+    # justification the dashboard already prompts for. Optional for
+    # backward compatibility with existing CLI scripts.
+    reason: Optional[str] = Field(
+        None,
+        description=(
+            "Operator-entered reason / acknowledgement, persisted in "
+            "the audit event metadata. The dashboard requires a non-"
+            "empty value before enabling the Confirm button; CLI "
+            "scripts may omit it for backward compatibility."
+        ),
+    )
 
 
 class StepUpIssueRequest(BaseModel):
@@ -1333,14 +1623,38 @@ def kill_switch_trip(
     payload: KillSwitchTripRequest,
     ctx: AdminContext = Depends(get_admin_context),
 ) -> dict:
-    """Trip a kill switch for a given scope. Requires OPERATOR role."""
-    ctx.require_role(AdminRole.OPERATOR)
+    """Trip a kill switch for a given scope.
+
+    PR #240 round-2 review P2 (issue #238 acceptance): kill-switch
+    toggle endpoints are ADMIN-only. The dashboard UI gates the
+    controls behind ``<Gate requiredRoles={[ADMIN]}>``; the backend
+    MUST match so an operator bearer session cannot bypass the React
+    gate via direct API/BFF calls.
+    """
+    ctx.require_role(AdminRole.ADMIN)
+    # PR #240 round-6 review P1: ensure the admin's entitlement
+    # covers the requested scope (GLOBAL requires cross-tenant).
+    _require_scope_entitlement(ctx, payload.scope, payload.scope_id)
+    # PR #240 round-7 review P2: reject whitespace-only reasons
+    # server-side. The dashboard enforces non-empty in React but a
+    # direct API/BFF call can still POST ``reason="   "`` and trip
+    # the kill switch with an unusable audit justification. Mirror
+    # the cancel-all endpoint's check so every operator-driven
+    # kill-switch mutation carries a meaningful reason.
+    if not str(payload.reason or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="reason is required and must be non-empty",
+        )
     from app.risk.kill_switch import KillSwitchScope
     try:
         scope = KillSwitchScope(payload.scope.upper())
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
     ksm = _get_kill_switch_manager()
+    # PR #240 round-1 review P1: capture prior record so a LIVE persist
+    # failure can roll back the in-memory trip mutation.
+    rollback = _kill_switch_rollback_factory(ksm, scope, payload.scope_id)
     upgraded = False
     try:
         record = ksm.trip(
@@ -1387,7 +1701,11 @@ def kill_switch_trip(
                 ),
             )
         upgraded = True
-    _save_kill_switch_state(ksm)
+    # PR #240 round-4 review P2: register post-mutation identity so
+    # the rollback only fires if the record is STILL the one we
+    # mutated (i.e. no concurrent request has further changed state).
+    rollback.set_expected_post_record(record)  # type: ignore[attr-defined]
+    _save_kill_switch_state(ksm, rollback=rollback)
     emit_audit_event(
         actor=ctx.caller,
         action=(
@@ -1417,8 +1735,21 @@ def kill_switch_request_clear(
     payload: KillSwitchClearRequestPayload,
     ctx: AdminContext = Depends(get_admin_context),
 ) -> dict:
-    """Request a kill switch clear (TRIPPED → CLEAR_PENDING). Requires OPERATOR role."""
-    ctx.require_role(AdminRole.OPERATOR)
+    """Request a kill switch clear (TRIPPED → CLEAR_PENDING).
+
+    PR #240 round-2 review P2: ADMIN-only per #238 acceptance — matches
+    the dashboard UI gate so operator sessions cannot bypass.
+    """
+    ctx.require_role(AdminRole.ADMIN)
+    _require_scope_entitlement(ctx, payload.scope, payload.scope_id)
+    # PR #240 round-7 review P2: reject whitespace-only reason_code
+    # server-side so direct API/BFF callers cannot bypass the
+    # dashboard's non-empty check.
+    if not str(payload.reason_code or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="reason_code is required and must be non-empty",
+        )
     from app.risk.kill_switch import KillSwitchScope, KillSwitchClearRequest, KillSwitchClearValidation
     try:
         scope = KillSwitchScope(payload.scope.upper())
@@ -1455,6 +1786,7 @@ def kill_switch_request_clear(
             pass
         return KillSwitchClearValidation(passed=len(failures) == 0, failures=failures)
 
+    rollback = _kill_switch_rollback_factory(ksm, scope, payload.scope_id)
     try:
         record, validation = ksm.request_clear(clear_req, _validation_fn)
     except (KeyError, ValueError) as exc:
@@ -1464,7 +1796,8 @@ def kill_switch_request_clear(
             status_code=409,
             detail=f"Clear request denied: {validation.failures}",
         )
-    _save_kill_switch_state(ksm)
+    rollback.set_expected_post_record(record)  # type: ignore[attr-defined]
+    _save_kill_switch_state(ksm, rollback=rollback)
     emit_audit_event(
         actor=ctx.caller,
         action="kill_switch_request_clear",
@@ -1481,25 +1814,87 @@ def kill_switch_confirm_clear(
     payload: KillSwitchRearmRequest,
     ctx: AdminContext = Depends(get_admin_context),
 ) -> dict:
-    """Confirm a kill switch clear (CLEAR_PENDING → CLEARED). Requires OPERATOR role."""
-    ctx.require_role(AdminRole.OPERATOR)
+    """Confirm a kill switch clear (CLEAR_PENDING → CLEARED).
+
+    PR #240 round-2 review P1: this is the transition that restores
+    LIVE entry eligibility — ``is_tripped()`` no longer blocks orders
+    once the record is CLEARED, even before the separate Rearm step.
+    Therefore it requires the same step-up token ceremony in LIVE as
+    rearm does (Architecture §15.4) — using the
+    ``KILL_SWITCH_CLEAR`` action class so the token cannot be reused
+    across action classes. Without this gate, a single authenticated
+    admin session could clear the kill switch end-to-end without any
+    secondary credential.
+
+    PR #240 round-2 review P2: also ADMIN-only per #238 acceptance.
+    PR #240 round-6 review P1: also requires the admin's tenant
+    entitlement to cover the scope being mutated.
+    """
+    ctx.require_role(AdminRole.ADMIN)
+    _require_scope_entitlement(ctx, payload.scope, payload.scope_id)
+
+    # Parse scope FIRST so we can scope the step-up token check.
     from app.risk.kill_switch import KillSwitchScope
     try:
         scope = KillSwitchScope(payload.scope.upper())
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
+
+    # §15.4 step-up gate (LIVE only).
+    # PR #240 round-3 review P1: pass ``resource_id=payload.scope_id``
+    # so a token issued for one scope cannot be reused to clear a
+    # different scope (the token issuer contract binds the resource).
+    import os as _os
+    if str(_os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper() == "LIVE":
+        if not payload.step_up_token:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "step_up_token is required to confirm-clear a kill "
+                    "switch in LIVE mode. Issue one first: "
+                    "POST /admin/step-up/issue {\"action_class\": "
+                    f"\"kill_switch_clear\", \"resource_id\": \"{payload.scope_id}\"}}."
+                ),
+            )
+        from app.security.step_up import DangerousActionClass, consume_step_up_token
+        if not consume_step_up_token(
+            token_id=payload.step_up_token,
+            actor=ctx.caller,
+            action_class=DangerousActionClass.KILL_SWITCH_CLEAR,
+            resource_id=str(payload.scope_id),
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "step_up_token is invalid, expired, already used, or was not "
+                    f"issued to the current actor for kill_switch_clear on "
+                    f"scope_id={payload.scope_id!r}. Issue a new token via "
+                    "POST /admin/step-up/issue and retry."
+                ),
+            )
+
     ksm = _get_kill_switch_manager()
+    rollback = _kill_switch_rollback_factory(ksm, scope, payload.scope_id)
     try:
         record = ksm.confirm_clear(scope, payload.scope_id)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-    _save_kill_switch_state(ksm)
+    rollback.set_expected_post_record(record)  # type: ignore[attr-defined]
+    _save_kill_switch_state(ksm, rollback=rollback)
     emit_audit_event(
         actor=ctx.caller,
         action="kill_switch_confirm_clear",
         resource_type="kill_switch",
         resource_id=str(payload.scope_id),
-        metadata={"scope": payload.scope, "scope_id": payload.scope_id},
+        metadata={
+            "scope": payload.scope,
+            "scope_id": payload.scope_id,
+            # PR #240 round-3 review P2: persist the operator
+            # acknowledgement reason so the audit trail carries the
+            # justification for the transition that restores LIVE
+            # entry eligibility.
+            "reason": payload.reason or "",
+        },
     )
     return {"status": "cleared", "record_id": record.id, "state": record.state.value}
 
@@ -1509,13 +1904,19 @@ def kill_switch_rearm(
     payload: KillSwitchRearmRequest,
     ctx: AdminContext = Depends(get_admin_context),
 ) -> dict:
-    """Rearm a kill switch (CLEARED → INACTIVE). Requires OPERATOR role.
+    """Rearm a kill switch (CLEARED → INACTIVE).
 
     In LIVE mode, a valid step_up_token with action_class=kill_switch_rearm
     is mandatory (Architecture §15.4). Obtain one first via
     POST /admin/step-up/issue with action_class=kill_switch_rearm.
+
+    PR #240 round-2 review P2: ADMIN-only per #238 acceptance — matches
+    the dashboard UI gate so operator sessions cannot bypass.
+    PR #240 round-6 review P1: also requires the admin's tenant
+    entitlement to cover the scope being mutated.
     """
-    ctx.require_role(AdminRole.OPERATOR)
+    ctx.require_role(AdminRole.ADMIN)
+    _require_scope_entitlement(ctx, payload.scope, payload.scope_id)
 
     # §15.4: Require step-up token in LIVE mode before restoring entry eligibility.
     import os as _os
@@ -1526,21 +1927,25 @@ def kill_switch_rearm(
                 detail=(
                     "step_up_token is required to rearm a kill switch in LIVE mode. "
                     "Issue one first: POST /admin/step-up/issue "
-                    "{\"action_class\": \"kill_switch_rearm\", \"resource_id\": \"<scope_id>\"}."
+                    f"{{\"action_class\": \"kill_switch_rearm\", \"resource_id\": \"{payload.scope_id}\"}}."
                 ),
             )
         from app.security.step_up import DangerousActionClass, consume_step_up_token
+        # PR #240 round-3 review P1: bind the token to ``scope_id`` so
+        # one scope's token cannot rearm a different scope.
         if not consume_step_up_token(
             token_id=payload.step_up_token,
             actor=ctx.caller,
             action_class=DangerousActionClass.KILL_SWITCH_REARM,
+            resource_id=str(payload.scope_id),
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
                     "step_up_token is invalid, expired, already used, or was not issued "
-                    "to the current actor for kill_switch_rearm. "
-                    "Issue a new token via POST /admin/step-up/issue and retry."
+                    f"to the current actor for kill_switch_rearm on scope_id="
+                    f"{payload.scope_id!r}. Issue a new token via "
+                    "POST /admin/step-up/issue and retry."
                 ),
             )
 
@@ -1550,27 +1955,732 @@ def kill_switch_rearm(
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
     ksm = _get_kill_switch_manager()
+    rollback = _kill_switch_rollback_factory(ksm, scope, payload.scope_id)
     try:
         record = ksm.rearm(scope, payload.scope_id, actor=ctx.caller)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-    _save_kill_switch_state(ksm)
+    rollback.set_expected_post_record(record)  # type: ignore[attr-defined]
+    _save_kill_switch_state(ksm, rollback=rollback)
     emit_audit_event(
         actor=ctx.caller,
         action="kill_switch_rearm",
         resource_type="kill_switch",
         resource_id=str(payload.scope_id),
-        metadata={"scope": payload.scope, "scope_id": payload.scope_id},
+        metadata={
+            "scope": payload.scope,
+            "scope_id": payload.scope_id,
+            # PR #240 round-3 review P2: persist operator reason.
+            "reason": payload.reason or "",
+        },
     )
     return {"status": "inactive", "record_id": record.id, "state": record.state.value}
 
 
 @router.get("/kill-switch/state")
 def get_kill_switch_state_endpoint(ctx: AdminContext = Depends(get_admin_context)) -> dict:
-    """Return current kill switch state for all non-INACTIVE scopes. Requires OPERATOR role."""
+    """Return current kill switch state for all non-INACTIVE scopes.
+
+    PR #240 round-3 review P2: include ``trade_mode`` so the dashboard
+    can render the step-up token field conditionally (LIVE-only).
+    Without this, the UI either always shows the token field
+    (blocking non-LIVE confirm-clear/rearm) or never shows it
+    (defeating the LIVE protection). Requires OPERATOR role.
+    """
     ctx.require_role(AdminRole.OPERATOR)
+    import os as _os
     from app.risk.kill_switch import get_kill_switch_state
-    return get_kill_switch_state()
+    state = get_kill_switch_state()
+    state["trade_mode"] = str(_os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper()
+    return state
+
+
+class KillSwitchCancelAllRequest(BaseModel):
+    """Issue #238: idempotent broker-side cancel of all open orders."""
+
+    reason: str = Field(
+        ...,
+        description=(
+            "Operator-entered reason for cancelling all open broker orders. "
+            "Stored in the audit trail."
+        ),
+    )
+    broker_account_id: Optional[str] = Field(
+        None,
+        description=(
+            "Optional: limit cancellation to a single broker account. "
+            "Omit to cancel across every registered runner."
+        ),
+    )
+
+
+@router.post("/kill-switch/cancel-all")
+async def kill_switch_cancel_all(
+    payload: KillSwitchCancelAllRequest,
+    request: Request,
+    ctx: AdminContext = Depends(get_admin_context),
+) -> dict:
+    """Cancel every open broker order across registered account runners.
+
+    Issue #238 + PR #240 round-3: dashboard-driven safety control.
+    Cancellation is idempotent on the broker side; per-broker results
+    are aggregated and returned.
+
+    Server-side preconditions enforced (PR #240 round-3 review P2):
+      * ADMIN role
+      * Non-empty reason
+      * Rate-limited via the standard dashboard limiter
+      * The durable GLOBAL kill switch must be actively blocking new
+        placements (TRIPPED or CLEAR_PENDING). Otherwise Phoenix is
+        free to place fresh orders during the bulk-cancel window,
+        defeating the documented emergency-drain sequence.
+
+    The endpoint does NOT trip the durable switch — operators must
+    call ``/admin/kill-switch/trip`` first.
+    """
+    ctx.require_role(AdminRole.ADMIN)
+    # PR #240 round-3 review P2: rate-limit destructive bulk cancel
+    # the same way as every other state-changing admin endpoint.
+    check_rate_limit(request)
+    if not str(payload.reason or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="reason is required and must be non-empty",
+        )
+
+    # PR #240 round-3 review P2: enforce trip-before-cancel on the
+    # server even though the UI also disables the button. A direct
+    # API/BFF call must be rejected when the durable kill switch is
+    # INACTIVE / CLEARED, because new placements are still allowed in
+    # those states.
+    # PR #240 round-4/round-5 review P2: hierarchical trip-before-cancel
+    # check that mirrors the order interceptor's GLOBAL → TENANT →
+    # ACCOUNT precedence. A trip at ANY level above the target broker
+    # account already blocks new placements for that account, so the
+    # endpoint should accept it as a precondition without forcing the
+    # operator to escalate to GLOBAL or add a duplicate ACCOUNT trip.
+    try:
+        _precheck_ksm = _get_kill_switch_manager()
+        from app.risk.kill_switch import KillSwitchScope, KillSwitchState
+        _ACTIVE_STATES = (
+            KillSwitchState.TRIPPED, KillSwitchState.CLEAR_PENDING,
+        )
+
+        def _is_active(record) -> bool:
+            return record is not None and record.state in _ACTIVE_STATES
+
+        _global_record = _precheck_ksm.get_record(
+            KillSwitchScope.GLOBAL, "GLOBAL",
+        )
+        _global_active = _is_active(_global_record)
+        _scoped_active = False
+        if not _global_active and payload.broker_account_id:
+            # ACCOUNT-level trip at this broker account.
+            _account_record = _precheck_ksm.get_record(
+                KillSwitchScope.ACCOUNT, str(payload.broker_account_id),
+            )
+            _scoped_active = _is_active(_account_record)
+            # PR #240 round-5/round-6 review P2: TENANT-level trip
+            # that covers this broker account.
+            #
+            # Round-6: prefer the runtime ``runner.tenant_id`` over
+            # the control-plane ``get_broker_account`` lookup. The
+            # hub already knows which tenant owns each runner; using
+            # that avoids losing TENANT-trip coverage during a
+            # control-plane outage (precisely when the emergency
+            # drain is most needed). Fall back to the control-plane
+            # lookup only when the runner is not registered yet.
+            if not _scoped_active:
+                _tenant_id = ""
+                _runtime = get_hub_runtime()
+                _hub = getattr(_runtime, "hub", None)
+                _runner = None
+                if _hub is not None and hasattr(_hub, "get_runner"):
+                    try:
+                        _runner = _hub.get_runner(payload.broker_account_id)
+                    except Exception:
+                        _runner = None
+                if _runner is not None:
+                    _tenant_id = str(getattr(_runner, "tenant_id", "") or "")
+                if not _tenant_id:
+                    try:
+                        from app.tenants.firestore_client import get_broker_account
+                        _ba = get_broker_account(str(payload.broker_account_id))
+                        _tenant_id = (
+                            str(getattr(_ba, "tenant_id", "") or "")
+                            if _ba is not None else ""
+                        )
+                    except Exception as _cp_exc:
+                        # Control-plane outage AND no runtime runner —
+                        # we cannot determine tenant. Fail with a
+                        # clear 503 rather than silently treating an
+                        # active TENANT trip as absent.
+                        raise HTTPException(
+                            status_code=503,
+                            detail=(
+                                "Could not resolve tenant_id for "
+                                f"broker_account_id={payload.broker_account_id!r}: "
+                                f"{_cp_exc}. Retry once the control "
+                                "plane is reachable, or use the GLOBAL trip."
+                            ),
+                        ) from _cp_exc
+                if _tenant_id:
+                    _tenant_record = _precheck_ksm.get_record(
+                        KillSwitchScope.TENANT, _tenant_id,
+                    )
+                    _scoped_active = _is_active(_tenant_record)
+        if not (_global_active or _scoped_active):
+            current_label = (
+                _global_record.state.value
+                if _global_record is not None
+                else "INACTIVE"
+            )
+            detail = (
+                "cancel-all requires an active kill switch in the "
+                "GLOBAL → TENANT → ACCOUNT hierarchy covering the "
+                "target scope"
+            )
+            if payload.broker_account_id:
+                detail += (
+                    f" (broker_account_id={payload.broker_account_id!r})"
+                )
+            detail += f". Current GLOBAL state: {current_label}. "
+            detail += "Trip the kill switch first via POST /admin/kill-switch/trip."
+            raise HTTPException(status_code=409, detail=detail)
+    except HTTPException:
+        raise
+    except Exception as _ksm_exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not verify durable kill-switch state before "
+                f"cancel-all: {_ksm_exc}"
+            ),
+        ) from _ksm_exc
+
+    try:
+        runtime = get_hub_runtime()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"hub runtime unavailable: {exc}",
+        ) from exc
+    hub = getattr(runtime, "hub", None)
+    if hub is None:
+        raise HTTPException(
+            status_code=503,
+            detail="hub not available on runtime",
+        )
+
+    # Collect target runners. When broker_account_id is provided, scope
+    # to that single account; otherwise iterate every registered runner.
+    # PR #240 round-1/round-6 review P1: enforce both broker-account
+    # AND tenant scoping. A bearer-authenticated admin with restricted
+    # ``tenant_ids`` (but no explicit ``broker_account_ids``) would
+    # otherwise pass ``can_access_broker_account`` for every account
+    # and could drain another tenant's broker orders. We resolve the
+    # runner's tenant_id at runtime and require it to be in the admin's
+    # ``tenant_ids`` unless ``all_tenants`` is True.
+
+    def _admin_can_drain(_runner, acct_id: str) -> bool:
+        """Combined broker-account + tenant scope check.
+
+        Accepts the drain if ANY of:
+          - admin has cross-tenant entitlement (``all_tenants``)
+          - admin is broker-account-scoped and this account is in
+            their entitlement (``broker_account_ids``)
+          - admin is tenant-scoped and this account's runner belongs
+            to a tenant in their entitlement (``tenant_ids``)
+
+        Round-6 review P1: was previously requiring tenant match
+        for ALL scoped admins, which broke pure account-scoped
+        admins who have no tenant restriction.
+        """
+        if ctx.all_tenants:
+            return True
+        if ctx.broker_account_ids and str(acct_id) in ctx.broker_account_ids:
+            return True
+        runner_tenant = str(getattr(_runner, "tenant_id", "") or "")
+        if (
+            ctx.tenant_ids
+            and runner_tenant
+            and runner_tenant in ctx.tenant_ids
+        ):
+            return True
+        return False
+
+    target_runner_ids: list = []
+    if payload.broker_account_id:
+        runner = hub.get_runner(payload.broker_account_id)
+        if runner is None:
+            # Resolve scope first before exposing 404 vs 403; an
+            # unauthorised admin should not be able to probe whether
+            # an arbitrary account_id has a registered runner.
+            if not ctx.can_access_broker_account(payload.broker_account_id):
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"broker_account_id {payload.broker_account_id!r} is "
+                        "outside this admin's scope"
+                    ),
+                )
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"broker_account_id {payload.broker_account_id!r} has "
+                    "no registered runner"
+                ),
+            )
+        if not _admin_can_drain(runner, payload.broker_account_id):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"broker_account_id {payload.broker_account_id!r} is "
+                    "outside this admin's scope (tenant or broker_account "
+                    "entitlement mismatch)"
+                ),
+            )
+        target_runner_ids = [payload.broker_account_id]
+        out_of_scope_runner_ids: list = []
+    else:
+        all_runner_ids = list(hub.list_runner_ids())
+        target_runner_ids = []
+        out_of_scope_runner_ids = []
+        for acct_id in all_runner_ids:
+            r = hub.get_runner(acct_id)
+            if r is None:
+                # Round-6 review P2: a runner that disappeared
+                # between list_runner_ids and get_runner is NOT a
+                # scope violation — let the main loop handle it as
+                # ``no_runner`` race (failed=1).
+                target_runner_ids.append(acct_id)
+            elif _admin_can_drain(r, str(acct_id)):
+                target_runner_ids.append(acct_id)
+            else:
+                out_of_scope_runner_ids.append(acct_id)
+
+    per_account_results: list[dict] = []
+    aggregate_attempted = 0
+    aggregate_cancelled = 0
+    aggregate_failed = 0
+    aggregate_skipped = 0
+    aggregate_raced_filled = 0
+    aggregate_refresh_failures = 0
+    aggregate_out_of_scope = 0
+    for _oos_acct in out_of_scope_runner_ids:
+        per_account_results.append({
+            "broker_account_id": str(_oos_acct),
+            "status": "out_of_scope",
+            "attempted": 0,
+            "cancelled": 0,
+            "failed": 0,
+            "skipped": 0,
+            "raced_filled": 0,
+            "errors": [{"out_of_scope": True}],
+        })
+        aggregate_out_of_scope += 1
+
+    # Statuses for which there is nothing left to cancel — counted as
+    # ``skipped`` rather than attempting a no-op cancel.
+    # PR #240 round-7 review P2: include ``COMPLETED`` (matches
+    # ``AccountRunner``'s own terminal set) — Zerodha/dhan style
+    # brokers emit "COMPLETED" rather than the Angel "COMPLETE", so
+    # without this entry a fully-executed order would be re-attempted
+    # and turn a clean drain into a partial/failed result.
+    _TERMINAL_BROKER_STATUSES = {
+        "FILLED", "FULL", "COMPLETE", "COMPLETED", "EXECUTED",
+        "CANCELLED", "CANCELED", "CANCEL", "EXPIRED",
+        "REJECTED", "REJECT", "FAILED", "FAILURE", "ERROR",
+    }
+    _CANCELLED_RESPONSE_STATUSES = {"CANCELLED", "CANCELED", "CANCEL"}
+    # PR #240 round-1 review P2: a broker that races the cancel with a
+    # FILL is NOT a successful cancel — it changes exposure. Track
+    # these separately so the operator can see they may need to flatten.
+    _FILLED_RACE_RESPONSE_STATUSES = {"FILLED", "FULL", "COMPLETE", "EXECUTED"}
+    # PR #240 round-1 review P1: only treat genuinely-idempotent
+    # rejections (already-cancelled / unknown order) as ``skipped``.
+    # The Angel adapter returns ``status="ERROR"`` for genuine cancel
+    # failures (e.g. ``cancel_failed:...``); those MUST surface as
+    # failed so the dashboard doesn't show ``failed=0`` during an
+    # incident.
+    _IDEMPOTENT_REJECTION_STATUSES = {
+        "REJECTED", "REJECT", "EXPIRED",
+    }
+    _CANCEL_FAILURE_STATUSES = {"FAILED", "FAILURE", "ERROR"}
+
+    for acct_id in target_runner_ids:
+        runner = hub.get_runner(acct_id)
+        if runner is None:
+            # PR #240 round-3 review P2: a runner that disappeared
+            # between ``list_runner_ids()`` and ``get_runner()`` has
+            # NOT been drained — surface as failed so the aggregate
+            # verdict is partial and operators see the gap.
+            per_account_results.append({
+                "broker_account_id": str(acct_id),
+                "status": "no_runner",
+                "attempted": 0,
+                "cancelled": 0,
+                "failed": 1,
+                "skipped": 0,
+                "raced_filled": 0,
+                "errors": [{"no_runner_race": True}],
+            })
+            aggregate_failed += 1
+            continue
+        broker_client = getattr(runner, "_broker_client", None)
+        cancel_fn = getattr(broker_client, "cancel_order", None)
+        if not callable(cancel_fn):
+            # PR #240 round-2 review P2: an account without a callable
+            # cancel API has NOT been drained. For a bulk emergency
+            # cancel-all this is a meaningful failure — count it as
+            # ``failed=1`` so the aggregate status is partial and the
+            # operator sees that one account could still have open
+            # broker orders.
+            per_account_results.append({
+                "broker_account_id": str(acct_id),
+                "status": "broker_no_cancel_api",
+                "attempted": 0,
+                "cancelled": 0,
+                "failed": 1,
+                "skipped": 0,
+                "raced_filled": 0,
+                "errors": [{"broker_no_cancel_api": True}],
+            })
+            aggregate_failed += 1
+            continue
+
+        # PR #240 round-1 review P1: refresh broker orders before
+        # iterating so the cancel-all does not work from a 90s-stale
+        # ``_last_orders`` cache. Fall back to the cached list when the
+        # broker refresh fails so we still attempt cancellation of
+        # whatever we last knew about.
+        #
+        # PR #240 round-3 review P2: when both the broker refresh AND
+        # the in-memory cache are empty (e.g. immediately after a
+        # process restart), also consult ``runner.state_store`` /
+        # ``runner._state_store`` for persisted orders. This mirrors
+        # ``AccountRunner.cancel_open_orders``'s own fallback so an
+        # operator-driven cancel-all does not silently report
+        # attempted=0 while persisted open orders are still live.
+        get_orders_fn = getattr(broker_client, "get_orders", None)
+        live_orders: Optional[list] = None
+        refresh_error: Optional[str] = None
+        refresh_succeeded = False
+        if callable(get_orders_fn):
+            try:
+                live_orders = list(await get_orders_fn() or [])
+                runner._last_orders = live_orders
+                refresh_succeeded = True
+            except Exception as exc:
+                refresh_error = repr(exc)
+                live_orders = None
+        # PR #240 round-4 review P2: only consult the cache / state
+        # store when the broker refresh ACTUALLY FAILED (or there is
+        # no refresh API). A successful refresh that returns ``[]`` is
+        # an authoritative "no open orders" — falling back to a stale
+        # cache would resurrect already-terminal order ids and turn a
+        # clean drain into partial/failed when the broker rejects
+        # them.
+        if live_orders is None and not refresh_succeeded:
+            cached = list(getattr(runner, "_last_orders", None) or [])
+            if cached:
+                live_orders = cached
+            else:
+                state_store = (
+                    getattr(runner, "state_store", None)
+                    or getattr(runner, "_state_store", None)
+                )
+                state_get_orders = getattr(state_store, "get_orders", None)
+                if callable(state_get_orders):
+                    try:
+                        live_orders = list(state_get_orders(acct_id) or [])
+                    except Exception as ss_exc:
+                        if refresh_error is None:
+                            refresh_error = repr(ss_exc)
+                        live_orders = []
+                else:
+                    live_orders = []
+        if live_orders is None:
+            live_orders = []
+
+        attempted = 0
+        cancelled = 0
+        failed = 0
+        skipped = 0
+        raced_filled = 0
+        errors: list[dict] = []
+        if refresh_error is not None:
+            errors.append({"broker_orders_refresh_error": refresh_error})
+
+        for order in live_orders:
+            # PR #240 round-1 review P1: ``OrderStatus.order_id`` is the
+            # broker id; the field ``broker_order_id`` does not exist
+            # on this dataclass. Fall back to several known aliases for
+            # broker-shaped dicts.
+            order_id = ""
+            for alias in ("order_id", "broker_order_id", "orderid", "id"):
+                candidate = getattr(order, alias, None)
+                if candidate is None and isinstance(order, dict):
+                    candidate = order.get(alias)
+                if candidate:
+                    order_id = str(candidate).strip()
+                    if order_id:
+                        break
+            order_status = str(getattr(order, "status", None) or (
+                order.get("status") if isinstance(order, dict) else ""
+            ) or "").strip().upper()
+            symbol = getattr(order, "symbol", None) or (
+                order.get("symbol") if isinstance(order, dict) else None
+            )
+            # PR #240 round-1 review P2: pass the order's broker
+            # ``variety`` (NORMAL / AMO / STOPLOSS / ...) so the
+            # broker adapter does not default to NORMAL and fail to
+            # cancel AMO/STOPLOSS orders.
+            variety = getattr(order, "variety", None) or (
+                order.get("variety") if isinstance(order, dict) else None
+            )
+            if not order_id:
+                skipped += 1
+                continue
+            if order_status in _TERMINAL_BROKER_STATUSES:
+                skipped += 1
+                continue
+            attempted += 1
+            # PR #240 round-4 review P2: wrap the direct broker cancel
+            # in a small retry loop with the same retryable-status
+            # semantics as ``app/brokers/execution.py``. A single
+            # transient broker blip during an incident would otherwise
+            # surface as ``failed=1`` even though the order is still
+            # cancellable. We keep the direct call (rather than
+            # delegating to ``_execution_port.cancel``) because the
+            # latter does not pass ``variety``, which we need for
+            # AMO/STOPLOSS orders.
+            _CANCEL_RETRY_ATTEMPTS = 2
+            _RETRYABLE_RESP_STATUSES = {"ERROR", "TIMEOUT", "UNKNOWN"}
+            resp = None
+            cancel_exc: Optional[Exception] = None
+            for _attempt_idx in range(_CANCEL_RETRY_ATTEMPTS + 1):
+                try:
+                    resp = await cancel_fn(order_id, symbol=symbol, variety=variety)
+                    cancel_exc = None
+                except Exception as exc:
+                    cancel_exc = exc
+                    resp = None
+                if cancel_exc is None and resp is not None:
+                    _intermediate_status = str(
+                        getattr(resp, "status", "") or ""
+                    ).strip().upper()
+                    if _intermediate_status not in _RETRYABLE_RESP_STATUSES:
+                        break
+                if _attempt_idx < _CANCEL_RETRY_ATTEMPTS:
+                    # Brief async sleep before retry — avoid tight loop.
+                    await asyncio.sleep(0.2 * (_attempt_idx + 1))
+            if cancel_exc is not None:
+                failed += 1
+                errors.append({
+                    "order_id": order_id,
+                    "error": repr(cancel_exc),
+                })
+                continue
+            assert resp is not None  # mypy hint; the loop above sets one
+            resp_status = str(getattr(resp, "status", "") or "").strip().upper()
+            if resp_status in _CANCELLED_RESPONSE_STATUSES:
+                cancelled += 1
+            elif resp_status in _FILLED_RACE_RESPONSE_STATUSES:
+                # PR #240 round-1 review P2: broker raced us with a
+                # fill — NOT a successful cancel; the operator may
+                # need to flatten this new exposure.
+                raced_filled += 1
+                errors.append({
+                    "order_id": order_id,
+                    "broker_status": resp_status,
+                    "note": (
+                        "filled before cancel could land — new exposure "
+                        "may need manual flatten"
+                    ),
+                })
+            elif resp_status in _IDEMPOTENT_REJECTION_STATUSES:
+                # PR #240 round-2 review P1: a REJECTED status alone is
+                # not enough to call this idempotent. Angel returns
+                # ``REJECTED`` with message ``cancel_failed`` for
+                # genuine broker-level cancel rejections too, which
+                # MUST count as failed. Only treat the response as
+                # idempotent when the message explicitly indicates the
+                # order is already gone / already cancelled / in a
+                # terminal state.
+                #
+                # PR #240 round-6 review P2: "already filled" /
+                # "already executed" markers are RACED FILLS — the
+                # broker accepted a fill before the cancel could land,
+                # so exposure was created. Route those to
+                # ``raced_filled`` rather than ``skipped`` so the
+                # operator is prompted to flatten the new position.
+                resp_message = str(getattr(resp, "message", "") or "")
+                _msg_lower = resp_message.lower()
+                _filled_race_markers = (
+                    "already filled",
+                    "already_filled",
+                    "already executed",
+                    "already_executed",
+                )
+                _idempotent_markers = (
+                    "not found",
+                    "not_found",
+                    "does not exist",
+                    "already cancelled",
+                    "already canceled",
+                    "already_cancelled",
+                    "already_canceled",
+                    "order completed",
+                    "order_completed",
+                    "terminal state",
+                    "terminal_state",
+                )
+                is_raced_filled = any(
+                    m in _msg_lower for m in _filled_race_markers
+                )
+                is_idempotent = (
+                    not is_raced_filled
+                    and any(m in _msg_lower for m in _idempotent_markers)
+                )
+                if is_raced_filled:
+                    raced_filled += 1
+                    errors.append({
+                        "order_id": order_id,
+                        "broker_status": resp_status,
+                        "broker_message": resp_message,
+                        "note": (
+                            "broker says order already filled/executed — "
+                            "new exposure may need manual flatten"
+                        ),
+                    })
+                elif is_idempotent:
+                    skipped += 1
+                    if resp_message:
+                        errors.append({
+                            "order_id": order_id,
+                            "broker_status": resp_status,
+                            "broker_message": resp_message,
+                        })
+                else:
+                    # Genuine broker-level cancel rejection (e.g.
+                    # Angel ``REJECTED:cancel_failed``). Must surface
+                    # as failed so the dashboard does not report a
+                    # green cancel-all when orders remain live.
+                    failed += 1
+                    errors.append({
+                        "order_id": order_id,
+                        "broker_status": resp_status,
+                        "broker_message": resp_message or "rejected_no_message",
+                    })
+            elif resp_status in _CANCEL_FAILURE_STATUSES:
+                # PR #240 round-1 review P1: real broker cancel failure.
+                # Must NOT be silently treated as idempotent.
+                failed += 1
+                errors.append({
+                    "order_id": order_id,
+                    "broker_status": resp_status,
+                    "broker_message": str(getattr(resp, "message", "") or ""),
+                })
+            else:
+                # Unknown / pending status — be conservative, count
+                # as failed so the operator investigates.
+                failed += 1
+                errors.append({
+                    "order_id": order_id,
+                    "broker_status": resp_status or "unknown",
+                })
+        # PR #240 round-2 review P2: a broker_orders refresh failure
+        # means we could NOT verify the current broker open-order
+        # set — fresh orders not in ``_last_orders`` may still be
+        # live. Surface as partial so the dashboard does not show a
+        # green ok cancel-all under that condition.
+        per_account_status = (
+            "ok"
+            if (failed == 0 and raced_filled == 0 and refresh_error is None)
+            else "partial"
+        )
+        per_account_results.append({
+            "broker_account_id": str(acct_id),
+            "status": per_account_status,
+            "attempted": attempted,
+            "cancelled": cancelled,
+            "failed": failed,
+            "skipped": skipped,
+            "raced_filled": raced_filled,
+            "broker_orders_refresh_failed": refresh_error is not None,
+            "errors": errors[:20],  # cap for payload size
+        })
+        aggregate_attempted += attempted
+        aggregate_cancelled += cancelled
+        aggregate_failed += failed
+        aggregate_skipped += skipped
+        aggregate_raced_filled += raced_filled
+        if refresh_error is not None:
+            aggregate_refresh_failures += 1
+
+    overall_status = (
+        "ok"
+        if (
+            aggregate_failed == 0
+            and aggregate_raced_filled == 0
+            and aggregate_refresh_failures == 0
+            and aggregate_out_of_scope == 0
+        )
+        else "partial"
+    )
+    emit_audit_event(
+        actor=ctx.caller,
+        action="kill_switch_cancel_all",
+        resource_type="broker_orders",
+        resource_id=payload.broker_account_id or "ALL_ACCOUNTS",
+        metadata={
+            "reason": payload.reason,
+            "broker_account_id": payload.broker_account_id,
+            "attempted": aggregate_attempted,
+            "cancelled": aggregate_cancelled,
+            "failed": aggregate_failed,
+            "skipped": aggregate_skipped,
+            "raced_filled": aggregate_raced_filled,
+            "refresh_failures": aggregate_refresh_failures,
+            # PR #240 round-5 review P2: scoped-admin runners outside
+            # entitlement that were skipped.
+            "out_of_scope": aggregate_out_of_scope,
+            "overall_status": overall_status,
+            "per_account": [
+                {
+                    "broker_account_id": r["broker_account_id"],
+                    "status": r["status"],
+                    "attempted": r["attempted"],
+                    "cancelled": r["cancelled"],
+                    "failed": r["failed"],
+                    "skipped": r["skipped"],
+                    "raced_filled": r["raced_filled"],
+                    "broker_orders_refresh_failed": r.get(
+                        "broker_orders_refresh_failed", False
+                    ),
+                    # PR #240 round-4 review P2: include the per-account
+                    # error details (capped) in the audit metadata so
+                    # incident reviewers can see WHICH order ids failed
+                    # and WHY after the response is gone or the Safety
+                    # page is reloaded.
+                    "errors": r.get("errors", [])[:10],
+                }
+                for r in per_account_results
+            ],
+        },
+    )
+    return {
+        "status": overall_status,
+        "attempted": aggregate_attempted,
+        "cancelled": aggregate_cancelled,
+        "failed": aggregate_failed,
+        "skipped": aggregate_skipped,
+        "raced_filled": aggregate_raced_filled,
+        "refresh_failures": aggregate_refresh_failures,
+        "out_of_scope": aggregate_out_of_scope,
+        "per_account": per_account_results,
+    }
 
 
 @router.get("/release-evidence")
@@ -1632,6 +2742,16 @@ def step_up_issue(
             action_class=action_class,
             resource_id=payload.resource_id or "",
         )
+    except ValueError as exc:
+        # PR #240 round-5 review P2: ``issue_step_up_token`` now
+        # rejects empty ``resource_id`` for ``kill_switch_clear`` /
+        # ``kill_switch_rearm``. Translate that to a 422 with the
+        # actionable error message so older clients / LIVE operators
+        # see a correctable bad request rather than an internal 500.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
     except RuntimeError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

@@ -62,10 +62,13 @@ def test_bff_get_forwards_user_and_tenant_headers(monkeypatch):
             backend_url="http://backend:8080",
         ),
     )
+    # PR #240 round-7 review P2: the proxy now passes ``timeout=`` to
+    # ``httpx.AsyncClient``; accept and ignore it in the stub so the
+    # call signature still matches.
     monkeypatch.setattr(
         bff_proxy.httpx,
         "AsyncClient",
-        lambda: _StubAsyncClient(calls),
+        lambda *_args, **_kwargs: _StubAsyncClient(calls),
     )
 
     client = TestClient(app)
@@ -102,10 +105,13 @@ def test_bff_post_forwards_json_body_and_query_params(monkeypatch):
             backend_url="http://backend:8080/",
         ),
     )
+    # PR #240 round-7 review P2: the proxy now passes ``timeout=`` to
+    # ``httpx.AsyncClient``; accept and ignore it in the stub so the
+    # call signature still matches.
     monkeypatch.setattr(
         bff_proxy.httpx,
         "AsyncClient",
-        lambda: _StubAsyncClient(calls),
+        lambda *_args, **_kwargs: _StubAsyncClient(calls),
     )
 
     client = TestClient(app)

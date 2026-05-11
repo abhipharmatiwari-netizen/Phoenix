@@ -225,6 +225,19 @@ def load_from_postgres() -> int:
 # Public API
 # ---------------------------------------------------------------------------
 
+#: PR #240 round-4 review P1: action classes for which an empty
+#: ``resource_id`` is forbidden at issuance. ``consume_step_up_token``
+#: treats a stored empty ``resource_id`` as a wildcard, so a kill-switch
+#: token issued without one could be used to clear/rearm any scope
+#: regardless of what the caller passes to ``consume``. Reject at
+#: issuance so the binding cannot be circumvented by either the issuer
+#: or the consumer.
+_RESOURCE_BOUND_ACTION_CLASSES: frozenset[DangerousActionClass] = frozenset({
+    DangerousActionClass.KILL_SWITCH_CLEAR,
+    DangerousActionClass.KILL_SWITCH_REARM,
+})
+
+
 def issue_step_up_token(
     *,
     actor: str,
@@ -237,7 +250,21 @@ def issue_step_up_token(
     In LIVE mode, persists to Postgres before returning. Raises RuntimeError if
     Postgres is unavailable in LIVE (fail closed — in-memory-only tokens are not
     permitted for LIVE dangerous actions). (#110)
+
+    PR #240 round-4 review P1: for kill-switch action classes the
+    caller MUST supply a non-empty ``resource_id``. The
+    ``consume_step_up_token`` API treats a stored empty resource as a
+    wildcard, so an unbound kill-switch token could be reused against
+    any scope. Reject here so the binding is enforced regardless of
+    what the consumer passes.
     """
+    if action_class in _RESOURCE_BOUND_ACTION_CLASSES:
+        if not str(resource_id or "").strip():
+            raise ValueError(
+                f"action_class={action_class.value!r} requires a non-empty "
+                "resource_id (kill-switch tokens must be bound to the scope "
+                "they are intended to act on)"
+            )
     token_id = uuid4().hex
     now = time.time()
     tok = StepUpToken(
@@ -308,7 +335,28 @@ def consume_step_up_token(
                 tok.action_class.value, action_class.value,
             )
             return False
-        if resource_id and tok.resource_id and tok.resource_id != resource_id:
+        # PR #240 round-4 review P1: for resource-bound action classes
+        # (kill-switch clear/rearm), require an EXACT non-empty match
+        # on both sides. The general wildcard-on-empty behaviour
+        # remains for other action classes for backward compatibility.
+        if action_class in _RESOURCE_BOUND_ACTION_CLASSES:
+            caller_resource = str(resource_id or "").strip()
+            stored_resource = str(tok.resource_id or "").strip()
+            if not caller_resource or not stored_resource:
+                logger.warning(
+                    "step_up_consume_failed: resource-bound action_class "
+                    "requires non-empty caller AND stored resource_id "
+                    "(caller=%r, stored=%r, action_class=%s)",
+                    caller_resource, stored_resource, action_class.value,
+                )
+                return False
+            if caller_resource != stored_resource:
+                logger.warning(
+                    "step_up_consume_failed: resource_id mismatch expected=%s got=%s",
+                    stored_resource, caller_resource,
+                )
+                return False
+        elif resource_id and tok.resource_id and tok.resource_id != resource_id:
             logger.warning(
                 "step_up_consume_failed: resource_id mismatch expected=%s got=%s",
                 tok.resource_id, resource_id,

@@ -251,6 +251,14 @@ def accountability_report(
     """
     dangerous_actions = {
         "kill_switch_clear", "kill_switch_rearm", "kill_switch_trip",
+        # PR #240 round-6 review P2 (issue #238): the dashboard
+        # bulk-cancel path is just as destructive as the kill-switch
+        # state transitions — incident reviewers must see it in the
+        # accountability summary too. Also covers the compensating
+        # rollback audit and the SOFT→HARD upgrade variant.
+        "kill_switch_cancel_all",
+        "kill_switch_block_exits_upgraded",
+        "kill_switch_persist_failed_rollback",
         "promote_user", "step_up_issued", "step_up_consumed", "step_up_approved",
         "break_glass", "capital_limit_change", "strategy_enable", "strategy_disable",
         "config_change", "manual_override",

@@ -442,6 +442,211 @@ export const AdminService = {
   },
 };
 
+// Issue #238: dashboard-driven kill-switch controls.
+//
+// The state machine is INACTIVE → TRIPPED → CLEAR_PENDING → CLEARED →
+// (rearm) INACTIVE. Trip / request-clear / confirm-clear / rearm are
+// idempotent against the durable Postgres-backed KillSwitchManager.
+// Cancel-all is a separate destructive bulk action that drains broker-
+// side open orders.
+
+export interface KillSwitchRecord {
+  id: number;
+  scope: 'GLOBAL' | 'TENANT' | 'ACCOUNT' | 'STRATEGY';
+  scope_id: string;
+  state: 'INACTIVE' | 'TRIPPED' | 'CLEAR_PENDING' | 'CLEARED';
+  block_exits: boolean;
+  tripped_at: string | null;
+  tripped_by: string | null;
+  trip_reason: string | null;
+  cleared_at: string | null;
+  cleared_by: string | null;
+  clear_reason: string | null;
+  clear_request_id: string | null;
+  updated_at: string | null;
+}
+
+export interface KillSwitchStateResponse {
+  source: string;
+  records?: KillSwitchRecord[];
+  active_count?: number;
+  // PR #240 round-5 review P2: backend falls back to the legacy
+  // risk_manager flag when the durable manager is unavailable
+  // (``source: "risk_manager"``). In that case neither ``records``
+  // nor ``legacy_kill_switch`` is populated — the active signal is
+  // here. Frontend must honour it to avoid rendering INACTIVE
+  // exactly when the durable path is broken.
+  kill_switch_activated?: boolean;
+  kill_switch_date?: string | null;
+  // PR #240 round-3 review P2: backend now surfaces trade_mode so
+  // the dashboard can conditionally require step-up tokens
+  // (LIVE-only) instead of unconditionally blocking non-LIVE flows.
+  trade_mode?: 'LIVE' | 'PAPER' | 'SHADOW' | string;
+  // PR #240 round-4 review P3: backend emits keys ``active`` and
+  // ``reason`` here (NOT ``legacy_active``/``legacy_reason`` — those
+  // appear under ``divergence``).
+  legacy_kill_switch?: {
+    active: boolean;
+    reason?: string | null;
+    publisher_seen?: boolean;
+    updated_at?: string | null;
+  } | null;
+  divergence?: {
+    divergent: boolean;
+    legacy_active: boolean;
+    durable_global_active: boolean | null;
+    divergence_age_seconds?: number | null;
+    publisher_seen?: boolean;
+  } | null;
+}
+
+export interface KillSwitchTripPayload {
+  scope: 'GLOBAL' | 'TENANT' | 'ACCOUNT' | 'STRATEGY';
+  scope_id: string;
+  reason: string;
+  block_exits?: boolean;
+}
+
+export interface KillSwitchTripResponse {
+  status: 'tripped' | 'block_exits_upgraded';
+  record_id: number;
+  state: string;
+  block_exits: boolean;
+  upgraded_in_place: boolean;
+}
+
+export interface KillSwitchClearRequestPayload {
+  scope: 'GLOBAL' | 'TENANT' | 'ACCOUNT' | 'STRATEGY';
+  scope_id: string;
+  reason_code: string;
+  break_glass?: boolean;
+}
+
+export interface KillSwitchRearmPayload {
+  scope: 'GLOBAL' | 'TENANT' | 'ACCOUNT' | 'STRATEGY';
+  scope_id: string;
+  step_up_token?: string | null;
+  // PR #240 round-3 review P2: operator-entered reason persisted
+  // in the audit event metadata. Required by the dashboard, but the
+  // backend treats it as optional for CLI compatibility.
+  reason?: string | null;
+}
+
+export interface KillSwitchCancelAllPayload {
+  reason: string;
+  broker_account_id?: string | null;
+}
+
+export interface KillSwitchCancelAllPerAccount {
+  broker_account_id: string;
+  status: 'ok' | 'partial' | 'no_runner' | 'broker_no_cancel_api' | 'out_of_scope';
+  attempted: number;
+  cancelled: number;
+  failed: number;
+  skipped: number;
+  // PR #240 round-1 review P2: broker-side fill race during cancel —
+  // counted separately from ``cancelled`` because it represents NEW
+  // exposure that may need manual flattening.
+  raced_filled?: number;
+  // PR #240 round-3 review P2: surface broker get_orders refresh
+  // failure so the dashboard renders the specific reason a
+  // per-account result is partial.
+  broker_orders_refresh_failed?: boolean;
+  errors: Array<Record<string, unknown>>;
+}
+
+export interface KillSwitchCancelAllResponse {
+  status: 'ok' | 'partial';
+  attempted: number;
+  cancelled: number;
+  failed: number;
+  skipped: number;
+  raced_filled?: number;
+  // PR #240 round-3 review P2: aggregate count of accounts where
+  // ``broker.get_orders()`` failed so the dashboard can show
+  // "could not verify broker open-order set" specifically.
+  refresh_failures?: number;
+  // PR #240 round-5/round-6 review P2: aggregate count of runners
+  // that were silently skipped because they were outside the
+  // scoped admin's entitlement. When > 0 the partial verdict is
+  // specifically due to scope-filter rather than broker failures.
+  out_of_scope?: number;
+  per_account: KillSwitchCancelAllPerAccount[];
+}
+
+export interface StepUpIssueResponse {
+  token_id: string;
+  expires_at: string;
+  action_class: string;
+}
+
+export const KillSwitchService = {
+  getState(): Promise<KillSwitchStateResponse> {
+    return request<KillSwitchStateResponse>({
+      path: bffPath('/admin/kill-switch/state'),
+    });
+  },
+
+  trip(payload: KillSwitchTripPayload): Promise<KillSwitchTripResponse> {
+    return request<KillSwitchTripResponse>({
+      path: bffPath('/admin/kill-switch/trip'),
+      method: 'POST',
+      body: payload,
+    });
+  },
+
+  requestClear(
+    payload: KillSwitchClearRequestPayload,
+  ): Promise<{ status: string; record_id: number; state: string }> {
+    return request({
+      path: bffPath('/admin/kill-switch/request-clear'),
+      method: 'POST',
+      body: payload,
+    });
+  },
+
+  confirmClear(
+    payload: KillSwitchRearmPayload,
+  ): Promise<{ status: string; record_id: number; state: string }> {
+    return request({
+      path: bffPath('/admin/kill-switch/confirm-clear'),
+      method: 'POST',
+      body: payload,
+    });
+  },
+
+  rearm(
+    payload: KillSwitchRearmPayload,
+  ): Promise<{ status: string; record_id: number; state: string }> {
+    return request({
+      path: bffPath('/admin/kill-switch/rearm'),
+      method: 'POST',
+      body: payload,
+    });
+  },
+
+  cancelAll(
+    payload: KillSwitchCancelAllPayload,
+  ): Promise<KillSwitchCancelAllResponse> {
+    return request<KillSwitchCancelAllResponse>({
+      path: bffPath('/admin/kill-switch/cancel-all'),
+      method: 'POST',
+      body: payload,
+    });
+  },
+
+  issueStepUpToken(
+    actionClass: string,
+    resourceId = '',
+  ): Promise<StepUpIssueResponse> {
+    return request<StepUpIssueResponse>({
+      path: bffPath('/admin/step-up/issue'),
+      method: 'POST',
+      body: { action_class: actionClass, resource_id: resourceId },
+    });
+  },
+};
+
 export const ControlTowerService = {
   getControlTowerMatrix(): Promise<MatrixResponse> {
     return request<MatrixResponse>({ path: bffPath('/api/control_tower/matrix') });
