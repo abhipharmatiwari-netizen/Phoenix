@@ -6,14 +6,18 @@ import pytest
 
 
 def _get_validate_fn():
-    from app.core.startup_config_validator import validate_runtime_settings
-    return validate_runtime_settings
+    from app.core.startup_config_validator import validate_runtime_startup_settings
+    return validate_runtime_startup_settings
 
 
 def _make_settings(**overrides):
     from app.config.settings import Settings
     defaults = {
         "HUB_DEFAULT_TENANT_ID": "tenant-1",
+        # LIVE validator requires a non-empty deployment-scoped instance
+        # name so circuit-breaker state doesn't bleed across stacks
+        # sharing the same Postgres.
+        "HUB_INSTANCE_NAME": "phoenix-live-test",
         "PROFIT_SWEEP_ENABLED": "false",
         "PROFIT_SWEEP_STRATEGY": "SIMPLE",
         "PROFIT_SIMPLE_ENABLED": "false",
@@ -43,6 +47,11 @@ def _base_live_env(**overrides):
     """Return a minimal passing LIVE environment dict."""
     base = {
         "TRADE_MODE": "LIVE",
+        # LIVE startup rejects local/dev/test APP_ENV because that
+        # disables dashboard auth (app/dashboard/auth.py). The
+        # validator-level tests below exercise specific gates and
+        # need a non-local APP_ENV so they reach the gate under test.
+        "APP_ENV": "production",
         "CONTROL_PLANE_BACKEND": "postgres",
         "SWEEP_STATE_BACKEND": "postgres",
         "BROKER_SECRET_BACKEND": "postgres",
