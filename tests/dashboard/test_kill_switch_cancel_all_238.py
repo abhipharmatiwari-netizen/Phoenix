@@ -523,10 +523,27 @@ def test_cancel_all_passes_order_variety_to_broker(monkeypatch):
 
 
 def test_cancel_all_error_status_counts_as_failed_not_skipped(monkeypatch):
-    """Round-1 P1: real Angel adapter returns ``status=ERROR`` for
-    genuine cancel failures (``cancel_failed:...``). MUST count as
-    failed so the dashboard shows ``failed>0`` during an incident."""
+    """Round-1 P1 + round-4 P2: real Angel adapter returns
+    ``status=ERROR`` for genuine cancel failures. MUST count as
+    failed so the dashboard shows ``failed>0`` during an incident.
+    Round-4 P2 added a retry loop with up to 3 attempts on
+    ERROR/TIMEOUT/UNKNOWN responses, so this test queues an ERROR
+    response for every attempt to verify the final classification."""
     broker = _FakeBroker(responses=[
+        OrderResponse(
+            broker_order_id="o1",
+            status="ERROR",
+            message="cancel_failed:broker_outage",
+            filled_quantity=0,
+            average_price=None,
+        ),
+        OrderResponse(
+            broker_order_id="o1",
+            status="ERROR",
+            message="cancel_failed:broker_outage",
+            filled_quantity=0,
+            average_price=None,
+        ),
         OrderResponse(
             broker_order_id="o1",
             status="ERROR",
@@ -549,6 +566,45 @@ def test_cancel_all_error_status_counts_as_failed_not_skipped(monkeypatch):
     assert resp["cancelled"] == 0
     assert resp["skipped"] == 0
     assert resp["status"] == "partial"
+    # Retry loop should have exercised all 3 attempts.
+    assert len(broker.calls) == 3
+
+
+def test_cancel_all_retry_succeeds_after_transient_error(monkeypatch):
+    """Round-4 P2: a single transient ERROR followed by a successful
+    cancel should report ``cancelled=1, failed=0`` thanks to the
+    retry loop, instead of failing on the first blip."""
+    broker = _FakeBroker(responses=[
+        OrderResponse(
+            broker_order_id="o1",
+            status="ERROR",
+            message="transient_glitch",
+            filled_quantity=0,
+            average_price=None,
+        ),
+        OrderResponse(
+            broker_order_id="o1",
+            status="CANCELLED",
+            message="cancelled",
+            filled_quantity=0,
+            average_price=None,
+        ),
+    ])
+    runner = _mk_runner("A1", [_order("o1")], broker)
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
+    monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
+    resp = _run(kill_switch_cancel_all(
+        KillSwitchCancelAllRequest(reason="retry-success"),
+        _mk_request(),
+        _mk_admin(),
+    ))
+    assert resp["attempted"] == 1
+    assert resp["cancelled"] == 1
+    assert resp["failed"] == 0
+    assert resp["status"] == "ok"
+    # Two calls: first ERROR, retry CANCELLED.
+    assert len(broker.calls) == 2
 
 
 def test_cancel_all_filled_race_counts_as_raced_filled_not_cancelled(monkeypatch):
@@ -1052,3 +1108,207 @@ def test_kill_switch_state_includes_trade_mode(monkeypatch):
     )
     resp = get_kill_switch_state_endpoint(_mk_admin(AdminRole.OPERATOR))
     assert resp["trade_mode"] == "LIVE"
+
+
+# ---- PR #240 round-4 review additions ----------------------------------
+
+
+def test_step_up_issue_rejects_empty_resource_for_kill_switch_clear():
+    """Round-4 P1: issuing a ``kill_switch_clear`` token without a
+    non-empty ``resource_id`` must raise. Otherwise the token could
+    be reused against any scope at consume time."""
+    from app.security.step_up import (
+        DangerousActionClass, issue_step_up_token,
+    )
+    with pytest.raises(ValueError) as exc:
+        issue_step_up_token(
+            actor="admin@phoenix.com",
+            action_class=DangerousActionClass.KILL_SWITCH_CLEAR,
+            resource_id="",
+        )
+    assert "resource_id" in str(exc.value)
+
+
+def test_step_up_issue_rejects_empty_resource_for_kill_switch_rearm():
+    """Round-4 P1: same rule for ``kill_switch_rearm``."""
+    from app.security.step_up import (
+        DangerousActionClass, issue_step_up_token,
+    )
+    with pytest.raises(ValueError):
+        issue_step_up_token(
+            actor="admin@phoenix.com",
+            action_class=DangerousActionClass.KILL_SWITCH_REARM,
+            resource_id="   ",  # whitespace also rejected
+        )
+
+
+def test_step_up_issue_accepts_bound_resource_for_kill_switch():
+    """Round-4 P1: non-empty resource binding is accepted."""
+    from app.security.step_up import (
+        DangerousActionClass, issue_step_up_token, consume_step_up_token,
+    )
+    tok = issue_step_up_token(
+        actor="admin@phoenix.com",
+        action_class=DangerousActionClass.KILL_SWITCH_CLEAR,
+        resource_id="GLOBAL",
+    )
+    # Mismatched scope rejected:
+    assert not consume_step_up_token(
+        token_id=tok.token_id,
+        actor="admin@phoenix.com",
+        action_class=DangerousActionClass.KILL_SWITCH_CLEAR,
+        resource_id="A1",
+    )
+
+
+def test_step_up_consume_rejects_empty_caller_resource_for_kill_switch():
+    """Round-4 P1: even if a legacy token with empty stored resource
+    exists, consuming a kill-switch action with empty caller
+    resource_id must be rejected."""
+    from app.security.step_up import (
+        DangerousActionClass, _STORE, StepUpToken, consume_step_up_token,
+    )
+    import time
+    tok = StepUpToken(
+        token_id="legacy-tok",
+        actor="admin@phoenix.com",
+        action_class=DangerousActionClass.KILL_SWITCH_CLEAR,
+        resource_id="",  # legacy, empty
+        issued_at=time.time(),
+        expires_at=time.time() + 60,
+    )
+    _STORE["legacy-tok"] = tok
+    try:
+        ok = consume_step_up_token(
+            token_id="legacy-tok",
+            actor="admin@phoenix.com",
+            action_class=DangerousActionClass.KILL_SWITCH_CLEAR,
+            resource_id="GLOBAL",
+        )
+        assert ok is False, (
+            "legacy token with empty stored resource must NOT be "
+            "accepted for kill-switch action classes"
+        )
+    finally:
+        _STORE.pop("legacy-tok", None)
+
+
+def test_cancel_all_accepts_account_scoped_trip(monkeypatch):
+    """Round-4 P2: hierarchical trip-before-cancel — an ACCOUNT-level
+    trip at the target broker account satisfies cancel-all even when
+    GLOBAL is INACTIVE."""
+    broker = _FakeBroker()
+    runner = _mk_runner("A1", [_order("o1")], broker)
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
+    monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    monkeypatch.setattr(
+        "app.dashboard.admin_routes.check_rate_limit",
+        lambda _request: None,
+    )
+    from app.risk.kill_switch import KillSwitchScope, KillSwitchState
+    account_record = SimpleNamespace(
+        scope=KillSwitchScope.ACCOUNT,
+        scope_id="A1",
+        state=KillSwitchState.TRIPPED,
+        block_exits=False,
+    )
+
+    def _get_record(scope, scope_id):
+        if scope == KillSwitchScope.ACCOUNT and scope_id == "A1":
+            return account_record
+        return None  # GLOBAL is INACTIVE
+
+    fake_ksm = SimpleNamespace(get_record=_get_record)
+    monkeypatch.setattr(admin_routes, "_get_kill_switch_manager", lambda: fake_ksm)
+    resp = _run(kill_switch_cancel_all(
+        KillSwitchCancelAllRequest(reason="scoped", broker_account_id="A1"),
+        _mk_request(),
+        _mk_admin(),
+    ))
+    assert resp["status"] == "ok"
+    assert resp["attempted"] == 1
+
+
+def test_cancel_all_does_not_fallback_to_cache_after_successful_empty_refresh(monkeypatch):
+    """Round-4 P2: when broker.get_orders() succeeds and returns
+    [], the in-memory cache must NOT be consulted — a fresh empty
+    refresh is authoritative "no open orders"."""
+    broker = _FakeBroker(get_orders_result=[])
+    # Stale cache (orders that broker confirms no longer exist).
+    runner = SimpleNamespace(
+        broker_account_id="A1",
+        is_running=True,
+    )
+    runner._broker_client = broker
+    runner._last_orders = [_order("stale-o1"), _order("stale-o2")]
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
+    monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
+    resp = _run(kill_switch_cancel_all(
+        KillSwitchCancelAllRequest(reason="clean-drain"),
+        _mk_request(),
+        _mk_admin(),
+    ))
+    # No cancels — broker confirmed empty open-order set.
+    assert resp["attempted"] == 0
+    assert resp["status"] == "ok"
+    assert len(broker.calls) == 0
+
+
+def test_cancel_all_audit_includes_per_account_errors(monkeypatch):
+    """Round-4 P2: audit metadata must carry per-account error
+    details so incident reviewers see which order ids failed."""
+    broker = _FakeBroker(raise_for={"o1"})
+    runner = _mk_runner("A1", [_order("o1")], broker)
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
+    captured: List[dict] = []
+    monkeypatch.setattr(
+        admin_routes, "emit_audit_event",
+        lambda **kw: captured.append(kw),
+    )
+    _patch_cancel_all_preconditions(monkeypatch)
+    _run(kill_switch_cancel_all(
+        KillSwitchCancelAllRequest(reason="audit-errors"),
+        _mk_request(),
+        _mk_admin(),
+    ))
+    assert captured
+    per_account = captured[-1]["metadata"]["per_account"]
+    assert per_account[0]["errors"], (
+        "per-account errors must be persisted in audit metadata"
+    )
+    assert "simulated broker outage" in str(per_account[0]["errors"][0])
+
+
+def test_kill_switch_rollback_suppressed_on_concurrent_mutation(monkeypatch):
+    """Round-4 P2: if the in-memory record's id has changed since the
+    snapshot was taken (a concurrent successful mutation), the
+    rollback must be suppressed so the newer state is preserved."""
+    from app.dashboard.admin_routes import _kill_switch_rollback_factory
+    from app.risk.kill_switch import KillSwitchScope
+    fake_ksm = SimpleNamespace(
+        _key=lambda scope, scope_id: (str(scope), str(scope_id)),
+        _lock=__import__("threading").RLock(),
+        _records={},
+    )
+    # Seed an initial record.
+    key = ("KillSwitchScope.GLOBAL", "GLOBAL")
+    prior = SimpleNamespace(id="rec-original", state="INACTIVE")
+    fake_ksm._records[key] = prior
+    rollback = _kill_switch_rollback_factory(
+        fake_ksm, KillSwitchScope.GLOBAL, "GLOBAL",
+    )
+    # Simulate caller's mutation: replace record with rec-A then
+    # register that as expected.
+    post_record = SimpleNamespace(id="rec-A", state="TRIPPED")
+    fake_ksm._records[key] = post_record
+    rollback.set_expected_post_record(post_record)
+    # Now a concurrent successful request mutates further.
+    newer_record = SimpleNamespace(id="rec-B", state="CLEAR_PENDING")
+    fake_ksm._records[key] = newer_record
+    # Rollback should NOT restore prior — would clobber newer state.
+    rollback()
+    assert fake_ksm._records[key].id == "rec-B", (
+        "rollback must suppress when a concurrent mutation has "
+        "advanced the record id"
+    )

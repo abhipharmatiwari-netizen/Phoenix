@@ -89,17 +89,38 @@ const KillSwitchPanel: React.FC = () => {
     return anyGlobal || null;
   }, [stateResp]);
 
-  // PR #240 round-3 review P2: when the durable manager has no GLOBAL
-  // record but the legacy stream-path kill switch is active (issue
-  // #222 divergence), surface "TRIPPED" so the panel doesn't mislead
-  // the operator into thinking no protection is in place. The
-  // backend ``state`` response already includes ``legacy_kill_switch``
-  // and ``divergence`` for exactly this case.
-  const legacyActive = Boolean(stateResp?.legacy_kill_switch?.legacy_active);
+  // PR #240 round-3/round-4 review: when the durable manager
+  // disagrees with the legacy stream-path kill switch (issue #222
+  // divergence), surface a distinct "DIVERGENT" pill rather than
+  // either INACTIVE (misleading — protection IS partly in place) or
+  // TRIPPED (misleading — operators would then hit Request Clear or
+  // Cancel All, which the durable endpoints reject because there is
+  // no actual durable record). The divergent panel keeps the Trip
+  // button available so the operator can create the durable trip
+  // needed to repair state.
+  //
+  // Round-4 review P3: backend emits ``active``/``reason`` keys in
+  // ``legacy_kill_switch`` (NOT ``legacy_active``/``legacy_reason``
+  // — those appear under ``divergence``).
+  const legacyActive = Boolean(stateResp?.legacy_kill_switch?.active);
   const divergent = Boolean(stateResp?.divergence?.divergent);
-  const globalState: KillSwitchRecord['state'] = globalRecord?.state
-    || (legacyActive || divergent ? 'TRIPPED' : 'INACTIVE');
-  const colours = STATE_COLOURS[globalState];
+  // Round-4 review P2: divergence applies WHENEVER the durable
+  // record is not actively blocking (INACTIVE / CLEARED / missing)
+  // but the legacy stream-path is active — not just the no-record
+  // case. ``KillSwitchManager.to_persistence_dict`` retains
+  // INACTIVE/CLEARED records in memory, so we have to check state
+  // value, not just record presence.
+  const durableActivelyBlocking =
+    globalRecord != null
+    && (globalRecord.state === 'TRIPPED' || globalRecord.state === 'CLEAR_PENDING');
+  const isDivergent = !durableActivelyBlocking && (legacyActive || divergent);
+  type PanelState = KillSwitchRecord['state'] | 'DIVERGENT';
+  const globalState: PanelState = isDivergent
+    ? 'DIVERGENT'
+    : (globalRecord?.state || 'INACTIVE');
+  const colours = globalState === 'DIVERGENT'
+    ? { bg: '#fef2f2', fg: '#7c2d12', border: '#dc2626' }
+    : STATE_COLOURS[globalState as KillSwitchRecord['state']];
 
   // PR #240 round-3 review P2: only require a step-up token when the
   // backend will actually enforce it (LIVE mode). In PAPER/SHADOW the
@@ -330,6 +351,35 @@ Paste the returned token_id below.`;
         </span>
       </div>
 
+      {/* PR #240 round-4 review P2: divergence warning banner. The
+          durable manager and legacy stream-path are reporting
+          different states; operator should Trip to create the
+          durable record (which the destructive endpoints require)
+          rather than Cancel/Clear, which would 409 on the missing
+          record. */}
+      {globalState === 'DIVERGENT' && (
+        <div
+          style={{
+            marginBottom: '0.75rem',
+            padding: '0.5rem 0.75rem',
+            borderLeft: '3px solid #dc2626',
+            backgroundColor: '#fef2f2',
+            color: '#7c2d12',
+            fontSize: '0.875rem',
+          }}
+        >
+          <strong>⚠ Kill-switch state is DIVERGENT</strong> — the legacy
+          stream-path reports active{stateResp?.legacy_kill_switch?.reason
+            ? ` (${stateResp.legacy_kill_switch.reason})`
+            : ''}, but the durable Postgres-backed manager has no actively-
+          blocking GLOBAL record. New placements are likely already
+          blocked by the legacy path, but durable endpoints (Request
+          Clear / Rearm / Cancel All) will 409 until a durable record
+          exists. Click <em>Trip Kill Switch (durable repair)</em> to
+          create the matching durable record, then proceed normally.
+        </div>
+      )}
+
       {error && (
         <div
           style={{
@@ -390,14 +440,19 @@ Paste the returned token_id below.`;
       </div>
 
       <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-        {globalState === 'INACTIVE' && (
+        {(globalState === 'INACTIVE' || globalState === 'DIVERGENT') && (
           <button
             type="button"
             onClick={onTrip}
             disabled={busy}
             style={btnStyle('#dc2626')}
           >
-            Trip Kill Switch
+            {/* PR #240 round-4 review P2: keep Trip available in
+                the DIVERGENT state so the operator can create the
+                missing durable record to repair the split-brain. */}
+            {globalState === 'DIVERGENT'
+              ? 'Trip Kill Switch (durable repair)'
+              : 'Trip Kill Switch'}
           </button>
         )}
         {globalState === 'TRIPPED' && (

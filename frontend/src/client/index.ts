@@ -474,9 +474,12 @@ export interface KillSwitchStateResponse {
   // the dashboard can conditionally require step-up tokens
   // (LIVE-only) instead of unconditionally blocking non-LIVE flows.
   trade_mode?: 'LIVE' | 'PAPER' | 'SHADOW' | string;
+  // PR #240 round-4 review P3: backend emits keys ``active`` and
+  // ``reason`` here (NOT ``legacy_active``/``legacy_reason`` — those
+  // appear under ``divergence``).
   legacy_kill_switch?: {
-    legacy_active: boolean;
-    legacy_reason?: string | null;
+    active: boolean;
+    reason?: string | null;
     publisher_seen?: boolean;
     updated_at?: string | null;
   } | null;

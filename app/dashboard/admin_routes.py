@@ -1368,15 +1368,50 @@ def _kill_switch_rollback_factory(ksm, scope, scope_id):
     key = ksm._key(scope, scope_id)  # KSM uses tuple(scope, scope_id) keys
     import copy as _copy
     prior_snapshot = _copy.deepcopy(ksm._records.get(key))
+    # PR #240 round-4 review P2: capture the post-mutation record's
+    # identity at the time we wrap the rollback so a CONCURRENT
+    # successful request that further mutates the same scope is not
+    # clobbered. The expected post-mutation snapshot is set by the
+    # caller AFTER the mutation completes (via the closure variable);
+    # at restore time we only roll back if the CURRENT in-memory
+    # record's id matches what we just put there. If a newer request
+    # has replaced the record (different id / updated_at), the
+    # rollback is suppressed because the in-memory state is already
+    # ahead of our snapshot — restoring would discard the newer
+    # successful mutation.
+    expected_post_id: list = []  # mutable cell
 
     def _rollback() -> None:
         with ksm._lock:
+            current = ksm._records.get(key)
+            current_id = getattr(current, "id", None) if current else None
+            expected_id = expected_post_id[0] if expected_post_id else None
+            if expected_id is not None and current_id != expected_id:
+                # A concurrent request has further mutated this scope.
+                # Suppress rollback to avoid clobbering newer state.
+                _log.getLogger(__name__).warning(
+                    "kill_switch rollback suppressed — concurrent mutation "
+                    "on scope (%s, %s): expected_id=%s current_id=%s",
+                    scope, scope_id, expected_id, current_id,
+                )
+                return
             if prior_snapshot is None:
                 ksm._records.pop(key, None)
             else:
                 ksm._records[key] = prior_snapshot
 
+    # Attach a setter so the caller can register the expected
+    # post-mutation record id after ``ksm.trip()``/``rearm()``/etc
+    # returns. The expectation is "if the in-memory state still has
+    # the record we just put there, roll it back".
+    def _set_expected(record) -> None:
+        expected_post_id.append(getattr(record, "id", None))
+
+    _rollback.set_expected_post_record = _set_expected  # type: ignore[attr-defined]
     return _rollback
+
+
+import logging as _log  # noqa: E402 — used by ``_rollback``'s concurrent-mutation warning
 
 
 class KillSwitchTripRequest(BaseModel):
@@ -1518,6 +1553,10 @@ def kill_switch_trip(
                 ),
             )
         upgraded = True
+    # PR #240 round-4 review P2: register post-mutation identity so
+    # the rollback only fires if the record is STILL the one we
+    # mutated (i.e. no concurrent request has further changed state).
+    rollback.set_expected_post_record(record)  # type: ignore[attr-defined]
     _save_kill_switch_state(ksm, rollback=rollback)
     emit_audit_event(
         actor=ctx.caller,
@@ -1600,6 +1639,7 @@ def kill_switch_request_clear(
             status_code=409,
             detail=f"Clear request denied: {validation.failures}",
         )
+    rollback.set_expected_post_record(record)  # type: ignore[attr-defined]
     _save_kill_switch_state(ksm, rollback=rollback)
     emit_audit_event(
         actor=ctx.caller,
@@ -1679,6 +1719,7 @@ def kill_switch_confirm_clear(
         record = ksm.confirm_clear(scope, payload.scope_id)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    rollback.set_expected_post_record(record)  # type: ignore[attr-defined]
     _save_kill_switch_state(ksm, rollback=rollback)
     emit_audit_event(
         actor=ctx.caller,
@@ -1756,6 +1797,7 @@ def kill_switch_rearm(
         record = ksm.rearm(scope, payload.scope_id, actor=ctx.caller)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    rollback.set_expected_post_record(record)  # type: ignore[attr-defined]
     _save_kill_switch_state(ksm, rollback=rollback)
     emit_audit_event(
         actor=ctx.caller,
@@ -1848,29 +1890,50 @@ async def kill_switch_cancel_all(
     # API/BFF call must be rejected when the durable kill switch is
     # INACTIVE / CLEARED, because new placements are still allowed in
     # those states.
+    # PR #240 round-4 review P2: hierarchical trip-before-cancel
+    # check. A GLOBAL trip always satisfies; for an account-scoped
+    # cancel, an ACCOUNT-level trip at that broker_account_id ALSO
+    # satisfies because the kill-switch interceptor already blocks
+    # new placements at that scope (no need to escalate to GLOBAL).
     try:
         _precheck_ksm = _get_kill_switch_manager()
         from app.risk.kill_switch import KillSwitchScope, KillSwitchState
+        _ACTIVE_STATES = (
+            KillSwitchState.TRIPPED, KillSwitchState.CLEAR_PENDING,
+        )
         _global_record = _precheck_ksm.get_record(
             KillSwitchScope.GLOBAL, "GLOBAL",
         )
-        _global_state = (
-            _global_record.state if _global_record is not None else None
+        _global_active = (
+            _global_record is not None
+            and _global_record.state in _ACTIVE_STATES
         )
-        if _global_state not in (
-            KillSwitchState.TRIPPED, KillSwitchState.CLEAR_PENDING,
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "cancel-all requires the GLOBAL kill switch to be "
-                    "actively blocking new placements (TRIPPED or "
-                    "CLEAR_PENDING). Current state: "
-                    f"{_global_state.value if _global_state else 'INACTIVE'}. "
-                    "Trip the kill switch first via POST "
-                    "/admin/kill-switch/trip."
-                ),
+        _scoped_active = False
+        if not _global_active and payload.broker_account_id:
+            _account_record = _precheck_ksm.get_record(
+                KillSwitchScope.ACCOUNT, str(payload.broker_account_id),
             )
+            _scoped_active = (
+                _account_record is not None
+                and _account_record.state in _ACTIVE_STATES
+            )
+        if not (_global_active or _scoped_active):
+            current_label = (
+                _global_record.state.value
+                if _global_record is not None
+                else "INACTIVE"
+            )
+            detail = (
+                "cancel-all requires the kill switch to be actively "
+                "blocking new placements (GLOBAL TRIPPED/CLEAR_PENDING"
+            )
+            if payload.broker_account_id:
+                detail += (
+                    f", or ACCOUNT TRIPPED for {payload.broker_account_id!r}"
+                )
+            detail += f"). Current GLOBAL state: {current_label}. "
+            detail += "Trip the kill switch first via POST /admin/kill-switch/trip."
+            raise HTTPException(status_code=409, detail=detail)
     except HTTPException:
         raise
     except Exception as _ksm_exc:
@@ -2016,23 +2079,29 @@ async def kill_switch_cancel_all(
         # operator-driven cancel-all does not silently report
         # attempted=0 while persisted open orders are still live.
         get_orders_fn = getattr(broker_client, "get_orders", None)
-        live_orders = None
+        live_orders: Optional[list] = None
         refresh_error: Optional[str] = None
+        refresh_succeeded = False
         if callable(get_orders_fn):
             try:
                 live_orders = list(await get_orders_fn() or [])
                 runner._last_orders = live_orders
+                refresh_succeeded = True
             except Exception as exc:
                 refresh_error = repr(exc)
                 live_orders = None
-        if not live_orders:
+        # PR #240 round-4 review P2: only consult the cache / state
+        # store when the broker refresh ACTUALLY FAILED (or there is
+        # no refresh API). A successful refresh that returns ``[]`` is
+        # an authoritative "no open orders" — falling back to a stale
+        # cache would resurrect already-terminal order ids and turn a
+        # clean drain into partial/failed when the broker rejects
+        # them.
+        if live_orders is None and not refresh_succeeded:
             cached = list(getattr(runner, "_last_orders", None) or [])
             if cached:
                 live_orders = cached
             else:
-                # State-store fallback. The runner exposes its store
-                # under either ``state_store`` (public) or
-                # ``_state_store`` (private); accept either.
                 state_store = (
                     getattr(runner, "state_store", None)
                     or getattr(runner, "_state_store", None)
@@ -2042,14 +2111,13 @@ async def kill_switch_cancel_all(
                     try:
                         live_orders = list(state_get_orders(acct_id) or [])
                     except Exception as ss_exc:
-                        # Best-effort — if even the state store
-                        # cannot enumerate, fall through to the empty
-                        # path which will surface the refresh error.
                         if refresh_error is None:
                             refresh_error = repr(ss_exc)
                         live_orders = []
                 else:
                     live_orders = []
+        if live_orders is None:
+            live_orders = []
 
         attempted = 0
         cancelled = 0
@@ -2094,15 +2162,43 @@ async def kill_switch_cancel_all(
                 skipped += 1
                 continue
             attempted += 1
-            try:
-                resp = await cancel_fn(order_id, symbol=symbol, variety=variety)
-            except Exception as exc:
+            # PR #240 round-4 review P2: wrap the direct broker cancel
+            # in a small retry loop with the same retryable-status
+            # semantics as ``app/brokers/execution.py``. A single
+            # transient broker blip during an incident would otherwise
+            # surface as ``failed=1`` even though the order is still
+            # cancellable. We keep the direct call (rather than
+            # delegating to ``_execution_port.cancel``) because the
+            # latter does not pass ``variety``, which we need for
+            # AMO/STOPLOSS orders.
+            _CANCEL_RETRY_ATTEMPTS = 2
+            _RETRYABLE_RESP_STATUSES = {"ERROR", "TIMEOUT", "UNKNOWN"}
+            resp = None
+            cancel_exc: Optional[Exception] = None
+            for _attempt_idx in range(_CANCEL_RETRY_ATTEMPTS + 1):
+                try:
+                    resp = await cancel_fn(order_id, symbol=symbol, variety=variety)
+                    cancel_exc = None
+                except Exception as exc:
+                    cancel_exc = exc
+                    resp = None
+                if cancel_exc is None and resp is not None:
+                    _intermediate_status = str(
+                        getattr(resp, "status", "") or ""
+                    ).strip().upper()
+                    if _intermediate_status not in _RETRYABLE_RESP_STATUSES:
+                        break
+                if _attempt_idx < _CANCEL_RETRY_ATTEMPTS:
+                    # Brief async sleep before retry — avoid tight loop.
+                    await asyncio.sleep(0.2 * (_attempt_idx + 1))
+            if cancel_exc is not None:
                 failed += 1
                 errors.append({
                     "order_id": order_id,
-                    "error": repr(exc),
+                    "error": repr(cancel_exc),
                 })
                 continue
+            assert resp is not None  # mypy hint; the loop above sets one
             resp_status = str(getattr(resp, "status", "") or "").strip().upper()
             if resp_status in _CANCELLED_RESPONSE_STATUSES:
                 cancelled += 1
@@ -2249,6 +2345,12 @@ async def kill_switch_cancel_all(
                     "broker_orders_refresh_failed": r.get(
                         "broker_orders_refresh_failed", False
                     ),
+                    # PR #240 round-4 review P2: include the per-account
+                    # error details (capped) in the audit metadata so
+                    # incident reviewers can see WHICH order ids failed
+                    # and WHY after the response is gone or the Safety
+                    # page is reloaded.
+                    "errors": r.get("errors", [])[:10],
                 }
                 for r in per_account_results
             ],
