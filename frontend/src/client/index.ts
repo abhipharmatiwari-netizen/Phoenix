@@ -468,8 +468,16 @@ export interface KillSwitchRecord {
 
 export interface KillSwitchStateResponse {
   source: string;
-  records: KillSwitchRecord[];
-  active_count: number;
+  records?: KillSwitchRecord[];
+  active_count?: number;
+  // PR #240 round-5 review P2: backend falls back to the legacy
+  // risk_manager flag when the durable manager is unavailable
+  // (``source: "risk_manager"``). In that case neither ``records``
+  // nor ``legacy_kill_switch`` is populated — the active signal is
+  // here. Frontend must honour it to avoid rendering INACTIVE
+  // exactly when the durable path is broken.
+  kill_switch_activated?: boolean;
+  kill_switch_date?: string | null;
   // PR #240 round-3 review P2: backend now surfaces trade_mode so
   // the dashboard can conditionally require step-up tokens
   // (LIVE-only) instead of unconditionally blocking non-LIVE flows.

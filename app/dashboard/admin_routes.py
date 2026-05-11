@@ -1368,31 +1368,50 @@ def _kill_switch_rollback_factory(ksm, scope, scope_id):
     key = ksm._key(scope, scope_id)  # KSM uses tuple(scope, scope_id) keys
     import copy as _copy
     prior_snapshot = _copy.deepcopy(ksm._records.get(key))
-    # PR #240 round-4 review P2: capture the post-mutation record's
-    # identity at the time we wrap the rollback so a CONCURRENT
-    # successful request that further mutates the same scope is not
-    # clobbered. The expected post-mutation snapshot is set by the
-    # caller AFTER the mutation completes (via the closure variable);
-    # at restore time we only roll back if the CURRENT in-memory
-    # record's id matches what we just put there. If a newer request
-    # has replaced the record (different id / updated_at), the
-    # rollback is suppressed because the in-memory state is already
-    # ahead of our snapshot — restoring would discard the newer
-    # successful mutation.
-    expected_post_id: list = []  # mutable cell
+    # PR #240 round-4/round-5 review P2: capture the post-mutation
+    # record's identity at the time we wrap the rollback so a
+    # CONCURRENT successful request that further mutates the same
+    # scope is not clobbered.
+    #
+    # Round-4 used only ``record.id`` for the comparison, but
+    # ``KillSwitchManager.request_clear`` / ``confirm_clear`` /
+    # ``rearm`` mutate the existing record IN PLACE without changing
+    # ``id``. An id-only guard therefore cannot detect a newer
+    # successful transition on the same scope. Round-5 expands the
+    # fingerprint to include ``state.value``, ``block_exits``, and
+    # ``updated_at`` so any concurrent state-changing mutation is
+    # observed and the rollback is suppressed.
+    expected_post_fingerprint: list = []  # mutable cell
+
+    def _record_fingerprint(record) -> Optional[tuple]:
+        if record is None:
+            return None
+        state = getattr(record, "state", None)
+        state_val = getattr(state, "value", state)
+        return (
+            getattr(record, "id", None),
+            state_val,
+            bool(getattr(record, "block_exits", False)),
+            getattr(record, "updated_at", None),
+        )
 
     def _rollback() -> None:
         with ksm._lock:
             current = ksm._records.get(key)
-            current_id = getattr(current, "id", None) if current else None
-            expected_id = expected_post_id[0] if expected_post_id else None
-            if expected_id is not None and current_id != expected_id:
-                # A concurrent request has further mutated this scope.
+            current_fp = _record_fingerprint(current)
+            expected_fp = (
+                expected_post_fingerprint[0]
+                if expected_post_fingerprint
+                else None
+            )
+            if expected_fp is not None and current_fp != expected_fp:
+                # A concurrent request has further mutated this scope
+                # (different id, state, block_exits, or updated_at).
                 # Suppress rollback to avoid clobbering newer state.
                 _log.getLogger(__name__).warning(
                     "kill_switch rollback suppressed — concurrent mutation "
-                    "on scope (%s, %s): expected_id=%s current_id=%s",
-                    scope, scope_id, expected_id, current_id,
+                    "on scope (%s, %s): expected=%s current=%s",
+                    scope, scope_id, expected_fp, current_fp,
                 )
                 return
             if prior_snapshot is None:
@@ -1400,12 +1419,8 @@ def _kill_switch_rollback_factory(ksm, scope, scope_id):
             else:
                 ksm._records[key] = prior_snapshot
 
-    # Attach a setter so the caller can register the expected
-    # post-mutation record id after ``ksm.trip()``/``rearm()``/etc
-    # returns. The expectation is "if the in-memory state still has
-    # the record we just put there, roll it back".
     def _set_expected(record) -> None:
-        expected_post_id.append(getattr(record, "id", None))
+        expected_post_fingerprint.append(_record_fingerprint(record))
 
     _rollback.set_expected_post_record = _set_expected  # type: ignore[attr-defined]
     return _rollback
@@ -1890,33 +1905,52 @@ async def kill_switch_cancel_all(
     # API/BFF call must be rejected when the durable kill switch is
     # INACTIVE / CLEARED, because new placements are still allowed in
     # those states.
-    # PR #240 round-4 review P2: hierarchical trip-before-cancel
-    # check. A GLOBAL trip always satisfies; for an account-scoped
-    # cancel, an ACCOUNT-level trip at that broker_account_id ALSO
-    # satisfies because the kill-switch interceptor already blocks
-    # new placements at that scope (no need to escalate to GLOBAL).
+    # PR #240 round-4/round-5 review P2: hierarchical trip-before-cancel
+    # check that mirrors the order interceptor's GLOBAL → TENANT →
+    # ACCOUNT precedence. A trip at ANY level above the target broker
+    # account already blocks new placements for that account, so the
+    # endpoint should accept it as a precondition without forcing the
+    # operator to escalate to GLOBAL or add a duplicate ACCOUNT trip.
     try:
         _precheck_ksm = _get_kill_switch_manager()
         from app.risk.kill_switch import KillSwitchScope, KillSwitchState
         _ACTIVE_STATES = (
             KillSwitchState.TRIPPED, KillSwitchState.CLEAR_PENDING,
         )
+
+        def _is_active(record) -> bool:
+            return record is not None and record.state in _ACTIVE_STATES
+
         _global_record = _precheck_ksm.get_record(
             KillSwitchScope.GLOBAL, "GLOBAL",
         )
-        _global_active = (
-            _global_record is not None
-            and _global_record.state in _ACTIVE_STATES
-        )
+        _global_active = _is_active(_global_record)
         _scoped_active = False
         if not _global_active and payload.broker_account_id:
+            # ACCOUNT-level trip at this broker account.
             _account_record = _precheck_ksm.get_record(
                 KillSwitchScope.ACCOUNT, str(payload.broker_account_id),
             )
-            _scoped_active = (
-                _account_record is not None
-                and _account_record.state in _ACTIVE_STATES
-            )
+            _scoped_active = _is_active(_account_record)
+            # PR #240 round-5 review P2: TENANT-level trip that
+            # covers this broker account. Resolve the tenant id from
+            # broker_accounts; if any tenant scope exists in the
+            # active records and matches, accept it.
+            if not _scoped_active:
+                try:
+                    from app.tenants.firestore_client import get_broker_account
+                    _ba = get_broker_account(str(payload.broker_account_id))
+                    _tenant_id = (
+                        str(getattr(_ba, "tenant_id", "") or "")
+                        if _ba is not None else ""
+                    )
+                except Exception:
+                    _tenant_id = ""
+                if _tenant_id:
+                    _tenant_record = _precheck_ksm.get_record(
+                        KillSwitchScope.TENANT, _tenant_id,
+                    )
+                    _scoped_active = _is_active(_tenant_record)
         if not (_global_active or _scoped_active):
             current_label = (
                 _global_record.state.value
@@ -1924,14 +1958,15 @@ async def kill_switch_cancel_all(
                 else "INACTIVE"
             )
             detail = (
-                "cancel-all requires the kill switch to be actively "
-                "blocking new placements (GLOBAL TRIPPED/CLEAR_PENDING"
+                "cancel-all requires an active kill switch in the "
+                "GLOBAL → TENANT → ACCOUNT hierarchy covering the "
+                "target scope"
             )
             if payload.broker_account_id:
                 detail += (
-                    f", or ACCOUNT TRIPPED for {payload.broker_account_id!r}"
+                    f" (broker_account_id={payload.broker_account_id!r})"
                 )
-            detail += f"). Current GLOBAL state: {current_label}. "
+            detail += f". Current GLOBAL state: {current_label}. "
             detail += "Trip the kill switch first via POST /admin/kill-switch/trip."
             raise HTTPException(status_code=409, detail=detail)
     except HTTPException:
@@ -1987,10 +2022,22 @@ async def kill_switch_cancel_all(
                 ),
             )
         target_runner_ids = [payload.broker_account_id]
+        out_of_scope_runner_ids: list = []
     else:
+        all_runner_ids = list(hub.list_runner_ids())
         target_runner_ids = [
-            acct_id for acct_id in hub.list_runner_ids()
+            acct_id for acct_id in all_runner_ids
             if ctx.can_access_broker_account(str(acct_id))
+        ]
+        # PR #240 round-5 review P2: a scoped admin omitting
+        # ``broker_account_id`` previously got a silent filtered
+        # subset; the UI/audit said "Cancel ALL" but accounts outside
+        # the admin's entitlement were never drained. Surface those
+        # accounts in the response as ``skipped_out_of_scope`` so the
+        # aggregate verdict reflects reality.
+        out_of_scope_runner_ids = [
+            acct_id for acct_id in all_runner_ids
+            if not ctx.can_access_broker_account(str(acct_id))
         ]
 
     per_account_results: list[dict] = []
@@ -2000,6 +2047,19 @@ async def kill_switch_cancel_all(
     aggregate_skipped = 0
     aggregate_raced_filled = 0
     aggregate_refresh_failures = 0
+    aggregate_out_of_scope = 0
+    for _oos_acct in out_of_scope_runner_ids:
+        per_account_results.append({
+            "broker_account_id": str(_oos_acct),
+            "status": "out_of_scope",
+            "attempted": 0,
+            "cancelled": 0,
+            "failed": 0,
+            "skipped": 0,
+            "raced_filled": 0,
+            "errors": [{"out_of_scope": True}],
+        })
+        aggregate_out_of_scope += 1
 
     # Statuses for which there is nothing left to cancel — counted as
     # ``skipped`` rather than attempting a no-op cancel.
@@ -2315,6 +2375,7 @@ async def kill_switch_cancel_all(
             aggregate_failed == 0
             and aggregate_raced_filled == 0
             and aggregate_refresh_failures == 0
+            and aggregate_out_of_scope == 0
         )
         else "partial"
     )
@@ -2332,6 +2393,9 @@ async def kill_switch_cancel_all(
             "skipped": aggregate_skipped,
             "raced_filled": aggregate_raced_filled,
             "refresh_failures": aggregate_refresh_failures,
+            # PR #240 round-5 review P2: scoped-admin runners outside
+            # entitlement that were skipped.
+            "out_of_scope": aggregate_out_of_scope,
             "overall_status": overall_status,
             "per_account": [
                 {
@@ -2364,6 +2428,7 @@ async def kill_switch_cancel_all(
         "skipped": aggregate_skipped,
         "raced_filled": aggregate_raced_filled,
         "refresh_failures": aggregate_refresh_failures,
+        "out_of_scope": aggregate_out_of_scope,
         "per_account": per_account_results,
     }
 
@@ -2427,6 +2492,16 @@ def step_up_issue(
             action_class=action_class,
             resource_id=payload.resource_id or "",
         )
+    except ValueError as exc:
+        # PR #240 round-5 review P2: ``issue_step_up_token`` now
+        # rejects empty ``resource_id`` for ``kill_switch_clear`` /
+        # ``kill_switch_rearm``. Translate that to a 422 with the
+        # actionable error message so older clients / LIVE operators
+        # see a correctable bad request rather than an internal 500.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
     except RuntimeError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

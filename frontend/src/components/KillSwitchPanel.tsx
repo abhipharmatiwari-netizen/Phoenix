@@ -104,6 +104,15 @@ const KillSwitchPanel: React.FC = () => {
   // — those appear under ``divergence``).
   const legacyActive = Boolean(stateResp?.legacy_kill_switch?.active);
   const divergent = Boolean(stateResp?.divergence?.divergent);
+  // PR #240 round-5 review P2: when the state endpoint falls back
+  // to the legacy risk_manager source (durable manager unavailable),
+  // the active signal comes via top-level ``kill_switch_activated``
+  // — not ``legacy_kill_switch.active``. Surface that too so the
+  // panel does not render INACTIVE exactly when the durable path
+  // is broken.
+  const legacyFallbackActive =
+    stateResp?.source === 'risk_manager'
+    && Boolean(stateResp?.kill_switch_activated);
   // Round-4 review P2: divergence applies WHENEVER the durable
   // record is not actively blocking (INACTIVE / CLEARED / missing)
   // but the legacy stream-path is active — not just the no-record
@@ -113,7 +122,9 @@ const KillSwitchPanel: React.FC = () => {
   const durableActivelyBlocking =
     globalRecord != null
     && (globalRecord.state === 'TRIPPED' || globalRecord.state === 'CLEAR_PENDING');
-  const isDivergent = !durableActivelyBlocking && (legacyActive || divergent);
+  const isDivergent =
+    !durableActivelyBlocking
+    && (legacyActive || divergent || legacyFallbackActive);
   type PanelState = KillSwitchRecord['state'] | 'DIVERGENT';
   const globalState: PanelState = isDivergent
     ? 'DIVERGENT'

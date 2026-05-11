@@ -688,8 +688,14 @@ def test_cancel_all_rejects_out_of_scope_broker_account(monkeypatch):
 
 
 def test_cancel_all_filters_runners_to_scoped_accounts(monkeypatch):
-    """When ``broker_account_id`` is omitted, a scoped admin must
-    only see runners within their entitlement."""
+    """When ``broker_account_id`` is omitted, a scoped admin drains
+    only runners within their entitlement, AND the response reports
+    out-of-scope accounts as ``out_of_scope`` partial entries so the
+    operator does not assume every runner was drained.
+
+    PR #240 round-5 review P2: previously the scope filter was
+    silent; that hid undrained accounts behind a green ok.
+    """
     broker_a = _FakeBroker()
     broker_b = _FakeBroker()
     runners = {
@@ -710,8 +716,17 @@ def test_cancel_all_filters_runners_to_scoped_accounts(monkeypatch):
             _mk_request(),
             scoped_admin,
     ))
-    assert len(resp["per_account"]) == 1
-    assert resp["per_account"][0]["broker_account_id"] == "ALLOWED"
+    # Both runners are reported: ALLOWED drained, BLOCKED skipped.
+    assert len(resp["per_account"]) == 2
+    by_id = {r["broker_account_id"]: r for r in resp["per_account"]}
+    assert by_id["ALLOWED"]["status"] == "ok"
+    assert by_id["ALLOWED"]["cancelled"] == 1
+    assert by_id["BLOCKED"]["status"] == "out_of_scope"
+    assert by_id["BLOCKED"]["attempted"] == 0
+    # Aggregate verdict reflects the out-of-scope accounts.
+    assert resp["out_of_scope"] == 1
+    assert resp["status"] == "partial"
+    # Broker calls confirm only ALLOWED was touched.
     assert len(broker_a.calls) == 1
     assert len(broker_b.calls) == 0
 
@@ -1281,9 +1296,15 @@ def test_cancel_all_audit_includes_per_account_errors(monkeypatch):
 
 
 def test_kill_switch_rollback_suppressed_on_concurrent_mutation(monkeypatch):
-    """Round-4 P2: if the in-memory record's id has changed since the
-    snapshot was taken (a concurrent successful mutation), the
-    rollback must be suppressed so the newer state is preserved."""
+    """Round-4/round-5 P2: if any of (id, state, block_exits,
+    updated_at) has changed since the snapshot was taken, the
+    rollback must be suppressed so the newer state is preserved.
+
+    Round-5 strengthened the fingerprint from id-only to the full
+    tuple because ``KillSwitchManager`` mutates records IN PLACE
+    (request_clear/confirm_clear/rearm don't change id), so an
+    id-only guard could not detect concurrent state transitions.
+    """
     from app.dashboard.admin_routes import _kill_switch_rollback_factory
     from app.risk.kill_switch import KillSwitchScope
     fake_ksm = SimpleNamespace(
@@ -1291,24 +1312,112 @@ def test_kill_switch_rollback_suppressed_on_concurrent_mutation(monkeypatch):
         _lock=__import__("threading").RLock(),
         _records={},
     )
-    # Seed an initial record.
     key = ("KillSwitchScope.GLOBAL", "GLOBAL")
-    prior = SimpleNamespace(id="rec-original", state="INACTIVE")
+    prior = SimpleNamespace(
+        id="rec-original", state=SimpleNamespace(value="INACTIVE"),
+        block_exits=False, updated_at="2026-05-11T00:00:00Z",
+    )
     fake_ksm._records[key] = prior
     rollback = _kill_switch_rollback_factory(
         fake_ksm, KillSwitchScope.GLOBAL, "GLOBAL",
     )
-    # Simulate caller's mutation: replace record with rec-A then
-    # register that as expected.
-    post_record = SimpleNamespace(id="rec-A", state="TRIPPED")
+    post_record = SimpleNamespace(
+        id="rec-A", state=SimpleNamespace(value="TRIPPED"),
+        block_exits=False, updated_at="2026-05-11T00:00:01Z",
+    )
     fake_ksm._records[key] = post_record
     rollback.set_expected_post_record(post_record)
-    # Now a concurrent successful request mutates further.
-    newer_record = SimpleNamespace(id="rec-B", state="CLEAR_PENDING")
-    fake_ksm._records[key] = newer_record
-    # Rollback should NOT restore prior — would clobber newer state.
-    rollback()
-    assert fake_ksm._records[key].id == "rec-B", (
-        "rollback must suppress when a concurrent mutation has "
-        "advanced the record id"
+    # Concurrent IN-PLACE mutation: same id but different state.
+    # An id-only guard would miss this; the full fingerprint catches it.
+    in_place_mutated = SimpleNamespace(
+        id="rec-A", state=SimpleNamespace(value="CLEAR_PENDING"),
+        block_exits=False, updated_at="2026-05-11T00:00:02Z",
     )
+    fake_ksm._records[key] = in_place_mutated
+    rollback()
+    assert fake_ksm._records[key].state.value == "CLEAR_PENDING", (
+        "rollback must suppress on in-place state mutation"
+    )
+
+
+def test_step_up_issue_route_translates_value_error_to_422(monkeypatch):
+    """Round-5 P2: a kill-switch step-up issuance without
+    ``resource_id`` raises ValueError inside ``issue_step_up_token``;
+    the route must translate it to HTTP 422 rather than letting it
+    escape as a 500."""
+    from app.dashboard.admin_routes import StepUpIssueRequest, step_up_issue
+    with pytest.raises(HTTPException) as exc:
+        step_up_issue(
+            StepUpIssueRequest(action_class="kill_switch_clear", resource_id=""),
+            _mk_admin(),
+        )
+    assert exc.value.status_code == 422
+    assert "resource_id" in str(exc.value.detail).lower()
+
+
+def test_cancel_all_accepts_tenant_scoped_trip(monkeypatch):
+    """Round-5 P2: a TENANT-level trip that covers the target
+    broker account satisfies the precheck — no need to escalate to
+    GLOBAL or duplicate the trip at ACCOUNT level."""
+    broker = _FakeBroker()
+    runner = _mk_runner("A1", [_order("o1")], broker)
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
+    monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    monkeypatch.setattr(
+        "app.dashboard.admin_routes.check_rate_limit",
+        lambda _request: None,
+    )
+    # Broker account A1 belongs to tenant TENANT_X.
+    monkeypatch.setattr(
+        "app.tenants.firestore_client.get_broker_account",
+        lambda _acct: SimpleNamespace(tenant_id="TENANT_X"),
+    )
+    from app.risk.kill_switch import KillSwitchScope, KillSwitchState
+    tenant_record = SimpleNamespace(
+        scope=KillSwitchScope.TENANT,
+        scope_id="TENANT_X",
+        state=KillSwitchState.TRIPPED,
+        block_exits=False,
+    )
+
+    def _get_record(scope, scope_id):
+        if scope == KillSwitchScope.TENANT and scope_id == "TENANT_X":
+            return tenant_record
+        return None
+
+    fake_ksm = SimpleNamespace(get_record=_get_record)
+    monkeypatch.setattr(admin_routes, "_get_kill_switch_manager", lambda: fake_ksm)
+    resp = _run(kill_switch_cancel_all(
+        KillSwitchCancelAllRequest(reason="tenant", broker_account_id="A1"),
+        _mk_request(),
+        _mk_admin(),
+    ))
+    assert resp["status"] == "ok"
+    assert resp["attempted"] == 1
+
+
+def test_cancel_all_response_includes_out_of_scope_field(monkeypatch):
+    """Round-5 P2: response includes top-level ``out_of_scope`` count
+    so dashboards can render the partial-due-to-scope-filter banner."""
+    broker_a = _FakeBroker()
+    broker_b = _FakeBroker()
+    runners = {
+        "ALLOWED": _mk_runner("ALLOWED", [_order("a1")], broker_a),
+        "BLOCKED": _mk_runner("BLOCKED", [_order("b1")], broker_b),
+    }
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime(runners))
+    monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    _patch_cancel_all_preconditions(monkeypatch)
+    scoped_admin = AdminContext(
+        caller="scoped@phoenix.com",
+        role=AdminRole.ADMIN,
+        broker_account_ids=("ALLOWED",),
+        all_tenants=False,
+    )
+    resp = _run(kill_switch_cancel_all(
+        KillSwitchCancelAllRequest(reason="x"),
+        _mk_request(),
+        scoped_admin,
+    ))
+    assert resp["out_of_scope"] == 1
+    assert resp["status"] == "partial"
