@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -20,7 +21,7 @@ import psycopg
 
 from app.strategies.adaptive.market_context import MarketContextBuilder
 from app.strategies.adaptive.regime import CLASSIFIER_VERSION, RegimeClassifier
-from scripts.replay.schema import normalize_table_name
+from scripts.replay.schema import normalize_table_name, regime_sidecar_table_name
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -49,6 +50,7 @@ def main() -> None:
         raise SystemExit(1)
 
     table, _ = normalize_table_name(args.table)
+    regime_table, _ = regime_sidecar_table_name(args.table)
     where = []
     params: list[Any] = []
     if args.label:
@@ -80,6 +82,30 @@ def main() -> None:
 
     with psycopg.connect(args.dsn, autocommit=True) as conn:
         with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {regime_table} (
+                    bar_id BIGINT NOT NULL REFERENCES {table}(id) ON DELETE CASCADE,
+                    regime TEXT NOT NULL,
+                    classifier_version TEXT NOT NULL,
+                    signals JSONB,
+                    classified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (bar_id, classifier_version)
+                )
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS {_regime_index_name(regime_table, "classifier_ts")}
+                ON {regime_table} (classifier_version, classified_at DESC)
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS {_regime_index_name(regime_table, "regime_classifier_idx")}
+                ON {regime_table} (regime, classifier_version)
+                """
+            )
             cur.execute(query, params)
             while True:
                 rows = cur.fetchmany(batch_size)
@@ -133,8 +159,8 @@ def main() -> None:
                     )
                 with conn.cursor() as writer:
                     writer.executemany(
-                        """
-                        INSERT INTO bar_regime (
+                        f"""
+                        INSERT INTO {regime_table} (
                             regime, classifier_version, signals, bar_id
                         )
                         VALUES (%s, %s, %s::jsonb, %s)
@@ -148,7 +174,7 @@ def main() -> None:
                 total += len(pending)
                 pending.clear()
 
-    print(f"Backfilled {total} bar_regime rows for classifier_version={args.classifier_version}")
+    print(f"Backfilled {total} {regime_table} rows for classifier_version={args.classifier_version}")
 
 
 def _ensure_tz(value: Any) -> datetime:
@@ -157,6 +183,16 @@ def _ensure_tz(value: Any) -> datetime:
             return value.replace(tzinfo=IST)
         return value
     return datetime.fromisoformat(str(value)).replace(tzinfo=IST)
+
+
+def _regime_index_name(table: str, suffix: str) -> str:
+    table_name = str(table or "bar_regime").split(".")[-1]
+    candidate = f"{table_name}_{suffix}"
+    if len(candidate) <= 63:
+        return candidate
+    digest = hashlib.sha1(candidate.encode("ascii", "ignore")).hexdigest()[:8]
+    keep = 63 - len(digest) - 1
+    return f"{candidate[:keep]}_{digest}"
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional, Sequence, Tuple
 
@@ -9,6 +10,8 @@ import psycopg
 from psycopg import sql
 
 DEFAULT_TABLE = "indicator_bars"
+DEFAULT_REGIME_SIDECAR_TABLE = "bar_regime"
+_POSTGRES_IDENTIFIER_MAX_LEN = 63
 
 _IDENTIFIER_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 
@@ -70,6 +73,22 @@ def normalize_table_name(raw: str, default: str = DEFAULT_TABLE) -> Tuple[str, T
     return ".".join(parts), tuple(parts)
 
 
+def regime_sidecar_table_name(
+    raw: str,
+    default: str = DEFAULT_TABLE,
+) -> Tuple[str, Tuple[str, ...]]:
+    """Return the source-scoped bar_regime table for an indicator source table."""
+
+    _, parts = normalize_table_name(raw, default)
+    source_table = parts[-1] if parts else DEFAULT_TABLE
+    if source_table == DEFAULT_TABLE:
+        sidecar_table = DEFAULT_REGIME_SIDECAR_TABLE
+    else:
+        sidecar_table = _derived_identifier(source_table, "bar_regime")
+    sidecar_parts = tuple([*parts[:-1], sidecar_table])
+    return ".".join(sidecar_parts), sidecar_parts
+
+
 def inspect_table_schema(
     dsn: str,
     table: str,
@@ -129,10 +148,21 @@ def _sanitize_identifier(raw: object) -> str:
     return text
 
 
+def _derived_identifier(base: str, suffix: str) -> str:
+    candidate = f"{base}_{suffix}"
+    if len(candidate) <= _POSTGRES_IDENTIFIER_MAX_LEN:
+        return candidate
+    digest = hashlib.sha1(candidate.encode("ascii", "ignore")).hexdigest()[:8]
+    keep = _POSTGRES_IDENTIFIER_MAX_LEN - len(digest) - 1
+    return f"{candidate[:keep]}_{digest}"
+
+
 __all__ = [
     "DEFAULT_TABLE",
+    "DEFAULT_REGIME_SIDECAR_TABLE",
     "ReplayTableSchema",
     "build_select_list",
     "inspect_table_schema",
     "normalize_table_name",
+    "regime_sidecar_table_name",
 ]

@@ -266,6 +266,10 @@ class PnLTracker:
 
     @staticmethod
     def _position_key(fill: ReplayFill) -> str:
+        strategy_id = str(fill.strategy_id)
+        underlying = str(fill.underlying)
+        if strategy_id == "ema20_strategy":
+            return f"{strategy_id}:{underlying}:__single_leg__"
         replay_ctx = {}
         if isinstance(fill.strategy_context, dict):
             replay_ctx = dict(fill.strategy_context.get("_replay") or {})
@@ -274,7 +278,7 @@ class PnLTracker:
             or str(getattr(fill, "symbol", "") or "").strip()
             or str(getattr(fill, "tag", "") or "").strip()
         )
-        return f"{fill.strategy_id}:{fill.underlying}:{label}"
+        return f"{strategy_id}:{underlying}:{label}"
 
     def compute_metrics(
         self,

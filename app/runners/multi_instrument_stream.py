@@ -2987,6 +2987,8 @@ def stream_multi_instruments(
     selector_context_builders: Dict[str, MarketContextBuilder] = {}
     selector_eval_timeframes: Dict[str, set[int]] = {}
     selector_regime_classifiers: Dict[str, RegimeClassifier] = {}
+    regime_context_builders: Dict[tuple[str, int], MarketContextBuilder] = {}
+    regime_classifiers: Dict[tuple[str, int], RegimeClassifier] = {}
 
     def _selector_strategy_timeframes(instance: Any) -> set[int]:
         out: set[int] = set()
@@ -3132,6 +3134,58 @@ def stream_multi_instruments(
             ),
         )
 
+    def _regime_signals(context: Any) -> dict:
+        return {
+            "atr14": context.atr14,
+            "atr_norm": context.atr_norm,
+            "adx14": context.adx14,
+            "di_spread": context.di_spread,
+            "plus_di": context.plus_di,
+            "minus_di": context.minus_di,
+            "ema_slope": context.ema_slope,
+            "ema_value": context.ema_value,
+            "last_price": context.last_price,
+            "gap_ratio": context.gap_ratio,
+            "chop_index": context.chop_index,
+        }
+
+    def _persist_regime_for_bar(
+        *,
+        label: str,
+        timeframe_seconds: int,
+        candle: Any,
+        indicators: dict,
+    ) -> Optional[Regime]:
+        if not hasattr(persister, "persist_regime"):
+            return None
+        key = (str(label or "").strip().upper(), int(timeframe_seconds))
+        if not key[0]:
+            return None
+        builder = regime_context_builders.setdefault(key, MarketContextBuilder())
+        classifier = regime_classifiers.setdefault(key, RegimeClassifier())
+        context = builder.build(
+            candle=candle,
+            indicators=indicators if isinstance(indicators, dict) else {},
+        )
+        regime = classifier.update(context)
+        try:
+            persister.persist_regime(
+                label,
+                timeframe_seconds,
+                candle,
+                regime=regime.value,
+                classifier_version=CLASSIFIER_VERSION,
+                signals=_regime_signals(context),
+            )
+        except Exception:
+            logger.debug(
+                "Bar regime persistence failed for %s tf=%s",
+                key[0],
+                timeframe_seconds,
+                exc_info=True,
+            )
+        return regime
+
     def _update_strategy_selection_for_bar(
         *,
         underlying_label: str,
@@ -3140,7 +3194,6 @@ def stream_multi_instruments(
         indicators: dict,
         publish_state: bool = True,
         emit_log: bool = True,
-        persist_regime: bool = True,
     ) -> None:
         if strategy_selector is None:
             return
@@ -3157,35 +3210,6 @@ def stream_multi_instruments(
             return
         classifier = selector_regime_classifiers.setdefault(key, RegimeClassifier())
         regime = classifier.update(context)
-        if persist_regime and hasattr(persister, "persist_regime"):
-            try:
-                persister.persist_regime(
-                    underlying_label,
-                    timeframe_seconds,
-                    candle,
-                    regime=regime.value,
-                    classifier_version=CLASSIFIER_VERSION,
-                    signals={
-                        "atr14": context.atr14,
-                        "atr_norm": context.atr_norm,
-                        "adx14": context.adx14,
-                        "di_spread": context.di_spread,
-                        "plus_di": context.plus_di,
-                        "minus_di": context.minus_di,
-                        "ema_slope": context.ema_slope,
-                        "ema_value": context.ema_value,
-                        "last_price": context.last_price,
-                        "gap_ratio": context.gap_ratio,
-                        "chop_index": context.chop_index,
-                    },
-                )
-            except Exception:
-                logger.debug(
-                    "Strategy selector regime persistence failed for %s tf=%s",
-                    key,
-                    timeframe_seconds,
-                    exc_info=True,
-                )
         decision = strategy_selector.select(
             underlying=key,
             regime=regime,
@@ -3273,7 +3297,6 @@ def stream_multi_instruments(
                     indicators=indicators,
                     publish_state=False,
                     emit_log=False,
-                    persist_regime=False,
                 ),
             )
             if replayed:
@@ -3620,6 +3643,12 @@ def stream_multi_instruments(
         )
         dashboard_bus.record_bar(label, timeframe_seconds, candle, indicators)
         persister.persist_bar(label, timeframe_seconds, candle, indicators)
+        _persist_regime_for_bar(
+            label=label,
+            timeframe_seconds=timeframe_seconds,
+            candle=candle,
+            indicators=indicators,
+        )
 
         # Only drive strategies from underlying instruments
         meta = instrument_state["instrument_meta"].get(label)

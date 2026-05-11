@@ -42,7 +42,12 @@ from scripts.replay.mock_execution import (
     build_mock_instrument_meta,
 )
 from scripts.replay.order_sink import ReplayOrderSink
-from scripts.replay.schema import build_select_list, inspect_table_schema, normalize_table_name
+from scripts.replay.schema import (
+    build_select_list,
+    inspect_table_schema,
+    normalize_table_name,
+    regime_sidecar_table_name,
+)
 
 logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -215,28 +220,34 @@ def load_bars_from_postgres(
         conditions.append("ts_start < %s")
         params.append(_session_start_ist(end_date + timedelta(days=1)))
 
-    select_list = build_select_list(schema, _REQUIRED_COLUMNS + _OPTIONAL_COLUMNS)
-    regime_select = "NULL::TEXT AS replay_regime"
-    if "id" in schema.available_set:
-        regime_select = (
-            "(SELECT br.regime FROM bar_regime br "
-            f"WHERE br.bar_id = {normalized_table}.id "
-            "AND br.classifier_version = %s LIMIT 1) AS replay_regime"
-        )
-        params.insert(0, CLASSIFIER_VERSION)
-    query = f"""
-        SELECT {select_list}, {regime_select}
-        FROM {normalized_table}
-        WHERE {" AND ".join(conditions)}
-        ORDER BY ts_start ASC
-    """
-
     rows: List[BarRow] = []
     null_counts = {column: 0 for column in _OPTIONAL_COLUMNS}
     fetch_size = max(1, int(chunk_size or 0))
+    regime_sidecar_table, _ = regime_sidecar_table_name(table)
+    regime_sidecar_available = False
     with psycopg.connect(dsn, autocommit=True) as conn:
+        regime_sidecar_available = (
+            "id" in schema.available_set
+            and _regime_sidecar_available(conn, regime_sidecar_table)
+        )
+        select_list = build_select_list(schema, _REQUIRED_COLUMNS + _OPTIONAL_COLUMNS)
+        regime_select = "NULL::TEXT AS replay_regime"
+        query_params = list(params)
+        if regime_sidecar_available:
+            regime_select = (
+                f"(SELECT br.regime FROM {regime_sidecar_table} br "
+                f"WHERE br.bar_id = {normalized_table}.id "
+                "AND br.classifier_version = %s LIMIT 1) AS replay_regime"
+            )
+            query_params.insert(0, CLASSIFIER_VERSION)
+        query = f"""
+            SELECT {select_list}, {regime_select}
+            FROM {normalized_table}
+            WHERE {" AND ".join(conditions)}
+            ORDER BY ts_start ASC
+        """
         with conn.cursor() as cur:
-            cur.execute(query, params)
+            cur.execute(query, query_params)
             while True:
                 batch = cur.fetchmany(fetch_size)
                 if not batch:
@@ -259,6 +270,8 @@ def load_bars_from_postgres(
         "bars_loaded": len(rows),
         "timezone": "Asia/Kolkata",
         "source_table": normalized_table,
+        "regime_sidecar_table": regime_sidecar_table,
+        "regime_sidecar_available": bool(regime_sidecar_available),
         "available_columns": list(schema.available_columns),
         "missing_optional_columns": list(schema.missing_optional_columns),
         "null_indicator_counts": {k: int(v) for k, v in sorted(null_counts.items()) if int(v) > 0},
@@ -275,6 +288,26 @@ def load_bars_from_postgres(
         profile["missing_optional_columns"],
     )
     return ReplayBarBatch(rows, replay_profile=profile)
+
+
+def _regime_sidecar_available(conn: Any, sidecar_table: str) -> bool:
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass(%s)", (sidecar_table,))
+            row = cur.fetchone()
+            if not row or row[0] is None:
+                return False
+            cur.execute(f"SELECT bar_id, regime, classifier_version FROM {sidecar_table} WHERE FALSE")
+            description = getattr(cur, "description", None) or ()
+            columns = {str(col.name) for col in description if getattr(col, "name", None)}
+            return {"bar_id", "regime", "classifier_version"}.issubset(columns)
+    except Exception:
+        logger.debug(
+            "Replay regime sidecar unavailable table=%s",
+            sidecar_table,
+            exc_info=True,
+        )
+        return False
 
 
 def bar_to_candle(bar: BarRow) -> SimpleNamespace:
@@ -767,6 +800,8 @@ class ReplayEngine:
                     for bar in bars
                     if _normalize_regime_name(bar.regime) == wanted
                 ]
+                for idx, bar in enumerate(bars):
+                    bar.series_index = idx
             profile = dict(getattr(batch, "replay_profile", {}) or {})
             db_bar_count_by_timeframe[int(tf)] = len(bars)
             merged_profile["bars_loaded_by_timeframe"][str(int(tf))] = len(bars)
@@ -1167,8 +1202,6 @@ def _attach_synthetic_regimes(rows: Sequence[BarRow]) -> Dict[str, int]:
     classifiers: Dict[int, RegimeClassifier] = {}
     filled = 0
     for row in rows:
-        if row.regime:
-            continue
         tf = int(row.timeframe_seconds)
         builder = builders.setdefault(tf, MarketContextBuilder())
         classifier = classifiers.setdefault(tf, RegimeClassifier())
@@ -1176,7 +1209,10 @@ def _attach_synthetic_regimes(rows: Sequence[BarRow]) -> Dict[str, int]:
             candle=bar_to_candle(row),
             indicators=bar_to_indicators(row),
         )
-        row.regime = classifier.update(context).value
+        regime = classifier.update(context)
+        if row.regime:
+            continue
+        row.regime = regime.value
         filled += 1
     return {"regime": filled} if filled else {}
 

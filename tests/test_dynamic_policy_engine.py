@@ -101,6 +101,29 @@ def test_directional_trending_profile_overrides_legacy_profile_when_present():
     assert effective["tp_pct"] == 0.50
 
 
+def test_empty_directional_profile_opts_out_of_legacy_fallback():
+    base = {"disable_entries": False}
+    cfg = parse_dynamic_policy_config(
+        {
+            "enabled": True,
+            "policy_id": "ema20_ng_v1",
+            "profiles": {
+                "TRENDING": {"disable_entries": True},
+                "TRENDING_UP": {},
+            },
+        }
+    )
+    engine = DynamicPolicyEngine(config=cfg)
+
+    effective = engine.apply(
+        base_params=base,
+        regime=Regime.TRENDING_UP,
+        context=_ctx(),
+    )
+
+    assert effective["disable_entries"] is False
+
+
 def test_no_trade_profile_disables_entries():
     base = {"disable_entries": False}
     cfg = parse_dynamic_policy_config(

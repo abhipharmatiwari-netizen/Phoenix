@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from app.brokers.base import (
     OrderPurpose,
@@ -13,7 +14,7 @@ from app.brokers.base import (
 from app.core.identifiers import StrategyId
 from app.orders.strategy_bridge import place_order_via_bridge
 from scripts.replay.execution_models import ExecutionConfig
-from scripts.replay.mock_execution import MockExecutionRecorder
+from scripts.replay.mock_execution import MockExecutionRecorder, ReplayFill
 from scripts.replay.optimizer import walk_forward_validate
 from scripts.replay.pnl_tracker import PnLTracker
 from scripts.replay.replay_engine import BarRow, ReplayConfig, ReplayEngine, bar_to_indicators
@@ -299,6 +300,248 @@ def test_load_bars_from_postgres_tolerates_missing_optional_columns(monkeypatch)
     assert batch.replay_profile["bars_loaded"] == 1
 
 
+def test_load_bars_from_postgres_ignores_missing_regime_sidecar(monkeypatch):
+    ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
+    row = (
+        ts,
+        ts + timedelta(minutes=5),
+        "NIFTY_IDX",
+        300,
+        100.0,
+        101.0,
+        99.0,
+        100.5,
+        1.0,
+        45.0,
+        None,
+        None,
+        None,
+        100.0,
+        None,
+        None,
+        None,
+        20.0,
+        10.0,
+        8.0,
+        2.0,
+        None,
+    )
+    executed = []
+
+    class _Cursor:
+        description = ()
+
+        def execute(self, query, params=None):
+            text = str(query)
+            executed.append(text)
+            self.query = text
+            self.params = params
+            if "to_regclass" in text:
+                self._fetchone = (None,)
+
+        def fetchone(self):
+            return getattr(self, "_fetchone", None)
+
+        def fetchmany(self, size):
+            del size
+            if "FROM indicator_bars" not in getattr(self, "query", ""):
+                return []
+            if getattr(self, "_done", False):
+                return []
+            self._done = True
+            return [row]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        replay_runtime_mod,
+        "inspect_table_schema",
+        lambda *args, **kwargs: ReplayTableSchema(
+            normalized_table="indicator_bars",
+            available_columns=(
+                "id",
+                "ts_start",
+                "ts_end",
+                "label",
+                "timeframe_seconds",
+                "o",
+                "h",
+                "l",
+                "c",
+                "atr",
+                "rsi",
+                "ema_20",
+                "adx",
+                "plus_di",
+                "minus_di",
+                "di_spread",
+            ),
+            required_columns=("ts_start", "ts_end", "label", "timeframe_seconds", "o", "h", "l", "c"),
+            optional_columns=replay_runtime_mod._OPTIONAL_COLUMNS,
+        ),
+    )
+    monkeypatch.setattr(replay_runtime_mod.psycopg, "connect", lambda *args, **kwargs: _Conn())
+
+    batch = replay_runtime_mod.load_bars_from_postgres("postgresql://ignored", "NIFTY_IDX", 300)
+
+    data_query = next(query for query in executed if "FROM indicator_bars" in query)
+    assert "bar_regime" not in data_query
+    assert "NULL::TEXT AS replay_regime" in data_query
+    assert len(batch) == 1
+    assert batch.replay_profile["regime_sidecar_available"] is False
+
+
+def test_regime_sidecar_table_is_scoped_to_source_table():
+    assert replay_runtime_mod.regime_sidecar_table_name("indicator_bars")[0] == "bar_regime"
+    assert (
+        replay_runtime_mod.regime_sidecar_table_name("custom_indicator_bars")[0]
+        == "custom_indicator_bars_bar_regime"
+    )
+    assert (
+        replay_runtime_mod.regime_sidecar_table_name("archive.indicator_bars")[0]
+        == "archive.bar_regime"
+    )
+
+
+def test_load_bars_from_postgres_uses_custom_regime_sidecar(monkeypatch):
+    ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
+    row = (
+        ts,
+        ts + timedelta(minutes=5),
+        "NIFTY_IDX",
+        300,
+        100.0,
+        101.0,
+        99.0,
+        100.5,
+        1.0,
+        45.0,
+        None,
+        None,
+        None,
+        100.0,
+        None,
+        None,
+        None,
+        20.0,
+        10.0,
+        8.0,
+        2.0,
+        "TRENDING_UP",
+    )
+    executed = []
+
+    class _Column:
+        def __init__(self, name):
+            self.name = name
+
+    class _Cursor:
+        description = ()
+
+        def execute(self, query, params=None):
+            text = str(query)
+            executed.append(text)
+            self.query = text
+            self.params = params
+            if "to_regclass" in text:
+                self._fetchone = ("custom_indicator_bars_bar_regime",)
+            elif "WHERE FALSE" in text:
+                self.description = [
+                    _Column("bar_id"),
+                    _Column("regime"),
+                    _Column("classifier_version"),
+                ]
+
+        def fetchone(self):
+            return getattr(self, "_fetchone", None)
+
+        def fetchmany(self, size):
+            del size
+            if "FROM custom_indicator_bars" not in getattr(self, "query", ""):
+                return []
+            if "WHERE FALSE" in getattr(self, "query", ""):
+                return []
+            if getattr(self, "_done", False):
+                return []
+            self._done = True
+            return [row]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        replay_runtime_mod,
+        "inspect_table_schema",
+        lambda *args, **kwargs: ReplayTableSchema(
+            normalized_table="custom_indicator_bars",
+            available_columns=(
+                "id",
+                "ts_start",
+                "ts_end",
+                "label",
+                "timeframe_seconds",
+                "o",
+                "h",
+                "l",
+                "c",
+                "atr",
+                "rsi",
+                "ema_20",
+                "adx",
+                "plus_di",
+                "minus_di",
+                "di_spread",
+            ),
+            required_columns=("ts_start", "ts_end", "label", "timeframe_seconds", "o", "h", "l", "c"),
+            optional_columns=replay_runtime_mod._OPTIONAL_COLUMNS,
+        ),
+    )
+    monkeypatch.setattr(replay_runtime_mod.psycopg, "connect", lambda *args, **kwargs: _Conn())
+
+    batch = replay_runtime_mod.load_bars_from_postgres(
+        "postgresql://ignored",
+        "NIFTY_IDX",
+        300,
+        table="custom_indicator_bars",
+    )
+
+    data_query = next(
+        query
+        for query in executed
+        if "SELECT" in query and "FROM custom_indicator_bars" in query and "WHERE FALSE" not in query
+    )
+    assert "custom_indicator_bars_bar_regime" in data_query
+    assert batch[0].regime == "TRENDING_UP"
+    assert batch.replay_profile["regime_sidecar_available"] is True
+
+
 def test_next_bar_open_fill_uses_following_bar_open(monkeypatch):
     base_ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
     bars = [_bar(base_ts, close=100.0, open_=99.0), _bar(base_ts + timedelta(minutes=5), close=106.0, open_=105.0)]
@@ -320,6 +563,105 @@ def test_next_bar_open_fill_uses_following_bar_open(monkeypatch):
     assert len(recorder.fills) == 1
     assert recorder.fills[0].fill_price == 105.0
     assert recorder.fills[0].fill_note == "next_bar_open"
+
+
+def test_next_bar_open_fill_reindexes_after_regime_filter(monkeypatch):
+    base_ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
+    bars = [
+        _bar(base_ts, close=99.0, open_=98.0),
+        _bar(base_ts + timedelta(minutes=5), close=100.0, open_=100.0),
+        _bar(base_ts + timedelta(minutes=10), close=101.0, open_=101.0),
+        _bar(base_ts + timedelta(minutes=15), close=106.0, open_=105.0),
+    ]
+    for idx, bar in enumerate(bars):
+        bar.series_index = idx
+        bar.regime = "TRENDING_UP" if idx in {1, 3} else "NORMAL"
+
+    monkeypatch.setattr(replay_runtime_mod, "load_bars_from_postgres", lambda **kwargs: list(bars))
+    monkeypatch.setitem(replay_runtime_mod.STRATEGY_BUILDERS, "ema20_strategy", lambda *_args: _EntryOnFirstBar())
+
+    recorder = ReplayEngine(
+        ReplayConfig(
+            dsn="postgresql://ignored",
+            strategy_id="ema20_strategy",
+            underlying_key="NIFTY",
+            strategy_params={},
+            timeframes=[300],
+            filter_regime="TRENDING_UP",
+            execution=ExecutionConfig(fill_mode="next_bar_open_fill", tick_model="open_close"),
+        )
+    ).run()
+
+    assert len(recorder.fills) == 1
+    assert recorder.fills[0].fill_price == 105.0
+    assert recorder.fills[0].fill_note == "next_bar_open"
+
+
+def test_pnl_tracker_pairs_ema20_exit_without_position_label():
+    ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
+    fills = [
+        ReplayFill(
+            timestamp=ts,
+            strategy_id="ema20_strategy",
+            underlying="NIFTY",
+            side="BUY",
+            purpose="ENTRY",
+            tag="EMA20_ENTRY",
+            quantity=1,
+            fill_price=100.0,
+            strategy_context={"_replay": {"position_label": "NIFTY_ATM_CE"}},
+            symbol="NIFTY26MAR24000CE",
+        ),
+        ReplayFill(
+            timestamp=ts + timedelta(minutes=5),
+            strategy_id="ema20_strategy",
+            underlying="NIFTY",
+            side="SELL",
+            purpose="EXIT",
+            tag="EMA20_EXIT_TARGET",
+            quantity=1,
+            fill_price=110.0,
+            strategy_context={"_replay": {}},
+            symbol="NIFTY26MAR24000CE",
+        ),
+    ]
+
+    trades = PnLTracker(fee_model=False).process_fills(fills)
+
+    assert len(trades) == 1
+    assert trades[0].gross_pnl == 10.0
+    assert trades[0].exit_reason == "TARGET"
+
+
+def test_synthetic_regimes_feed_persisted_rows_into_classifier_state(monkeypatch):
+    base_ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
+    rows = [
+        _bar(base_ts, close=100.0),
+        _bar(base_ts + timedelta(minutes=5), close=101.0),
+    ]
+    rows[0].regime = "TRENDING_UP"
+    rows[1].regime = None
+    built = []
+
+    class _Builder:
+        def build(self, *, candle, indicators):
+            built.append((candle.start_ts, dict(indicators)))
+            return SimpleNamespace()
+
+    class _Classifier:
+        def update(self, context):
+            del context
+            return SimpleNamespace(value=f"SYNTH_{len(built)}")
+
+    monkeypatch.setattr(replay_runtime_mod, "MarketContextBuilder", _Builder)
+    monkeypatch.setattr(replay_runtime_mod, "RegimeClassifier", _Classifier)
+
+    counts = replay_runtime_mod._attach_synthetic_regimes(rows)
+
+    assert len(built) == 2
+    assert rows[0].regime == "TRENDING_UP"
+    assert rows[1].regime == "SYNTH_2"
+    assert counts == {"regime": 1}
 
 
 def test_gate_summary_groups_by_regime():
