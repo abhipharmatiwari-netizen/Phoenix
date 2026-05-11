@@ -1399,8 +1399,15 @@ def kill_switch_trip(
     payload: KillSwitchTripRequest,
     ctx: AdminContext = Depends(get_admin_context),
 ) -> dict:
-    """Trip a kill switch for a given scope. Requires OPERATOR role."""
-    ctx.require_role(AdminRole.OPERATOR)
+    """Trip a kill switch for a given scope.
+
+    PR #240 round-2 review P2 (issue #238 acceptance): kill-switch
+    toggle endpoints are ADMIN-only. The dashboard UI gates the
+    controls behind ``<Gate requiredRoles={[ADMIN]}>``; the backend
+    MUST match so an operator bearer session cannot bypass the React
+    gate via direct API/BFF calls.
+    """
+    ctx.require_role(AdminRole.ADMIN)
     from app.risk.kill_switch import KillSwitchScope
     try:
         scope = KillSwitchScope(payload.scope.upper())
@@ -1486,8 +1493,12 @@ def kill_switch_request_clear(
     payload: KillSwitchClearRequestPayload,
     ctx: AdminContext = Depends(get_admin_context),
 ) -> dict:
-    """Request a kill switch clear (TRIPPED → CLEAR_PENDING). Requires OPERATOR role."""
-    ctx.require_role(AdminRole.OPERATOR)
+    """Request a kill switch clear (TRIPPED → CLEAR_PENDING).
+
+    PR #240 round-2 review P2: ADMIN-only per #238 acceptance — matches
+    the dashboard UI gate so operator sessions cannot bypass.
+    """
+    ctx.require_role(AdminRole.ADMIN)
     from app.risk.kill_switch import KillSwitchScope, KillSwitchClearRequest, KillSwitchClearValidation
     try:
         scope = KillSwitchScope(payload.scope.upper())
@@ -1551,8 +1562,50 @@ def kill_switch_confirm_clear(
     payload: KillSwitchRearmRequest,
     ctx: AdminContext = Depends(get_admin_context),
 ) -> dict:
-    """Confirm a kill switch clear (CLEAR_PENDING → CLEARED). Requires OPERATOR role."""
-    ctx.require_role(AdminRole.OPERATOR)
+    """Confirm a kill switch clear (CLEAR_PENDING → CLEARED).
+
+    PR #240 round-2 review P1: this is the transition that restores
+    LIVE entry eligibility — ``is_tripped()`` no longer blocks orders
+    once the record is CLEARED, even before the separate Rearm step.
+    Therefore it requires the same step-up token ceremony in LIVE as
+    rearm does (Architecture §15.4) — using the
+    ``KILL_SWITCH_CLEAR`` action class so the token cannot be reused
+    across action classes. Without this gate, a single authenticated
+    admin session could clear the kill switch end-to-end without any
+    secondary credential.
+
+    PR #240 round-2 review P2: also ADMIN-only per #238 acceptance.
+    """
+    ctx.require_role(AdminRole.ADMIN)
+
+    # §15.4 step-up gate (LIVE only).
+    import os as _os
+    if str(_os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper() == "LIVE":
+        if not payload.step_up_token:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "step_up_token is required to confirm-clear a kill "
+                    "switch in LIVE mode. Issue one first: "
+                    "POST /admin/step-up/issue {\"action_class\": "
+                    "\"kill_switch_clear\", \"resource_id\": \"<scope_id>\"}."
+                ),
+            )
+        from app.security.step_up import DangerousActionClass, consume_step_up_token
+        if not consume_step_up_token(
+            token_id=payload.step_up_token,
+            actor=ctx.caller,
+            action_class=DangerousActionClass.KILL_SWITCH_CLEAR,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "step_up_token is invalid, expired, already used, or was not "
+                    "issued to the current actor for kill_switch_clear. Issue a "
+                    "new token via POST /admin/step-up/issue and retry."
+                ),
+            )
+
     from app.risk.kill_switch import KillSwitchScope
     try:
         scope = KillSwitchScope(payload.scope.upper())
@@ -1580,13 +1633,16 @@ def kill_switch_rearm(
     payload: KillSwitchRearmRequest,
     ctx: AdminContext = Depends(get_admin_context),
 ) -> dict:
-    """Rearm a kill switch (CLEARED → INACTIVE). Requires OPERATOR role.
+    """Rearm a kill switch (CLEARED → INACTIVE).
 
     In LIVE mode, a valid step_up_token with action_class=kill_switch_rearm
     is mandatory (Architecture §15.4). Obtain one first via
     POST /admin/step-up/issue with action_class=kill_switch_rearm.
+
+    PR #240 round-2 review P2: ADMIN-only per #238 acceptance — matches
+    the dashboard UI gate so operator sessions cannot bypass.
     """
-    ctx.require_role(AdminRole.OPERATOR)
+    ctx.require_role(AdminRole.ADMIN)
 
     # §15.4: Require step-up token in LIVE mode before restoring entry eligibility.
     import os as _os
@@ -1748,6 +1804,7 @@ async def kill_switch_cancel_all(
     aggregate_failed = 0
     aggregate_skipped = 0
     aggregate_raced_filled = 0
+    aggregate_refresh_failures = 0
 
     # Statuses for which there is nothing left to cancel — counted as
     # ``skipped`` rather than attempting a no-op cancel.
@@ -1789,16 +1846,23 @@ async def kill_switch_cancel_all(
         broker_client = getattr(runner, "_broker_client", None)
         cancel_fn = getattr(broker_client, "cancel_order", None)
         if not callable(cancel_fn):
+            # PR #240 round-2 review P2: an account without a callable
+            # cancel API has NOT been drained. For a bulk emergency
+            # cancel-all this is a meaningful failure — count it as
+            # ``failed=1`` so the aggregate status is partial and the
+            # operator sees that one account could still have open
+            # broker orders.
             per_account_results.append({
                 "broker_account_id": str(acct_id),
                 "status": "broker_no_cancel_api",
                 "attempted": 0,
                 "cancelled": 0,
-                "failed": 0,
+                "failed": 1,
                 "skipped": 0,
                 "raced_filled": 0,
-                "errors": [],
+                "errors": [{"broker_no_cancel_api": True}],
             })
+            aggregate_failed += 1
             continue
 
         # PR #240 round-1 review P1: refresh broker orders before
@@ -1888,16 +1952,52 @@ async def kill_switch_cancel_all(
                     ),
                 })
             elif resp_status in _IDEMPOTENT_REJECTION_STATUSES:
-                # Cancel of already-cancelled / unknown order; broker
-                # frequently returns REJECTED for these. Idempotent
-                # success — operator double-click should not raise.
+                # PR #240 round-2 review P1: a REJECTED status alone is
+                # not enough to call this idempotent. Angel returns
+                # ``REJECTED`` with message ``cancel_failed`` for
+                # genuine broker-level cancel rejections too, which
+                # MUST count as failed. Only treat the response as
+                # idempotent when the message explicitly indicates the
+                # order is already gone / already cancelled / in a
+                # terminal state.
                 resp_message = str(getattr(resp, "message", "") or "")
-                skipped += 1
-                if resp_message:
+                _msg_lower = resp_message.lower()
+                _idempotent_markers = (
+                    "not found",
+                    "not_found",
+                    "does not exist",
+                    "already cancelled",
+                    "already canceled",
+                    "already_cancelled",
+                    "already_canceled",
+                    "already filled",
+                    "already_filled",
+                    "already executed",
+                    "already_executed",
+                    "order completed",
+                    "order_completed",
+                    "terminal state",
+                    "terminal_state",
+                )
+                is_idempotent = any(m in _msg_lower for m in _idempotent_markers)
+                if is_idempotent:
+                    skipped += 1
+                    if resp_message:
+                        errors.append({
+                            "order_id": order_id,
+                            "broker_status": resp_status,
+                            "broker_message": resp_message,
+                        })
+                else:
+                    # Genuine broker-level cancel rejection (e.g.
+                    # Angel ``REJECTED:cancel_failed``). Must surface
+                    # as failed so the dashboard does not report a
+                    # green cancel-all when orders remain live.
+                    failed += 1
                     errors.append({
                         "order_id": order_id,
                         "broker_status": resp_status,
-                        "broker_message": resp_message,
+                        "broker_message": resp_message or "rejected_no_message",
                     })
             elif resp_status in _CANCEL_FAILURE_STATUSES:
                 # PR #240 round-1 review P1: real broker cancel failure.
@@ -1916,8 +2016,15 @@ async def kill_switch_cancel_all(
                     "order_id": order_id,
                     "broker_status": resp_status or "unknown",
                 })
+        # PR #240 round-2 review P2: a broker_orders refresh failure
+        # means we could NOT verify the current broker open-order
+        # set — fresh orders not in ``_last_orders`` may still be
+        # live. Surface as partial so the dashboard does not show a
+        # green ok cancel-all under that condition.
         per_account_status = (
-            "ok" if (failed == 0 and raced_filled == 0) else "partial"
+            "ok"
+            if (failed == 0 and raced_filled == 0 and refresh_error is None)
+            else "partial"
         )
         per_account_results.append({
             "broker_account_id": str(acct_id),
@@ -1927,6 +2034,7 @@ async def kill_switch_cancel_all(
             "failed": failed,
             "skipped": skipped,
             "raced_filled": raced_filled,
+            "broker_orders_refresh_failed": refresh_error is not None,
             "errors": errors[:20],  # cap for payload size
         })
         aggregate_attempted += attempted
@@ -1934,10 +2042,16 @@ async def kill_switch_cancel_all(
         aggregate_failed += failed
         aggregate_skipped += skipped
         aggregate_raced_filled += raced_filled
+        if refresh_error is not None:
+            aggregate_refresh_failures += 1
 
     overall_status = (
         "ok"
-        if (aggregate_failed == 0 and aggregate_raced_filled == 0)
+        if (
+            aggregate_failed == 0
+            and aggregate_raced_filled == 0
+            and aggregate_refresh_failures == 0
+        )
         else "partial"
     )
     emit_audit_event(
@@ -1953,6 +2067,7 @@ async def kill_switch_cancel_all(
             "failed": aggregate_failed,
             "skipped": aggregate_skipped,
             "raced_filled": aggregate_raced_filled,
+            "refresh_failures": aggregate_refresh_failures,
             "overall_status": overall_status,
             "per_account": [
                 {
@@ -1963,6 +2078,9 @@ async def kill_switch_cancel_all(
                     "failed": r["failed"],
                     "skipped": r["skipped"],
                     "raced_filled": r["raced_filled"],
+                    "broker_orders_refresh_failed": r.get(
+                        "broker_orders_refresh_failed", False
+                    ),
                 }
                 for r in per_account_results
             ],
@@ -1975,6 +2093,7 @@ async def kill_switch_cancel_all(
         "failed": aggregate_failed,
         "skipped": aggregate_skipped,
         "raced_filled": aggregate_raced_filled,
+        "refresh_failures": aggregate_refresh_failures,
         "per_account": per_account_results,
     }
 

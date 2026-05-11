@@ -28,7 +28,16 @@ interface ConfirmDialog {
   prompt: string;
   reasonLabel: string;
   hardOption?: boolean;
-  onConfirm: (reason: string, hard: boolean) => Promise<void>;
+  // PR #240 round-2 review P1: the dashboard must NOT auto-mint a
+  // step-up token from the already-authenticated admin session — that
+  // defeats the LIVE-mode protection that step-up is meant to add.
+  // Operators must supply an independently-obtained step-up token
+  // (e.g. via a separate CLI ceremony or future MFA channel). When
+  // ``requireStepUpToken`` is true the dialog renders a token-input
+  // field and refuses to confirm until it is filled.
+  requireStepUpToken?: boolean;
+  stepUpInstructions?: string;
+  onConfirm: (reason: string, hard: boolean, stepUpToken: string) => Promise<void>;
 }
 
 const KillSwitchPanel: React.FC = () => {
@@ -41,6 +50,7 @@ const KillSwitchPanel: React.FC = () => {
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialog | null>(null);
   const [reasonInput, setReasonInput] = useState('');
   const [hardInput, setHardInput] = useState(false);
+  const [stepUpTokenInput, setStepUpTokenInput] = useState('');
 
   const fetchState = useCallback(async () => {
     try {
@@ -86,6 +96,7 @@ const KillSwitchPanel: React.FC = () => {
     setConfirmDialog(null);
     setReasonInput('');
     setHardInput(false);
+    setStepUpTokenInput('');
   };
 
   const runDialog = async () => {
@@ -95,11 +106,19 @@ const KillSwitchPanel: React.FC = () => {
       setError('Reason is required');
       return;
     }
+    const trimmedToken = stepUpTokenInput.trim();
+    if (confirmDialog.requireStepUpToken && !trimmedToken) {
+      setError(
+        'Step-up token is required for this action in LIVE mode. '
+        + 'Obtain one via the operator runbook before retrying.',
+      );
+      return;
+    }
     setBusy(true);
     setError(null);
     setActionFeedback(null);
     try {
-      await confirmDialog.onConfirm(trimmed, hardInput);
+      await confirmDialog.onConfirm(trimmed, hardInput, trimmedToken);
       await fetchState();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Action failed');
@@ -108,6 +127,18 @@ const KillSwitchPanel: React.FC = () => {
       closeDialog();
     }
   };
+
+  // PR #240 round-2 review P1: instructions for obtaining a step-up
+  // token via a separate ceremony. Shown to the operator alongside
+  // the token-input field so the LIVE protection is not defeated by
+  // auto-minting from the existing admin session.
+  const stepUpInstructions = (actionClass: string) =>
+    `In LIVE mode this action requires a separately-issued step-up token.
+Obtain one via the operator runbook — typically:
+  curl -X POST $PHOENIX/admin/step-up/issue \\
+       -H "Authorization: Bearer $OPERATOR_TOKEN" \\
+       -d '{"action_class":"${actionClass}","resource_id":"GLOBAL"}'
+Paste the returned token_id below.`;
 
   // Trip — operator confirms and provides reason; SOFT vs HARD selectable.
   const onTrip = () => {
@@ -169,14 +200,23 @@ const KillSwitchPanel: React.FC = () => {
   };
 
   const onConfirmClear = () => {
+    // PR #240 round-2 review P1: confirm-clear is the transition that
+    // restores LIVE entry eligibility, so it requires the same
+    // step-up ceremony as rearm — the operator MUST paste a token
+    // obtained independently from this session. The backend
+    // validates the token against the ``kill_switch_clear`` action
+    // class.
     setConfirmDialog({
       title: 'Confirm CLEAR for GLOBAL kill switch',
-      prompt: 'Moves CLEAR_PENDING → CLEARED. After this, rearm to return to INACTIVE.',
+      prompt: 'Moves CLEAR_PENDING → CLEARED. This is the transition that re-allows new entry orders in LIVE mode, so it requires a separately-issued step-up token.',
       reasonLabel: 'Reason / acknowledgement',
-      onConfirm: async () => {
+      requireStepUpToken: true,
+      stepUpInstructions: stepUpInstructions('kill_switch_clear'),
+      onConfirm: async (reason, _hard, stepUpToken) => {
         await KillSwitchService.confirmClear({
           scope: 'GLOBAL',
           scope_id: 'GLOBAL',
+          step_up_token: stepUpToken || null,
         });
         setActionFeedback('Clear confirmed. State now CLEARED. Use Rearm to return to INACTIVE.');
       },
@@ -184,24 +224,21 @@ const KillSwitchPanel: React.FC = () => {
   };
 
   const onRearm = () => {
+    // PR #240 round-2 review P1: do NOT auto-mint a step-up token
+    // from the existing admin session — that defeats the LIVE
+    // protection. The operator must paste a token obtained via the
+    // separate operator-runbook ceremony.
     setConfirmDialog({
       title: 'Rearm GLOBAL kill switch',
-      prompt: 'Moves CLEARED → INACTIVE. In LIVE mode this requires a step-up token, which is fetched and consumed automatically.',
+      prompt: 'Moves CLEARED → INACTIVE. In LIVE mode this requires a separately-issued step-up token.',
       reasonLabel: 'Reason / acknowledgement',
-      onConfirm: async () => {
-        let token: string | null = null;
-        try {
-          const tok = await KillSwitchService.issueStepUpToken('kill_switch_rearm', 'GLOBAL');
-          token = tok.token_id;
-        } catch (err) {
-          // Step-up only required in LIVE; in PAPER/non-LIVE this may
-          // 4xx. Try the rearm without a token in that case.
-          token = null;
-        }
+      requireStepUpToken: true,
+      stepUpInstructions: stepUpInstructions('kill_switch_rearm'),
+      onConfirm: async (reason, _hard, stepUpToken) => {
         await KillSwitchService.rearm({
           scope: 'GLOBAL',
           scope_id: 'GLOBAL',
-          step_up_token: token,
+          step_up_token: stepUpToken || null,
         });
         setActionFeedback('Rearmed. State now INACTIVE.');
       },
@@ -385,11 +422,28 @@ const KillSwitchPanel: React.FC = () => {
             Rearm (→ INACTIVE)
           </button>
         )}
+        {/* PR #240 round-2 review P2: only enable cancel-all when the
+            kill switch is actively blocking new placements. Cancelling
+            open orders while INACTIVE/CLEARED leaves Phoenix free to
+            place fresh orders during the bulk-cancel window. The
+            operator must Trip first to block placements. */}
         <button
           type="button"
           onClick={onCancelAll}
-          disabled={busy}
-          style={btnStyle('#7c3aed')}
+          disabled={
+            busy
+            || (globalState !== 'TRIPPED' && globalState !== 'CLEAR_PENDING')
+          }
+          title={
+            globalState === 'TRIPPED' || globalState === 'CLEAR_PENDING'
+              ? undefined
+              : 'Trip the kill switch first — cancel-all is only enabled while new placements are blocked.'
+          }
+          style={
+            globalState === 'TRIPPED' || globalState === 'CLEAR_PENDING'
+              ? btnStyle('#7c3aed')
+              : { ...btnStyle('#7c3aed'), opacity: 0.5, cursor: 'not-allowed' }
+          }
         >
           Cancel ALL Open Orders
         </button>
@@ -516,6 +570,39 @@ const KillSwitchPanel: React.FC = () => {
                 </span>
               </label>
             )}
+            {confirmDialog.requireStepUpToken && (
+              <div style={{ marginBottom: '0.75rem' }}>
+                <label style={{ display: 'block', fontSize: '0.875rem', color: '#374151', marginBottom: '0.25rem' }}>
+                  Step-up token (LIVE)
+                </label>
+                {confirmDialog.stepUpInstructions && (
+                  <pre style={{
+                    fontSize: '0.75rem',
+                    backgroundColor: '#f3f4f6',
+                    padding: '0.5rem',
+                    borderRadius: 4,
+                    overflowX: 'auto',
+                    margin: '0 0 0.5rem 0',
+                    color: '#374151',
+                    whiteSpace: 'pre-wrap',
+                  }}>{confirmDialog.stepUpInstructions}</pre>
+                )}
+                <input
+                  type="text"
+                  value={stepUpTokenInput}
+                  onChange={(e) => setStepUpTokenInput(e.target.value)}
+                  placeholder="Paste step-up token_id here"
+                  style={{
+                    width: '100%',
+                    padding: '0.5rem',
+                    borderRadius: 6,
+                    border: '1px solid #d1d5db',
+                    fontFamily: 'monospace',
+                    fontSize: '0.875rem',
+                  }}
+                />
+              </div>
+            )}
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
               <button
                 type="button"
@@ -528,7 +615,14 @@ const KillSwitchPanel: React.FC = () => {
               <button
                 type="button"
                 onClick={() => void runDialog()}
-                disabled={busy || !reasonInput.trim()}
+                disabled={
+                  busy
+                  || !reasonInput.trim()
+                  || (
+                    !!confirmDialog.requireStepUpToken
+                    && !stepUpTokenInput.trim()
+                  )
+                }
                 style={btnStyle('#dc2626')}
               >
                 {busy ? 'Working…' : 'Confirm'}

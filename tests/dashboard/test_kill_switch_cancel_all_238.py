@@ -323,7 +323,12 @@ def test_cancel_all_scopes_to_specific_broker_account(monkeypatch):
     assert resp["per_account"][0]["broker_account_id"] == "A1"
 
 
-def test_cancel_all_skips_runner_with_no_cancel_api(monkeypatch):
+def test_cancel_all_no_cancel_api_runner_is_failed_partial(monkeypatch):
+    """PR #240 round-2 review P2: a runner without a callable
+    cancel API has NOT been drained — it must contribute to the
+    failed count + partial overall status so the dashboard does
+    not show a green ok cancel-all while one account could still
+    have open broker orders."""
     runner = SimpleNamespace(
         broker_account_id="A_NOAPI",
         is_running=True,
@@ -338,8 +343,11 @@ def test_cancel_all_skips_runner_with_no_cancel_api(monkeypatch):
         _mk_admin(),
     ))
     assert resp["attempted"] == 0
+    assert resp["failed"] == 1
+    assert resp["status"] == "partial"
     per = resp["per_account"][0]
     assert per["status"] == "broker_no_cancel_api"
+    assert per["failed"] == 1
 
 
 # ---- LIVE fail-closed save_state ---------------------------------------
@@ -409,7 +417,12 @@ def test_cancel_all_refreshes_broker_orders_before_iterating(monkeypatch):
 def test_cancel_all_falls_back_to_cached_orders_on_refresh_failure(monkeypatch):
     """If ``broker.get_orders()`` raises, the endpoint must still
     attempt cancellation against the cached ``_last_orders`` so a
-    broker outage doesn't silently make cancel-all a no-op."""
+    broker outage doesn't silently make cancel-all a no-op.
+
+    PR #240 round-2 review P2: when the refresh fails we can NOT
+    verify the broker's current open-order set, so per_account
+    status must be ``partial`` and the aggregate ``partial`` /
+    ``refresh_failures>0`` rather than green ok."""
     broker = _FakeBroker(get_orders_raises=True)
     runner = _mk_runner("A1", [_order("cached-o1")], broker)
     monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
@@ -421,8 +434,12 @@ def test_cancel_all_falls_back_to_cached_orders_on_refresh_failure(monkeypatch):
     assert broker.get_orders_calls == 1
     assert resp["attempted"] == 1
     assert resp["cancelled"] == 1
-    # The refresh error is surfaced in per_account.errors[].
+    # PR #240 round-2 review P2: refresh failure escalates to partial.
+    assert resp["status"] == "partial"
+    assert resp["refresh_failures"] == 1
     per = resp["per_account"][0]
+    assert per["status"] == "partial"
+    assert per["broker_orders_refresh_failed"] is True
     assert any("broker_orders_refresh_error" in str(e) for e in per["errors"])
 
 
@@ -600,3 +617,156 @@ def test_save_kill_switch_state_live_invokes_rollback_before_500(monkeypatch):
         )
     assert exc.value.status_code == 500
     assert rolled_back == [True]
+
+
+# ---- PR #240 round-2 review additions ----------------------------------
+
+
+def test_cancel_all_rejected_cancel_failed_counts_as_failed(monkeypatch):
+    """Round-2 P1: Angel returns ``status=REJECTED`` with message
+    ``cancel_failed`` for genuine broker-level cancel rejections too.
+    Only messages indicating the order is already gone / cancelled
+    / terminal should be treated as idempotent skip; everything else
+    must count as failed so the dashboard does not report a green
+    cancel-all while orders remain live."""
+    broker = _FakeBroker(responses=[
+        OrderResponse(
+            broker_order_id="o1",
+            status="REJECTED",
+            message="cancel_failed:broker_server_error",
+            filled_quantity=0,
+            average_price=None,
+        ),
+    ])
+    runner = _mk_runner("A1", [_order("o1")], broker)
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
+    monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    resp = _run(kill_switch_cancel_all(
+        KillSwitchCancelAllRequest(reason="incident"),
+        _mk_admin(),
+    ))
+    assert resp["attempted"] == 1
+    assert resp["failed"] == 1
+    assert resp["skipped"] == 0
+    assert resp["status"] == "partial"
+    per = resp["per_account"][0]
+    assert per["failed"] == 1
+
+
+def test_cancel_all_rejected_already_cancelled_counts_as_skipped(monkeypatch):
+    """Round-2 P1: message-based disambiguation. Variants of
+    "already cancelled" / "not found" remain idempotent skips."""
+    for msg in (
+        "Order already cancelled",
+        "ORDER NOT FOUND",
+        "order does not exist",
+        "already_filled",
+        "Terminal state - cannot cancel",
+    ):
+        broker = _FakeBroker(responses=[
+            OrderResponse(
+                broker_order_id="o1",
+                status="REJECTED",
+                message=msg,
+                filled_quantity=0,
+                average_price=None,
+            ),
+        ])
+        runner = _mk_runner("A1", [_order("o1")], broker)
+        monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
+        monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+        resp = _run(kill_switch_cancel_all(
+            KillSwitchCancelAllRequest(reason="retry"),
+            _mk_admin(),
+        ))
+        assert resp["failed"] == 0, f"message {msg!r} should be idempotent skip"
+        assert resp["skipped"] == 1, f"message {msg!r} should be idempotent skip"
+        assert resp["status"] == "ok", f"message {msg!r} should not be partial"
+
+
+def test_cancel_all_endpoint_requires_admin_not_operator(monkeypatch):
+    """Round-2 P2: cancel-all already required ADMIN; this is a
+    regression guard that it has not been loosened back to OPERATOR."""
+    runner = _mk_runner("A1", [_order("o1")], _FakeBroker())
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: _mk_runtime({"A1": runner}))
+    with pytest.raises(HTTPException) as exc:
+        _run(kill_switch_cancel_all(
+            KillSwitchCancelAllRequest(reason="x"),
+            _mk_admin(AdminRole.OPERATOR),
+        ))
+    assert exc.value.status_code == 403
+
+
+def test_kill_switch_trip_requires_admin_role(monkeypatch):
+    """Round-2 P2: trip endpoint now requires ADMIN (was OPERATOR).
+    Issue #238 acceptance: non-admin users cannot call the toggle API."""
+    from app.dashboard.admin_routes import (
+        KillSwitchTripRequest, kill_switch_trip,
+    )
+    fake_ksm = SimpleNamespace(
+        trip=lambda *a, **kw: SimpleNamespace(id="rec", state=SimpleNamespace(value="TRIPPED"), block_exits=False),
+    )
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: SimpleNamespace(kill_switch_manager=fake_ksm))
+    with pytest.raises(HTTPException) as exc:
+        kill_switch_trip(
+            KillSwitchTripRequest(scope="GLOBAL", scope_id="GLOBAL", reason="x"),
+            _mk_admin(AdminRole.OPERATOR),
+        )
+    assert exc.value.status_code == 403
+
+
+def test_kill_switch_rearm_requires_admin_role(monkeypatch):
+    """Round-2 P2: rearm endpoint now requires ADMIN."""
+    from app.dashboard.admin_routes import (
+        KillSwitchRearmRequest, kill_switch_rearm,
+    )
+    fake_ksm = SimpleNamespace(
+        rearm=lambda *a, **kw: SimpleNamespace(id="rec", state=SimpleNamespace(value="INACTIVE")),
+    )
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: SimpleNamespace(kill_switch_manager=fake_ksm))
+    monkeypatch.setenv("TRADE_MODE", "PAPER")
+    with pytest.raises(HTTPException) as exc:
+        kill_switch_rearm(
+            KillSwitchRearmRequest(scope="GLOBAL", scope_id="GLOBAL"),
+            _mk_admin(AdminRole.OPERATOR),
+        )
+    assert exc.value.status_code == 403
+
+
+def test_kill_switch_confirm_clear_requires_step_up_token_in_live(monkeypatch):
+    """Round-2 P1: confirm-clear in LIVE mode must require a step-up
+    token — that's the transition that restores entry eligibility."""
+    from app.dashboard.admin_routes import (
+        KillSwitchRearmRequest, kill_switch_confirm_clear,
+    )
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    with pytest.raises(HTTPException) as exc:
+        kill_switch_confirm_clear(
+            KillSwitchRearmRequest(scope="GLOBAL", scope_id="GLOBAL"),
+            _mk_admin(),
+        )
+    assert exc.value.status_code == 403
+    assert "step_up_token" in str(exc.value.detail).lower()
+
+
+def test_kill_switch_confirm_clear_passes_through_in_non_live(monkeypatch):
+    """In non-LIVE no step-up token is required."""
+    from app.dashboard.admin_routes import (
+        KillSwitchRearmRequest, kill_switch_confirm_clear,
+    )
+    monkeypatch.setenv("TRADE_MODE", "PAPER")
+    fake_record = SimpleNamespace(id="rec", state=SimpleNamespace(value="CLEARED"))
+    fake_ksm = SimpleNamespace(
+        confirm_clear=lambda scope, scope_id: fake_record,
+        _key=lambda scope, scope_id: (str(scope), str(scope_id)),
+        _records={},
+        _lock=__import__("threading").RLock(),
+    )
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: SimpleNamespace(kill_switch_manager=fake_ksm))
+    monkeypatch.setattr(admin_routes, "_save_kill_switch_state", lambda *_a, **_kw: None)
+    monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: None)
+    resp = kill_switch_confirm_clear(
+        KillSwitchRearmRequest(scope="GLOBAL", scope_id="GLOBAL"),
+        _mk_admin(),
+    )
+    assert resp["status"] == "cleared"
