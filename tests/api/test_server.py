@@ -1332,6 +1332,15 @@ def test_readyz_returns_200_when_single_runner_is_running(monkeypatch):
         "get_settings",
         lambda: SimpleNamespace(admin_api_key="test-admin"),
     )
+    # /readyz's LIVE-mode tradeable-instrument gate calls into the
+    # multi-instrument-stream module which expects a real instrument
+    # universe; mock it to return 1 so the gate passes deterministically
+    # in this unit test (the gate itself has separate coverage).
+    monkeypatch.setattr(
+        importlib.import_module("app.runners.multi_instrument_stream"),
+        "get_active_instrument_count",
+        lambda: 1,
+    )
     with TestClient(server.app) as client:
         resp = client.get("/readyz")
     assert resp.status_code == 200
@@ -1690,6 +1699,12 @@ def test_readyz_allows_disabled_live_stream_worker_path(monkeypatch):
         importlib.import_module("app.dashboard.auth"),
         "get_settings",
         lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+    # Mock the LIVE-mode tradeable-instrument gate (covered separately).
+    monkeypatch.setattr(
+        importlib.import_module("app.runners.multi_instrument_stream"),
+        "get_active_instrument_count",
+        lambda: 1,
     )
     with TestClient(server.app) as client:
         resp = client.get("/readyz")

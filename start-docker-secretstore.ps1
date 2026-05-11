@@ -249,6 +249,54 @@ try {
     }
     Set-Item -Path "Env:CAPITAL_LIMITS_JSON" -Value $capitalLimitsJson
 
+    # Issue #221 / PR #243 round-1 review P2: the LIVE compose files now
+    # require ``RISK_MAX_DAILY_LOSS`` to be set explicitly (no fallback
+    # default). The launcher must surface a clear error if the operator
+    # did not pre-export it, instead of failing later inside ``docker
+    # compose up`` with an opaque "variable is required" message. Also
+    # forward the optional floor override so very small accounts can
+    # lower the LIVE start-up floor without re-rolling the image.
+    $tradeModeForRisk = [Environment]::GetEnvironmentVariable("TRADE_MODE", "Process")
+    $riskMaxDailyLoss = [Environment]::GetEnvironmentVariable("RISK_MAX_DAILY_LOSS", "Process")
+    if ([string]::IsNullOrWhiteSpace($riskMaxDailyLoss)) {
+        try {
+            $riskMaxDailyLoss = Get-Secret -Name "RISK_MAX_DAILY_LOSS" -AsPlainText -ErrorAction Stop
+        }
+        catch {
+            $riskMaxDailyLoss = ""
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($riskMaxDailyLoss)) {
+        if ($tradeModeForRisk -eq "LIVE") {
+            Write-Host ""
+            Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
+            Write-Host "  RISK_MAX_DAILY_LOSS is not set for TRADE_MODE=LIVE     " -ForegroundColor Red
+            Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
+            Write-Host ""
+            Write-Host "  The LIVE compose files require this explicitly (no fallback)." -ForegroundColor Yellow
+            Write-Host "  Size per capital tier — see docs/runbooks/oci_live_deployment.md" -ForegroundColor Yellow
+            Write-Host "  'Sizing the daily-loss limit by capital tier'. A common starting" -ForegroundColor Yellow
+            Write-Host "  point for a ₹1-2L account is 10000." -ForegroundColor Yellow
+            Write-Host ""
+            Write-Error "Deployment cancelled. Set RISK_MAX_DAILY_LOSS in env or SecretStore and retry."
+            exit 1
+        }
+        else {
+            $riskMaxDailyLoss = "10000"
+            Write-Host "RISK_MAX_DAILY_LOSS not set; using sample default 10000 for non-LIVE mode."
+        }
+    }
+    else {
+        Write-Host "Loaded RISK_MAX_DAILY_LOSS from the current PowerShell session or SecretStore."
+    }
+    Set-Item -Path "Env:RISK_MAX_DAILY_LOSS" -Value $riskMaxDailyLoss
+
+    $riskFloorOverride = [Environment]::GetEnvironmentVariable("RISK_MAX_DAILY_LOSS_LIVE_FLOOR", "Process")
+    if (-not [string]::IsNullOrWhiteSpace($riskFloorOverride)) {
+        Write-Host "Forwarding RISK_MAX_DAILY_LOSS_LIVE_FLOOR override = $riskFloorOverride into the container."
+        Set-Item -Path "Env:RISK_MAX_DAILY_LOSS_LIVE_FLOOR" -Value $riskFloorOverride
+    }
+
     # Write secrets to temporary files for Docker secret mounts (Issue #56).
     # Files are written to a per-session temp directory under $env:TEMP.
     # Docker Compose reads them via the `secrets:` section in the compose file.

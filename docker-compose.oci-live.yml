@@ -124,6 +124,11 @@ x-live-backend-env: &live-backend-env
   ENABLE_RISK_CHECKS: "true"
   RISK_ENABLE_DAILY_LOSS: "true"
   RISK_MAX_DAILY_LOSS: "${RISK_MAX_DAILY_LOSS:?Set RISK_MAX_DAILY_LOSS}"
+  # Issue #221 / PR #243 round-1 review P2: forward the floor-override
+  # env var so the LIVE start-up floor (default ₹5,000) can be lowered
+  # for very small accounts — or disabled with =0 — at deploy time
+  # without re-rolling the image.
+  RISK_MAX_DAILY_LOSS_LIVE_FLOOR: "${RISK_MAX_DAILY_LOSS_LIVE_FLOOR:-}"
   RISK_FAIL_OPEN_ON_MISSING_PNL: "false"
 
   ENABLE_PROFIT_CHECKS: "true"

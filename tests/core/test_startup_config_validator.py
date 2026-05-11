@@ -34,7 +34,10 @@ def _valid_runtime_settings(**overrides):
         "capital_fail_closed_on_missing_notional_price": True,
         "enable_risk_checks": True,
         "risk_enable_daily_loss": True,
-        "risk_max_daily_loss": 1000.0,
+        # Issue #221: LIVE validator now floors RISK_MAX_DAILY_LOSS at
+        # RISK_MAX_DAILY_LOSS_LIVE_FLOOR (default ₹5,000). Use ₹10,000
+        # so the default fixture continues to pass LIVE-path tests.
+        "risk_max_daily_loss": 10000.0,
         "enable_profit_checks": True,
         "profit_enable_daily_target": True,
         "profit_daily_target": 1200.0,
@@ -55,6 +58,11 @@ def _valid_runtime_settings(**overrides):
         "eod_cancel_open_orders_enabled": True,
         "ownership_persist_pending_locks": True,
         "hub_instance_name": "phoenix-live-1",
+        # Issue #155 / #221: LIVE startup requires the operator to
+        # explicitly choose a production tenant identifier. The
+        # historical placeholder ``tenant-default`` is rejected; a
+        # real tenant id like ``tenant-1`` is acceptable.
+        "hub_default_tenant_id": "tenant-1",
     }
     values.update(overrides)
     return type("Cfg", (), values)()
@@ -90,6 +98,11 @@ def _valid_live_env(**overrides):
         "POSITION_SYNC_INTERVAL_SECONDS": "30",
         "ORDERS_SYNC_INTERVAL_SECONDS": "90",
         "DASHBOARD_AUTH_DISABLED": "false",
+        # Issue #155 / #221: validator requires HUB_DEFAULT_TENANT_ID
+        # in both the settings object AND the env so the deployment
+        # cannot drift between Pydantic-resolved value and the raw
+        # env-file value the operator audits.
+        "HUB_DEFAULT_TENANT_ID": "tenant-1",
     }
     values.update(overrides)
     return values

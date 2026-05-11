@@ -47,7 +47,7 @@ Required values:
 - `HUB_DEFAULT_TENANT_ID` — default tenant used by hub routing, strategy_bridge, and trade_records when no tenant is provided by the caller. Must match the production tenant UUID. Required in LIVE (startup validation rejects empty value). The bundled compose example defaults to `tenant-1`; set it explicitly in your `phoenix-deploy.env`.
 - `HUB_DEFAULT_BROKER_ACCOUNT_ID`
 - `CAPITAL_LIMITS_JSON`
-- `RISK_MAX_DAILY_LOSS`
+- `RISK_MAX_DAILY_LOSS` — one-sided daily realised+unrealised loss cap in INR (trips the kill switch only when the day's running P&L falls **below** `-abs(value)`; profitable days are unaffected). **Must be sized per capital tier** — see [Sizing the daily-loss limit by capital tier](#sizing-the-daily-loss-limit-by-capital-tier) below. LIVE startup fails closed when this is below `RISK_MAX_DAILY_LOSS_LIVE_FLOOR` (default ₹5,000) — set explicitly in `/opt/phoenix/phoenix-deploy.env`. The committed `.env.example`/`cloudrun.env` placeholders are `CHANGE_ME_DAILY_LOSS_INR` and will not start LIVE.
 - `PROFIT_DAILY_TARGET`
 - `CLIENT_LOCAL_IP`
 - `CLIENT_PUBLIC_IP`
@@ -265,6 +265,45 @@ The operator on duty owns:
 - proving Postgres migrations and control-plane rows
 - capturing release evidence
 - holding or rolling back on any readiness or reconciliation blocker
+
+---
+
+## Sizing the daily-loss limit by capital tier
+
+`RISK_MAX_DAILY_LOSS` is the **absolute daily realised + unrealised loss limit in INR** — the one-sided cap on how far the day's running P&L is allowed to fall below zero. The risk engine compares the running P&L against `-abs(RISK_MAX_DAILY_LOSS)` (see [`app/risk/risk_engine.py`](../../app/risk/risk_engine.py) and [`app/core/risk_manager.py`](../../app/core/risk_manager.py)); the kill switch trips only when the running P&L crosses below that negative threshold. A profitable day giving back gains, or a day finishing positive, does **not** trip this gate. Once the gate trips it blocks new entries (SOFT) or all orders including exits (HARD), and the exit engine subsequently squares off open positions per its policy.
+
+**Why this matters (issue #221, 2026-05-08 incident).** The historical committed default of ₹2,000 tripped the kill switch on a ~1.6-point adverse mark-to-market move on a single NG_FUT lot. A limit that fires on routine intraday volatility is operationally meaningless — operators learn to re-arm it, distorting backtests-vs-live and leaving real risk un-bounded.
+
+**Hard gate.** Phoenix LIVE startup now fails closed when this value is below `RISK_MAX_DAILY_LOSS_LIVE_FLOOR` (default ₹5,000). To deliberately accept a sub-floor value (e.g. for a very small paper-funded account), set `RISK_MAX_DAILY_LOSS_LIVE_FLOOR` explicitly to a lower value or to `0` (disables the gate).
+
+**Sizing guidance.** A daily-loss limit should be:
+
+- **Large enough** to absorb normal intraday volatility plus 1–2 typical losing-trade exits without tripping prematurely.
+- **Small enough** that hitting it represents a clearly anomalous day worth stopping.
+
+A pragmatic target is **3–5% of account capital**, capped so that no single overnight gap can produce a worse outcome than the limit. Use the table below as a starting point and adjust per realised volatility of the instruments traded.
+
+| Account capital tier | Suggested `RISK_MAX_DAILY_LOSS` | Rationale |
+|---|---|---|
+| ₹1L – ₹2L (small / paper-funded) | **₹10,000** | ~5–10% of capital; absorbs an ~8-point NG_FUT adverse move on 1 lot before tripping. |
+| ₹5L | ₹15,000 – ₹20,000 | ~3–4% of capital; comfortably absorbs a 2-leg credit-spread reversal. |
+| ₹10L – ₹25L | ₹30,000 – ₹75,000 | ~3% of capital; tolerates multi-strategy concurrent drawdowns. |
+| ₹25L+ | ₹1,00,000+ | Operator decides per capital tier and risk policy. |
+
+**Operator workflow:**
+
+1. Decide the production value for the deploying VM (typically picked once per account at provisioning).
+2. Set it explicitly in `/opt/phoenix/phoenix-deploy.env` — there is no fallback in `docker-compose.live.single.yml` or `docker-compose.oci-live.yml` (both use `?Set RISK_MAX_DAILY_LOSS`). Startup fails fast if the value is missing or below the floor.
+3. Capture the chosen value in deploy notes alongside `PROFIT_DAILY_TARGET` so the limit ratio is auditable.
+4. Re-evaluate after the first 2 weeks of trading using realised P&L distribution — if the limit fires on > 10% of trading days the threshold is likely too tight.
+
+**Verification:** After deploy, confirm the running value:
+
+```bash
+docker inspect phoenix-oci-backend \
+  --format '{{range .Config.Env}}{{println .}}{{end}}' \
+  | grep RISK_MAX_DAILY_LOSS
+```
 
 ---
 

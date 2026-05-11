@@ -239,8 +239,18 @@ class TestReadyzPositionAuthorityGate:
         from app import server as server_module
         from app.server import app
 
+        # PR #237 added a LIVE-mode avg_price corruption audit gate that
+        # runs BEFORE the position-authority gate; it reaches into
+        # get_hub_runtime().audit_position_avg_price_corruption(). When
+        # the test runtime is a MagicMock, that audit returns a MagicMock
+        # whose int() coercion explodes, leaving readyz reporting
+        # ``avg_price_audit_failed`` and pre-empting the gate under test.
+        # Stub the hub-runtime audit method to a clean no-op so we reach
+        # the position-authority gate.
+        _hub_stub = SimpleNamespace()
         with (
             patch.object(server_module, "get_app_runtime", return_value=rt),
+            patch.object(server_module, "get_hub_runtime", return_value=_hub_stub),
             patch("app.server._readiness_trade_mode", return_value="LIVE"),
             patch("app.risk.kill_switch.get_kill_switch_state", return_value={"active_count": 0, "source": "postgres"}),
         ):
@@ -262,8 +272,18 @@ class TestReadyzPositionAuthorityGate:
         from app import server as server_module
         from app.server import app
 
+        # PR #237 added a LIVE-mode avg_price corruption audit gate that
+        # runs BEFORE the position-authority gate; it reaches into
+        # get_hub_runtime().audit_position_avg_price_corruption(). When
+        # the test runtime is a MagicMock, that audit returns a MagicMock
+        # whose int() coercion explodes, leaving readyz reporting
+        # ``avg_price_audit_failed`` and pre-empting the gate under test.
+        # Stub the hub-runtime audit method to a clean no-op so we reach
+        # the position-authority gate.
+        _hub_stub = SimpleNamespace()
         with (
             patch.object(server_module, "get_app_runtime", return_value=rt),
+            patch.object(server_module, "get_hub_runtime", return_value=_hub_stub),
             patch("app.server._readiness_trade_mode", return_value="LIVE"),
             patch("app.risk.kill_switch.get_kill_switch_state", return_value={"active_count": 0, "source": "postgres"}),
         ):
@@ -323,8 +343,18 @@ class TestReadyzPositionAuthorityGate:
         from app import server as server_module
         from app.server import app
 
+        # PR #237 added a LIVE-mode avg_price corruption audit gate that
+        # runs BEFORE the position-authority gate; it reaches into
+        # get_hub_runtime().audit_position_avg_price_corruption(). When
+        # the test runtime is a MagicMock, that audit returns a MagicMock
+        # whose int() coercion explodes, leaving readyz reporting
+        # ``avg_price_audit_failed`` and pre-empting the gate under test.
+        # Stub the hub-runtime audit method to a clean no-op so we reach
+        # the position-authority gate.
+        _hub_stub = SimpleNamespace()
         with (
             patch.object(server_module, "get_app_runtime", return_value=rt),
+            patch.object(server_module, "get_hub_runtime", return_value=_hub_stub),
             patch("app.server._readiness_trade_mode", return_value="LIVE"),
             patch("app.risk.kill_switch.get_kill_switch_state", return_value={"active_count": 0, "source": "postgres"}),
         ):

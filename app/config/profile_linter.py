@@ -19,6 +19,16 @@ _EXAMPLE_LINT_NETWORK_IDENTITY = {
     "CLIENT_PUBLIC_IP": "203.0.113.10",
     "MAC_ADDRESS": "02:00:00:00:00:10",
 }
+# Issue #221: LIVE-mode ``.example`` profiles use human-readable
+# ``CHANGE_ME_*`` placeholders for capital/loss limits so operators
+# know to set them per deployment. Numeric-only validators cannot
+# parse those literals, so substitute a sane in-range placeholder
+# during lint (the placeholder itself remains in the committed
+# example file).
+_EXAMPLE_LINT_RISK_PLACEHOLDERS = {
+    "RISK_MAX_DAILY_LOSS": "10000",
+}
+_RISK_PLACEHOLDER_MARKERS = ("CHANGE_ME", "<", "TBD", "TODO")
 
 
 def _parse_bool(value: object, *, default: bool = False) -> bool:
@@ -178,6 +188,22 @@ def _validator_env_for_profile(
     if trade_mode == "LIVE" and path.name.endswith(".example"):
         for key, value in _EXAMPLE_LINT_NETWORK_IDENTITY.items():
             validator_env.setdefault(key, value)
+    # Issue #221: substitute a sane numeric placeholder when the
+    # committed ``.example`` file uses a human-readable
+    # ``CHANGE_ME_*`` literal so neither the unconditional
+    # ``RISK_ENABLE_DAILY_LOSS=true requires RISK_MAX_DAILY_LOSS > 0``
+    # check nor the LIVE-mode floor check flags the example. The
+    # placeholder remains literal in the committed file; operators
+    # must replace it at deploy time (the LIVE compose enforces
+    # ``?Set RISK_MAX_DAILY_LOSS``).
+    if path.name.endswith(".example"):
+        for key, value in _EXAMPLE_LINT_RISK_PLACEHOLDERS.items():
+            current = str(validator_env.get(key, "") or "")
+            if not current:
+                continue
+            upper = current.upper()
+            if any(marker in upper for marker in _RISK_PLACEHOLDER_MARKERS):
+                validator_env[key] = value
     return validator_env
 
 

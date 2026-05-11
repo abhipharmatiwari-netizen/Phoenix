@@ -6,14 +6,26 @@ import pytest
 
 
 def _get_validate_fn():
-    from app.core.startup_config_validator import validate_runtime_settings
-    return validate_runtime_settings
+    from app.core.startup_config_validator import validate_runtime_startup_settings
+    return validate_runtime_startup_settings
 
 
 def _make_settings(**overrides):
     from app.config.settings import Settings
     defaults = {
         "HUB_DEFAULT_TENANT_ID": "tenant-1",
+        # LIVE validator requires a non-empty deployment-scoped instance
+        # name so circuit-breaker state doesn't bleed across stacks
+        # sharing the same Postgres.
+        "HUB_INSTANCE_NAME": "phoenix-live-test",
+        # PR #243 round-1 review P2: non-local APP_ENV triggers the
+        # auth gate (``ADMIN_API_KEY must be configured outside
+        # local/dev/test``). A clean test env without this variable
+        # exported would fail the LIVE-validator path with an
+        # unrelated error and mask the gate under test. Hard-coded
+        # placeholder is acceptable because these tests never reach
+        # the network — Settings only needs the field to be non-empty.
+        "ADMIN_API_KEY": "test-admin-placeholder",
         "PROFIT_SWEEP_ENABLED": "false",
         "PROFIT_SWEEP_STRATEGY": "SIMPLE",
         "PROFIT_SIMPLE_ENABLED": "false",
@@ -43,6 +55,11 @@ def _base_live_env(**overrides):
     """Return a minimal passing LIVE environment dict."""
     base = {
         "TRADE_MODE": "LIVE",
+        # LIVE startup rejects local/dev/test APP_ENV because that
+        # disables dashboard auth (app/dashboard/auth.py). The
+        # validator-level tests below exercise specific gates and
+        # need a non-local APP_ENV so they reach the gate under test.
+        "APP_ENV": "production",
         "CONTROL_PLANE_BACKEND": "postgres",
         "SWEEP_STATE_BACKEND": "postgres",
         "BROKER_SECRET_BACKEND": "postgres",
@@ -50,7 +67,12 @@ def _base_live_env(**overrides):
         "CAPITAL_LIMITS_JSON": '{"tenant-1:A1":{"max_notional_per_order":500000}}',
         "ENABLE_RISK_CHECKS": "true",
         "RISK_ENABLE_DAILY_LOSS": "true",
-        "RISK_MAX_DAILY_LOSS": "2000",
+        # Issue #221: LIVE validator now requires
+        # RISK_MAX_DAILY_LOSS >= RISK_MAX_DAILY_LOSS_LIVE_FLOOR
+        # (default ₹5,000) so a sub-floor placeholder cannot ship.
+        # The previous 2000 fixture would now trip the new gate;
+        # bump to a sane sample value.
+        "RISK_MAX_DAILY_LOSS": "10000",
         "ENABLE_PROFIT_CHECKS": "true",
         "PROFIT_ENABLE_DAILY_TARGET": "true",
         "PROFIT_DAILY_TARGET": "10000",
