@@ -334,21 +334,35 @@ class _BridgeDeadline:
         retry`` call can consume ~``candidate_count * connect_timeout``
         before returning, pushing ``square_off_all`` past the
         advertised hard deadline.
+
+        **PR #258 round-5 P1 (Codex line 343):** when the remaining
+        budget is less than ``candidate_count`` seconds, we cannot
+        sensibly start another ``connect_with_retry`` call — psycopg
+        requires ``connect_timeout >= 1`` per candidate, so starting
+        would let the call consume ``candidate_count * 1s`` before
+        returning, pushing ``square_off_all`` past the advertised
+        hard deadline. Raise ``_BridgeDeadlineExceeded`` so the caller
+        bails out cleanly without ever entering psycopg.
         """
         remaining = self.remaining()
-        # Clamp to >= 1s — psycopg requires >= 1 — but never exceed the
-        # remaining wall-clock window so we always have time to log the
-        # deadline-exceeded before square-off runs.
-        if remaining <= 1.0:
-            return 1
-        # PR #258 round-3 P2 (Codex line 1375): divide the remaining
-        # budget by the DSN-candidate count so the sum of per-candidate
-        # connect timeouts within ONE ``connect_with_retry`` call
-        # cannot exceed the bridge's remaining deadline.
         try:
             n = max(1, int(candidate_count))
         except Exception:
             n = 1
+        # PR #258 round-5 P1 (Codex line 343): refuse to start a
+        # Postgres connect when the remaining budget cannot cover the
+        # minimum wall-clock cost of one ``connect_with_retry`` call.
+        # ``psycopg.connect`` clamps ``connect_timeout`` to >= 1 per
+        # candidate, so the minimum cost of one call is
+        # ``candidate_count * 1s``. If remaining < that, abort instead
+        # of clamping up to 1 (which would let psycopg overrun the
+        # deadline).
+        if remaining < float(n):
+            raise _BridgeDeadlineExceeded(
+                f"deadline_exceeded step=connect_timeout_seconds "
+                f"remaining={remaining:.2f}s candidates={n} "
+                f"min_required={float(n):.2f}s"
+            )
         per_candidate_budget = remaining / float(n)
         if per_candidate_budget <= 1.0:
             return 1
@@ -445,6 +459,19 @@ def _retry_with_backoff(
                     op_name, attempt, attempts,
                 )
             return True, None
+        except _BridgeDeadlineExceeded as exc_dl:
+            # PR #258 round-5 P1 (Codex line 343): the deadline tracker
+            # raised mid-operation (e.g. ``connect_timeout_seconds``
+            # refused to start a connect with subsecond budget). Treat
+            # as terminal: do NOT retry, return immediately so the
+            # caller falls through to emergency square-off.
+            logger.error(
+                "kill_switch_bridge_deadline_exceeded op=%s attempt=%d/%d "
+                "exc=%s — abandoning retry; emergency square-off "
+                "will proceed.",
+                op_name, attempt, attempts, exc_dl,
+            )
+            return False, exc_dl
         except Exception as exc:  # noqa: BLE001 — bounded retry surface.
             last_exc = exc
             if attempt < attempts:
@@ -1176,122 +1203,208 @@ class RiskManager:
             # square-off budget; the deadline guarantees we exit before
             # that happens.
             #
-            # Issue #258 round-2 P2 (Codex): track whether the FIRST
+            # PR #258 round-5 P1 (Codex line 1208/1213): the deadline
+            # check between attempts is necessary but not sufficient
+            # because a SINGLE ``ksm.trip`` call can itself stall for
+            # the full audit dual-write budget (``connect_with_retry``
+            # with default ``max_attempts=3`` × 5s timeout = ~15s).
+            # Apply env overrides for the duration of the trip loop so
+            # the audit dual-write inside ``ksm.trip`` is bounded to one
+            # attempt with a remaining-budget timeout, preventing a
+            # single trip from blowing the bridge deadline. The JSONL
+            # audit write is unchanged (durable, local-disk).
+            #
+            # Issue #258 round-2 P2 (Codex): track whether ANY
             # ksm.trip attempt mutated the in-memory record but then
             # raised in ``_emit_audit`` (or any post-mutation step).
             # If so, the in-memory state is TRIPPED but the audit row
             # was never written. The bridge MUST NOT silently mark this
             # as succeeded — we re-emit the audit through the bridge
             # before proceeding so the trip is durably accountable.
+            #
+            # PR #258 round-5 P1 (Codex line 1234): the post-mutation
+            # detection runs on EVERY retry, not only attempt 1. If
+            # attempt 1 fails before mutation but attempt 2 mutates
+            # then fails the audit, attempt 3 would raise ValueError
+            # (record already TRIPPED) and we'd silently mark success
+            # with no audit row.
+            #
+            # PR #258 round-5 P1 (Codex line 1247): persist the
+            # ``self._pending_audit_reemit`` marker AS SOON AS post-
+            # mutation is detected (not only later in the ValueError
+            # branch). If the deadline fires between detection and the
+            # ValueError handler, the local flag is lost; on the next
+            # cycle ``get_record`` sees TRIPPED and skips the trip
+            # branch entirely, so the audit miss would never be repaired.
             delays = _bridge_retry_delays()
             attempts = 1 + len(delays)
             record: Any = None
             trip_value_error: Optional[ValueError] = None
             trip_other_error: Optional[BaseException] = None
             first_attempt_post_mutation_error: bool = False
-            for attempt in range(1, attempts + 1):
-                # Issue #258 round-2 P1: hard deadline check before EACH
-                # trip attempt. ``ksm.trip``'s audit write nests a
-                # ``connect_with_retry(max_attempts=3, connect_timeout=5)``
-                # in the default audit_log path, so a single attempt
-                # can stall ~15s. Without this guard the retry budget
-                # would be uncapped on a Postgres outage.
-                if deadline.is_exceeded():
-                    logger.error(
-                        "kill_switch_bridge_deadline_exceeded op=ksm_trip "
-                        "attempt=%d/%d elapsed=%.2fs — emergency square-off "
-                        "will proceed.",
-                        attempt, attempts, deadline.elapsed(),
-                    )
-                    return
+
+            # PR #258 round-5 P1 (Codex line 1208/1213): bound the
+            # nested audit dual-write inside ``ksm.trip`` via env
+            # overrides for the duration of the loop. Restore the
+            # original values in the finally block even if a retry
+            # exception escapes.
+            _POSTGRES_TIMEOUT_ENV = "POSTGRES_CONNECT_TIMEOUT_SECONDS"
+            _AUDIT_PG_ATTEMPTS_ENV = "AUDIT_POSTGRES_MAX_ATTEMPTS"
+            trip_prev_pg_timeout: Optional[str] = os.environ.get(_POSTGRES_TIMEOUT_ENV)
+            trip_prev_audit_attempts: Optional[str] = os.environ.get(_AUDIT_PG_ATTEMPTS_ENV)
+            trip_env_applied = False
+            try:
                 try:
-                    record = ksm.trip(
-                        KillSwitchScope.GLOBAL,
-                        "GLOBAL",
-                        reason=bridge_reason,
-                        actor="risk_manager_auto",
+                    trip_remaining = deadline.remaining()
+                    trip_candidates = _bridge_dsn_candidate_count()
+                    trip_per_candidate = max(
+                        1.0,
+                        trip_remaining / float(max(1, trip_candidates)),
                     )
-                    if attempt > 1:
-                        logger.info(
-                            "kill_switch_bridge_retry_succeeded op=ksm_trip "
-                            "attempt=%d/%d", attempt, attempts,
-                        )
-                    trip_other_error = None
-                    trip_value_error = None
-                    break
-                except ValueError as exc_ve:
-                    trip_value_error = exc_ve
-                    break  # Non-retriable; fall through to race re-check.
-                except Exception as exc_t:  # noqa: BLE001
-                    trip_other_error = exc_t
-                    # Issue #258 round-2 P2: check whether the in-memory
-                    # state was mutated to TRIPPED despite the exception.
-                    # This happens when ``ksm.trip`` raises AFTER
-                    # ``self._records[key] = record`` — e.g. ``_emit_audit``
-                    # throws on a JSONL disk-full or similar. Recording
-                    # this flag lets the post-trip race recheck know the
-                    # current TRIPPED state has NO matching audit row.
-                    if attempt == 1:
-                        try:
-                            mutation_record = ksm.get_record(
-                                KillSwitchScope.GLOBAL, "GLOBAL",
-                            )
-                            mutation_state = (
-                                mutation_record.state
-                                if mutation_record is not None else None
-                            )
-                            if mutation_state in (
-                                KillSwitchState.TRIPPED,
-                                KillSwitchState.CLEAR_PENDING,
-                            ):
-                                first_attempt_post_mutation_error = True
-                                logger.error(
-                                    "kill_switch_bridge_unaudited_partial_trip "
-                                    "detected: ksm.trip raised %s AFTER "
-                                    "mutating in-memory state to %s — audit "
-                                    "row may be missing; will re-emit audit "
-                                    "via fallback path before marking "
-                                    "succeeded.",
-                                    type(exc_t).__name__,
-                                    mutation_state.value,
-                                )
-                        except Exception:
-                            # Lookup failure — leave the flag unset and
-                            # let the post-trip recheck path handle it.
-                            pass
-                    if attempt < attempts:
-                        delay = delays[attempt - 1]
-                        # Clip backoff to the remaining deadline so we
-                        # never sleep past the square-off budget.
-                        remaining = deadline.remaining()
-                        if remaining <= 0.0:
-                            logger.error(
-                                "kill_switch_bridge_deadline_exceeded "
-                                "op=ksm_trip attempt=%d/%d elapsed=%.2fs "
-                                "(before backoff) — emergency square-off "
-                                "will proceed.",
-                                attempt, attempts, deadline.elapsed(),
-                            )
-                            return
-                        if delay > remaining:
-                            delay = remaining
-                        logger.warning(
-                            "kill_switch_bridge_retry op=ksm_trip "
-                            "attempt=%d/%d delay=%.2fs exc=%s",
-                            attempt, attempts, delay, exc_t,
-                        )
-                        if delay > 0:
-                            try:
-                                time.sleep(delay)
-                            except Exception:  # pragma: no cover
-                                pass
-                    else:
+                    trip_tight = max(1, int(trip_per_candidate))
+                    os.environ[_POSTGRES_TIMEOUT_ENV] = str(trip_tight)
+                    os.environ[_AUDIT_PG_ATTEMPTS_ENV] = "1"
+                    trip_env_applied = True
+                except Exception:  # pragma: no cover - defensive
+                    pass
+
+                for attempt in range(1, attempts + 1):
+                    # Issue #258 round-2 P1: hard deadline check before
+                    # EACH trip attempt. Even with the env caps applied,
+                    # the JSONL audit write or other in-process steps
+                    # can take time; the deadline keeps the loop bounded.
+                    if deadline.is_exceeded():
                         logger.error(
-                            "kill_switch_bridge_retry_exhausted op=ksm_trip "
-                            "attempts=%d last_exc=%s — will retry on next "
-                            "evaluate cycle.",
-                            attempts, exc_t,
+                            "kill_switch_bridge_deadline_exceeded op=ksm_trip "
+                            "attempt=%d/%d elapsed=%.2fs — emergency square-off "
+                            "will proceed.",
+                            attempt, attempts, deadline.elapsed(),
                         )
+                        return
+                    try:
+                        record = ksm.trip(
+                            KillSwitchScope.GLOBAL,
+                            "GLOBAL",
+                            reason=bridge_reason,
+                            actor="risk_manager_auto",
+                        )
+                        if attempt > 1:
+                            logger.info(
+                                "kill_switch_bridge_retry_succeeded op=ksm_trip "
+                                "attempt=%d/%d", attempt, attempts,
+                            )
+                        trip_other_error = None
+                        trip_value_error = None
+                        break
+                    except ValueError as exc_ve:
+                        trip_value_error = exc_ve
+                        break  # Non-retriable; fall through to race re-check.
+                    except Exception as exc_t:  # noqa: BLE001
+                        trip_other_error = exc_t
+                        # PR #258 round-5 P1 (Codex line 1234): check
+                        # whether the in-memory state was mutated to
+                        # TRIPPED on ANY attempt (not only attempt 1).
+                        # If attempt 1 fails before mutation and
+                        # attempt 2 mutates then fails audit, attempt 3
+                        # would raise ValueError and we'd silently mark
+                        # succeeded with no audit row.
+                        #
+                        # PR #258 round-5 P1 (Codex line 1247): set
+                        # ``self._pending_audit_reemit`` IMMEDIATELY on
+                        # detection so the marker survives a deadline
+                        # hit between here and the ValueError handler.
+                        if not first_attempt_post_mutation_error:
+                            try:
+                                mutation_record = ksm.get_record(
+                                    KillSwitchScope.GLOBAL, "GLOBAL",
+                                )
+                                mutation_state = (
+                                    mutation_record.state
+                                    if mutation_record is not None else None
+                                )
+                                if mutation_state in (
+                                    KillSwitchState.TRIPPED,
+                                    KillSwitchState.CLEAR_PENDING,
+                                ):
+                                    first_attempt_post_mutation_error = True
+                                    # PR #258 round-5 P1 (Codex line 1247):
+                                    # persist the marker NOW so a later
+                                    # deadline-exit cannot lose it. The
+                                    # ValueError branch (or the next
+                                    # cycle's already_tripped repair
+                                    # path) will clear it on successful
+                                    # re-emit.
+                                    self._pending_audit_reemit = True
+                                    self._pending_audit_reemit_reason = bridge_reason
+                                    logger.error(
+                                        "kill_switch_bridge_unaudited_partial_trip "
+                                        "detected: ksm.trip raised %s on "
+                                        "attempt=%d/%d AFTER mutating in-memory "
+                                        "state to %s — audit row may be "
+                                        "missing; pending_audit_reemit marker "
+                                        "persisted; will re-emit audit via "
+                                        "fallback path before marking succeeded.",
+                                        type(exc_t).__name__,
+                                        attempt, attempts,
+                                        mutation_state.value,
+                                    )
+                            except Exception:
+                                # Lookup failure — leave the flag unset
+                                # and let the post-trip recheck path
+                                # handle it.
+                                pass
+                        if attempt < attempts:
+                            delay = delays[attempt - 1]
+                            # Clip backoff to the remaining deadline so we
+                            # never sleep past the square-off budget.
+                            remaining = deadline.remaining()
+                            if remaining <= 0.0:
+                                logger.error(
+                                    "kill_switch_bridge_deadline_exceeded "
+                                    "op=ksm_trip attempt=%d/%d elapsed=%.2fs "
+                                    "(before backoff) — emergency square-off "
+                                    "will proceed.",
+                                    attempt, attempts, deadline.elapsed(),
+                                )
+                                return
+                            if delay > remaining:
+                                delay = remaining
+                            logger.warning(
+                                "kill_switch_bridge_retry op=ksm_trip "
+                                "attempt=%d/%d delay=%.2fs exc=%s",
+                                attempt, attempts, delay, exc_t,
+                            )
+                            if delay > 0:
+                                try:
+                                    time.sleep(delay)
+                                except Exception:  # pragma: no cover
+                                    pass
+                        else:
+                            logger.error(
+                                "kill_switch_bridge_retry_exhausted op=ksm_trip "
+                                "attempts=%d last_exc=%s — will retry on next "
+                                "evaluate cycle.",
+                                attempts, exc_t,
+                            )
+            finally:
+                # PR #258 round-5 P1 (Codex line 1208/1213): restore
+                # the env vars regardless of how the trip loop exits
+                # (success, ValueError, deadline-return, exception).
+                if trip_env_applied:
+                    try:
+                        if trip_prev_pg_timeout is None:
+                            os.environ.pop(_POSTGRES_TIMEOUT_ENV, None)
+                        else:
+                            os.environ[_POSTGRES_TIMEOUT_ENV] = trip_prev_pg_timeout
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+                    try:
+                        if trip_prev_audit_attempts is None:
+                            os.environ.pop(_AUDIT_PG_ATTEMPTS_ENV, None)
+                        else:
+                            os.environ[_AUDIT_PG_ATTEMPTS_ENV] = trip_prev_audit_attempts
+                    except Exception:  # pragma: no cover - defensive
+                        pass
 
             if trip_value_error is not None:
                 # ValueError from trip() means "current state is not
@@ -1827,8 +1940,20 @@ class RiskManager:
         # 5s connect = up to 15s, which can blow the bridge deadline.
         # Override the env var so that single call respects the
         # remaining bridge budget; restore afterwards.
+        #
+        # PR #258 round-5 P2 (Codex line 1845): the timeout clamp alone
+        # is insufficient because ``connect_with_retry`` defaults to
+        # ``max_attempts=3`` with 0.5/1.0s internal backoffs. Even with
+        # the per-attempt timeout tightened, three attempts × candidates
+        # × per-candidate-timeout + 1.5s backoff can blow the budget.
+        # Also set ``AUDIT_POSTGRES_MAX_ATTEMPTS=1`` (honored by
+        # ``app.core.audit_log._try_postgres_persist``) so the audit
+        # dual-write makes exactly one attempt for the duration of this
+        # call; restore afterwards.
         _POSTGRES_TIMEOUT_ENV = "POSTGRES_CONNECT_TIMEOUT_SECONDS"
+        _AUDIT_PG_ATTEMPTS_ENV = "AUDIT_POSTGRES_MAX_ATTEMPTS"
         prev_pg_timeout: Optional[str] = None
+        prev_audit_attempts: Optional[str] = None
         env_override_applied = False
         if deadline is not None:
             try:
@@ -1843,6 +1968,8 @@ class RiskManager:
                 tight = max(1, int(per_candidate))
                 prev_pg_timeout = os.environ.get(_POSTGRES_TIMEOUT_ENV)
                 os.environ[_POSTGRES_TIMEOUT_ENV] = str(tight)
+                prev_audit_attempts = os.environ.get(_AUDIT_PG_ATTEMPTS_ENV)
+                os.environ[_AUDIT_PG_ATTEMPTS_ENV] = "1"
                 env_override_applied = True
             except Exception:  # pragma: no cover - defensive
                 pass
@@ -1902,6 +2029,13 @@ class RiskManager:
                         os.environ.pop(_POSTGRES_TIMEOUT_ENV, None)
                     else:
                         os.environ[_POSTGRES_TIMEOUT_ENV] = prev_pg_timeout
+                except Exception:  # pragma: no cover - defensive
+                    pass
+                try:
+                    if prev_audit_attempts is None:
+                        os.environ.pop(_AUDIT_PG_ATTEMPTS_ENV, None)
+                    else:
+                        os.environ[_AUDIT_PG_ATTEMPTS_ENV] = prev_audit_attempts
                 except Exception:  # pragma: no cover - defensive
                     pass
         return success

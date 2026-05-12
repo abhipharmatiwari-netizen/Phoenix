@@ -2058,3 +2058,436 @@ def test_bridge_worst_case_wallclock_under_deadline_with_dsn_candidates(
         "MUST stay bounded (PR #258 round-3); took %.2fs" % elapsed
     )
     assert rm._durable_kill_switch_bridge_succeeded is False
+
+
+# ---------------------------------------------------------------------------
+# PR #258 round-5 — newly-discovered P1/P2 findings
+# ---------------------------------------------------------------------------
+
+
+def test_bridge_subsecond_budget_aborts_before_postgres_connect(monkeypatch):
+    """PR #258 round-5 P1 (Codex line 343): when earlier bridge work
+    has consumed almost all of the budget, the deadline-clamp helper
+    MUST raise ``_BridgeDeadlineExceeded`` rather than clamping up to
+    1s and entering ``connect_with_retry``. With ``candidate_count=2``
+    and remaining < 2.0s, psycopg's per-candidate minimum 1s timeout
+    would let a single connect call consume ``2 × 1s = 2s`` past the
+    deadline."""
+    import time as _time
+    import app.core.risk_manager as rm_mod
+
+    # Build a deadline near-expiry.
+    deadline = rm_mod._BridgeDeadline(timeout_seconds=0.5)
+    # Burn most of the budget; remaining ≈ 0.0–0.1s.
+    _time.sleep(0.45)
+
+    # With 2 candidates and < 2s remaining, the helper MUST raise.
+    with pytest.raises(rm_mod._BridgeDeadlineExceeded):
+        deadline.connect_timeout_seconds(
+            min_default=2, candidate_count=2,
+        )
+
+    # With 1 candidate the same call also fails because remaining < 1.0.
+    with pytest.raises(rm_mod._BridgeDeadlineExceeded):
+        deadline.connect_timeout_seconds(
+            min_default=2, candidate_count=1,
+        )
+
+
+def test_bridge_subsecond_budget_does_not_enter_psycopg(
+    tmp_path, monkeypatch, caplog,
+):
+    """PR #258 round-5 P1 (Codex line 343): end-to-end — when the
+    bridge enters the save step with subsecond budget remaining (the
+    trip/get_record steps having burned the budget), ``_do_save``
+    MUST NOT enter ``connect_with_retry`` at all. The deadline-clamp
+    helper inside ``_do_save`` raises and propagates out as a
+    deadline-exceeded short-circuit through ``_retry_with_backoff``.
+    """
+    import time as _time
+
+    monkeypatch.setenv("RISK_BRIDGE_TOTAL_DEADLINE_SECONDS", "0.6")
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+    monkeypatch.setenv("POSTGRES_FORCE_IPV4", "true")  # 2 candidates
+
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    stub_ksm = _StubKillSwitchManager()
+    runtime = SimpleNamespace(kill_switch_manager=stub_ksm)
+
+    # Make get_record artificially slow so we enter save with < 1s
+    # remaining.
+    orig_get = stub_ksm.get_record
+
+    def _slow_get(scope, scope_id):
+        _time.sleep(0.55)  # burn most of 0.6s budget
+        return orig_get(scope, scope_id)
+
+    stub_ksm.get_record = _slow_get  # type: ignore[assignment]
+
+    connect_calls = {"n": 0}
+
+    def _track_connect(*_args, **_kwargs):
+        connect_calls["n"] += 1
+        raise ConnectionError("MUST NOT be reached on subsecond budget")
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", side_effect=_track_connect), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        rm._check_kill_switch(now)
+
+    # PR #258 round-5 P1 (Codex line 343): the save step MUST refuse
+    # to start a Postgres connect when remaining < candidate_count.
+    # connect_with_retry is the audit path inside ksm.trip which we
+    # don't model here, so the count for save should be 0 entries
+    # from the save path. The stub ksm.trip() doesn't call postgres
+    # directly, so any non-zero count would be from the save attempt
+    # — which the deadline-clamp MUST have blocked.
+    assert connect_calls["n"] == 0, (
+        "save step MUST NOT enter connect_with_retry with subsecond "
+        "budget (PR #258 round-5 P1, Codex line 343); got %d calls"
+        % connect_calls["n"]
+    )
+    assert rm._durable_kill_switch_bridge_succeeded is False
+
+
+def test_bridge_initial_trip_audit_write_is_bounded(
+    tmp_path, monkeypatch,
+):
+    """PR #258 round-5 P1 (Codex line 1208/1213): the initial
+    ``ksm.trip()`` call's nested audit dual-write to Postgres MUST be
+    bounded by env overrides so it cannot block for default 3 ×
+    5s = 15s during a Postgres outage.
+
+    Verify by patching ``app.core.audit_log.emit_audit_event`` and
+    asserting the two env vars are tight (== 1 for max_attempts; <=
+    remaining-budget for connect-timeout) at the moment the audit
+    dual-write would run."""
+    monkeypatch.setenv("RISK_BRIDGE_TOTAL_DEADLINE_SECONDS", "3")
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+    monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_SECONDS", "30")
+    monkeypatch.delenv("AUDIT_POSTGRES_MAX_ATTEMPTS", raising=False)
+
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    observed_env: list = []
+
+    # ksm.trip is the stub that does NOT call emit_audit_event itself;
+    # to model the real KillSwitchManager.trip() emitting audit AFTER
+    # mutation we wrap the stub.
+    class _AuditEmittingKsm(_StubKillSwitchManager):
+        def trip(self, scope, scope_id, reason, actor):
+            # Snapshot env vars at the moment trip's audit dual-write
+            # would run — BEFORE returning the record.
+            observed_env.append({
+                "POSTGRES_CONNECT_TIMEOUT_SECONDS": os.environ.get(
+                    "POSTGRES_CONNECT_TIMEOUT_SECONDS"
+                ),
+                "AUDIT_POSTGRES_MAX_ATTEMPTS": os.environ.get(
+                    "AUDIT_POSTGRES_MAX_ATTEMPTS"
+                ),
+            })
+            return super().trip(scope, scope_id, reason, actor)
+
+    ksm = _AuditEmittingKsm()
+    runtime = SimpleNamespace(kill_switch_manager=ksm)
+
+    class _NoopConn:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", return_value=_NoopConn()), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        rm._check_kill_switch(now)
+
+    assert observed_env, "ksm.trip MUST be invoked"
+    inside = observed_env[0]
+    assert inside["AUDIT_POSTGRES_MAX_ATTEMPTS"] == "1", (
+        "initial trip MUST set AUDIT_POSTGRES_MAX_ATTEMPTS=1 to "
+        "bound the audit dual-write (PR #258 round-5 P1, Codex "
+        "line 1208/1213); saw %r" % inside["AUDIT_POSTGRES_MAX_ATTEMPTS"]
+    )
+    inside_timeout = inside["POSTGRES_CONNECT_TIMEOUT_SECONDS"]
+    assert inside_timeout is not None and int(inside_timeout) <= 3, (
+        "initial trip MUST tighten POSTGRES_CONNECT_TIMEOUT_SECONDS "
+        "to <= remaining deadline (PR #258 round-5 P1, Codex line "
+        "1208/1213); saw %r" % inside_timeout
+    )
+    # And after the bridge returns, the env vars MUST be restored.
+    assert os.environ.get("POSTGRES_CONNECT_TIMEOUT_SECONDS") == "30", (
+        "env override MUST be restored after the trip loop exits"
+    )
+    assert os.environ.get("AUDIT_POSTGRES_MAX_ATTEMPTS") is None, (
+        "AUDIT_POSTGRES_MAX_ATTEMPTS MUST be removed (no prior value) "
+        "after the trip loop exits"
+    )
+
+
+def test_bridge_marker_persists_immediately_on_post_mutation_detection(
+    tmp_path, monkeypatch,
+):
+    """PR #258 round-5 P1 (Codex line 1247): when an attempt mutates
+    the in-memory record then raises, ``self._pending_audit_reemit``
+    MUST be set IMMEDIATELY on detection — not only later in the
+    ValueError branch. If a subsequent deadline fires before the
+    ValueError handler runs, the marker survives so the NEXT cycle's
+    already-tripped repair path replays the audit.
+
+    Simulate: trip mutates state then raises; the loop hits the
+    deadline before doing anything else. The marker MUST be set on
+    the RiskManager."""
+    monkeypatch.setenv("RISK_BRIDGE_TOTAL_DEADLINE_SECONDS", "0.5")
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    import time as _time
+
+    class _MutateThenRaiseAndStallKsm(_StubKillSwitchManager):
+        def __init__(self):
+            super().__init__()
+            self.trip_calls_n = 0
+
+        def trip(self, scope, scope_id, reason, actor):
+            self.trip_calls_n += 1
+            # First attempt: mutate in-memory state then raise.
+            self._state_text = "TRIPPED"
+            # Burn budget so the deadline is exceeded BEFORE the
+            # ValueError branch can run its re-emit.
+            _time.sleep(0.6)
+            raise IOError("simulated audit disk-full after mutation")
+
+    flaky = _MutateThenRaiseAndStallKsm()
+    runtime = SimpleNamespace(kill_switch_manager=flaky)
+
+    class _NoopConn:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", return_value=_NoopConn()), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        rm._check_kill_switch(now)
+
+    # PR #258 round-5 P1 (Codex line 1247): the persistent marker MUST
+    # be set so the next cycle repairs the audit. Without the fix,
+    # the local flag was lost when the deadline fired before the
+    # ValueError handler.
+    assert rm._pending_audit_reemit is True, (
+        "pending_audit_reemit MUST be set IMMEDIATELY on post-mutation "
+        "detection (PR #258 round-5 P1, Codex line 1247)"
+    )
+    assert rm._durable_kill_switch_bridge_succeeded is False
+
+
+def test_bridge_detects_post_mutation_failure_on_every_retry(
+    tmp_path, monkeypatch, caplog,
+):
+    """PR #258 round-5 P1 (Codex line 1234): post-mutation detection
+    MUST run on every retry, not only attempt 1. Model: attempt 1
+    raises BEFORE mutating; attempt 2 mutates THEN raises; attempt 3
+    raises ValueError (state already TRIPPED). Without the fix, the
+    bridge would silently mark success with no audit row."""
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    class _MutateOnSecondAttemptKsm(_StubKillSwitchManager):
+        def __init__(self):
+            super().__init__()
+            self.n = 0
+
+        def trip(self, scope, scope_id, reason, actor):
+            self.n += 1
+            if self.n == 1:
+                # Pre-mutation failure (no state change).
+                raise ConnectionError("attempt 1 transient blip")
+            if self.n == 2:
+                # Mutate THEN raise (audit failed post-mutation).
+                self._state_text = "TRIPPED"
+                raise IOError("attempt 2 audit-write disk-full")
+            # Subsequent attempts: state is TRIPPED so raise ValueError.
+            raise ValueError(
+                "Cannot trip kill switch: current state is TRIPPED"
+            )
+
+    flaky = _MutateOnSecondAttemptKsm()
+    runtime = SimpleNamespace(kill_switch_manager=flaky)
+
+    class _NoopConn:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    audit_emissions: list = []
+
+    def _capture_audit(**kwargs):
+        audit_emissions.append(kwargs)
+        return {"audit_id": "stub"}
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", return_value=_NoopConn()), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"), \
+         patch("app.core.audit_log.emit_audit_event", side_effect=_capture_audit):
+        rm._check_kill_switch(now)
+
+    # PR #258 round-5 P1 (Codex line 1234): detection MUST fire on
+    # attempt 2 — without the every-retry check we'd silently mark
+    # success with no audit row.
+    assert any(
+        "kill_switch_bridge_unaudited_partial_trip" in rec.message
+        and rec.levelname == "ERROR"
+        for rec in caplog.records
+    ), (
+        "bridge MUST detect post-mutation audit failure on every retry "
+        "(PR #258 round-5 P1, Codex line 1234)"
+    )
+    # The audit MUST be re-emitted via the fallback path.
+    assert any(
+        evt.get("metadata", {}).get("bridge_reemit") is True
+        for evt in audit_emissions
+    ), (
+        "bridge MUST re-emit audit when post-mutation failure detected "
+        "on retry > 1 (PR #258 round-5 P1, Codex line 1234)"
+    )
+
+
+def test_audit_postgres_max_attempts_env_override():
+    """PR #258 round-5 P2 (Codex line 1845): the audit dual-write
+    helper MUST honor the ``AUDIT_POSTGRES_MAX_ATTEMPTS`` env var so
+    callers (the bridge re-emit, the initial trip loop) can bound
+    its wall-clock by setting it to ``1``."""
+    import app.core.audit_log as audit_mod
+
+    # Default is 3.
+    if "AUDIT_POSTGRES_MAX_ATTEMPTS" in os.environ:
+        del os.environ["AUDIT_POSTGRES_MAX_ATTEMPTS"]
+    assert audit_mod._audit_postgres_max_attempts() == 3
+
+    os.environ["AUDIT_POSTGRES_MAX_ATTEMPTS"] = "1"
+    try:
+        assert audit_mod._audit_postgres_max_attempts() == 1
+    finally:
+        del os.environ["AUDIT_POSTGRES_MAX_ATTEMPTS"]
+
+    # Malformed -> default.
+    os.environ["AUDIT_POSTGRES_MAX_ATTEMPTS"] = "garbage"
+    try:
+        assert audit_mod._audit_postgres_max_attempts() == 3
+    finally:
+        del os.environ["AUDIT_POSTGRES_MAX_ATTEMPTS"]
+
+    # Non-positive -> default.
+    os.environ["AUDIT_POSTGRES_MAX_ATTEMPTS"] = "0"
+    try:
+        assert audit_mod._audit_postgres_max_attempts() == 3
+    finally:
+        del os.environ["AUDIT_POSTGRES_MAX_ATTEMPTS"]
+
+
+def test_bridge_reemit_tightens_audit_max_attempts_env(tmp_path, monkeypatch):
+    """PR #258 round-5 P2 (Codex line 1845): the audit re-emit helper
+    MUST set ``AUDIT_POSTGRES_MAX_ATTEMPTS=1`` for the duration of
+    the ``emit_audit_event`` call so the nested dual-write makes
+    exactly one connect attempt rather than the default 3 (which
+    would compound with the per-attempt timeout to blow the
+    deadline). Verify the override is applied during the call AND
+    restored afterwards."""
+    monkeypatch.setenv("RISK_BRIDGE_TOTAL_DEADLINE_SECONDS", "3")
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+    monkeypatch.delenv("AUDIT_POSTGRES_MAX_ATTEMPTS", raising=False)
+
+    rm = _build_risk_manager(tmp_path)
+
+    captured: list = []
+
+    def _capture(**kwargs):
+        captured.append(
+            os.environ.get("AUDIT_POSTGRES_MAX_ATTEMPTS")
+        )
+        return {"audit_id": "stub"}
+
+    from types import SimpleNamespace as _SN
+    from app.risk.kill_switch import KillSwitchState
+
+    rec = _SN(
+        id="rec-x",
+        state=KillSwitchState.TRIPPED,
+        scope=None,
+        scope_id="GLOBAL",
+        trip_reason=None,
+        tripped_by=None,
+    )
+
+    deadline = importlib.import_module(
+        "app.core.risk_manager"
+    )._BridgeDeadline(timeout_seconds=3.0)
+
+    with patch("app.core.audit_log.emit_audit_event", side_effect=_capture):
+        ok = rm._reemit_kill_switch_bridge_audit(
+            record=rec, bridge_reason="test", deadline=deadline,
+        )
+
+    assert ok is True
+    assert captured, "emit_audit_event MUST be invoked"
+    assert captured[0] == "1", (
+        "bridge MUST set AUDIT_POSTGRES_MAX_ATTEMPTS=1 during the "
+        "audit re-emit (PR #258 round-5 P2, Codex line 1845); saw %r"
+        % captured[0]
+    )
+    # After the call returns the env var MUST be removed (no prior).
+    assert os.environ.get("AUDIT_POSTGRES_MAX_ATTEMPTS") is None, (
+        "AUDIT_POSTGRES_MAX_ATTEMPTS MUST be removed after _reemit "
+        "returns (PR #258 round-5 P2)"
+    )
+
+
+def test_bridge_worst_case_wallclock_round5_under_deadline_full_outage(
+    tmp_path, monkeypatch,
+):
+    """PR #258 round-5: combined worst-case — the bridge MUST stay
+    under the deadline + small grace EVEN when:
+      - Postgres is fully out (every connect raises after 2 DSN
+        candidates × full per-candidate timeout).
+      - The initial trip's nested audit dual-write would otherwise
+        consume default 3 attempts × full timeout.
+      - The re-emit path would otherwise also consume 3 × timeout.
+    With round-5 env overrides (initial trip + re-emit set
+    AUDIT_POSTGRES_MAX_ATTEMPTS=1), the worst case is bounded by the
+    deadline."""
+    import time as _time
+
+    monkeypatch.setenv("RISK_BRIDGE_TOTAL_DEADLINE_SECONDS", "2")
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+    monkeypatch.setenv("POSTGRES_FORCE_IPV4", "true")  # 2 candidates
+
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    stub_ksm = _StubKillSwitchManager()
+    runtime = SimpleNamespace(kill_switch_manager=stub_ksm)
+
+    def _slow_connect(*_args, **_kwargs):
+        # Model 2 DSN candidates × full connect timeout each.
+        _time.sleep(1.0)
+        _time.sleep(1.0)
+        raise ConnectionError("simulated full outage")
+
+    t0 = _time.monotonic()
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", side_effect=_slow_connect), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        rm._check_kill_switch(now)
+    elapsed = _time.monotonic() - t0
+
+    # Same bound as round-3 worst-case test but expanded to cover
+    # round-5 scenarios (initial trip audit, re-emit audit).
+    assert elapsed < 6.0, (
+        "Worst-case bridge wall-clock (round-5 full-outage model) "
+        "MUST stay bounded; took %.2fs" % elapsed
+    )
+    assert rm._durable_kill_switch_bridge_succeeded is False
