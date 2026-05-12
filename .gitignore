@@ -29,7 +29,11 @@ htmlcov/
 *.env.local
 *.env.secrets
 
-# Generated temp secret files from scripts/fetch-secrets.sh when SECRETS_DIR is inside checkout
+# Generated temp secret files from scripts/fetch-secrets.sh when SECRETS_DIR is inside checkout.
+# The broad ``*.tmp`` ignore catches operator-set custom secret names when
+# SECRETS_DIR is overridden — see #244 (Codex P1 from PR #210). The explicit
+# per-name entries below remain as a defence-in-depth list for the bundled secrets.
+*.tmp
 admin_api_key.tmp
 auth_token_secret.tmp
 control_plane_pg_password.tmp
