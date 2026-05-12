@@ -58,12 +58,46 @@ def _append_audit_event(event: dict[str, Any]) -> None:
     _try_postgres_persist(event)
 
 
+def _audit_postgres_max_attempts() -> int:
+    """Per-call ``max_attempts`` override for the audit dual-write.
+
+    PR #258 round-5 P2 (Codex line 1845): the kill-switch bridge's
+    audit re-emit calls ``emit_audit_event`` synchronously and must
+    bound the Postgres dual-write's wall-clock to fit inside the
+    bridge's remaining deadline. The default
+    ``connect_with_retry(max_attempts=3)`` plus 0.5/1.0s internal
+    backoff can consume up to ``3 * connect_timeout + 1.5s`` before
+    returning, blowing the advertised hard deadline. When
+    ``AUDIT_POSTGRES_MAX_ATTEMPTS`` is set, this overrides the
+    default so the bridge can scope it to ``max_attempts=1`` for the
+    duration of its re-emit call (and any other caller wishing to
+    bound the dual-write wall-clock can do the same).
+
+    Returns the override on a valid positive int, else the default
+    ``3`` so unrelated callers are unaffected.
+    """
+    raw = os.getenv("AUDIT_POSTGRES_MAX_ATTEMPTS", "").strip()
+    if not raw:
+        return 3
+    try:
+        parsed = int(float(raw))
+        if parsed <= 0:
+            return 3
+        return parsed
+    except Exception:
+        return 3
+
+
 def _try_postgres_persist(event: dict[str, Any]) -> None:
     """Append-only insert to Postgres audit_events table.  Never raises."""
     try:
         from app.data.postgres import connect_with_retry, get_control_plane_dsn
         dsn = get_control_plane_dsn()
-        with connect_with_retry(dsn, autocommit=True) as conn:
+        with connect_with_retry(
+            dsn,
+            autocommit=True,
+            max_attempts=_audit_postgres_max_attempts(),
+        ) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
