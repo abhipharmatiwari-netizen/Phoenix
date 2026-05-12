@@ -1393,6 +1393,18 @@ async def readyz() -> JSONResponse:
         # divergent in LIVE, fail readiness here (after the durable-
         # active check has cleared, so we're in the "durable INACTIVE
         # but legacy ACTIVE" silent-bypass scenario).
+        #
+        # Issue #247 (Codex P1 from PR #234 review): this gate MUST
+        # fire ONLY when ``divergent is True``. An earlier draft of
+        # PR #234 inverted the condition (gated on the ``else``
+        # branch), which 503ed every healthy LIVE instance while
+        # silently passing the actual silent-bypass case. The pre-
+        # check failure path above sets ``div = {"divergent": False}``
+        # so a hub-side exception in ``compute_kill_switch_divergence``
+        # also does NOT trip this gate — readyz degrades gracefully
+        # on transient signal-collection errors. See
+        # ``test_readyz_returns_503_when_kill_switch_divergent_in_live``
+        # and siblings for the pinned contract.
         try:
             if div.get("divergent"):
                 fails_ready = str(
