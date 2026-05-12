@@ -2220,13 +2220,50 @@ class PositionTrailingLockEngine:
         # normal evaluation on the next cycle. Issue #251: also drop the
         # persisted row so a subsequent restart does NOT rehydrate the
         # stale marker.
+        #
+        # PR #261 round-3 review P2 (exit_engines.py:2227): in LIVE,
+        # request ``raise_on_failure=True`` so a Postgres delete/connect
+        # failure is propagated (and surfaced as an operator-visible
+        # ERROR event) rather than swallowed here. Without this, the
+        # in-memory marker is cleared but the durable row persists and a
+        # subsequent restart rehydrates the stale marker — blocking the
+        # very position the timeout was meant to unblock until ANOTHER
+        # timeout fires. Mirror the operator-visible ERROR pattern from
+        # ``_clear_inflight_marker`` (round-2 P2). In non-LIVE, keep the
+        # historical log-only behaviour because no real broker order is
+        # at stake.
         self._inflight_markers.pop(key, None)
+        self._inflight_exit_specs.pop(key, None)
+        live = self._is_live_mode()
         try:
             self.inflight_backend.delete_marker(
-                str(tenant_id), str(broker_account_id), str(symbol)
+                str(tenant_id),
+                str(broker_account_id),
+                str(symbol),
+                raise_on_failure=live,
             )
-        except Exception:  # pragma: no cover - defensive
-            pass
+        except Exception as _exc:
+            log_event(
+                logger,
+                event_type=(
+                    "POSITION_TRAILING_LOCK_INFLIGHT_DELETE_FAILED"
+                ),
+                message=(
+                    "Durable inflight marker delete FAILED while "
+                    "ageing out a stale marker — the in-memory marker "
+                    "is already cleared but the durable row remains "
+                    "and a process restart will rehydrate the stale "
+                    "marker. Operator action: investigate Postgres "
+                    "health and DELETE the row manually if needed "
+                    "(PR #261 round-3 review P2 — exit_engines.py:2227)."
+                ),
+                level=logging.ERROR,
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=symbol,
+                broker_order_id=broker_order_id,
+                error=repr(_exc),
+            )
         log_event(
             logger,
             event_type="POSITION_TRAILING_LOCK_INFLIGHT_TIMEOUT",
@@ -2316,6 +2353,16 @@ class PositionTrailingLockEngine:
         now_mono = _t.monotonic()
         now_utc = datetime.now(timezone.utc)
         self._inflight_markers[key] = (broker_order_id, now_mono, now_utc)
+        # PR #261 round-3 review P2 (exit_engines.py:2509): pull the
+        # exit spec captured by ``_emit_exit`` immediately before this
+        # call so we can round-trip it to the durable backend. Without
+        # this, a restart hydrates the marker but ``_inflight_exit_specs``
+        # is empty and the unknown-broker-order-id terminal-evidence
+        # fallback can never recognise a matching FILLED row.
+        _spec = self._inflight_exit_specs.get(key)
+        _spec_side, _spec_units = (
+            (_spec[0], _spec[1]) if _spec else (None, None)
+        )
         if persist:
             try:
                 # PR #261 round-2 review P1 (root cause): when the caller
@@ -2333,6 +2380,8 @@ class PositionTrailingLockEngine:
                         symbol=str(symbol),
                         broker_order_id=broker_order_id,
                         submitted_at=now_utc,
+                        exit_side=_spec_side,
+                        exit_broker_units=_spec_units,
                     ),
                     raise_on_failure=bool(fail_closed),
                 )
@@ -2507,6 +2556,33 @@ class PositionTrailingLockEngine:
                     effective_mono,
                     submitted_at,
                 )
+                # PR #261 round-3 review P2 (exit_engines.py:2509):
+                # repopulate ``_inflight_exit_specs`` from the persisted
+                # exit spec so the unknown-broker-order-id fallback can
+                # match the right ledger row after a restart. Legacy
+                # rows have NULL spec columns; skip those so the engine
+                # falls back to the broker_order_id strict-match path.
+                _persisted_side = (
+                    str(marker.exit_side).strip().upper()
+                    if marker.exit_side
+                    else None
+                )
+                _persisted_units: Optional[int]
+                try:
+                    _persisted_units = (
+                        int(marker.exit_broker_units)
+                        if marker.exit_broker_units is not None
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    _persisted_units = None
+                if _persisted_units is not None and _persisted_units <= 0:
+                    _persisted_units = None
+                if _persisted_side or _persisted_units is not None:
+                    self._inflight_exit_specs[key] = (
+                        _persisted_side,
+                        _persisted_units,
+                    )
                 hydrated_count += 1
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning(
@@ -2568,19 +2644,86 @@ class PositionTrailingLockEngine:
         # submit broker orders with no durable restart guard. A process
         # restart is required after the operator has resolved the
         # Postgres outage.
+        #
+        # PR #261 round-3 review P2 (exit_engines.py:2584): previously
+        # this branch ``return``ed early, which ALSO suppressed the
+        # qty==0 closed-position cleanup paths inside ``_evaluate_runner``
+        # (manager state reset + inflight marker clear). If a position
+        # closes manually or via broker fill while the backend is
+        # unavailable, the persisted trailing-lock peak/armed state
+        # survives until restart and is then applied to a same-symbol
+        # reopen — emitting an immediate stale trailing-lock exit on
+        # the new position's first evaluate cycle. The fix: emit the
+        # warning once-per-cycle and continue running ``_evaluate_runner``
+        # so the cleanup paths still fire. ``_evaluate_runner`` consults
+        # ``self.inflight_disabled`` to refuse the broker-submission
+        # branch (preserve fail-closed) while still resetting state.
         if self.inflight_disabled:
             log_event(
                 logger,
                 event_type="POSITION_TRAILING_LOCK_DISABLED_NO_BACKEND",
                 message=(
-                    "Trailing-lock evaluation skipped: durable inflight "
-                    "backend was not constructed at startup (LIVE). "
-                    "Restart the process after Postgres is reachable "
-                    "to re-enable trailing-lock exits (PR #261 round-2 "
-                    "review P1 — runtime.py:539)."
+                    "Trailing-lock SUBMISSIONS disabled this cycle: "
+                    "durable inflight backend was not constructed at "
+                    "startup (LIVE). Closed-position cleanup paths "
+                    "(manager state reset + marker clear) still run so "
+                    "stale peak/armed state is not preserved into a "
+                    "same-symbol reopen. Restart the process after "
+                    "Postgres is reachable to re-enable trailing-lock "
+                    "exits (PR #261 round-2 review P1 — runtime.py:539; "
+                    "round-3 review P2 — exit_engines.py:2584)."
                 ),
                 level=logging.ERROR,
             )
+            # Fall through to the runner loop. ``_evaluate_runner`` reads
+            # ``self.inflight_disabled`` and skips submission while still
+            # honouring qty==0 cleanup. Skip hydration / live-mode gates
+            # below because the backend is known-bad — there is nothing
+            # to hydrate.
+            for runner in runners:
+                try:
+                    await self._evaluate_runner(
+                        runner,
+                        giveback_pct=float(
+                            getattr(
+                                self.settings,
+                                "position_trailing_lock_giveback_pct",
+                                0.10,
+                            )
+                        ),
+                        floor_inr=float(
+                            getattr(
+                                self.settings,
+                                "position_trailing_lock_floor_inr",
+                                500.0,
+                            )
+                        ),
+                        cooldown=float(
+                            getattr(
+                                self.settings,
+                                "position_trailing_lock_exit_cooldown_seconds",
+                                30.0,
+                            )
+                        ),
+                    )
+                except Exception as exc:
+                    log_event(
+                        logger,
+                        event_type=(
+                            "POSITION_TRAILING_LOCK_RUNNER_ERROR"
+                        ),
+                        message=(
+                            "PositionTrailingLockEngine runner evaluation "
+                            "failed while inflight_disabled (cleanup-only "
+                            "mode)"
+                        ),
+                        level=logging.ERROR,
+                        tenant_id=getattr(runner, "tenant_id", None),
+                        broker_account_id=getattr(
+                            runner, "broker_account_id", None,
+                        ),
+                        error=repr(exc),
+                    )
             return
         # Issue #251: hydrate persisted inflight markers from the durable
         # backend on the first evaluate call. Restart-survival depends on
@@ -2710,6 +2853,15 @@ class PositionTrailingLockEngine:
             # cleanup branch above continues to fire for every closed
             # position in this cycle.
             if kill_switch_tripped:
+                continue
+            # PR #261 round-3 review P2 (exit_engines.py:2584): when the
+            # durable inflight backend was not constructed at startup,
+            # refuse to submit any trailing-lock exit (preserve the
+            # fail-closed contract from runtime.py:539). The qty==0
+            # cleanup path above STILL fires so that a position closed
+            # during the backend-outage window does not preserve stale
+            # peak/armed state into a same-symbol reopen.
+            if self.inflight_disabled:
                 continue
             # Issue #225: per-position inflight-marker check. If a recent
             # trailing-lock submission for this (tenant, account, symbol)
@@ -3065,13 +3217,49 @@ class PositionTrailingLockEngine:
                     max_age_seconds=max_age,
                 )
                 continue
+            # PR #261 round-3 review P2 (exit_engines.py:3072): when the
+            # terminal-evidence gate has cleared, propagate Postgres
+            # delete failures in LIVE so a swallowed delete cannot leave
+            # a durable row behind. The in-memory marker has already been
+            # popped above, so a swallowed durable delete would survive
+            # a restart and rehydrate the stale marker — blocking the
+            # legitimate same-symbol reopen we just verified is safe to
+            # allow. Mirror the operator-visible ERROR pattern used by
+            # ``_clear_inflight_marker`` and the round-3 stale-marker
+            # timeout path. In non-LIVE, keep the historical log-only
+            # behaviour because no real broker order is at stake.
             self._inflight_markers.pop(key, None)
+            self._inflight_exit_specs.pop(key, None)
+            live_terminal = self._is_live_mode()
             try:
                 self.inflight_backend.delete_marker(
-                    tenant_key, account_key, str(symbol)
+                    tenant_key,
+                    account_key,
+                    str(symbol),
+                    raise_on_failure=live_terminal,
                 )
-            except Exception:  # pragma: no cover - defensive
-                pass
+            except Exception as _exc:
+                log_event(
+                    logger,
+                    event_type=(
+                        "POSITION_TRAILING_LOCK_INFLIGHT_DELETE_FAILED"
+                    ),
+                    message=(
+                        "Durable inflight marker delete FAILED in the "
+                        "terminal-evidence clear path — the in-memory "
+                        "marker is already cleared but the durable row "
+                        "remains and a process restart will rehydrate "
+                        "the stale marker. Operator action: investigate "
+                        "Postgres health and DELETE the row manually if "
+                        "needed (PR #261 round-3 review P2 — "
+                        "exit_engines.py:3072)."
+                    ),
+                    level=logging.ERROR,
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    symbol=symbol,
+                    error=repr(_exc),
+                )
             self._disappeared_symbol_miss_counts.pop(key, None)
             self._disappeared_symbol_last_fingerprint.pop(key, None)
             # Issue #225 (PR #236 round-2 review P1) + issue #250: also
@@ -3228,11 +3416,16 @@ class PositionTrailingLockEngine:
         # ledger entry for this symbol, but only treat it as terminal
         # evidence if it is unambiguously terminal AND it matches the
         # captured marker spec (side opposite to the position, exit
-        # quantity in lots, submitted at or after the marker armed).
-        # Without these criteria an older filled ENTRY order for the
-        # same symbol would satisfy the gate and clear the marker
-        # while the actual exit order is still live (PR #261 round-2
-        # review P2 — exit_engines.py:3047).
+        # quantity in BROKER UNITS — not lots — submitted at or after
+        # the marker armed). The broker snapshot reports
+        # ``OrderStatus.quantity`` in broker units after the router
+        # resolves the request quantity to ``broker_qty``; the spec
+        # capture in ``_emit_exit`` therefore records ``broker_units``
+        # for an apples-to-apples comparison (PR #261 round-3 review
+        # P2 — exit_engines.py:3283). Without these criteria an older
+        # filled ENTRY order for the same symbol would satisfy the
+        # gate and clear the marker while the actual exit order is
+        # still live (PR #261 round-2 review P2 — exit_engines.py:3047).
         #
         # If the caller could not supply ``expected_side`` /
         # ``expected_quantity`` (e.g. legacy code paths that have not
@@ -3378,6 +3571,21 @@ class PositionTrailingLockEngine:
         # the right ledger row rather than any unrelated entry order
         # for the same symbol. Indexed by the same (tenant, account,
         # symbol) key the marker uses.
+        #
+        # PR #261 round-3 review P2 (exit_engines.py:3283): record
+        # ``broker_units`` (not lots). The broker order snapshot reports
+        # ``OrderStatus.quantity`` in BROKER UNITS after the router
+        # replaces the request quantity with ``broker_qty``. For a
+        # derivative position such as 1 lot of NIFTY (50 units) or
+        # NATURALGAS (1250 units), a real matching FILLED exit row will
+        # have ``quantity=50`` / ``quantity=1250`` while ``expected_qty``
+        # captured as ``exit_plan.lots`` would have been ``1`` — the
+        # equality check in ``_marker_has_terminal_broker_evidence``
+        # would therefore NEVER match and the marker could only clear
+        # by timeout. ``PositionExitPlan.broker_units`` is already
+        # computed by ``build_position_exit_plan`` and is exactly what
+        # the router writes onto the ``OrderRequest.quantity``, so the
+        # ledger row's ``quantity`` field will match.
         _key = (
             str(tenant_id), str(broker_account_id), str(decision.symbol),
         )
@@ -3388,10 +3596,27 @@ class PositionTrailingLockEngine:
                 if hasattr(_exit_side, "value")
                 else str(_exit_side or "")
             ).strip().upper()
-            _exit_lots = int(exit_plan.lots or 0)
+            # Prefer broker_units (units the broker actually sees).
+            # Fall back to order_req.quantity (also in broker units
+            # after the router resolves lot_size) then to lots if the
+            # plan was constructed before broker_units was populated.
+            _exit_units_candidates = (
+                exit_plan.broker_units,
+                getattr(exit_plan.order_req, "quantity", None),
+                exit_plan.lots,
+            )
+            _exit_units: Optional[int] = None
+            for _candidate in _exit_units_candidates:
+                try:
+                    _parsed = int(_candidate)
+                except (TypeError, ValueError):
+                    continue
+                if _parsed > 0:
+                    _exit_units = _parsed
+                    break
             self._inflight_exit_specs[_key] = (
                 _exit_side_str or None,
-                _exit_lots if _exit_lots > 0 else None,
+                _exit_units,
             )
         except Exception:  # pragma: no cover - defensive
             self._inflight_exit_specs[_key] = (None, None)

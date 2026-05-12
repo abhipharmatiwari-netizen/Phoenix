@@ -414,6 +414,19 @@ class PositionTrailingLockInflightMarker:
     broker terminal confirmation. ``submitted_at`` is the UTC wall-clock instant
     the marker was armed; the engine compares the age against the configured
     inflight max age to decide when to auto-clear after a hard timeout.
+
+    PR #261 round-3 review P2 (exit_engines.py:2509): ``exit_side`` and
+    ``exit_broker_units`` are persisted alongside the marker so that the
+    unknown-broker-order-id terminal-evidence fallback can match the right
+    ledger row even after a process restart. Without these, hydration
+    restores the marker but the in-memory ``_inflight_exit_specs`` dict
+    is empty, so the post-restart fallback can never recognise a matching
+    FILLED exit row and the marker is forced to wait for the inflight
+    timeout. Both fields are Optional because legacy persisted rows
+    written before this round-3 change have NULL in the new columns;
+    the engine then falls back to the broker_order_id strict-match
+    path and the spec capture in ``_emit_exit`` repopulates the in-
+    memory dict on the next arm.
     """
 
     tenant_id: str
@@ -421,6 +434,8 @@ class PositionTrailingLockInflightMarker:
     symbol: str
     broker_order_id: Optional[str]
     submitted_at: datetime
+    exit_side: Optional[str] = None
+    exit_broker_units: Optional[int] = None
 
 
 @runtime_checkable
@@ -512,25 +527,46 @@ class PostgresPositionTrailingLockInflightBackend:
 
     _CREATE_TABLE = """
     CREATE TABLE IF NOT EXISTS position_trailing_lock_inflight (
-        tenant_id          TEXT        NOT NULL,
-        broker_account_id  TEXT        NOT NULL,
-        symbol             TEXT        NOT NULL,
-        broker_order_id    TEXT,
-        submitted_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        tenant_id           TEXT        NOT NULL,
+        broker_account_id   TEXT        NOT NULL,
+        symbol              TEXT        NOT NULL,
+        broker_order_id     TEXT,
+        submitted_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        exit_side           TEXT,
+        exit_broker_units   INTEGER,
+        updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
         PRIMARY KEY (tenant_id, broker_account_id, symbol)
     );
     """
 
+    # PR #261 round-3 review P2 (exit_engines.py:2509): idempotent
+    # ALTER TABLE adds the new columns on existing deployments where
+    # the table was created by an older migration (or an older
+    # ``CREATE TABLE IF NOT EXISTS`` revision of this module).
+    # ``ADD COLUMN IF NOT EXISTS`` is supported by Postgres 9.6+ and
+    # is safe to run on every backend init.
+    _ALTER_ADD_COLUMNS = (
+        (
+            "ALTER TABLE position_trailing_lock_inflight "
+            "ADD COLUMN IF NOT EXISTS exit_side TEXT;"
+        ),
+        (
+            "ALTER TABLE position_trailing_lock_inflight "
+            "ADD COLUMN IF NOT EXISTS exit_broker_units INTEGER;"
+        ),
+    )
+
     _UPSERT = """
     INSERT INTO position_trailing_lock_inflight
         (tenant_id, broker_account_id, symbol, broker_order_id,
-         submitted_at, updated_at)
-    VALUES (%s, %s, %s, %s, %s, %s)
+         submitted_at, exit_side, exit_broker_units, updated_at)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (tenant_id, broker_account_id, symbol) DO UPDATE SET
-        broker_order_id = EXCLUDED.broker_order_id,
-        submitted_at    = EXCLUDED.submitted_at,
-        updated_at      = EXCLUDED.updated_at;
+        broker_order_id   = EXCLUDED.broker_order_id,
+        submitted_at      = EXCLUDED.submitted_at,
+        exit_side         = EXCLUDED.exit_side,
+        exit_broker_units = EXCLUDED.exit_broker_units,
+        updated_at        = EXCLUDED.updated_at;
     """
 
     _DELETE = """
@@ -539,7 +575,8 @@ class PostgresPositionTrailingLockInflightBackend:
     """
 
     _LIST_ALL = """
-    SELECT tenant_id, broker_account_id, symbol, broker_order_id, submitted_at
+    SELECT tenant_id, broker_account_id, symbol, broker_order_id,
+           submitted_at, exit_side, exit_broker_units
     FROM position_trailing_lock_inflight;
     """
 
@@ -550,6 +587,17 @@ class PostgresPositionTrailingLockInflightBackend:
         conn = connect_with_retry(dsn)
         try:
             conn.execute(self._CREATE_TABLE)
+            # Idempotent ALTER for existing deployments (round-3 P2).
+            for ddl in self._ALTER_ADD_COLUMNS:
+                try:
+                    conn.execute(ddl)
+                except Exception:
+                    logger.exception(
+                        "position_trailing_lock_inflight: idempotent ALTER "
+                        "TABLE failed for `%s` — backend will still operate "
+                        "but the round-3 spec round-trip may be degraded.",
+                        ddl,
+                    )
         finally:
             conn.close()
 
@@ -578,6 +626,27 @@ class PostgresPositionTrailingLockInflightBackend:
             return
         try:
             now_utc = datetime.now(timezone.utc)
+            # PR #261 round-3 review P2 (exit_engines.py:2509): round-trip
+            # the exit spec (side + broker units) alongside the marker so
+            # the unknown-broker-order-id terminal-evidence fallback can
+            # match the right ledger row after a restart. Both columns
+            # are NULL-tolerant; legacy markers written before this
+            # change persist with NULL and the engine falls back to the
+            # broker_order_id strict path until the spec is repopulated.
+            exit_side = (
+                str(marker.exit_side).strip().upper()
+                if marker.exit_side
+                else None
+            )
+            exit_broker_units: Optional[int]
+            try:
+                exit_broker_units = (
+                    int(marker.exit_broker_units)
+                    if marker.exit_broker_units is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                exit_broker_units = None
             conn.execute(
                 self._UPSERT,
                 (
@@ -586,6 +655,8 @@ class PostgresPositionTrailingLockInflightBackend:
                     marker.symbol,
                     marker.broker_order_id,
                     marker.submitted_at,
+                    exit_side,
+                    exit_broker_units,
                     now_utc,
                 ),
             )
@@ -672,6 +743,39 @@ class PostgresPositionTrailingLockInflightBackend:
                         submitted_at = datetime.now(timezone.utc)
                 if submitted_at.tzinfo is None:
                     submitted_at = submitted_at.replace(tzinfo=timezone.utc)
+                # PR #261 round-3 review P2 (exit_engines.py:2509):
+                # round-trip the persisted exit spec so the engine can
+                # repopulate ``_inflight_exit_specs`` on hydration. Rows
+                # written before the round-3 change have NULL in these
+                # columns; treat as ``None`` and let the engine fall
+                # back to the broker_order_id strict-match path.
+                # Defensive index access: tolerate older backends that
+                # might not surface the new columns yet (e.g. mid-roll
+                # deployments where the ALTER TABLE has not yet run).
+                try:
+                    exit_side_raw = row[5]
+                except IndexError:
+                    exit_side_raw = None
+                try:
+                    exit_units_raw = row[6]
+                except IndexError:
+                    exit_units_raw = None
+                exit_side_val: Optional[str] = (
+                    str(exit_side_raw).strip().upper()
+                    if exit_side_raw not in (None, "")
+                    else None
+                )
+                exit_units_val: Optional[int]
+                try:
+                    exit_units_val = (
+                        int(exit_units_raw)
+                        if exit_units_raw is not None
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    exit_units_val = None
+                if exit_units_val is not None and exit_units_val <= 0:
+                    exit_units_val = None
                 out.append(
                     PositionTrailingLockInflightMarker(
                         tenant_id=str(row[0] or ""),
@@ -679,6 +783,8 @@ class PostgresPositionTrailingLockInflightBackend:
                         symbol=str(row[2] or ""),
                         broker_order_id=(str(row[3]) if row[3] is not None else None),
                         submitted_at=submitted_at,
+                        exit_side=exit_side_val,
+                        exit_broker_units=exit_units_val,
                     )
                 )
         except Exception:

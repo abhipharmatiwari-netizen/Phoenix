@@ -2938,14 +2938,21 @@ async def test_pr261_round2_unknown_id_fallback_accepts_matching_exit_row():
     key = ("t-1", "A1", "NG22MAY26255CE")
     assert key in engine._inflight_markers
     spec = engine._inflight_exit_specs.get(key)
-    assert spec is not None and spec[0] == "SELL" and spec[1] == 1, (
-        "marker spec capture must record SELL side and 1 lot for the "
-        "subsequent fallback match"
+    # PR #261 round-3 review P2 (exit_engines.py:3283): the spec is
+    # now captured in BROKER UNITS (1 lot of NG = 1250 units) so the
+    # subsequent fallback compares against the broker ledger row's
+    # ``OrderStatus.quantity``, which is also broker units after the
+    # router rewrites quantity to ``broker_qty``.
+    assert spec is not None and spec[0] == "SELL" and spec[1] == 1250, (
+        "marker spec capture must record SELL side and 1250 broker "
+        "units (1 lot * 1250 lot_size) for the subsequent fallback "
+        "match (PR #261 round-3 review P2 — exit_engines.py:3283)"
     )
     _age_inflight_markers_past_grace(engine)
 
     # Symbol disappears AND a FILLED SELL row appears in the ledger,
-    # quantity=1 (matches marker), updated_at AFTER the marker armed.
+    # quantity=1250 broker units (matches marker), updated_at AFTER
+    # the marker armed.
     from datetime import datetime, timezone
     exit_row = OrderStatus(
         order_id="BOI-LATE-EXIT",
@@ -2954,8 +2961,8 @@ async def test_pr261_round2_unknown_id_fallback_accepts_matching_exit_row():
         status="FILLED",
         order_type="MARKET",
         product_type="INTRADAY",
-        quantity=1,
-        filled_quantity=1,
+        quantity=1250,
+        filled_quantity=1250,
         updated_at=datetime.now(timezone.utc).isoformat(),
     )
     state_store.set_orders("A1", [exit_row])
@@ -3040,4 +3047,527 @@ async def test_pr261_round2_clear_inflight_marker_paper_keeps_log_only(monkeypat
     assert backend.delete_raise_on_failure == [False], (
         "PAPER/SHADOW must keep raise_on_failure=False (legacy "
         "log-only delete preserved)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# PR #261 round-3 review: five verified-new P2 findings on head aefa6bb.
+#   * Surface delete failures in the terminal-evidence clear path
+#     (exit_engines.py:3072)
+#   * Propagate stale-marker delete failures in LIVE
+#     (exit_engines.py:2227)
+#   * Persist the exit spec needed after unknown-id restarts
+#     (exit_engines.py:2509)
+#   * Keep cleanup running when the inflight backend is disabled
+#     (exit_engines.py:2584)
+#   * Compare exit rows using broker units, not lots
+#     (exit_engines.py:3283)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pr261_round3_stale_marker_timeout_surfaces_delete_failure_in_live(
+    monkeypatch,
+):
+    """P2 (exit_engines.py:2227): the stale-marker timeout clear path
+    in ``_is_inflight_blocked`` MUST pass ``raise_on_failure=True`` to
+    the backend in LIVE so a Postgres delete failure is surfaced via a
+    structured ERROR event rather than silently leaving the durable
+    row behind for a future restart to rehydrate."""
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    state_store = StateStore()
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-261-R3A")
+
+    class _DeleteFailingBackend(_FakeInflightBackend):
+        def delete_marker(
+            self, tenant_id, broker_account_id, symbol,
+            *, raise_on_failure: bool = False,
+        ):
+            self.delete_calls.append(
+                (str(tenant_id), str(broker_account_id), str(symbol))
+            )
+            self.delete_raise_on_failure.append(bool(raise_on_failure))
+            raise RuntimeError("simulated postgres outage on delete")
+
+    backend = _DeleteFailingBackend()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(
+            position_trailing_lock_inflight_max_seconds=0.0,
+        ),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+        inflight_backend=backend,  # type: ignore[arg-type]
+    )
+    # Seed a marker manually and invoke the stale-marker check; the
+    # zero max-age forces it through the auto-clear branch.
+    from datetime import datetime, timezone
+    engine._inflight_markers[("t-1", "A1", "S")] = (
+        "BOI-STALE", 0.0, datetime.now(timezone.utc),
+    )
+    blocked = engine._is_inflight_blocked(
+        tenant_id="t-1", broker_account_id="A1", symbol="S",
+    )
+    assert blocked is False, (
+        "stale marker with age > max_age must clear and return False"
+    )
+    assert backend.delete_raise_on_failure == [True], (
+        "stale-marker timeout MUST request raise_on_failure=True in "
+        "LIVE so a Postgres delete failure is propagated and surfaced "
+        "as an ERROR event (PR #261 round-3 P2 — exit_engines.py:2227)"
+    )
+    # The in-memory marker is gone even though the durable delete
+    # failed — operator visibility comes via the structured ERROR log.
+    assert ("t-1", "A1", "S") not in engine._inflight_markers
+
+
+@pytest.mark.asyncio
+async def test_pr261_round3_stale_marker_timeout_paper_keeps_log_only(monkeypatch):
+    """In PAPER/SHADOW the stale-marker timeout path must KEEP the
+    historical log-only behaviour (``raise_on_failure=False``) so dev
+    loops are not destabilised by backend hiccups."""
+    monkeypatch.setenv("TRADE_MODE", "PAPER")
+    state_store = StateStore()
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-261-R3B")
+    backend = _FakeInflightBackend()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(
+            position_trailing_lock_inflight_max_seconds=0.0,
+        ),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+        inflight_backend=backend,  # type: ignore[arg-type]
+    )
+    from datetime import datetime, timezone
+    engine._inflight_markers[("t-1", "A1", "S")] = (
+        "BOI-STALE", 0.0, datetime.now(timezone.utc),
+    )
+    engine._is_inflight_blocked(
+        tenant_id="t-1", broker_account_id="A1", symbol="S",
+    )
+    assert backend.delete_raise_on_failure == [False], (
+        "PAPER/SHADOW must KEEP raise_on_failure=False on the "
+        "stale-marker timeout path"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pr261_round3_terminal_evidence_clear_surfaces_delete_failure_in_live(
+    monkeypatch,
+):
+    """P2 (exit_engines.py:3072): when the disappeared-symbol sweep
+    finds terminal broker evidence in LIVE, the durable
+    ``delete_marker`` call MUST opt into ``raise_on_failure=True`` and
+    surface failures via the
+    ``POSITION_TRAILING_LOCK_INFLIGHT_DELETE_FAILED`` event. Without
+    this, a swallowed Postgres delete leaves a stale row that a
+    restart would rehydrate."""
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    from app.brokers.base import OrderStatus
+    from datetime import datetime, timezone
+
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-261-R3C")
+
+    class _TerminalDeleteFailingBackend(_FakeInflightBackend):
+        def delete_marker(
+            self, tenant_id, broker_account_id, symbol,
+            *, raise_on_failure: bool = False,
+        ):
+            self.delete_calls.append(
+                (str(tenant_id), str(broker_account_id), str(symbol))
+            )
+            self.delete_raise_on_failure.append(bool(raise_on_failure))
+            raise RuntimeError("simulated postgres outage on terminal-delete")
+
+    backend = _TerminalDeleteFailingBackend()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+        inflight_backend=backend,  # type: ignore[arg-type]
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key in engine._inflight_markers
+
+    # Symbol disappears AND ledger shows the matching exit row in a
+    # terminal state — drives the sweep into the terminal-evidence
+    # clear path at line ~3068.
+    state_store.set_positions("A1", [])
+    exit_row = OrderStatus(
+        order_id="BOI-261-R3C",
+        symbol="NG22MAY26255CE",
+        side="SELL",
+        status="FILLED",
+        order_type="MARKET",
+        product_type="INTRADAY",
+        quantity=1250,
+        filled_quantity=1250,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+    )
+    state_store.set_orders("A1", [exit_row])
+    state_store.set_order_snapshot("A1", [exit_row])
+    _age_inflight_markers_past_grace(engine)
+    _mark_positions_sync_fresh(state_store, "A1")
+    # Reset the delete-call recording from the pre-arm path so we
+    # measure ONLY the terminal-evidence clear-path call.
+    backend.delete_raise_on_failure.clear()
+    backend.delete_calls.clear()
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    # Force a second distinct fingerprint to clear the disappeared-
+    # symbol miss-counter threshold.
+    _mark_positions_sync_fresh(state_store, "A1")
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert backend.delete_raise_on_failure, (
+        "terminal-evidence clear path MUST call delete_marker"
+    )
+    assert backend.delete_raise_on_failure[-1] is True, (
+        "terminal-evidence clear in LIVE MUST pass "
+        "raise_on_failure=True (PR #261 round-3 P2 — "
+        "exit_engines.py:3072)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pr261_round3_inflight_disabled_still_runs_qty0_cleanup():
+    """P2 (exit_engines.py:2584): when ``inflight_disabled=True`` the
+    engine MUST still run the qty==0 cleanup paths so a position that
+    closes during the backend-outage window does NOT preserve stale
+    peak/armed manager state into a same-symbol reopen. Previously the
+    top-level ``return`` skipped the entire cycle, including cleanup.
+    """
+    state_store = StateStore()
+    manager = PositionTrailingLockManager(
+        backend=_NoopPositionTrailingLockBackend()
+    )
+    # Pre-seed manager state so we have something to reset.
+    manager.evaluate(
+        tenant_id="t-1",
+        broker_account_id="A1",
+        symbol="NG22MAY26255CE",
+        current_unrealized_pnl=2500.0,
+        floor_inr=500.0,
+        giveback_pct=0.10,
+        exit_cooldown_seconds=0.0,
+    )
+    assert ("t-1", "A1", "NG22MAY26255CE") in manager._states, (
+        "test scaffolding: manager must have armed peak"
+    )
+
+    # Position now reports qty=0 (closed). Engine runs in
+    # inflight_disabled mode — submissions are blocked but the qty==0
+    # cleanup path MUST still execute and reset manager state.
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=0, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-261-R3D")
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=manager,
+        inflight_disabled=True,
+    )
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert router.calls == [], (
+        "router MUST NOT be invoked when inflight_disabled=True "
+        "(submission fail-closed)"
+    )
+    assert ("t-1", "A1", "NG22MAY26255CE") not in manager._states, (
+        "qty==0 cleanup MUST reset manager state even when "
+        "inflight_disabled=True so a same-symbol reopen does not "
+        "reuse stale peak/armed state (PR #261 round-3 P2 — "
+        "exit_engines.py:2584)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pr261_round3_inflight_disabled_still_blocks_submissions():
+    """Companion to the cleanup-still-runs test: even with the new
+    fall-through evaluator, ``inflight_disabled=True`` must still
+    refuse all broker submissions for non-zero positions."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-261-R3E")
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(
+            backend=_NoopPositionTrailingLockBackend()
+        ),
+        inflight_disabled=True,
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert router.calls == [], (
+        "inflight_disabled must STILL block submissions for non-zero "
+        "positions (preserve fail-closed contract)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pr261_round3_spec_capture_uses_broker_units_not_lots():
+    """P2 (exit_engines.py:3283): the marker spec captured at arm time
+    MUST record ``exit_plan.broker_units`` (e.g. 1250 for 1 lot of NG)
+    rather than ``exit_plan.lots`` (which would be 1). The broker
+    ledger row's ``OrderStatus.quantity`` is in broker units after
+    the router replaces request quantity with ``broker_qty``, so an
+    apples-to-apples comparison requires broker units on both sides.
+    """
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-261-R3F")
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(
+            backend=_NoopPositionTrailingLockBackend()
+        ),
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    spec = engine._inflight_exit_specs.get(
+        ("t-1", "A1", "NG22MAY26255CE")
+    )
+    assert spec is not None, "exit spec must be captured at arm time"
+    side, units = spec
+    assert side == "SELL", "exit side must be SELL for a long NG position"
+    assert units == 1250, (
+        "spec quantity MUST be broker_units (1250 = 1 lot * 1250 "
+        "lot_size), not lots (PR #261 round-3 P2 — "
+        "exit_engines.py:3283)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pr261_round3_unknown_id_fallback_matches_broker_units_ledger_row():
+    """P2 (exit_engines.py:3283): with the spec captured in broker
+    units, an unknown-broker-order-id fallback presented with a real
+    matching FILLED row (quantity=1250 broker units) MUST recognise
+    it as terminal evidence. Before this fix, the gate compared
+    expected_qty=1 (lots) against order.quantity=1250 (units) and the
+    marker could only clear by timeout."""
+    from app.brokers.base import OrderStatus
+    from datetime import datetime, timezone
+
+    class _NoOrderIdRouter:
+        def __init__(self):
+            self.calls = []
+
+        async def submit_order(
+            self, *, tenant_id, broker_account_id, strategy_id, order_req,
+        ):
+            self.calls.append(order_req)
+            return ("hub-order-id", SimpleNamespace(status="OK"))
+
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _NoOrderIdRouter()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(
+            backend=_NoopPositionTrailingLockBackend()
+        ),
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key in engine._inflight_markers, "marker must be armed"
+    _age_inflight_markers_past_grace(engine)
+
+    # Symbol disappears and the broker ledger shows a matching SELL
+    # FILLED row in BROKER UNITS (1250), updated_at after the marker.
+    exit_row = OrderStatus(
+        order_id="BOI-LATE-EXIT-R3",
+        symbol="NG22MAY26255CE",
+        side="SELL",
+        status="FILLED",
+        order_type="MARKET",
+        product_type="INTRADAY",
+        quantity=1250,  # broker units, NOT lots
+        filled_quantity=1250,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+    )
+    state_store.set_orders("A1", [exit_row])
+    state_store.set_order_snapshot("A1", [exit_row])
+    state_store.set_positions("A1", [])
+    _mark_positions_sync_fresh(state_store, "A1")
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _mark_positions_sync_fresh(state_store, "A1")
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    assert key not in engine._inflight_markers, (
+        "a matching SELL FILLED row with quantity=1250 broker units "
+        "MUST clear the marker via the unknown-id fallback (PR #261 "
+        "round-3 P2 — exit_engines.py:3283)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pr261_round3_exit_spec_round_trips_via_backend_on_restart():
+    """P2 (exit_engines.py:2509): the exit spec MUST be persisted to
+    the durable backend alongside the marker and repopulated on
+    hydration so the unknown-broker-order-id fallback works after a
+    restart. Simulates: arm marker via submit, then construct a fresh
+    engine over the same backend, verify ``_inflight_exit_specs``
+    survives.
+    """
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-261-R3G")
+    backend = _FakeInflightBackend()
+    engine_pre = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(
+            backend=_NoopPositionTrailingLockBackend()
+        ),
+        inflight_backend=backend,  # type: ignore[arg-type]
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine_pre.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine_pre.evaluate_runners([_runner("t-1", "A1")])
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    pre_spec = engine_pre._inflight_exit_specs.get(key)
+    assert pre_spec is not None and pre_spec[0] == "SELL" and pre_spec[1] == 1250, (
+        "pre-restart spec must be (SELL, 1250)"
+    )
+
+    # Verify the spec was actually written through to the durable
+    # backend (the save path includes exit_side / exit_broker_units).
+    saved_marker = backend._rows[key]
+    assert saved_marker.exit_side == "SELL", (
+        "save_marker MUST persist exit_side to the durable backend "
+        "(PR #261 round-3 P2 — exit_engines.py:2509)"
+    )
+    assert saved_marker.exit_broker_units == 1250, (
+        "save_marker MUST persist exit_broker_units to the durable "
+        "backend (PR #261 round-3 P2 — exit_engines.py:2509)"
+    )
+
+    # Construct a FRESH engine instance over the SAME backend to
+    # simulate a process restart. Hydration must repopulate the spec.
+    engine_post = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(
+            backend=_NoopPositionTrailingLockBackend()
+        ),
+        inflight_backend=backend,  # type: ignore[arg-type]
+    )
+    # An evaluate cycle triggers lazy hydration.
+    state_store.set_positions("A1", [])  # symbol disappeared post-restart
+    _mark_positions_sync_fresh(state_store, "A1")
+    await engine_post.evaluate_runners([_runner("t-1", "A1")])
+    post_spec = engine_post._inflight_exit_specs.get(key)
+    assert post_spec is not None, (
+        "post-restart hydration MUST repopulate _inflight_exit_specs "
+        "from the durable backend (PR #261 round-3 P2 — "
+        "exit_engines.py:2509)"
+    )
+    assert post_spec[0] == "SELL" and post_spec[1] == 1250, (
+        "post-restart spec must round-trip exactly (SELL, 1250)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pr261_round3_legacy_marker_without_spec_hydrates_cleanly():
+    """Companion to the round-trip test: rows written before the
+    round-3 schema change have NULL ``exit_side``/``exit_broker_units``.
+    Hydration MUST tolerate them — leaving ``_inflight_exit_specs``
+    empty for that key — so the engine falls back to the broker_order_id
+    strict-match path without raising."""
+    from app.pnl.position_trailing_lock import (
+        PositionTrailingLockInflightMarker,
+    )
+    from datetime import datetime, timezone
+
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-261-R3H")
+    backend = _FakeInflightBackend()
+    # Seed a "legacy" marker: spec fields default to None.
+    backend.save_marker(
+        PositionTrailingLockInflightMarker(
+            tenant_id="t-1",
+            broker_account_id="A1",
+            symbol="NG22MAY26255CE",
+            broker_order_id="BOI-LEGACY",
+            submitted_at=datetime.now(timezone.utc),
+        )
+    )
+    backend.save_calls.clear()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(
+            backend=_NoopPositionTrailingLockBackend()
+        ),
+        inflight_backend=backend,  # type: ignore[arg-type]
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    # Marker rehydrated.
+    assert ("t-1", "A1", "NG22MAY26255CE") in engine._inflight_markers, (
+        "legacy marker must still rehydrate to in-memory dict"
+    )
+    # Spec dict is empty for the legacy key (no NULL injection).
+    assert ("t-1", "A1", "NG22MAY26255CE") not in engine._inflight_exit_specs, (
+        "legacy markers with NULL spec columns must NOT populate "
+        "_inflight_exit_specs — the engine falls back to the "
+        "broker_order_id strict path until the spec is repopulated "
+        "on the next arm (PR #261 round-3 P2)"
+    )
+    # Router must be blocked by the rehydrated marker.
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert router.calls == [], (
+        "rehydrated legacy marker must block duplicate submission"
     )
