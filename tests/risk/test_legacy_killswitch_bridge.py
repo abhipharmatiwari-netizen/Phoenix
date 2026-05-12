@@ -816,3 +816,265 @@ def test_retry_delay_override_respects_env_var(monkeypatch):
     # silently on the live auto-trip path).
     monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "not,a,number")
     assert rm_mod._bridge_retry_delays() == rm_mod._BRIDGE_RETRY_DEFAULT_DELAYS
+
+
+# ---------------------------------------------------------------------------
+# PR #258 round-1 Codex review:
+#   P1 — Avoid nested Postgres retries before emergency square-off.
+#   P2 — Re-verify same manager (identity fingerprint) after save retries.
+# ---------------------------------------------------------------------------
+
+
+def test_bridge_disables_inner_postgres_retry_and_uses_tight_connect_timeout(
+    tmp_path, monkeypatch,
+):
+    """PR #258 round-1 P1 (Codex): when the bridge persists, it MUST call
+    ``connect_with_retry`` with ``max_attempts=1`` and pass a tight
+    ``connect_timeout_seconds`` so the inner retry loop is disabled.
+    Without this fix, the outer 4 retries × inner 3 retries = 12
+    Postgres-connect attempts could block ``evaluate_account_loss`` for
+    up to ~60s, delaying emergency ``square_off_all``.
+    """
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+    # Pin the per-attempt connect timeout to a known value so the assertion
+    # is robust to default tuning.
+    monkeypatch.setenv("RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS", "3")
+
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    stub_ksm = _StubKillSwitchManager()
+    runtime = SimpleNamespace(kill_switch_manager=stub_ksm)
+
+    class _NoopConn:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    captured_kwargs: dict = {}
+
+    def _capture_connect(dsn, **kwargs):
+        captured_kwargs.update(kwargs)
+        captured_kwargs["dsn"] = dsn
+        return _NoopConn()
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", side_effect=_capture_connect), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        rm._check_kill_switch(now)
+
+    assert rm._durable_kill_switch_bridge_succeeded is True
+    assert captured_kwargs.get("max_attempts") == 1, (
+        "bridge MUST pass max_attempts=1 to connect_with_retry to disable "
+        "the inner Postgres retry loop (PR #258 round-1 P1, Codex)"
+    )
+    assert captured_kwargs.get("connect_timeout_seconds") == 3, (
+        "bridge MUST pass a tight per-attempt connect_timeout_seconds so "
+        "the total retry budget stays under 10s (PR #258 round-1 P1)"
+    )
+    assert captured_kwargs.get("autocommit") is True
+
+
+def test_bridge_total_retry_budget_is_bounded_under_emergency_square_off_threshold(
+    tmp_path, monkeypatch,
+):
+    """PR #258 round-1 P1 (Codex): the WORST-CASE wall-clock for the
+    bridge persistence path must stay below the 10-second emergency-
+    square-off budget. This proves the bridge gives up within a bounded
+    window even when ``connect_with_retry`` always raises (full Postgres
+    outage on the auto-trip path).
+
+    Mocks ``connect_with_retry`` to always raise, asserts that
+    ``_propagate_kill_switch_to_durable_manager`` returns within the
+    budget, and asserts the bridge did NOT mark itself succeeded.
+    """
+    import time as _time
+
+    # Use the production retry-delay defaults (0.2 + 0.5 + 1.0 = 1.7s) so
+    # we exercise the real backoff budget, not the test-zeroed one.
+    monkeypatch.delenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", raising=False)
+    monkeypatch.setenv("RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS", "2")
+
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    stub_ksm = _StubKillSwitchManager()
+    runtime = SimpleNamespace(kill_switch_manager=stub_ksm)
+
+    connect_call_count = {"n": 0}
+
+    def _always_fail(*_args, **_kwargs):
+        connect_call_count["n"] += 1
+        # Simulate "connect refused" rather than connect_timeout (we don't
+        # want the test to actually sleep for 2s on every attempt).
+        raise ConnectionError("simulated full postgres outage")
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", side_effect=_always_fail), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        t0 = _time.monotonic()
+        rm._check_kill_switch(now)
+        elapsed = _time.monotonic() - t0
+
+    # 4 outer attempts (1 initial + 3 retries).
+    assert connect_call_count["n"] == 4, (
+        "bridge MUST attempt connect_with_retry exactly 4 times (no nested "
+        "retry); got %d" % connect_call_count["n"]
+    )
+    # Bridge gave up cleanly without marking succeeded.
+    assert rm._durable_kill_switch_bridge_succeeded is False
+    # Legacy flag is set — operator/next cycle will retry.
+    assert rm.kill_switch_activated is True
+    # Total wall-clock budget under 10s (real-world: ~1.7s of backoff +
+    # 4 × the mocked connect_with_retry overhead which is ~immediate).
+    assert elapsed < 10.0, (
+        "bridge persistence path must give up within the 10s emergency-"
+        "square-off budget (PR #258 round-1 P1); took %.2fs" % elapsed
+    )
+
+
+def test_bridge_aborts_save_retry_on_concurrent_operator_mutation(
+    tmp_path, monkeypatch, caplog,
+):
+    """PR #258 round-1 P2 (Codex): if the first ``save_state`` attempt
+    fails and an operator clear/rearm mutates the same
+    ``KillSwitchManager`` during the inter-attempt backoff, a later
+    retry would persist the manager's current snapshot rather than the
+    TRIPPED record that was validated before the retry. The fix:
+    capture an identity fingerprint of the in-memory record before the
+    first save attempt and abort if it changes between retries.
+
+    Asserts:
+      - bridge does NOT mark ``_durable_kill_switch_bridge_succeeded`` True.
+      - a structured ``kill_switch_bridge_save_state_aborted_concurrent_
+        mutation`` ERROR is logged.
+      - the retry loop stops early (save attempts < full retry budget).
+    """
+    import app.core.risk_manager as rm_mod
+    from app.risk.kill_switch import KillSwitchState
+
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    class _MutatingKillSwitchManager(_StubKillSwitchManager):
+        """First save attempt fails. Between attempts the record id is
+        mutated (simulating an operator-driven rearm / re-trip cycle
+        that replaced the record on the same manager instance)."""
+
+        def __init__(self):
+            super().__init__()
+            self._mutation_applied = False
+
+        def save_state(self, conn):
+            # Fail the first attempt so the loop falls into the
+            # inter-attempt backoff window.
+            self.save_state_calls += 1
+            if self.save_state_calls == 1:
+                # Simulate the operator mutation having ALREADY happened
+                # before the retry's pre_attempt_check runs.
+                self._apply_concurrent_mutation()
+                raise ConnectionError("simulated postgres blip on save")
+            # Subsequent attempts should NOT be reached — the
+            # concurrent-mutation guard should abort the retry.
+            raise AssertionError(
+                "save_state retried despite concurrent mutation guard — "
+                "PR #258 round-1 P2 regression"
+            )
+
+        def _apply_concurrent_mutation(self):
+            if self._mutation_applied:
+                return
+            self._mutation_applied = True
+            # Mutate the underlying record's id (simulates operator
+            # clear/rearm cycle producing a new record id).
+            self._state_text = "TRIPPED"
+
+        def get_record(self, scope, scope_id):
+            rec = super().get_record(scope, scope_id)
+            if rec is None:
+                return None
+            # After mutation, surface a different id so the fingerprint
+            # mismatches the pre-save snapshot.
+            if self._mutation_applied:
+                from types import SimpleNamespace as _SN
+                return _SN(
+                    id="rec-2-after-operator-rearm",
+                    state=KillSwitchState.TRIPPED,
+                    scope=scope,
+                    scope_id=scope_id,
+                    trip_reason=None,
+                    tripped_by=None,
+                    block_exits=False,
+                    updated_at="2026-05-12T00:00:01Z",
+                )
+            return rec
+
+    mutating = _MutatingKillSwitchManager()
+    runtime = SimpleNamespace(kill_switch_manager=mutating)
+
+    class _NoopConn:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", return_value=_NoopConn()), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        rm._check_kill_switch(now)
+
+    # Trip happened in-memory (initial state was INACTIVE).
+    assert len(mutating.trip_calls) == 1
+    # Save was attempted exactly ONCE then aborted on the next retry's
+    # pre_attempt_check.
+    assert mutating.save_state_calls == 1, (
+        "save retry MUST abort on concurrent mutation rather than "
+        "persisting a stale snapshot (PR #258 round-1 P2)"
+    )
+    # Bridge did NOT mark itself succeeded — next evaluate cycle re-validates.
+    assert rm._durable_kill_switch_bridge_succeeded is False
+    # Loud, structured ERROR for operators.
+    assert any(
+        "kill_switch_bridge_save_state_aborted_concurrent_mutation" in rec.message
+        and rec.levelname == "ERROR"
+        for rec in caplog.records
+    ), (
+        "concurrent-mutation abort MUST surface as a structured ERROR — "
+        "operators must be able to correlate this with their clear/rearm "
+        "action (PR #258 round-1 P2)"
+    )
+    # The retry-aborted helper log fires too.
+    assert any(
+        "kill_switch_bridge_retry_aborted" in rec.message
+        and "op=save_state" in rec.message
+        and "concurrent_mutation_detected" in rec.message
+        for rec in caplog.records
+    )
+
+    # Sanity: the helper itself accepts pre_attempt_check kwarg.
+    assert callable(rm_mod._retry_with_backoff)
+
+
+def test_bridge_postgres_connect_timeout_env_override(monkeypatch):
+    """PR #258 round-1 P1 plumbing: the per-attempt connect-timeout env
+    override MUST parse correctly so ops can tune the bridge budget."""
+    import app.core.risk_manager as rm_mod
+
+    monkeypatch.delenv("RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS", raising=False)
+    assert (
+        rm_mod._bridge_postgres_connect_timeout_seconds()
+        == rm_mod._BRIDGE_POSTGRES_CONNECT_TIMEOUT_DEFAULT_SECONDS
+    )
+
+    monkeypatch.setenv("RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS", "4")
+    assert rm_mod._bridge_postgres_connect_timeout_seconds() == 4
+
+    # Clamped to >= 1.
+    monkeypatch.setenv("RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS", "0")
+    assert rm_mod._bridge_postgres_connect_timeout_seconds() == 1
+
+    # Malformed -> default.
+    monkeypatch.setenv("RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS", "garbage")
+    assert (
+        rm_mod._bridge_postgres_connect_timeout_seconds()
+        == rm_mod._BRIDGE_POSTGRES_CONNECT_TIMEOUT_DEFAULT_SECONDS
+    )

@@ -97,16 +97,29 @@ def connect_with_retry(
     autocommit: bool = True,
     max_attempts: int = 3,
     base_backoff_seconds: float = 0.5,
+    connect_timeout_seconds: Optional[int] = None,
 ) -> Any:
     """
     Connect to Postgres with a small retry/backoff and a configurable connect timeout.
+
+    ``connect_timeout_seconds`` overrides the ``POSTGRES_CONNECT_TIMEOUT_SECONDS``
+    env var for callers that need a tighter per-attempt budget than the
+    fleet-wide default (e.g. issues #245/#246 — the kill-switch bridge
+    must bound its total retry budget to < 10 seconds so emergency
+    square-off in ``evaluate_account_loss`` is not blocked).
     """
     if psycopg is None:
         raise RuntimeError("psycopg is required for Postgres operations but is not installed")
-    try:
-        connect_timeout = int(os.getenv("POSTGRES_CONNECT_TIMEOUT_SECONDS", "5"))
-    except Exception:
-        connect_timeout = 5
+    if connect_timeout_seconds is not None:
+        try:
+            connect_timeout = max(1, int(connect_timeout_seconds))
+        except Exception:
+            connect_timeout = 5
+    else:
+        try:
+            connect_timeout = int(os.getenv("POSTGRES_CONNECT_TIMEOUT_SECONDS", "5"))
+        except Exception:
+            connect_timeout = 5
     connect_options = _postgres_connect_options()
     dsn_candidates = _dsn_connect_candidates(dsn)
     last_exc: Optional[Exception] = None

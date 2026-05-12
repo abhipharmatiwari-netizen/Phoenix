@@ -74,6 +74,36 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # safe.
 _BRIDGE_RETRY_DEFAULT_DELAYS: Tuple[float, ...] = (0.2, 0.5, 1.0)
 
+# Issue #258 round-1 P1 (Codex): bound the bridge persistence path's total
+# retry budget so emergency square-off in ``evaluate_account_loss`` is not
+# blocked. The legacy implementation wrapped ``_do_save`` (which calls
+# ``connect_with_retry`` with default ``max_attempts=3`` and 5s connect
+# timeout plus 0.5/1.0s internal backoff) inside our outer 4-attempt
+# retry. Worst-case effective attempts = 4 × 3 = 12 with up to ~60s of
+# wall-clock — long enough to delay the subsequent ``square_off_all`` on
+# the auto-trip path. The fix:
+#   1. Pass ``max_attempts=1`` to ``connect_with_retry`` so the inner
+#      retry loop is disabled — only the outer bridge retry runs.
+#   2. Pass a tight ``connect_timeout_seconds`` so each attempt has a
+#      bounded wall-clock cost.
+# With 4 outer attempts × 2s connect timeout + 1.7s backoff between
+# attempts (0.2+0.5+1.0), the worst-case total is ~9.7s — safely below
+# the 10-second emergency-square-off budget.
+_BRIDGE_POSTGRES_CONNECT_TIMEOUT_DEFAULT_SECONDS: int = 2
+
+
+def _bridge_postgres_connect_timeout_seconds() -> int:
+    """Per-attempt Postgres connect timeout used by the bridge persistence
+    path. Overridable via ``RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS``
+    for ops tuning. Clamped to >= 1s."""
+    raw = os.getenv("RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return _BRIDGE_POSTGRES_CONNECT_TIMEOUT_DEFAULT_SECONDS
+    try:
+        return max(1, int(float(raw)))
+    except ValueError:
+        return _BRIDGE_POSTGRES_CONNECT_TIMEOUT_DEFAULT_SECONDS
+
 
 def _bridge_retry_delays() -> Tuple[float, ...]:
     raw = os.getenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "").strip()
@@ -93,11 +123,21 @@ def _bridge_retry_delays() -> Tuple[float, ...]:
     return tuple(parts) if parts else _BRIDGE_RETRY_DEFAULT_DELAYS
 
 
+class _BridgeConcurrentMutationAbort(Exception):
+    """Sentinel raised by a ``pre_attempt_check`` to abort the retry loop
+    early when the underlying record has been mutated by a concurrent
+    operator action (Issue #258 round-1 P2). The bridge catches this
+    explicitly and exits without marking ``_durable_kill_switch_bridge_
+    succeeded`` true.
+    """
+
+
 def _retry_with_backoff(
     operation: Callable[[], Any],
     *,
     op_name: str,
     sleep: Callable[[float], None] = time.sleep,
+    pre_attempt_check: Optional[Callable[[], None]] = None,
 ) -> Tuple[bool, Optional[BaseException]]:
     """Run ``operation`` with bounded exponential backoff.
 
@@ -106,6 +146,14 @@ def _retry_with_backoff(
     leave the legacy ``kill_switch_activated`` flag set while the durable
     record is not persisted. Idempotency is the caller's responsibility
     (see ``_propagate_kill_switch_to_durable_manager`` doc).
+
+    Issue #258 round-1 P2: ``pre_attempt_check`` is invoked BEFORE every
+    attempt (including the first). If it raises
+    ``_BridgeConcurrentMutationAbort`` the loop stops immediately,
+    returning ``(False, <abort exc>)`` without further operation()
+    calls. This lets callers detect that the underlying record has been
+    mutated by a concurrent operator action between attempts and bail
+    out cleanly rather than persisting a now-stale snapshot.
 
     Returns ``(succeeded, last_exception)``. The last failure is logged
     inside this helper so callers can collapse error handling to a single
@@ -116,6 +164,22 @@ def _retry_with_backoff(
     attempts = 1 + len(delays)
     last_exc: Optional[BaseException] = None
     for attempt in range(1, attempts + 1):
+        if pre_attempt_check is not None:
+            try:
+                pre_attempt_check()
+            except _BridgeConcurrentMutationAbort as abort_exc:
+                # Concurrent mutation observed — surface to the caller
+                # WITHOUT marking the bridge succeeded. Logged loudly
+                # so the operator can correlate the bridge's exit with
+                # the operator-driven clear/rearm that intervened.
+                logger.error(
+                    "kill_switch_bridge_retry_aborted op=%s attempt=%d/%d "
+                    "reason=concurrent_mutation_detected detail=%s — "
+                    "bridge will NOT mark succeeded; next evaluate cycle "
+                    "will re-validate.",
+                    op_name, attempt, attempts, abort_exc,
+                )
+                return False, abort_exc
         try:
             operation()
             if attempt > 1:
@@ -588,6 +652,24 @@ class RiskManager:
           which is handled by the post-trip race re-check). Sleeps may be
           tuned/zeroed via ``RISK_BRIDGE_RETRY_DELAYS_SECONDS`` (comma
           separated floats, e.g. ``"0"`` to disable backoff in tests).
+        - **Bounded total retry budget (PR #258 round-1 P1, Codex):** the
+          ``save_state`` path calls ``connect_with_retry`` with
+          ``max_attempts=1`` and a tight per-attempt connect timeout
+          (default 2s, overridable via
+          ``RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS``). Worst-case
+          total wall-clock for persistence is ~9.7s — under the 10s
+          emergency-square-off budget so a Postgres outage does not
+          delay ``square_off_all`` on the auto-trip path.
+        - **Concurrent-mutation guard (PR #258 round-1 P2, Codex):** the
+          save loop captures an identity fingerprint
+          ``(id, state, block_exits, updated_at)`` of the in-memory
+          record before the first save attempt and re-checks it before
+          every retry. If an operator clear/rearm mutates the same
+          ``KillSwitchManager`` during the inter-attempt backoff, the
+          bridge aborts the retry, logs
+          ``kill_switch_bridge_save_state_aborted_concurrent_mutation``
+          at ERROR, and leaves ``_durable_kill_switch_bridge_succeeded``
+          False so the next evaluate cycle re-validates from scratch.
         - Lazy-imported to avoid circular dependency on the hub runtime.
         - Never raises into the legacy auto-trip path; all failures are
           logged at ERROR / WARNING and leave
@@ -825,6 +907,26 @@ class RiskManager:
         # source of truth, the Postgres row is the cache). The outer
         # retry-on-next-evaluate-cycle remains as the ultimate fallback
         # if all in-call attempts fail.
+        #
+        # Issue #258 round-1 P1 (Codex): ``connect_with_retry`` is called
+        # with ``max_attempts=1`` and a tight ``connect_timeout_seconds``
+        # so the inner retry loop is disabled and each attempt has a
+        # bounded wall-clock cost. The outer ``_retry_with_backoff`` is
+        # now the SOLE retry surface for this path (no nested retries).
+        # Worst-case total: 4 outer attempts × 2s connect timeout + 1.7s
+        # backoff = ~9.7s — under the 10s emergency-square-off budget so
+        # ``square_off_all`` is not delayed by bridge persistence retries.
+        #
+        # Issue #258 round-1 P2 (Codex): capture an identity fingerprint
+        # of the in-memory manager record we intend to persist BEFORE
+        # the first save attempt. Re-check the fingerprint before every
+        # retry attempt. If an operator clear / rearm mutates the same
+        # ``KillSwitchManager`` during the inter-attempt backoff, the
+        # in-memory state we'd save no longer matches the TRIPPED record
+        # that was validated upstream — persisting it (and then marking
+        # the bridge succeeded) would silently suppress future retries
+        # while the active record is no longer TRIPPED. Abort cleanly
+        # instead and let the next evaluate cycle re-validate.
         try:
             from app.data.postgres import (
                 connect_with_retry,
@@ -838,16 +940,82 @@ class RiskManager:
             )
             return
 
+        # Capture the pre-save fingerprint of the manager's GLOBAL
+        # record. ``get_record`` may transiently fail; that's OK — we
+        # fall back to a sentinel that disables the concurrent-mutation
+        # check rather than aborting the save entirely (a transient
+        # get_record blip is exactly what the bridge is designed to
+        # tolerate; the outer cycle retry remains the safety net).
+        def _record_fingerprint(rec: Any) -> Optional[Tuple[Any, ...]]:
+            if rec is None:
+                return None
+            state = getattr(rec, "state", None)
+            state_val = getattr(state, "value", state)
+            return (
+                getattr(rec, "id", None),
+                state_val,
+                bool(getattr(rec, "block_exits", False)),
+                getattr(rec, "updated_at", None),
+            )
+
+        try:
+            pre_save_record = ksm.get_record(
+                KillSwitchScope.GLOBAL, "GLOBAL",
+            )
+            pre_save_fp: Optional[Tuple[Any, ...]] = _record_fingerprint(
+                pre_save_record,
+            )
+            fingerprint_captured = True
+        except Exception as exc:
+            logger.warning(
+                "kill_switch_bridge_pre_save_fingerprint_unavailable: %s "
+                "— concurrent-mutation guard disabled for this cycle.",
+                exc,
+            )
+            pre_save_fp = None
+            fingerprint_captured = False
+
+        connect_timeout_seconds = _bridge_postgres_connect_timeout_seconds()
+
         def _do_save() -> None:
             with connect_with_retry(
-                get_control_plane_dsn(), autocommit=True
+                get_control_plane_dsn(),
+                autocommit=True,
+                max_attempts=1,
+                connect_timeout_seconds=connect_timeout_seconds,
             ) as conn:
                 ksm.save_state(conn)
 
+        def _abort_if_concurrent_mutation() -> None:
+            if not fingerprint_captured:
+                return
+            try:
+                current = ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL")
+            except Exception:
+                # Transient lookup failure — don't abort on it. The outer
+                # save will surface the real Postgres failure if any.
+                return
+            current_fp = _record_fingerprint(current)
+            if current_fp != pre_save_fp:
+                raise _BridgeConcurrentMutationAbort(
+                    f"expected={pre_save_fp} current={current_fp}"
+                )
+
         save_ok, save_exc = _retry_with_backoff(
-            _do_save, op_name="save_state",
+            _do_save,
+            op_name="save_state",
+            pre_attempt_check=_abort_if_concurrent_mutation,
         )
         if not save_ok:
+            if isinstance(save_exc, _BridgeConcurrentMutationAbort):
+                logger.error(
+                    "kill_switch_bridge_save_state_aborted_concurrent_mutation "
+                    "(operator clear/rearm intervened between save retries — "
+                    "bridge will NOT mark succeeded; next evaluate cycle will "
+                    "re-validate): %s",
+                    save_exc,
+                )
+                return
             logger.error(
                 "kill_switch_bridge_save_state_failed (all in-call retries "
                 "exhausted — will retry next evaluate cycle; durable trip is "
