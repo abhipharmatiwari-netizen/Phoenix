@@ -2028,12 +2028,25 @@ class PositionTrailingLockEngine:
         Tuple[str, str, str],
         Tuple[Optional[str], float, datetime],
     ] = field(default_factory=dict, init=False, repr=False)
-    # Issue #251: True once the engine has attempted to hydrate the in-memory
+    # Issue #251: True once the engine has SUCCESSFULLY hydrated the in-memory
     # marker dict from the durable backend. Lazy because the engine is
     # constructed at module import time but the backend may not be reachable
     # until the runtime has wired up Postgres.
+    #
+    # PR #261 round-1 review P1: previously this flag was set BEFORE the
+    # ``load_all()`` call, so a transient Postgres outage on first eval would
+    # permanently disable the duplicate-fill guard for the lifetime of the
+    # process. We now flip it to True ONLY on confirmed success and retry on
+    # the next eval cycle if the first attempt raised.
     _inflight_hydrated: bool = field(
         default=False, init=False, repr=False,
+    )
+    # PR #261 round-1 review P1: count of failed hydrate attempts since
+    # startup, surfaced in the structured WARNING on each retry so an
+    # operator can see how many cycles the duplicate-fill guard has been
+    # degraded.
+    _inflight_hydrate_failed_attempts: int = field(
+        default=0, init=False, repr=False,
     )
 
     def _enabled(self) -> bool:
@@ -2246,6 +2259,7 @@ class PositionTrailingLockEngine:
         symbol: str,
         broker_order_id: Optional[str],
         persist: bool = True,
+        fail_closed: bool = False,
     ) -> None:
         """Arm the inflight marker for (tenant, account, symbol).
 
@@ -2254,6 +2268,16 @@ class PositionTrailingLockEngine:
         terminal confirmation. ``persist=False`` is used by the startup
         hydration path to seed the in-memory dict from already-persisted
         rows without re-writing them.
+
+        PR #261 round-1 review P1: ``fail_closed=True`` is used by the
+        PRE-submit arming in ``_emit_exit`` in LIVE so a persistence
+        failure aborts the broker submission. Without fail-closed, a
+        persist failure followed by a restart between broker-submit and
+        the (never-completed) post-submit confirmation would lose the
+        durable duplicate-fill guard. Default ``fail_closed=False`` is
+        used by the post-submit refresh paths (synchronous fill,
+        post-submit raise) where the broker order is already placed and
+        we want best-effort persistence with a log-only fallback.
         """
         import time as _t
         key = (str(tenant_id), str(broker_account_id), str(symbol))
@@ -2271,7 +2295,39 @@ class PositionTrailingLockEngine:
                         submitted_at=now_utc,
                     )
                 )
-            except Exception as exc:  # pragma: no cover - defensive
+            except Exception as exc:
+                if fail_closed:
+                    # PR #261 round-1 review P1: surface a clear ERROR
+                    # event and re-raise so the caller (``_emit_exit``)
+                    # ABORTS the broker submission. Placing the broker
+                    # order without a durable guard reopens the
+                    # restart-window duplicate-fill gap that issue #251
+                    # set out to close.
+                    log_event(
+                        logger,
+                        event_type=(
+                            "POSITION_TRAILING_LOCK_INFLIGHT_PERSIST_FAILED"
+                        ),
+                        message=(
+                            "Pre-submit inflight marker persistence FAILED "
+                            "in LIVE — ABORTING broker submission to avoid "
+                            "running without the durable duplicate-fill "
+                            "guard (PR #261 round-1 review P1, issue "
+                            "#251)."
+                        ),
+                        level=logging.ERROR,
+                        tenant_id=tenant_id,
+                        broker_account_id=broker_account_id,
+                        symbol=symbol,
+                        broker_order_id=broker_order_id,
+                        error=repr(exc),
+                    )
+                    # Roll back the in-memory marker too so a subsequent
+                    # eval cycle (after the operator resolves Postgres)
+                    # can re-arm cleanly without a phantom in-memory
+                    # guard surviving the abort.
+                    self._inflight_markers.pop(key, None)
+                    raise
                 logger.warning(
                     "trailing-lock inflight marker persist failed (non-fatal; "
                     "in-memory guard remains): %s",
@@ -2300,9 +2356,23 @@ class PositionTrailingLockEngine:
 
         Hydration is lazy (not in ``__post_init__``) because the engine
         dataclass may be constructed before the Postgres pool is reachable
-        in some startup paths. The result is a one-shot import: once
-        hydrated, subsequent submit/clear operations are the authoritative
-        source.
+        in some startup paths. The result is a one-shot import on SUCCESS:
+        once hydrated, subsequent submit/clear operations are the
+        authoritative source.
+
+        PR #261 round-1 review P1: distinguish "load succeeded → 0 rows"
+        from "load failed → unknown". The previous version set
+        ``_inflight_hydrated = True`` BEFORE calling ``load_all()`` and
+        early-returned on any exception, so a transient Postgres outage
+        on the first eval after restart permanently dropped the
+        duplicate-fill guard for the lifetime of the process. We now:
+          * Set ``_inflight_hydrated = True`` ONLY after a confirmed
+            successful load (success may legitimately return zero rows
+            — that is distinct from a load failure).
+          * Increment ``_inflight_hydrate_failed_attempts`` and emit a
+            structured WARNING naming the retry count on each failure
+            so an operator can see how long the guard has been degraded.
+          * Retry on the NEXT eval cycle until success.
 
         The reload of ``submitted_at`` becomes both the in-memory monotonic
         timestamp AND the wall-clock instant. We compute the monotonic
@@ -2315,17 +2385,27 @@ class PositionTrailingLockEngine:
         """
         if self._inflight_hydrated:
             return
-        self._inflight_hydrated = True
         try:
             persisted = list(self.inflight_backend.load_all())
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.error(
-                "trailing-lock inflight marker hydrate FAILED — restart "
-                "duplicate-fill guard is degraded to in-memory only "
-                "(issue #251): %s",
-                exc,
+        except Exception as exc:
+            self._inflight_hydrate_failed_attempts += 1
+            log_event(
+                logger,
+                event_type="POSITION_TRAILING_LOCK_INFLIGHT_HYDRATE_FAILED",
+                message=(
+                    "trailing-lock inflight marker hydrate attempt FAILED — "
+                    "duplicate-fill guard is degraded to in-memory only "
+                    "for this eval cycle; will retry on next cycle "
+                    "(PR #261 round-1 review P1, issue #251)."
+                ),
+                level=logging.WARNING,
+                failed_attempts=self._inflight_hydrate_failed_attempts,
+                error=repr(exc),
             )
             return
+        # Successful load (even if zero rows). Mark hydrated so we do not
+        # re-query the backend on every eval cycle.
+        self._inflight_hydrated = True
         if not persisted:
             return
         import time as _t
@@ -2735,8 +2815,56 @@ class PositionTrailingLockEngine:
                 broker_order_id=broker_order_id,
             )
             if not terminal_evidence:
-                # Fall back to inflight timeout — DO NOT clear the marker
-                # on disappearance alone.
+                # PR #261 round-1 review P2: the comment above promises
+                # "hold until the normal timeout sweeps it", but
+                # ``_is_inflight_blocked`` is ONLY called while iterating
+                # currently-present non-zero positions. For a marker
+                # whose symbol filled-then-disappeared (so the
+                # corresponding position will never appear in the
+                # snapshot again) and whose terminal ledger row is
+                # absent, no other code path will ever sweep the
+                # marker — it would emit
+                # ``POSITION_TRAILING_LOCK_INFLIGHT_HELD_NO_TERMINAL``
+                # every watchdog cycle forever. Honour the comment: if
+                # the marker is older than the configured
+                # ``inflight_max_seconds``, age it out here.
+                age_seconds = float(now_mono) - float(submitted_at_mono)
+                max_age = self._inflight_max_seconds()
+                if age_seconds >= max_age:
+                    self._inflight_markers.pop(key, None)
+                    try:
+                        self.inflight_backend.delete_marker(
+                            tenant_key, account_key, str(symbol)
+                        )
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+                    self._disappeared_symbol_miss_counts.pop(key, None)
+                    self._disappeared_symbol_last_fingerprint.pop(key, None)
+                    log_event(
+                        logger,
+                        event_type=(
+                            "POSITION_TRAILING_LOCK_INFLIGHT_TIMEOUT"
+                        ),
+                        message=(
+                            "Disappeared-symbol inflight marker exceeded "
+                            "max age without terminal broker-order "
+                            "evidence — auto-clearing to prevent "
+                            "permanent log churn. Investigate "
+                            "broker_order_id and reconcile manually if "
+                            "duplicate fills are observed "
+                            "(PR #261 round-1 review P2)."
+                        ),
+                        level=logging.ERROR,
+                        tenant_id=tenant_id,
+                        broker_account_id=broker_account_id,
+                        symbol=symbol,
+                        broker_order_id=broker_order_id,
+                        age_seconds=round(age_seconds, 2),
+                        max_age_seconds=max_age,
+                        consecutive_missing_snapshots=current_misses,
+                    )
+                    continue
+                # Still within the timeout window — log and hold.
                 log_event(
                     logger,
                     event_type=(
@@ -2753,6 +2881,8 @@ class PositionTrailingLockEngine:
                     symbol=symbol,
                     broker_order_id=broker_order_id,
                     consecutive_missing_snapshots=current_misses,
+                    age_seconds=round(age_seconds, 2),
+                    max_age_seconds=max_age,
                 )
                 continue
             self._inflight_markers.pop(key, None)
@@ -2828,11 +2958,29 @@ class PositionTrailingLockEngine:
 
         Returns False on ANY uncertainty — fail closed (hold the
         marker, accept a longer block, avoid duplicate fills).
+
+        PR #261 round-1 review P2: read the FULL broker order snapshot
+        via ``state_store.get_order_snapshot()`` rather than
+        ``state_store.get_orders()``. AccountRunner's sync writes only
+        ``_derive_active_orders(...)`` to ``set_orders``, which DROPS
+        terminal statuses (FILLED/CANCELLED/REJECTED/EXPIRED/FAILED)
+        before publishing — so the terminal evidence we want is
+        invisible there. The full broker ledger (including terminal
+        rows) lives in ``get_order_snapshot``. We fall back to
+        ``get_orders()`` if the snapshot is empty in case a deployment
+        is mid-rollout and only the legacy projection is populated.
         """
         try:
-            orders = self.state_store.get_orders(broker_account_id) or []
+            orders = self.state_store.get_order_snapshot(broker_account_id) or []
         except Exception:  # pragma: no cover - defensive
-            return False
+            orders = []
+        if not orders:
+            # Fallback for callers / deployments that only populate the
+            # legacy ``get_orders`` projection.
+            try:
+                orders = self.state_store.get_orders(broker_account_id) or []
+            except Exception:  # pragma: no cover - defensive
+                return False
         if not orders:
             return False
         try:
@@ -2844,6 +2992,36 @@ class PositionTrailingLockEngine:
             return False
 
         def _is_terminal(status_str: Any) -> bool:
+            # PR #261 round-1 review P2: ``classify_broker_status`` has
+            # a fuzzy fallback that maps ANY unrecognized status
+            # containing ``CANCEL`` (e.g. ``CANCEL_PENDING`` with an
+            # underscore, which is NOT in the canonical map's
+            # ``"CANCEL PENDING"`` entry) to ``CANCELLED`` (a terminal
+            # state). The submit-response path elsewhere in this engine
+            # explicitly treats ``CANCEL_PENDING`` / ``PENDING_CANCEL``
+            # / ``CANCEL_REQUESTED`` as non-terminal — if the ledger
+            # reports a pending cancel while the position snapshot is
+            # missing, the sweep would otherwise clear the marker and
+            # reset trailing state before the exit order is actually
+            # terminal. Explicitly veto pending-cancel variants BEFORE
+            # delegating.
+            try:
+                normalised = str(status_str or "").strip().upper().replace("-", "_")
+            except Exception:
+                normalised = ""
+            _PENDING_CANCEL_SUBSTRINGS = (
+                "CANCEL_PENDING",
+                "PENDING_CANCEL",
+                "CANCEL_REQUESTED",
+                "CANCEL_REQUEST",
+                "CANCEL PENDING",
+                "PENDING CANCEL",
+                "MODIFY_PENDING",
+                "MODIFY PENDING",
+            )
+            for _sub in _PENDING_CANCEL_SUBSTRINGS:
+                if _sub in normalised:
+                    return False
             try:
                 state = classify_broker_status(status_str)
             except Exception:
@@ -2931,12 +3109,47 @@ class PositionTrailingLockEngine:
         #   policy interceptor rejection), there is no broker order to
         #   wait for; clear the marker so the next eligible cycle can
         #   try again immediately.
-        self._set_inflight_marker(
-            tenant_id=tenant_id,
-            broker_account_id=broker_account_id,
-            symbol=decision.symbol,
-            broker_order_id=None,  # populated post-submit on success
-        )
+        #
+        # PR #261 round-1 review P1: in LIVE, the pre-submit marker
+        # persistence MUST be fail-closed. If the UPSERT raises, abort
+        # the broker submission rather than silently placing the order
+        # without the durable guard. PAPER/SHADOW preserves the
+        # historical log-only behaviour since no real broker order is at
+        # stake.
+        import os as _os
+        _trade_mode = str(_os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper()
+        _fail_closed_persist = (_trade_mode == "LIVE")
+        try:
+            self._set_inflight_marker(
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=decision.symbol,
+                broker_order_id=None,  # populated post-submit on success
+                fail_closed=_fail_closed_persist,
+            )
+        except Exception as exc:
+            # Pre-submit marker persistence failed in LIVE. ``_set_inflight_marker``
+            # has already logged the ERROR event and rolled back the in-memory
+            # marker. Emit the higher-level skip event so operators see the
+            # missed eval cycle in the trailing-lock log stream, then abort
+            # without placing the broker order.
+            log_event(
+                logger,
+                event_type="POSITION_TRAILING_LOCK_EXIT_SKIPPED",
+                message=(
+                    "position trailing exit ABORTED: pre-submit inflight "
+                    "marker persistence failed in LIVE — failing closed "
+                    "to preserve the duplicate-fill guard "
+                    "(PR #261 round-1 review P1)."
+                ),
+                level=logging.ERROR,
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=decision.symbol,
+                reason="inflight_persist_failed_pre_submit",
+                error=repr(exc),
+            )
+            return
         try:
             submit_result = await self.order_router.submit_order(
                 tenant_id=tenant_id,
