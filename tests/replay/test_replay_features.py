@@ -1774,3 +1774,198 @@ def test_nifty_spread_replay_iron_condor_partial_rollback_keeps_spread_tracked(m
         "PUT-short EXIT was broker-rejected; short_exit_done must remain "
         "False so _maybe_manage_exits retries"
     )
+
+
+def _iron_condor_rollback_strategy(monkeypatch_ignored=None):
+    """Shared setup helper for Codex round-2 P1 regression tests.
+
+    Returns a configured strategy + a placed[] sink. The caller monkey-patches
+    ``strategy._place_order`` with a custom capture function that controls the
+    broker response per-leg.
+    """
+    fixed_now = datetime(2026, 3, 3, 10, 15, tzinfo=replay_runtime_mod.IST)
+    meta = replay_runtime_mod.build_nifty_spread_instrument_meta(
+        "NIFTY_IDX",
+        65,
+        min_strike=19000,
+        max_strike=21000,
+    )
+    strategy = NiftyWeeklyCreditSpreadStrategy(
+        meta,
+        order_client=None,
+        risk_manager=None,
+        env_prefix="NIFTY_",
+        underlying_label="NIFTY_IDX",
+        params={
+            "account_equity": 10_000_000.0,
+            "lot_size": 65,
+            "min_credit_pct_of_width": 0.05,
+            "min_condor_total_credit_pct": 0.05,
+            "risk_per_trade_pct": 1.0,
+            "max_total_risk_pct": 1.0,
+            "max_open_spreads": 10,
+        },
+    )
+    strategy._now_ist = lambda: fixed_now
+    strategy._find_option_by_strike = lambda strike, side, expiry: f"NIFTY_{side}_{int(strike)}"
+    strategy.last_price.update(
+        {
+            "NIFTY_PE_19550": 200.0,
+            "NIFTY_PE_19250": 50.0,
+            "NIFTY_CE_20050": 200.0,
+            "NIFTY_CE_20350": 50.0,
+        }
+    )
+    return strategy, fixed_now
+
+
+def test_nifty_spread_replay_iron_condor_rollback_success_status_is_submitted(monkeypatch):
+    """Issue #262 round-3 (Codex round-2 P1 #1): the rollback path must
+    treat any broker-submitted status as submitted, not only the strict
+    {ACCEPTED, FILLED, COMPLETE} set. Angel SmartAPI normalises successful
+    placements to ``SUCCESS`` (``app/brokers/angel_client.py`` line 1882);
+    a too-strict acceptance check misclassifies real submissions as
+    rejections and double-submits the rollback EXITs.
+    """
+    strategy, fixed_now = _iron_condor_rollback_strategy()
+    placed: list[Any] = []
+
+    def _capture_place_order(*, label, side, qty, price, tag, purpose, **kwargs):
+        del kwargs
+        purpose_text = purpose.value if hasattr(purpose, "value") else str(purpose)
+        placed.append({"label": label, "side": side, "purpose": purpose_text})
+        if purpose_text == "ENTRY" and "CE" in str(label):
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_call_leg_failure",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        # Rollback EXITs return Angel-style "SUCCESS" (submitted but not
+        # yet filled). The round-3 fix must classify SUCCESS as submitted.
+        if purpose_text == "EXIT":
+            return OrderResponse(
+                broker_order_id=f"REPLAY_{len(placed)}",
+                status="SUCCESS",
+                message="ok",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        return OrderResponse(
+            broker_order_id=f"REPLAY_{len(placed)}",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=int(qty),
+            average_price=float(price or 0.0),
+            requested_quantity=int(qty),
+        )
+
+    monkeypatch.setattr(strategy, "_place_order", _capture_place_order)
+    strategy._try_iron_condor(spot=19800.0, expiry=fixed_now.date())
+
+    # Both rollback EXITs returned SUCCESS (submitted, not filled). Round-3
+    # contract: spread stays tracked (since not FILLED) BUT both
+    # ``*_exit_done`` flags are True (since both submitted) so the
+    # management path won't re-submit either leg.
+    assert len(strategy.open_spreads) == 1, (
+        "SUCCESS-returning rollback EXITs must keep the spread tracked "
+        "until FILLED is confirmed (Codex round-2 P1 #2); "
+        f"got {list(strategy.open_spreads.keys())!r}"
+    )
+    put_spread = next(iter(strategy.open_spreads.values()))
+    assert put_spread.short_exit_done is True, (
+        "PUT-short EXIT returned SUCCESS; must be classified as submitted "
+        "(Codex round-2 P1 #1)"
+    )
+    assert put_spread.long_exit_done is True, (
+        "PUT-long EXIT returned SUCCESS; must be classified as submitted "
+        "(Codex round-2 P1 #1)"
+    )
+    # Exactly one rollback EXIT per leg — round-3 must NOT have forced a
+    # second submission for either leg (both were submitted).
+    exit_orders = [e for e in placed if e["purpose"] == "EXIT"]
+    short_exits = [e for e in exit_orders if e["label"] == "NIFTY_PE_19550"]
+    long_exits = [e for e in exit_orders if e["label"] == "NIFTY_PE_19250"]
+    assert len(short_exits) == 1, (
+        f"PUT-short EXIT was submitted (SUCCESS) — no retry expected; got {short_exits!r}"
+    )
+    assert len(long_exits) == 1, (
+        f"PUT-long EXIT was submitted (SUCCESS) — no retry expected; got {long_exits!r}"
+    )
+
+
+def test_nifty_spread_replay_iron_condor_rollback_both_rejected_forces_retry(monkeypatch):
+    """Issue #262 round-3 (Codex round-2 P1 #3): when BOTH rollback EXITs
+    are broker-rejected, both ``*_exit_done`` flags stay False. Without
+    the round-3 retry kick, ``_maybe_manage_exits``'s fast-path (which
+    requires at least one ``*_exit_done`` to be True) wouldn't add the
+    spread to ``to_close``, leaving the failed-condor PUT exposure
+    unmanaged until TP/SL/EOD. The round-3 fix forces an immediate
+    ``_exit_spread`` retry so the rejected legs are re-attempted.
+    """
+    strategy, fixed_now = _iron_condor_rollback_strategy()
+    placed: list[Any] = []
+
+    def _capture_place_order(*, label, side, qty, price, tag, purpose, **kwargs):
+        del kwargs
+        purpose_text = purpose.value if hasattr(purpose, "value") else str(purpose)
+        placed.append({"label": label, "side": side, "purpose": purpose_text})
+        if purpose_text == "ENTRY" and "CE" in str(label):
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_call_leg_failure",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        # BOTH rollback EXITs are broker-rejected.
+        if purpose_text == "EXIT":
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_broker_rejected_rollback_exit",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        return OrderResponse(
+            broker_order_id=f"REPLAY_{len(placed)}",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=int(qty),
+            average_price=float(price or 0.0),
+            requested_quantity=int(qty),
+        )
+
+    monkeypatch.setattr(strategy, "_place_order", _capture_place_order)
+    strategy._try_iron_condor(spot=19800.0, expiry=fixed_now.date())
+
+    # Spread must stay tracked (no leg was even submitted).
+    assert len(strategy.open_spreads) == 1, (
+        "Both rollback EXITs rejected — spread must stay tracked; got "
+        f"{list(strategy.open_spreads.keys())!r}"
+    )
+    put_spread = next(iter(strategy.open_spreads.values()))
+    assert put_spread.short_exit_done is False
+    assert put_spread.long_exit_done is False
+
+    # Round-3 must have force-invoked ``_exit_spread`` which submits a
+    # retry EXIT for each rejected leg. Without the round-3 fix the
+    # rollback path would emit exactly 2 EXIT orders (the initial
+    # rollback) and then sit on a spread with both flags False that
+    # ``_maybe_manage_exits``'s fast-path will not retry.
+    exit_orders = [e for e in placed if e["purpose"] == "EXIT"]
+    short_exits = [e for e in exit_orders if e["label"] == "NIFTY_PE_19550"]
+    long_exits = [e for e in exit_orders if e["label"] == "NIFTY_PE_19250"]
+    assert len(short_exits) >= 2, (
+        "PUT-short EXIT was rejected — round-3 must force an immediate "
+        f"_exit_spread retry; got {short_exits!r}"
+    )
+    assert len(long_exits) >= 2, (
+        "PUT-long EXIT was rejected — round-3 must force an immediate "
+        f"_exit_spread retry; got {long_exits!r}"
+    )

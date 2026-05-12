@@ -34,6 +34,7 @@ from app.brokers.base import (
     ProductType,
     TimeInForce,
 )
+from app.core.signal_metrics import is_submitted_order_response
 
 logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -1439,21 +1440,46 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
                 put_long_label, "SELL", self._qty_for_label(put_long_label),
             )
 
-            def _accepted(resp: Optional[OrderResponse]) -> bool:
+            # Issue #262 round-3 (Codex round-2 P1 #1): treat any
+            # broker-submitted status as "submitted", not just the strict
+            # {ACCEPTED, FILLED, COMPLETE} set. ``is_submitted_order_response``
+            # is the canonical predicate used elsewhere in the platform and
+            # also recognises Angel's ``SUCCESS`` and other normalised
+            # placement statuses; without this expansion a successful
+            # SmartAPI submission would be misclassified as rejected and the
+            # spread would stay tracked with both ``*_exit_done`` flags
+            # false — causing ``_maybe_manage_exits`` to re-submit exits for
+            # legs that were already submitted.
+            def _is_submitted(resp: Optional[OrderResponse]) -> bool:
+                if resp is None:
+                    return False
+                return is_submitted_order_response(
+                    status=getattr(resp, "status", ""),
+                    broker_order_id=getattr(resp, "broker_order_id", ""),
+                )
+
+            # Issue #262 round-3 (Codex round-2 P1 #2): only treat the
+            # rollback as "complete" (safe to drop the spread shell) when
+            # both legs reach a terminal fill status. ``ACCEPTED`` /
+            # ``SUCCESS`` means the broker accepted the order, not that it
+            # filled — if the order later cancels or fails, dropping the
+            # spread state here would orphan the live PUT exposure beyond
+            # ``_maybe_manage_exits``'s reach.
+            def _is_filled(resp: Optional[OrderResponse]) -> bool:
                 if resp is None:
                     return False
                 status = str(getattr(resp, "status", "") or "").upper()
-                return status in {"ACCEPTED", "FILLED", "COMPLETE"}
+                return status in {"FILLED", "COMPLETE", "COMPLETED"}
 
-            short_accepted = _accepted(put_short_resp)
-            long_accepted = _accepted(put_long_resp)
+            short_filled = _is_filled(put_short_resp)
+            long_filled = _is_filled(put_long_resp)
+            short_submitted = _is_submitted(put_short_resp)
+            long_submitted = _is_submitted(put_long_resp)
 
-            if short_accepted and long_accepted:
-                # Issue #262 round-1: both rollback legs accepted. Remove
-                # the orphaned PUT-spread shell from ``self.open_spreads``
-                # so it no longer counts toward ``max_open_spreads`` and
-                # later iterations don't manage a spread whose legs are
-                # already gone.
+            if short_filled and long_filled:
+                # Both rollback legs reached a terminal fill — safe to drop
+                # the orphan PUT-spread shell from ``self.open_spreads`` so
+                # it no longer counts toward ``max_open_spreads``.
                 self.open_spreads.pop(put_spread_id, None)
                 self._reset_exit_retry_state(put_spread_id)
                 self._log_signal_evaluation(
@@ -1466,30 +1492,46 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
                 )
                 return
 
-            # Issue #262 round-2: at least one rollback leg was broker-
-            # rejected. Keep the spread in ``open_spreads`` so
-            # ``_maybe_manage_exits`` can see the still-live exposure and
-            # retry on the next bar. Flip the per-leg ``*_exit_done`` flag
-            # for the legs that DID get accepted so we don't re-submit
-            # those exits.
+            # Issue #262 round-3: rollback did NOT terminate cleanly (at
+            # least one leg is broker-rejected or only submitted but not
+            # yet filled). Keep the spread in ``open_spreads`` so
+            # ``_maybe_manage_exits`` retains visibility on the still-live
+            # exposure. Set ``*_exit_done`` for legs that the broker
+            # accepted as submitted so the management path doesn't
+            # double-submit them; leave the flag false for rejected legs
+            # so the next retry re-attempts only those.
             put_spread = self.open_spreads.get(put_spread_id)
             if put_spread is not None:
-                if short_accepted:
+                if short_submitted:
                     put_spread.short_exit_done = True
-                if long_accepted:
+                if long_submitted:
                     put_spread.long_exit_done = True
             self._log_signal_evaluation(
                 "condor_call_side_failed_rollback_partial",
                 put_short=put_short_label,
-                put_short_accepted=short_accepted,
+                put_short_submitted=short_submitted,
+                put_short_filled=short_filled,
                 put_short_status=str(getattr(put_short_resp, "status", "") or "") if put_short_resp else "",
                 put_long=put_long_label,
-                put_long_accepted=long_accepted,
+                put_long_submitted=long_submitted,
+                put_long_filled=long_filled,
                 put_long_status=str(getattr(put_long_resp, "status", "") or "") if put_long_resp else "",
                 call_short=call_short_label,
                 call_long=call_long_label,
                 put_spread_id=put_spread_id,
             )
+
+            # Issue #262 round-3 (Codex round-2 P1 #3): when at least one
+            # rollback leg was broker-rejected, force an immediate retry
+            # through the normal exit path. ``_maybe_manage_exits``'s
+            # fast-path requires at least one ``*_exit_done`` to be True
+            # to add the spread to ``to_close``; in the both-rejected
+            # case (both flags stay False) the failed-condor PUT exposure
+            # would otherwise sit unmanaged until TP/SL/EOD triggers a
+            # normal exit decision. ``_exit_spread`` honours its own
+            # backoff and circuit-breaker, so this is safe to call here.
+            if not short_submitted or not long_submitted:
+                self._exit_spread(put_spread_id)
             return
         # Full condor (all 4 legs) is in place -- emit the unambiguous
         # full-spread-opened signal. (Codex P2 round-3 #1.)
