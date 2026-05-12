@@ -81,34 +81,14 @@ fetch_secret "admin_api_key"
 fetch_secret "control_plane_pg_password"
 fetch_secret "angel_postback_token"
 fetch_secret "dashboard_hmac_secret"
-# auth_token_secret was created with an underscore in the vault name (phoenix-auth_token_secret).
-# Fetch it explicitly to avoid the hyphen conversion applied to the others.
-fetch_secret_vault_name() {
-  local secret_name="$1"
-  local oci_secret_name="$2"
-  local out_path="$SECRETS_DIR/$secret_name"
-  local tmp_path="${out_path}.tmp"
-  echo "Fetching secret: $oci_secret_name -> $out_path"
-  if ! "$OCI_CLI_BIN" secrets secret-bundle get-secret-bundle-by-name \
-    --secret-name "$oci_secret_name" \
-    --vault-id "$OCI_VAULT_ID" \
-    --auth instance_principal \
-    --query 'data."secret-bundle-content".content' \
-    --raw-output \
-    | base64 -d > "$tmp_path"; then
-    rm -f "$tmp_path"
-    echo "ERROR: Failed to fetch $oci_secret_name — existing file left unchanged." >&2
-    return 1
-  fi
-  if [ ! -s "$tmp_path" ]; then
-    rm -f "$tmp_path"
-    echo "ERROR: $oci_secret_name returned empty content — existing file left unchanged." >&2
-    return 1
-  fi
-  mv "$tmp_path" "$out_path"
-  chmod 644 "$out_path"
-}
-fetch_secret_vault_name "auth_token_secret" "phoenix-auth_token_secret"
+# 2026-05-12: auth_token_secret was previously stored in the vault under the
+# legacy name ``phoenix-auth_token_secret`` (underscore in the second segment),
+# which required a special-case fetch helper to bypass the hyphen translation.
+# The canonical ``phoenix-auth-token-secret`` (all hyphens) was created and
+# back-filled with the same value; the legacy ``phoenix-auth_token_secret``
+# is scheduled for vault deletion on 2026-06-11. Use the canonical name so
+# the round-trip stays consistent after the legacy entry is purged.
+fetch_secret "auth_token_secret"
 
 echo "All secrets written to $SECRETS_DIR"
 echo "Verify with: ls -la $SECRETS_DIR"
