@@ -37,7 +37,7 @@ In the current hub-authoritative runtime:
        docker compose -f .\docker-compose.live.single.yml exec backend printenv ORDER_ROUTER_ENFORCE_GLOBAL_KILL_SWITCH
        ```
        Must print `true` (or `1`). An empty result means the flag is off and the interceptor will short-circuit.
-    2. **Behavioural verification** — trip a SOFT kill switch at GLOBAL scope, attempt a paper-mode test order, confirm the router emits `ORDER_REJECTED_GLOBAL_KILL` in the backend logs, then clear and rearm. If the test order is accepted instead, the interceptor is disabled regardless of what the env claims.
+    2. **Behavioural verification** — trip a SOFT kill switch at GLOBAL scope **via the durable manager** (dashboard or `POST /admin/kill-switch/trip`), attempt a paper-mode test order, confirm the router emits `ORDER_REJECTED_KILL_SWITCH_MANAGER` in the backend logs (`app/orders/interceptors.py:355-361`), then clear and rearm. **Do not** look for `ORDER_REJECTED_GLOBAL_KILL` — that event name is emitted only by the env-var path (`GLOBAL_KILL=1`, `app/orders/interceptors.py:308-325`); a correctly-enforced durable trip will not produce it, so monitors filtering on `ORDER_REJECTED_GLOBAL_KILL` will conclude the interceptor is disabled when the durable path is in fact working. If the test order is accepted instead, the interceptor is disabled regardless of what the env claims. (Codex #256 round-4 P2 correction — earlier preflight wording named the env-var event for a durable-manager drill.)
 
     The dashboard kill-switch panel does **not** warn you when the underlying interceptor is disabled, so this pre-flight step is non-negotiable for LIVE.
 - The legacy stream path uses `RiskManager.kill_switch_activated`. PR #231 (Issue #218) bridges legacy auto-trips into the durable `KillSwitchManager` so the hub interceptor sees them (subject to the enforcement gate above); PR #234 (Issue #222) surfaces any remaining legacy↔durable divergence in `/readyz`.
@@ -66,9 +66,9 @@ Each transition is a separate, explicit, audited operator call. None happen auto
 
 Use this checklist for every trip. Steps 1–3 are verification; only after they pass do you progress to clear/rearm.
 
-**Auto-trip vs manual-trip scope of Step 1 (Codex #256 round-2 P2).** Step 1 (legacy↔durable divergence check) is **only meaningful on the auto-trip path**. By construction, divergence is defined as `legacy_active=True AND durable_global_active=False` (`app/hub/runtime.py:1029`). A manual operator trip via the dashboard or `POST /admin/kill-switch/trip` only calls `KillSwitchManager.trip(...)` (`app/dashboard/admin_routes.py:1660-1666`) and does **not** mutate `RiskManager.kill_switch_activated`, so a manual trip starts with `legacy=False, durable=True` — divergence is False by definition and the readyz divergence alert is **not** expected to fire. If you tripped manually and `/readyz` reports `kill_switch_divergence=true`, treat that as a separate pre-existing legacy auto-trip that the manual durable trip just masked — investigate before clearing. Otherwise, on a manual-trip path you may skip directly to Step 2.
+**Auto-trip vs manual-trip scope of Step 1 (Codex #256 round-2 P2 + round-4 P2 reinforcement).** Step 1 is composed of two distinct checks: (a) the legacy↔durable **divergence** boolean and (b) the standalone `kill_switch_legacy_active` flag. Divergence is defined as `legacy_active=True AND durable_global_active=False` (`app/hub/runtime.py:1029`); a manual operator trip via the dashboard or `POST /admin/kill-switch/trip` only calls `KillSwitchManager.trip(...)` (`app/dashboard/admin_routes.py:1660-1666`) and does **not** mutate `RiskManager.kill_switch_activated`. So a manual trip on a clean system starts with `legacy=False, durable=True` — divergence is False by definition. **However**, when a manual durable trip is laid on top of an already-active legacy `RiskManager` flag (e.g. a stream-path auto-trip the operator did not realise was active), the durable=True term *masks* divergence: the operator sees `kill_switch_divergence=false` while `kill_switch_legacy_active=true` remains in the `/readyz` payload (`app/server.py:1346-1348`). If the operator then confirm-clears the durable record without inspecting `kill_switch_legacy_active`, the durable mask is removed, divergence reappears, **and** entries become eligible at the router while the legacy halt is still active — re-creating exactly the 2026-05-08 incident shape from the other direction. Therefore on **every** trip — auto **and** manual — Step 1 must check **both** `kill_switch_divergence` AND `kill_switch_legacy_active` in the `/readyz` payload before progressing to clear. If `kill_switch_legacy_active=true` you have a pre-existing legacy auto-trip to investigate and re-bridge **regardless** of what the divergence boolean reports.
 
-### Step 1 — On auto-trip incidents, confirm both legacy and durable state agree
+### Step 1 — Confirm both legacy and durable kill-switch state agree (every trip)
 
 Two stores represent kill-switch state and they can disagree:
 
@@ -77,7 +77,7 @@ Two stores represent kill-switch state and they can disagree:
 | Durable `KillSwitchManager` (Postgres `kill_switch_state` table) | Hub interceptor decisions in LIVE | `GET /admin/kill-switch/state` — admin auth required |
 | Legacy `RiskManager.kill_switch_activated` (in-memory + `risk_positions.json`) | Stream-path legacy exits | Search backend logs for `kill_switch_activated`, or inspect `risk_positions.json` |
 
-PR #231 (Issue #218) bridges legacy auto-trips into the durable manager. If the bridge fails (auto-trip on the stream path but durable manager still INACTIVE), `/readyz` will surface `kill_switch_divergence=true` and `kill_switch_legacy_active=true` in the JSON payload, and fail readiness with `reason="kill_switch_divergence: legacy=True durable_global=False ..."` (PR #234 / Issue #222 — see `app/server.py:1346-1348` for the payload fields and `app/server.py:1397-1413` for the reason). **Do not** proceed to clear while divergence is reported — capture the evidence and re-run the bridge before touching the durable state.
+PR #231 (Issue #218) bridges legacy auto-trips into the durable manager. If the bridge fails (auto-trip on the stream path but durable manager still INACTIVE), `/readyz` will surface `kill_switch_divergence=true` and `kill_switch_legacy_active=true` in the JSON payload, and fail readiness with `reason="kill_switch_divergence: legacy=True durable_global=False ..."` (PR #234 / Issue #222 — see `app/server.py:1346-1348` for the payload fields and `app/server.py:1397-1413` for the reason). **Do not** proceed to clear while either `kill_switch_divergence=true` **or** `kill_switch_legacy_active=true` is reported. Per the round-4 P2 correction above, `kill_switch_legacy_active=true` with `kill_switch_divergence=false` is the masked-divergence shape that appears when a manual durable trip is laid on top of a pre-existing legacy auto-trip — clearing the durable record alone will re-expose the legacy halt and reopen entries against it. Capture the evidence and re-run the legacy bridge before touching the durable state.
 
 ### Step 2 — Verify broker-side flat directly in the broker terminal
 
@@ -119,13 +119,47 @@ Both the dashboard "Cancel ALL" and `break-glass/flatten` are audited (cancel-al
 Earlier wording said operators could downgrade an existing HARD trip back to SOFT via the dashboard `block_exits` toggle. **That control does not exist** — the Safety panel only renders **"Upgrade SOFT → HARD"** and only when `!globalRecord?.block_exits` (`frontend/src/components/KillSwitchPanel.tsx:521-528`). There is no dashboard "Downgrade HARD → SOFT" button. The two actually-supported paths are:
 
 1. **HTTP API re-trip (preferred, audited).** `POST /admin/kill-switch/trip` with `block_exits=false` against the same scope+scope_id. When the durable record is already `TRIPPED` or `CLEAR_PENDING` with a different `block_exits` value, the endpoint detects the in-place upgrade/downgrade case and routes through `KillSwitchManager.set_block_exits` rather than rejecting with 409 (`app/dashboard/admin_routes.py:1667-1703`). The action is audited as `kill_switch_block_exits_upgraded` and the response carries `upgraded_in_place=true`. In LIVE this still requires ADMIN role and a non-empty `reason`.
-2. **Direct Postgres UPDATE (break-glass, manual audit only).** When the API is unavailable: `UPDATE kill_switch_state SET block_exits = false, updated_at = now() WHERE scope = 'GLOBAL' AND scope_id = 'GLOBAL' AND state IN ('TRIPPED','CLEAR_PENDING');` — followed by a backend restart so `KillSwitchManager.load_state()` picks up the change. This is **not** audited by Phoenix; capture the SQL evidence in the incident log.
+2. **Direct Postgres UPDATE (break-glass, manual audit only).** When the API is unavailable, the downgrade SQL must match the **actual scope** of the active HARD record — the runbook supports `GLOBAL`, `TENANT`, `ACCOUNT`, and `STRATEGY` scopes (`app/risk/kill_switch.py` `KillSwitchScope`), and a literal `WHERE scope='GLOBAL' AND scope_id='GLOBAL'` will update zero rows when the active HARD trip is account- or tenant-scoped (Codex #256 round-4 P2 correction). First confirm the active record:
+
+   ```sql
+   -- Identify the active HARD trip(s) to downgrade
+   SELECT id, scope, scope_id, state, block_exits, trip_reason, updated_at
+   FROM kill_switch_state
+   WHERE block_exits = true
+     AND state IN ('TRIPPED','CLEAR_PENDING')
+   ORDER BY updated_at DESC;
+   ```
+
+   Then run a parameterised UPDATE against the specific `scope` / `scope_id` pair you observed. The placeholders below use `psql`'s `\set` form for clarity; substitute the matching driver syntax (`%(scope)s` for psycopg, `$1`/`$2` for asyncpg, `?` for sqlite shells) as appropriate:
+
+   ```sql
+   -- psql example. Replace :scope / :scope_id with the values from the SELECT above
+   \set scope     'ACCOUNT'
+   \set scope_id  'PRIMARY'
+   UPDATE kill_switch_state
+   SET block_exits = false,
+       updated_at  = now()
+   WHERE scope    = :'scope'
+     AND scope_id = :'scope_id'
+     AND state IN ('TRIPPED','CLEAR_PENDING');
+   ```
+
+   For a `GLOBAL` downgrade the invocation is `\set scope 'GLOBAL'` / `\set scope_id 'GLOBAL'`; for a tenant-scoped trip use `\set scope 'TENANT'` / `\set scope_id '<tenant_id>'`. Verify `UPDATE 1` (or `UPDATE N` matching the number of active records you intended to downgrade) — `UPDATE 0` means the predicate did not match and the HARD trip is still in force. Follow with a backend restart so `KillSwitchManager.load_state()` picks up the change. This is **not** audited by Phoenix; capture the SELECT + UPDATE evidence in the incident log.
 
 ### Step 4 — Only then follow the clear / rearm sequence
 
 After (and only after) broker-side flat is confirmed and the next `AccountRunner._sync_positions` tick has refreshed `StateStore` so `/positions` reflects the flat state (recall from Step 2 that the StateStore write is **not** gated by the kill switch — there is no separate "re-enable BROKER_SYNC" step in the durable flow):
 
-1. `POST /admin/kill-switch/request-clear` (or the dashboard "Request Clear" button) — validation will refuse if any order-lifecycle record for an `AccountRunner` is in `RECONCILING` or `MANUAL_REVIEW` state (`app/dashboard/admin_routes.py:1769-1787`). **Note (Codex #256 round-2 P2 correction).** Earlier runbook wording said `request-clear` rejects `ORPHAN_REVIEW` ownership records — that is **not** what the endpoint does. The validator only walks `OrderLifecycle._position_records` and checks `position_state in {RECONCILING, MANUAL_REVIEW}`. The position-ownership store's `ORPHAN_REVIEW` state is **not** consulted by this validator. If you need to ensure no `ORPHAN_REVIEW` ownership records exist before clearing, query `GET /admin/positions/ownership` (or the relevant store endpoint) and resolve them via `POST /admin/resolve-orphan-review` independently — see `resolve_orphan_review.md`.
+1. `POST /admin/kill-switch/request-clear` (or the dashboard "Request Clear" button) — validation will refuse if any order-lifecycle record for an `AccountRunner` is in `RECONCILING` or `MANUAL_REVIEW` state (`app/dashboard/admin_routes.py:1769-1787`). **Note (Codex #256 round-2 P2 + round-4 P3 corrections).** Earlier runbook wording said `request-clear` rejects `ORPHAN_REVIEW` ownership records — that is **not** what the endpoint does. The validator only walks `OrderLifecycle._position_records` and checks `position_state in {RECONCILING, MANUAL_REVIEW}`. The position-ownership store's `ORPHAN_REVIEW` state is **not** consulted by this validator. There is also **no** `GET /admin/positions/ownership` route — earlier wording referencing it was wrong (repo-wide search finds only `POST /admin/resolve-orphan-review` and `POST /state/clear-position-record` in `app/dashboard/admin_routes.py`; no ownership listing route exists). To enumerate `ORPHAN_REVIEW` ownership records before clearing, query the `position_ownership_ledger` table directly:
+
+   ```sql
+   SELECT tenant_id, broker_account_id, ownership_key, state, updated_at, evidence
+   FROM position_ownership_ledger
+   WHERE state = 'ORPHAN_REVIEW'
+   ORDER BY updated_at DESC;
+   ```
+
+   Resolve any rows returned via `POST /admin/resolve-orphan-review` independently — see `resolve_orphan_review.md` for the request schema and decision codes.
 2. **In LIVE, FIRST obtain a `kill_switch_clear` step-up token** (Codex #256 round-1 P1; PR #240 round-2 review). `POST /admin/step-up/issue` with `action_class=kill_switch_clear`, `resource_id=GLOBAL` (or the specific scope id). Token TTL is 5 minutes, single-use, actor + action-class + resource bound.
 3. `POST /admin/kill-switch/confirm-clear` with the `step_up_token` — moves to `CLEARED`. **Entries become eligible at this transition** in LIVE: `KillSwitchManager.is_tripped()` (`app/risk/kill_switch.py:467-476`) returns False once the record is `CLEARED`, so the router interceptor will admit new entries even before the separate rearm step. The dashboard pill turning blue `CLEARED` is therefore the point of restored entry flow. The LIVE step-up gate on confirm-clear (`app/dashboard/admin_routes.py:1848-1864`) is the secondary credential ceremony that protects this transition; it is **not** deferrable to rearm.
 4. Obtain a separate `kill_switch_rearm` step-up token in LIVE (`POST /admin/step-up/issue` with `action_class=kill_switch_rearm`, `resource_id=GLOBAL` for the global scope). Tokens are not interchangeable across action classes.
@@ -146,7 +180,7 @@ This subsection documents the status-quo behaviour of the automated exit engines
 | **SOFT** (default) | Blocked at router | Allowed at the router (still pass risk-reducing gate) | **Trailing-lock skips exit submission entirely** — see warning below. Other engines that bypass the engine-side gate may still flow to the router. |
 | **HARD** (`block_exits=True`) | Blocked at router | Blocked at router (`is_tripped_for_scope_with_block_exits → block_exits=True`) | Blocked. Operator must flatten manually in the broker UI. |
 
-**Operator warning (Codex #256 round-1 P2 correction).** For any durable trip — **SOFT or HARD** — `PositionTrailingLockEngine` calls `KillSwitchManager.is_tripped_for_scope()` and **skips exit submission for tripped scopes** regardless of `block_exits` (`app/hub/exit_engines.py:2308-2358`). This is intentional: while the kill switch is durable-tripped, BROKER_SYNC is suppressed and internal position state is stale, so submitting trailing-lock exits against it produced the 2026-05-08 duplicate-fill incident. Therefore:
+**Operator warning (Codex #256 round-1 P2 + round-4 P2 corrections).** For any durable trip — **SOFT or HARD** — `PositionTrailingLockEngine` calls `KillSwitchManager.is_tripped_for_scope()` and **skips exit submission for tripped scopes** regardless of `block_exits` (`app/hub/exit_engines.py:2308-2358`). This is intentional defence-in-depth: trailing-lock submissions during the 2026-05-08 NATURALGAS22MAY26265CE window produced the duplicate-broker-fill sequence (broker_order_ids 842740 + 842946 ~60s apart), so the engine now suppresses **its own** exit submissions for the duration of any durable trip. **This skip is NOT because StateStore is stale** — Step 2 above documents that `runtime.state_store.get_positions(...)` continues to refresh on every `AccountRunner._sync_positions` tick regardless of the kill switch (`app/hub/account_runner.py:419-423`), and `PositionTrailingLockEngine` reads from the **same** `self.state_store.get_positions(...)` source (`app/hub/exit_engines.py:2315`). The trailing-lock skip is a defence against runaway re-submission during incident response, not a stale-data fix. Therefore:
 
 - **Do not rely on trailing-lock to flatten exposure during a SOFT trip.** It will not fire. The operator must flatten manually — either via dashboard "Cancel ALL Open Orders" plus broker UI close, or by clearing the kill switch (Step 4 SOP) once broker-side flat is confirmed.
 - HARD vs SOFT chiefly affects strategy-driven and break-glass exits at the router. Trailing-lock is gated at the **engine** side regardless.
@@ -263,47 +297,57 @@ The dashboard's Safety page already merges these three resource types into a sin
 
 ## HTTP API reference (authenticated, ADMIN role)
 
+The calls below are listed in the order an operator must execute them during an incident response (Codex #256 round-4 P2 correction — earlier ordering placed `cancel-all` after `confirm-clear`/`rearm`, which would re-admit entries while pending broker orders were still on the book; per SOP Step 3a `cancel-all` is **mandatory before** `confirm-clear`).
+
 ```http
 # Trip
 POST /admin/kill-switch/trip
 X-Admin-Key: <ADMIN_API_KEY>
 {"scope": "GLOBAL", "scope_id": "GLOBAL", "reason": "Daily loss threshold exceeded", "block_exits": false}
 
-# Request a clear (TRIPPED → CLEAR_PENDING)
+# Query current state at any time (read-only, no state machine effect)
+GET /admin/kill-switch/state
+X-Admin-Key: <ADMIN_API_KEY>
+
+# SOP Step 3a — Cancel all open broker orders BEFORE clearing
+# (MANDATORY; drains working/pending broker orders so they cannot fill
+# against fresh entries once confirm-clear re-admits them. PR #240,
+# audit-emitting.) Precondition: the durable KillSwitchManager has a
+# record in TRIPPED or CLEAR_PENDING covering the target scope —
+# env-only GLOBAL_KILL=1 does NOT satisfy this gate.
+POST /admin/kill-switch/cancel-all
+X-Admin-Key: <ADMIN_API_KEY>
+{"reason": "panic stop — strategy XYZ mis-firing", "broker_account_id": null}
+
+# SOP Step 4 — Request a clear (TRIPPED → CLEAR_PENDING)
 POST /admin/kill-switch/request-clear
 X-Admin-Key: <ADMIN_API_KEY>
 {"scope": "GLOBAL", "scope_id": "GLOBAL", "reason_code": "loss_resolved", "break_glass": false}
 
-# STEP 1 of confirm-clear — issue a kill_switch_clear step-up token (LIVE only)
+# SOP Step 4 — STEP 1 of confirm-clear — issue a kill_switch_clear step-up token (LIVE only)
 # Codex #256 round-1 P1: confirm-clear is the transition that restores router
 # entry eligibility, so it ALSO requires a dedicated step-up token (not just rearm).
 POST /admin/step-up/issue
 X-Admin-Key: <ADMIN_API_KEY>
 {"action_class": "kill_switch_clear", "resource_id": "GLOBAL"}
 
-# STEP 2 of confirm-clear — Confirm the clear (CLEAR_PENDING → CLEARED — entries restored at the router)
+# SOP Step 4 — STEP 2 of confirm-clear — Confirm the clear
+# (CLEAR_PENDING → CLEARED — entries restored at the router).
+# DO NOT call this before cancel-all above has completed cleanly,
+# otherwise pending broker orders may fill against fresh entries.
 POST /admin/kill-switch/confirm-clear
 X-Admin-Key: <ADMIN_API_KEY>
 {"scope": "GLOBAL", "scope_id": "GLOBAL", "step_up_token": "<CLEAR_TOKEN_ID>"}
 
-# STEP 1 of rearm — issue a separate kill_switch_rearm step-up token (LIVE only, 5-minute TTL, single-use, actor-bound)
+# SOP Step 4 — STEP 1 of rearm — issue a separate kill_switch_rearm step-up token (LIVE only, 5-minute TTL, single-use, actor-bound)
 POST /admin/step-up/issue
 X-Admin-Key: <ADMIN_API_KEY>
 {"action_class": "kill_switch_rearm", "resource_id": "GLOBAL"}
 
-# STEP 2 of rearm — Re-arm (CLEARED → INACTIVE — state-machine hygiene; router already unblocked at confirm-clear)
+# SOP Step 4 — STEP 2 of rearm — Re-arm (CLEARED → INACTIVE — state-machine hygiene; router already unblocked at confirm-clear)
 POST /admin/kill-switch/rearm
 X-Admin-Key: <ADMIN_API_KEY>
 {"scope": "GLOBAL", "scope_id": "GLOBAL", "step_up_token": "<REARM_TOKEN_ID>"}
-
-# Cancel all open broker orders (PR #240, audit-emitting)
-POST /admin/kill-switch/cancel-all
-X-Admin-Key: <ADMIN_API_KEY>
-{"reason": "panic stop — strategy XYZ mis-firing", "broker_account_id": null}
-
-# Query current state
-GET /admin/kill-switch/state
-X-Admin-Key: <ADMIN_API_KEY>
 ```
 
 Most mutations in this API block are audited under `resource_type=kill_switch` and persisted to Postgres immediately. The exceptions (Codex #256 round-1 P3 + round-2 P2 corrections): `/admin/kill-switch/cancel-all` emits `action=kill_switch_cancel_all` with `resource_type=broker_orders` (`app/dashboard/admin_routes.py:2632-2636`) because the cancelled artefacts are broker orders, not kill-switch state; and `/admin/break-glass/flatten` emits `action=break_glass_flatten` with `resource_type=position` (`app/dashboard/admin_routes.py:1114-1118`) — **not** `resource_type=break_glass` as earlier wording in this runbook claimed. Step-up token issuance and consumption are also audited (`resource_type=step_up_token`). When auditing a clear/rearm incident, query `resource_type=kill_switch` and `resource_type=broker_orders` and (if `break-glass/flatten` was used) `resource_type=position&action=break_glass_flatten` to get the full picture.
@@ -323,13 +367,24 @@ Most mutations in this API block are audited under `resource_type=kill_switch` a
 If the kill switch was activated by setting `GLOBAL_KILL=1`:
 
 1. Confirm the triggering condition has been resolved.
-2. Update the deployment environment to remove or unset `GLOBAL_KILL`.
-3. Restart the backend:
+2. **If SOP Step 3a's "helper durable trip" was created so that `/admin/kill-switch/cancel-all` would pass its trip-before-cancel precondition** (see Step 3a above and "Manual — global kill switch via environment" below), that durable record is still `TRIPPED` and will continue to reject entries at the router even after the env var is removed (Codex #256 round-4 P2 correction). Clear the helper trip through the standard durable workflow before progressing — see "After clearing — env-only path cleanup" immediately below this list. If no helper durable trip was created (cancel-all was performed directly in the Angel One terminal as the last-resort option), skip this step.
+3. Update the deployment environment to remove or unset `GLOBAL_KILL`.
+4. Restart the backend:
    ```powershell
    docker compose -f .\docker-compose.live.single.yml restart backend
    ```
-4. Verify in logs that startup validation passes and no kill switch activation is logged.
-5. Confirm fresh entries flow through the order router without `ORDER_REJECTED_GLOBAL_KILL` blocks.
+5. Verify in logs that startup validation passes and no kill switch activation is logged.
+6. Confirm fresh entries flow through the order router without `ORDER_REJECTED_GLOBAL_KILL` **or** `ORDER_REJECTED_KILL_SWITCH_MANAGER` blocks. The latter is what surfaces if the helper durable trip from step 2 was missed and the durable record is still `TRIPPED`.
+
+> **After clearing — env-only path cleanup (Codex #256 round-4 P2).** If you executed SOP Step 3a's "Option (a) — issue a durable `POST /admin/kill-switch/trip` first so cancel-all is permitted" while the original trip path was env-var-only, the durable record you created for that purpose is still `TRIPPED`. Removing `GLOBAL_KILL` and restarting does **not** clear it — `KillSwitchManager.load_state()` rehydrates the row at startup and the hub interceptor keeps rejecting entries with `ORDER_REJECTED_KILL_SWITCH_MANAGER`. Cleanup is the standard durable sequence, in this order (see the HTTP API block above for full request bodies):
+>
+> 1. `POST /admin/kill-switch/request-clear` — `TRIPPED → CLEAR_PENDING`.
+> 2. Obtain a `kill_switch_clear` step-up token via `POST /admin/step-up/issue` (LIVE only).
+> 3. `POST /admin/kill-switch/confirm-clear` — `CLEAR_PENDING → CLEARED`. Entries become eligible at the router at this transition.
+> 4. Obtain a separate `kill_switch_rearm` step-up token via `POST /admin/step-up/issue` (LIVE only).
+> 5. `POST /admin/kill-switch/rearm` — `CLEARED → INACTIVE`. The helper record is now gone and the next trip ceremony starts cleanly.
+>
+> If the helper durable trip was created at a non-GLOBAL scope (e.g. an account-scoped record to satisfy cancel-all for a specific broker account), use the matching `scope` / `scope_id` in each call above. Use the audit log (`GET /admin/audit?resource_type=kill_switch&action=kill_switch_trip`) to identify the record you created if you no longer remember its scope.
 
 ### Legacy path — in-memory kill switch
 
