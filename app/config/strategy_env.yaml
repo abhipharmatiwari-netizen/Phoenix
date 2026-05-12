@@ -861,7 +861,29 @@ strategy_selection:
       #    replay (#214) and direction-filtering already blocks it
       #    on bear days; promoting the spread here is the higher-
       #    value choice for this PR's diagnostic goal.
+      #
+      # 5. TRENDING_UP / TRENDING_DOWN keys (issue #212) make the
+      #    direction-conditional intent explicit instead of relying on
+      #    each strategy's internal direction-gate to self-reject the
+      #    wrong-side bars:
+      #      - TRENDING_UP day: exclusive_nifty_ce_buy (long CE) is the
+      #        direction-matched strategy; put_momentum_scalper would
+      #        have rejected every bar anyway.
+      #      - TRENDING_DOWN day: put_momentum_scalper (long PE) is the
+      #        direction-matched strategy; exclusive_nifty_ce_buy would
+      #        have rejected every bar anyway.
+      #      - Legacy TRENDING is retained for backward compatibility
+      #        and is used when the runtime cannot resolve direction
+      #        (e.g. missing +DI/-DI/EMA/slope ctx fields — see
+      #        RegimeClassifier._directional_trending_regime).
+      #    Position-1 placement of `nifty_weekly_credit_spreads` is no
+      #    longer required for these two split lists since each holds
+      #    exactly two strategies (both fit under cap=2). It is kept
+      #    first for consistency with the legacy TRENDING / HIGH_VOL
+      #    lists where the cap-truncation rule still applies.
       TRENDING: ["nifty_weekly_credit_spreads", "put_momentum_scalper", "exclusive_nifty_ce_buy"]
+      TRENDING_UP: ["nifty_weekly_credit_spreads", "exclusive_nifty_ce_buy"]
+      TRENDING_DOWN: ["nifty_weekly_credit_spreads", "put_momentum_scalper"]
       NORMAL: ["nifty_weekly_credit_spreads", "exclusive_nifty_ce_buy"]
       CHOPPY: ["nifty_weekly_credit_spreads", "exclusive_nifty_ce_buy"]
       HIGH_VOL: ["nifty_weekly_credit_spreads", "put_momentum_scalper", "exclusive_nifty_ce_buy"]
