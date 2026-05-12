@@ -320,3 +320,146 @@ def test_persist_bar_bigquery_uses_row_ids():
     assert len(persister._bq_client.calls) == 1
     _table, _rows, row_ids, _ignore = persister._bq_client.calls[0]
     assert row_ids == ["NIFTY_IDX|60|2026-02-01T09:15:00+00:00"]
+
+
+# ---- bar_regime sidecar persistence (issue #215) ----
+
+
+def test_persist_regime_postgres_inserts_with_idempotent_conflict_clause(monkeypatch):
+    """`persist_regime` writes a row into the bar_regime sidecar with the
+    composite-key UPSERT shape required by issue #215 AC: idempotent on
+    (bar_id, classifier_version)."""
+    dummy_conn = _DummyConn()
+
+    monkeypatch.setattr(
+        "app.core.bar_persister.connect_with_retry",
+        lambda dsn, **kwargs: dummy_conn,
+    )
+
+    persister = BarPersister(
+        postgres_dsn="postgresql://user:pass@localhost:5432/testdb",
+        postgres_table="indicator_bars",
+    )
+    candle = _sample_candle()
+    persister.persist_regime(
+        "NIFTY_IDX",
+        60,
+        candle,
+        regime="TRENDING_UP",
+        classifier_version="dynamic_policy_v2",
+        signals={"adx14": 27.5, "di_spread": 12.0},
+    )
+    persister.close()
+
+    regime_inserts = [
+        (query, params)
+        for query, params in dummy_conn.calls
+        if isinstance(query, str)
+        and "INSERT INTO" in query.upper()
+        and "BAR_REGIME" in query.upper()
+    ]
+    assert regime_inserts, "expected an INSERT into the bar_regime sidecar"
+    query, params = regime_inserts[-1]
+    # AC: idempotent on the composite key.
+    assert "ON CONFLICT (bar_id, classifier_version)" in query
+    # AC: insert references the source indicator_bars row for FK integrity.
+    assert "FROM \"indicator_bars\"" in query
+    assert "WHERE label = %s" in query
+    assert "AND timeframe_seconds = %s" in query
+    assert "AND ts_start = %s" in query
+    # AC: regime + classifier_version travel as positional params.
+    assert params is not None
+    assert params[0] == "TRENDING_UP"
+    assert params[1] == "dynamic_policy_v2"
+    # signals is serialized to JSON for the JSONB column.
+    assert "\"adx14\": 27.5" in params[2]
+    # The bar lookup uses the candle's tz-aware ts_start.
+    assert params[3] == "NIFTY_IDX"
+    assert params[4] == 60
+    assert params[5] == candle.start_ts
+
+
+def test_persist_regime_is_fire_and_forget_on_postgres_error(monkeypatch):
+    """AC: regime persistence is fire-and-forget. A Postgres failure must
+    never propagate out of `persist_regime` and block the hot path."""
+    dummy_conn = _DummyConn()
+
+    class _BrokenCursor(_DummyCursor):
+        def execute(self, query, params=None):
+            text = str(query).upper()
+            if "INSERT INTO" in text and "BAR_REGIME" in text:
+                raise RuntimeError("simulated bar_regime write failure")
+            return super().execute(query, params)
+
+    monkeypatch.setattr(dummy_conn, "cursor", lambda: _BrokenCursor(dummy_conn))
+    monkeypatch.setattr(
+        "app.core.bar_persister.connect_with_retry",
+        lambda dsn, **kwargs: dummy_conn,
+    )
+
+    persister = BarPersister(
+        postgres_dsn="postgresql://user:pass@localhost:5432/testdb",
+        postgres_table="indicator_bars",
+    )
+
+    # Must not raise even though the cursor.execute path raises.
+    persister.persist_regime(
+        "NIFTY_IDX",
+        60,
+        _sample_candle(),
+        regime="CHOPPY",
+        classifier_version="dynamic_policy_v2",
+        signals=None,
+    )
+    persister.close()
+
+
+def test_persist_regime_noop_when_postgres_disabled():
+    """Without a Postgres backend the call must silently no-op (no crash,
+    no attribute access). Replay / CSV-only setups rely on this."""
+    persister = BarPersister(csv_path=None)
+    # Should return cleanly even with no connection initialized.
+    persister.persist_regime(
+        "NIFTY_IDX",
+        60,
+        _sample_candle(),
+        regime="NORMAL",
+        classifier_version="dynamic_policy_v2",
+    )
+    persister.close()
+
+
+def test_persist_regime_scopes_sidecar_for_custom_indicator_bars(monkeypatch):
+    """Non-default indicator_bars table names get a derived sidecar table
+    name (`<table>_bar_regime`) so multi-tenant setups do not cross-write."""
+    dummy_conn = _DummyConn()
+    monkeypatch.setattr(
+        "app.core.bar_persister.connect_with_retry",
+        lambda dsn, **kwargs: dummy_conn,
+    )
+
+    persister = BarPersister(
+        postgres_dsn="postgresql://user:pass@localhost:5432/testdb",
+        postgres_table="tenant_alpha_indicator_bars",
+    )
+    persister.persist_regime(
+        "NIFTY_IDX",
+        60,
+        _sample_candle(),
+        regime="HIGH_VOL",
+        classifier_version="dynamic_policy_v2",
+    )
+    persister.close()
+
+    regime_inserts = [
+        (query, params)
+        for query, params in dummy_conn.calls
+        if isinstance(query, str)
+        and "INSERT INTO" in query.upper()
+        and "BAR_REGIME" in query.upper()
+    ]
+    assert regime_inserts, "expected a sidecar INSERT for the tenant table"
+    query, _params = regime_inserts[-1]
+    # Sidecar name is derived from the source table, not the global default.
+    assert "tenant_alpha_indicator_bars_bar_regime" in query
+    assert "FROM \"tenant_alpha_indicator_bars\"" in query
