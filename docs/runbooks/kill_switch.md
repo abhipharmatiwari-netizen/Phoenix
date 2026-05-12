@@ -150,16 +150,29 @@ Earlier wording said operators could downgrade an existing HARD trip back to SOF
 
 After (and only after) broker-side flat is confirmed and the next `AccountRunner._sync_positions` tick has refreshed `StateStore` so `/positions` reflects the flat state (recall from Step 2 that the StateStore write is **not** gated by the kill switch — there is no separate "re-enable BROKER_SYNC" step in the durable flow):
 
-1. `POST /admin/kill-switch/request-clear` (or the dashboard "Request Clear" button) — validation will refuse if any order-lifecycle record for an `AccountRunner` is in `RECONCILING` or `MANUAL_REVIEW` state (`app/dashboard/admin_routes.py:1769-1787`). **Note (Codex #256 round-2 P2 + round-4 P3 corrections).** Earlier runbook wording said `request-clear` rejects `ORPHAN_REVIEW` ownership records — that is **not** what the endpoint does. The validator only walks `OrderLifecycle._position_records` and checks `position_state in {RECONCILING, MANUAL_REVIEW}`. The position-ownership store's `ORPHAN_REVIEW` state is **not** consulted by this validator. There is also **no** `GET /admin/positions/ownership` route — earlier wording referencing it was wrong (repo-wide search finds only `POST /admin/resolve-orphan-review` and `POST /state/clear-position-record` in `app/dashboard/admin_routes.py`; no ownership listing route exists). To enumerate `ORPHAN_REVIEW` ownership records before clearing, query the `position_ownership_ledger` table directly:
+1. `POST /admin/kill-switch/request-clear` (or the dashboard "Request Clear" button) — validation will refuse if any order-lifecycle record for an `AccountRunner` is in `RECONCILING` or `MANUAL_REVIEW` state (`app/dashboard/admin_routes.py:1769-1787`). **Note (Codex #256 round-2 P2 + round-4 P3 + round-5 P2 corrections).** Earlier runbook wording said `request-clear` rejects `ORPHAN_REVIEW` ownership records — that is **not** what the endpoint does. The validator only walks `OrderLifecycle._position_records` and checks `position_state in {RECONCILING, MANUAL_REVIEW}`. The position-ownership store's `ORPHAN_REVIEW` state is **not** consulted by this validator. There is also **no** `GET /admin/positions/ownership` route — earlier wording referencing it was wrong (repo-wide search finds only `POST /admin/resolve-orphan-review` and `POST /state/clear-position-record` in `app/dashboard/admin_routes.py`; no ownership listing route exists).
+
+   **Ownership-state `ORPHAN_REVIEW` is in-memory only.** Round-4 wording proposed a `SELECT ... FROM position_ownership_ledger WHERE state='ORPHAN_REVIEW'` query — **that SQL is invalid** (Codex #256 round-5 P2 correction). Migration `008_position_ownership_ledger.sql` defines `position_ownership_ledger` as a strategy/net-quantity ledger with no `ownership_key`, `state`, or `evidence` columns; the table only persists `(tenant_id, broker_account_id, contract_key_tuple, strategy_id, authority_path, net_qty, updated_at)`. The runtime `OwnershipRecord` (which carries the `ORPHAN_REVIEW` state) lives in `PositionOwnershipStore._ownership_records` (`app/orders/position_ownership.py:937-940`) and is **not** mirrored to Postgres. Use one of the two working enumeration paths instead:
+
+   **(a) Order-lifecycle proxy via `internal_position_records` (migration 009).** When the reconciliation watcher escalates a scope to `ORPHAN_REVIEW`, the matching `OrderLifecycle._position_records` entry is updated to `position_state='MANUAL_REVIEW'` (`app/core/position_sync.py:1070-1075`) and persisted into `internal_position_records.position_state`. This is the **same** state the `request-clear` validator inspects, so querying it is the operationally-meaningful pre-clear check:
 
    ```sql
-   SELECT tenant_id, broker_account_id, ownership_key, state, updated_at, evidence
-   FROM position_ownership_ledger
-   WHERE state = 'ORPHAN_REVIEW'
+   SELECT scope_key, tenant_id, account_id, strategy_id, ownership_key,
+          position_state, state_reason, updated_at
+   FROM internal_position_records
+   WHERE position_state IN ('RECONCILING', 'MANUAL_REVIEW')
    ORDER BY updated_at DESC;
    ```
 
-   Resolve any rows returned via `POST /admin/resolve-orphan-review` independently — see `resolve_orphan_review.md` for the request schema and decision codes.
+   Any rows returned will cause `request-clear` to fail with HTTP 409.
+
+   **(b) Backend log search for the watcher escalation event.** `ReconciliationTimeoutWatcher.check_and_escalate` emits a `WARNING` log line `reconciliation_timeout_watcher: escalating scope <key> to ORPHAN_REVIEW ...` (`app/core/reconciliation_timeout_watcher.py:162-166`) at the moment of escalation. Tail the backend logs across the incident window:
+
+   ```powershell
+   docker compose -f .\docker-compose.live.single.yml logs --since 24h backend | Select-String "escalating scope.*ORPHAN_REVIEW"
+   ```
+
+   Each match identifies the `scope_key` of an active ORPHAN_REVIEW; resolve via `POST /admin/resolve-orphan-review` — see `resolve_orphan_review.md` for the request schema and decision codes. If neither query nor log search returns anything, no ORPHAN_REVIEW work is pending.
 2. **In LIVE, FIRST obtain a `kill_switch_clear` step-up token** (Codex #256 round-1 P1; PR #240 round-2 review). `POST /admin/step-up/issue` with `action_class=kill_switch_clear`, `resource_id=GLOBAL` (or the specific scope id). Token TTL is 5 minutes, single-use, actor + action-class + resource bound.
 3. `POST /admin/kill-switch/confirm-clear` with the `step_up_token` — moves to `CLEARED`. **Entries become eligible at this transition** in LIVE: `KillSwitchManager.is_tripped()` (`app/risk/kill_switch.py:467-476`) returns False once the record is `CLEARED`, so the router interceptor will admit new entries even before the separate rearm step. The dashboard pill turning blue `CLEARED` is therefore the point of restored entry flow. The LIVE step-up gate on confirm-clear (`app/dashboard/admin_routes.py:1848-1864`) is the secondary credential ceremony that protects this transition; it is **not** deferrable to rearm.
 4. Obtain a separate `kill_switch_rearm` step-up token in LIVE (`POST /admin/step-up/issue` with `action_class=kill_switch_rearm`, `resource_id=GLOBAL` for the global scope). Tokens are not interchangeable across action classes.
@@ -291,7 +304,12 @@ GET /admin/audit?resource_type=position&action=break_glass_flatten
 
 (The third query is filtered by `action=break_glass_flatten` because `resource_type=position` also covers other position-mutating audit events; the action filter narrows to the break-glass exits only.)
 
-The dashboard's Safety page already merges these three resource types into a single table for the common operator view.
+**Safety-page audit merge — current gap (Codex #256 round-5 P2 correction).** Earlier wording said the dashboard's Safety page already merges these three resource types into a single table. **That is only partially true today.** `frontend/src/pages/Safety.tsx` (lines 44-76) merges three audit feeds, but the third query is `action='break_glass'` — and the actual endpoint emits `action='break_glass_flatten'` with `resource_type='position'` (`app/dashboard/admin_routes.py:1114-1118`). The `action='break_glass'` query therefore returns zero rows, and break-glass flatten events do **not** appear on the Safety page Audit Trail. The page does correctly merge:
+
+- `resource_type='kill_switch'` — trip / request_clear / confirm_clear / rearm / set_block_exits.
+- `resource_type='broker_orders'` — `kill_switch_cancel_all`.
+
+For break-glass-flatten audit during an incident, **do not rely on the Safety page**. Issue the explicit `GET /admin/audit?resource_type=position&action=break_glass_flatten` query above (or fetch via `gh api` / `curl` directly) to capture those entries until `Safety.tsx` is updated to query `action='break_glass_flatten'`. Note this in the incident timeline so the audit reconstruction is complete.
 
 ---
 
@@ -382,13 +400,23 @@ If the kill switch was activated by setting `GLOBAL_KILL=1`:
 > 2. Obtain a `kill_switch_clear` step-up token via `POST /admin/step-up/issue` (LIVE only).
 > 3. `POST /admin/kill-switch/confirm-clear` — `CLEAR_PENDING → CLEARED`. Entries become eligible at the router at this transition.
 > 4. Obtain a separate `kill_switch_rearm` step-up token via `POST /admin/step-up/issue` (LIVE only).
-> 5. `POST /admin/kill-switch/rearm` — `CLEARED → INACTIVE`. The helper record is now gone and the next trip ceremony starts cleanly.
+> 5. `POST /admin/kill-switch/rearm` — `CLEARED → INACTIVE`. **The helper record is now in the INACTIVE state — it is not deleted** (Codex #256 round-5 P3 correction). `KillSwitchManager.rearm` (`app/risk/kill_switch.py:440-463`) only transitions the in-memory record's `state` field to `KillSwitchState.INACTIVE`; `save_state` then upserts that row (still keyed on `(scope, scope_id)`) into `kill_switch_state` with `state='INACTIVE'`. On a subsequent process restart, `load_state` filters `WHERE state != 'INACTIVE'` (`app/risk/kill_switch.py:684-703`), so the row is **not** rehydrated into the in-memory manager next boot — but until that restart happens, `GET /admin/kill-switch/state` and the dashboard's kill-switch table will continue to list the helper record as an `INACTIVE` row. This is harmless (an INACTIVE record blocks nothing at the router and the next trip ceremony starts cleanly because `trip()` is permitted from `INACTIVE`); do not chase it as a residual issue during post-incident verification. If you want the Postgres row physically gone, run a manual `DELETE FROM kill_switch_state WHERE scope=:scope AND scope_id=:scope_id AND state='INACTIVE'` after rearm — this is optional and not part of the standard cleanup.
 >
 > If the helper durable trip was created at a non-GLOBAL scope (e.g. an account-scoped record to satisfy cancel-all for a specific broker account), use the matching `scope` / `scope_id` in each call above. Use the audit log (`GET /admin/audit?resource_type=kill_switch&action=kill_switch_trip`) to identify the record you created if you no longer remember its scope.
 
-### Legacy path — in-memory kill switch
+### Legacy path — persisted `RiskManager.kill_switch_activated` flag
 
-The legacy `RiskManager.kill_switch_activated` is reset on restart because it is in-memory. PR #231 bridges legacy auto-trips into the durable manager, so restarting the backend will **not** clear a durable kill switch even if the legacy flag was the original trigger. Use the dashboard or HTTP API.
+**Codex #256 round-5 P2 correction.** Earlier runbook wording said the legacy `RiskManager.kill_switch_activated` flag is "reset on restart because it is in-memory" — **that is wrong**. The flag is persisted to `risk_positions.json` alongside the rest of the legacy risk-state snapshot: `RiskManager._persist_state` writes `"kill_switch_activated": self.kill_switch_activated` on every persist tick (`app/core/risk_manager.py:1300`), and `RiskManager._load_state` rehydrates it on startup (`app/core/risk_manager.py:1269`: `self.kill_switch_activated = bool(data.get("kill_switch_activated", False))`). Restarting the backend therefore does **not** clear a legacy auto-trip — the flag survives the restart and `/readyz` keeps reporting `kill_switch_legacy_active=true`. There are only two paths that actually flip the flag back to False:
+
+1. **Automatic daily reset (IST midnight).** `RiskManager._reset_daily_if_new_day` (`app/core/risk_manager.py:1346-1362`) sets `kill_switch_activated = False` when the next process-observed mark of the day rolls over into a new IST date. This fires on the next risk-evaluation tick after midnight IST — it is **not** a restart side-effect and does not require operator action.
+2. **Manual cleanup of `risk_positions.json` (incident-recovery only, audit-tracked separately).** Stop the backend, edit `risk_positions.json` to set `"kill_switch_activated": false`, restart. Capture the before/after JSON in the incident timeline because this path is not Phoenix-audited.
+
+PR #231 bridges legacy auto-trips into the durable `KillSwitchManager`, so a present-day legacy auto-trip will also leave a `TRIPPED` durable record behind. Clearing the durable record alone does **not** flip the legacy flag — the durable workflow (`request-clear` / `confirm-clear` / `rearm`) only operates on the `kill_switch_state` table. Conversely, the legacy daily reset does not clear the durable record either. To fully recover from a legacy-driven auto-trip:
+
+1. Confirm `kill_switch_legacy_active=false` in `/readyz` — either wait for the IST-midnight reset or edit `risk_positions.json` as above.
+2. Run the standard durable clear/rearm sequence on the bridged `GLOBAL` record (HTTP API or dashboard). See "After clearing — env-only path cleanup" for the call ordering.
+
+**Do not** rely on a process restart alone to recover from a legacy auto-trip; both stores are persisted and both must be cleared explicitly.
 
 ### Postgres-backed kill switch
 
@@ -405,7 +433,18 @@ If the kill switch state is persisted to Postgres and a restart does not clear i
    ```
 2. Confirm the triggering condition is resolved (Step 1 of the SOP above).
 3. Confirm broker-side flat (Step 2).
-4. Verify no `RECONCILING` or `MANUAL_REVIEW` lifecycle records exist for the affected scope — these are the only states `request-clear` validates against (`app/dashboard/admin_routes.py:1769-1787`). `ORPHAN_REVIEW` ownership records are **not** enforced by the validator and must be reviewed separately if relevant.
+4. Verify no `RECONCILING` or `MANUAL_REVIEW` lifecycle records exist on **any** runner — these are the only states `request-clear` validates against (`app/dashboard/admin_routes.py:1769-1787`). **Codex #256 round-5 P2 correction: the validator is unconditionally global.** The `_validation_fn` iterates `hub._runners.values()`, walks each runner's `OrderLifecycle._position_records`, and rejects the clear if **any** record on **any** runner is in `RECONCILING` or `MANUAL_REVIEW` — there is no filter on the requested kill-switch scope. So even when the operator is clearing an account- or tenant-scoped record, a stale `MANUAL_REVIEW` record on an entirely unrelated account will still surface as `HTTP 409: Clear request denied: [...]`. The pre-clear check must therefore enumerate `RECONCILING` / `MANUAL_REVIEW` lifecycle records across **all** runners, not just the affected scope:
+
+   ```sql
+   -- All RECONCILING / MANUAL_REVIEW lifecycle records, regardless of which scope you intend to clear.
+   SELECT scope_key, tenant_id, account_id, strategy_id, ownership_key,
+          position_state, state_reason, updated_at
+   FROM internal_position_records
+   WHERE position_state IN ('RECONCILING', 'MANUAL_REVIEW')
+   ORDER BY updated_at DESC;
+   ```
+
+   If any row is returned, `request-clear` will fail with HTTP 409 even if the row is on a different account than the kill switch being cleared. Resolve the row (`POST /state/clear-position-record` after operator review, or wait for reconciliation to converge) before retrying. `ORPHAN_REVIEW` ownership records are **not** enforced by this validator and must be reviewed separately if relevant.
 5. Use the HTTP clear / rearm API or the dashboard. Do not manually update `kill_switch_state` for routine LIVE operation.
 6. If the API is unavailable, hold the stack stopped and escalate to incident recovery. Any direct DB repair must be separately approved, captured as break-glass evidence, and followed by a restart plus `/readyz` validation.
 
@@ -434,7 +473,7 @@ If a clear or rearm was issued incorrectly, immediately trip the same scope agai
 
 | Time | Event |
 |---|---|
-| 13:07:02 | Legacy auto-trip: `total_dd > limit` triggered `RiskManager.kill_switch_activated=True` (in-memory only). |
+| 13:07:02 | Legacy auto-trip: `total_dd > limit` triggered `RiskManager.kill_switch_activated=True`. Per Codex #256 round-5 P2 the flag is also persisted to `risk_positions.json`, so it would have survived a restart — though the durable bridge gap (root cause 1 below) was the proximate cause of the 23-minute hub-side admit window. |
 | 13:07:02 – 13:30:26 | Hub-side `KillSwitchManager` remained `INACTIVE`; 23 minutes of trailing-lock and ema20 entry routing continued through the router. |
 | 13:30:26 | Operator issued manual GLOBAL trip (durable). |
 | 13:30:32 / 13:31:33 / 13:33:03 | Three additional 3-lot SELL fills / external fills landed after the manual trip — the dashboard "Cancel ALL Open Orders" flow did not yet exist, and BROKER_SYNC suppression made the internal `[]` position view misleading. |
