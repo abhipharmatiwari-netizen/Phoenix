@@ -90,8 +90,10 @@ def parse_args() -> argparse.Namespace:
             "unrealised, NOT folded into win/loss stats. 'force_exit' is "
             "legacy behaviour that closes everything at session boundaries "
             "(inflates losses; kept for parity with pre-#216 reports). "
-            "'daily_mtm' is carry_over plus per-session unrealised snapshots, "
-            "with final unrealised folded into total PnL."
+            "'daily_mtm' is carry_over plus per-session unrealised "
+            "daily_mtm_snapshot events for audit; window-end marks remain "
+            "unrealised and are excluded from realized net PnL and win/loss "
+            "stats (issue #254)."
         ),
     )
     parser.add_argument("--verbose", "-v", action="store_true")
