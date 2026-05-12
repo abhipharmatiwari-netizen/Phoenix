@@ -116,7 +116,7 @@ def test_nifty_spread_exit_uses_entry_broker_symbol_when_meta_symbol_missing(mon
         expiry=date(2026, 2, 26),
         extra=None,
     )
-    assert ok is True
+    assert ok  # issue #262: _enter_spread returns spread_id (truthy) on success
     assert len(calls) == 2
     spread_id = next(iter(strategy.open_spreads))
     entry_short_symbol = calls[0].symbol
@@ -172,7 +172,11 @@ def test_nifty_spread_exit_circuit_breaker_caps_retry_attempts(monkeypatch):
         expiry=date(2026, 2, 26),
         extra=None,
     )
-    assert ok is True
+    # Issue #262: _enter_spread now returns the spread_id (truthy str) on
+    # success / None on failure, so callers in _try_iron_condor can remove
+    # an orphaned PUT-spread shell after a CALL-side rollback. Check truthy
+    # to remain agnostic to the exact id format.
+    assert ok
     spread_id = next(iter(strategy.open_spreads))
 
     strategy._exit_spread(spread_id)
@@ -216,7 +220,7 @@ def test_nifty_spread_entry_carries_strategy_context_and_syncs_risk_manager(monk
         extra=None,
     )
 
-    assert ok is True
+    assert ok  # issue #262: _enter_spread returns spread_id (truthy) on success
     assert len(calls) == 2
     short_ctx = calls[0].strategy_context
     long_ctx = calls[1].strategy_context

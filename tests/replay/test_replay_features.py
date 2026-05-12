@@ -1648,3 +1648,12 @@ def test_nifty_spread_replay_iron_condor_rollback_emits_put_unwind_fills(monkeyp
     assert ("NIFTY_PE_19250", "SELL") in exit_pairs, (
         f"PUT-long leg must be sold to close; got exits={exit_orders!r}"
     )
+    # Issue #262: the rollback must ALSO remove the orphaned PUT-spread
+    # shell from ``self.open_spreads``. Before the fix, the PUT spread
+    # entry remained in the dict after its legs were force-exited, counting
+    # toward ``max_open_spreads`` and producing stale state in subsequent
+    # bar iterations.
+    assert strategy.open_spreads == {}, (
+        "iron-condor rollback must remove the PUT-spread shell from "
+        f"open_spreads (#262); got {list(strategy.open_spreads.keys())!r}"
+    )

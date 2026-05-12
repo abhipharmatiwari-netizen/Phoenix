@@ -1423,18 +1423,30 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
             )
             return
         # place orders: put spread then call spread
-        if not self._enter_spread("IRON_CONDOR_PUT", put_short_label, put_long_label, put_credit, put_width, expiry, extra=None):
+        put_spread_id = self._enter_spread(
+            "IRON_CONDOR_PUT", put_short_label, put_long_label, put_credit, put_width, expiry, extra=None,
+        )
+        if not put_spread_id:
             return
-        if not self._enter_spread("IRON_CONDOR_CALL", call_short_label, call_long_label, call_credit, call_width, expiry, extra=None):
+        if not self._enter_spread(
+            "IRON_CONDOR_CALL", call_short_label, call_long_label, call_credit, call_width, expiry, extra=None,
+        ):
             # rollback put side
             self._force_exit_leg(put_short_label, "BUY", self._qty_for_label(put_short_label))
             self._force_exit_leg(put_long_label, "SELL", self._qty_for_label(put_long_label))
+            # Issue #262: also remove the orphaned PUT-spread shell from
+            # ``self.open_spreads``. Without this the entry continues to
+            # count toward ``max_open_spreads`` and the next bar iteration
+            # observes a spread whose legs have been force-exited.
+            self.open_spreads.pop(put_spread_id, None)
+            self._reset_exit_retry_state(put_spread_id)
             self._log_signal_evaluation(
                 "condor_call_side_failed_rolled_back_put",
                 put_short=put_short_label,
                 put_long=put_long_label,
                 call_short=call_short_label,
                 call_long=call_long_label,
+                put_spread_id=put_spread_id,
             )
             return
         # Full condor (all 4 legs) is in place -- emit the unambiguous
@@ -1550,7 +1562,14 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
         width_pts: float,
         expiry: date,
         extra: Optional[List[SpreadLeg]] = None,
-    ) -> bool:
+    ) -> Optional[str]:
+        # Issue #262: return the freshly-allocated ``spread_id`` on success
+        # (or ``None`` on failure) so callers like ``_try_iron_condor`` can
+        # remove the orphaned spread shell from ``self.open_spreads`` when a
+        # later leg fails and a rollback is needed. The previous ``bool``
+        # signature is preserved at every existing call site because callers
+        # use ``if not self._enter_spread(...):`` truthy checks — a non-empty
+        # ``spread_id`` string is truthy; ``None`` is falsy.
         qty = self._qty_for_label(short_label)
         short_price = self._latest_price(short_label)
         long_price = self._latest_price(long_label)
@@ -1628,7 +1647,7 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
                 response_status=str(getattr(resp_short, "status", "") or ""),
                 response_message=str(getattr(resp_short, "message", "") or "")[:120],
             )
-            return False
+            return None
         self._remember_order_identity(short_label)
         resp_long = self._place_order(
             label=long_label,
@@ -1655,7 +1674,7 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
                 response_status=str(getattr(resp_long, "status", "") or ""),
                 response_message=str(getattr(resp_long, "message", "") or "")[:120],
             )
-            return False
+            return None
         self._remember_order_identity(long_label)
         self.open_spreads[spread_id] = open_spread
         self._reset_exit_retry_state(spread_id)
@@ -1675,7 +1694,7 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
         # fails and rolls back the PUT side. The success log is fired by
         # the spread builder (_open_vertical / _try_iron_condor) AFTER
         # the full spread is in place. (Codex P2 round-3 #1, PR #208.)
-        return True
+        return spread_id
 
     # Force exit a single leg at market.
     def _force_exit_leg(self, label: str, side: str, qty: int) -> None:
