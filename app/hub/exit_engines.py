@@ -2740,24 +2740,44 @@ class PositionTrailingLockEngine:
         # and proceeding with normal evaluation would re-submit an exit
         # for a position whose persisted marker we simply could not
         # load. Fail closed.
-        if self._is_live_mode() and not self._inflight_hydrated:
+        #
+        # PR #261 round-5 review P2 (exit_engines.py:2760): previously
+        # this branch ``return``ed, which ALSO suppressed the qty==0
+        # closed-position cleanup paths in ``_evaluate_runner``. If
+        # Postgres is unreachable for a few watchdog cycles while a
+        # symbol closes and is then reopened before hydration succeeds,
+        # the old peak/armed state is never reset and the reopened
+        # position can be evaluated against stale trailing-lock state.
+        # Mirror the ``inflight_disabled`` cleanup-only mode (round-3 P2,
+        # exit_engines.py:2584): emit the warning, then fall through to
+        # the runner loop with ``submissions_blocked=True`` so the
+        # qty==0 cleanup runs unconditionally while the new-exit
+        # submission path remains fail-closed.
+        hydrate_pending_block = (
+            self._is_live_mode() and not self._inflight_hydrated
+        )
+        if hydrate_pending_block:
             log_event(
                 logger,
                 event_type=(
                     "POSITION_TRAILING_LOCK_SKIPPED_HYDRATE_PENDING"
                 ),
                 message=(
-                    "Trailing-lock evaluation skipped this cycle: durable "
+                    "Trailing-lock SUBMISSIONS skipped this cycle: durable "
                     "inflight marker hydrate has not succeeded yet in LIVE. "
                     "Submitting exits with an unknown durable-marker state "
                     "could place a duplicate exit for a position whose "
-                    "persisted marker simply could not be loaded "
-                    "(PR #261 round-2 review P1 — exit_engines.py:2405)."
+                    "persisted marker simply could not be loaded. "
+                    "Closed-position cleanup (manager state reset + marker "
+                    "clear) still runs so a position closed during the "
+                    "hydrate-pending window cannot preserve stale peak/"
+                    "armed state into a same-symbol reopen "
+                    "(PR #261 round-2 review P1 — exit_engines.py:2405; "
+                    "round-5 review P2 — exit_engines.py:2760)."
                 ),
                 level=logging.ERROR,
                 failed_attempts=self._inflight_hydrate_failed_attempts,
             )
-            return
         giveback_pct = float(getattr(self.settings, "position_trailing_lock_giveback_pct", 0.10))
         floor_inr = float(getattr(self.settings, "position_trailing_lock_floor_inr", 500.0))
         cooldown = float(
@@ -2770,6 +2790,7 @@ class PositionTrailingLockEngine:
                     giveback_pct=giveback_pct,
                     floor_inr=floor_inr,
                     cooldown=cooldown,
+                    submissions_blocked=hydrate_pending_block,
                 )
             except Exception as exc:
                 log_event(
@@ -2789,7 +2810,17 @@ class PositionTrailingLockEngine:
         giveback_pct: float,
         floor_inr: float,
         cooldown: float,
+        submissions_blocked: bool = False,
     ) -> None:
+        # PR #261 round-5 review P2 (exit_engines.py:2760): when the
+        # caller has determined that NEW trailing-lock submissions must
+        # be fail-closed for this cycle (durable inflight hydrate has
+        # not succeeded yet in LIVE), we still want to run the qty==0
+        # cleanup paths below so a closed position cannot preserve
+        # stale peak/armed state into a same-symbol reopen.
+        # ``submissions_blocked=True`` short-circuits the non-zero
+        # submission branch the same way ``self.inflight_disabled``
+        # does.
         tenant_id = getattr(runner, "tenant_id", None)
         broker_account_id = getattr(runner, "broker_account_id", None)
         if tenant_id is None or broker_account_id is None:
@@ -2862,6 +2893,13 @@ class PositionTrailingLockEngine:
             # during the backend-outage window does not preserve stale
             # peak/armed state into a same-symbol reopen.
             if self.inflight_disabled:
+                continue
+            # PR #261 round-5 review P2 (exit_engines.py:2760): same
+            # contract for the hydrate-pending window — caller passed
+            # ``submissions_blocked=True`` because the durable inflight
+            # hydrate has not succeeded yet in LIVE. Skip the submission
+            # branch but keep the qty==0 cleanup above firing.
+            if submissions_blocked:
                 continue
             # Issue #225: per-position inflight-marker check. If a recent
             # trailing-lock submission for this (tenant, account, symbol)
@@ -3092,7 +3130,7 @@ class PositionTrailingLockEngine:
             expected_side, expected_quantity = self._inflight_exit_specs.get(
                 key, (None, None),
             )
-            terminal_evidence = self._marker_has_terminal_broker_evidence(
+            terminal_state = self._marker_has_terminal_broker_evidence(
                 broker_account_id=broker_account_id,
                 symbol=symbol,
                 broker_order_id=broker_order_id,
@@ -3100,7 +3138,7 @@ class PositionTrailingLockEngine:
                 expected_side=expected_side,
                 expected_quantity=expected_quantity,
             )
-            if not terminal_evidence:
+            if not terminal_state:
                 # PR #261 round-1 review P2: the comment above promises
                 # "hold until the normal timeout sweeps it", but
                 # ``_is_inflight_blocked`` is ONLY called while iterating
@@ -3269,15 +3307,55 @@ class PositionTrailingLockEngine:
             # reset, a quick same-symbol re-open is evaluated against the
             # stale peak/armed state and can immediately emit another
             # trailing-lock exit even though the new position never armed.
+            #
+            # PR #261 round-5 review P2 (exit_engines.py:3274): only
+            # reset peaks on FILLED. CANCELLED / REJECTED / EXPIRED /
+            # FAILED are terminal evidence FOR THE EXIT ORDER but they
+            # do NOT prove the underlying position is closed — the
+            # rejected exit means the position is still open and the
+            # existing peak/armed state remains the correct basis for
+            # the next exit attempt. Resetting peaks here would drop
+            # the historic peak that a subsequent trailing-lock retry
+            # needs.
             try:
-                self.manager.reset_position(
-                    tenant_id, broker_account_id, symbol,
-                )
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning(
-                    "trailing-lock state reset failed for disappeared "
-                    "symbol %s (non-fatal): %s",
-                    symbol, exc,
+                from app.orders.order_state import TERMINAL_FILL_STATES
+
+                terminal_is_fill = terminal_state in TERMINAL_FILL_STATES
+            except Exception:  # pragma: no cover - defensive
+                # Failing to import = fail closed (do not reset peaks).
+                terminal_is_fill = False
+            if terminal_is_fill:
+                try:
+                    self.manager.reset_position(
+                        tenant_id, broker_account_id, symbol,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "trailing-lock state reset failed for disappeared "
+                        "symbol %s (non-fatal): %s",
+                        symbol, exc,
+                    )
+            else:
+                log_event(
+                    logger,
+                    event_type=(
+                        "POSITION_TRAILING_LOCK_PEAK_PRESERVED_NON_FILL"
+                    ),
+                    message=(
+                        "Disappeared-symbol marker cleared with NON-FILL "
+                        "terminal evidence (CANCELLED / REJECTED / "
+                        "EXPIRED / FAILED) — preserving "
+                        "PositionTrailingLockManager peak/armed state so "
+                        "the next exit attempt for the still-open "
+                        "position can rely on the historic peak "
+                        "(PR #261 round-5 review P2 — "
+                        "exit_engines.py:3274)."
+                    ),
+                    level=logging.INFO,
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    symbol=symbol,
+                    terminal_state=str(terminal_state),
                 )
             log_event(
                 logger,
@@ -3288,8 +3366,11 @@ class PositionTrailingLockEngine:
                     f"{min_consecutive_misses} consecutive evaluations AND "
                     "the broker order ledger shows the prior exit in a "
                     "canonical terminal state. Persisted trailing-lock "
-                    "state also reset to prevent stale peak/armed bias on "
-                    "a quick re-open (issues #250 + #252)."
+                    "manager state was reset ONLY if the terminal status "
+                    "is FILLED — non-fill terminal evidence (CANCELLED / "
+                    "REJECTED / EXPIRED / FAILED) preserves the peak "
+                    "because the underlying position is still open "
+                    "(issues #250 + #252; PR #261 round-5 review P2)."
                 ),
                 level=logging.INFO,
                 tenant_id=tenant_id,
@@ -3297,6 +3378,7 @@ class PositionTrailingLockEngine:
                 symbol=symbol,
                 consecutive_missing_snapshots=min_consecutive_misses,
                 broker_order_id=broker_order_id,
+                terminal_state=str(terminal_state),
             )
 
     def _marker_has_terminal_broker_evidence(
@@ -3308,9 +3390,26 @@ class PositionTrailingLockEngine:
         marker_submitted_at: Optional[datetime] = None,
         expected_side: Optional[str] = None,
         expected_quantity: Optional[int] = None,
-    ) -> bool:
-        """Issue #252: return True iff the broker-order ledger shows
-        explicit terminal evidence for the marker.
+    ) -> Optional[Any]:
+        """Issue #252: return the resolved canonical terminal lifecycle
+        state for the marker iff the broker-order ledger shows explicit
+        terminal evidence; return None otherwise (and on ANY uncertainty
+        — fail closed).
+
+        PR #261 round-5 review P2 (exit_engines.py:3274): callers need
+        to distinguish FILLED (the underlying position is now flat) from
+        CANCELLED / REJECTED / EXPIRED / FAILED (the position is likely
+        STILL OPEN — the exit did not happen). The disappeared-symbol
+        sweep was previously resetting the ``PositionTrailingLockManager``
+        peak/armed state on every terminal status; that loses the
+        historic peak the next exit attempt needs when the terminal
+        evidence is a non-fill cancel/reject. Returning the lifecycle
+        state lets the caller branch on FILLED-only.
+
+        Truthy/falsy semantics are preserved: ``None`` (not terminal /
+        unknown) is falsy; a lifecycle-state enum value (terminal) is
+        truthy — so existing call sites using ``if not terminal_evidence``
+        continue to behave the same way.
 
         Two acceptance paths:
 
@@ -3355,31 +3454,41 @@ class PositionTrailingLockEngine:
             try:
                 orders = self.state_store.get_orders(broker_account_id) or []
             except Exception:  # pragma: no cover - defensive
-                return False
+                return None
         if not orders:
-            return False
+            return None
         try:
             from app.orders.order_state import (
                 TERMINAL_ORDER_STATES,
                 classify_broker_status,
             )
         except Exception:  # pragma: no cover - defensive
-            return False
+            return None
 
-        def _is_terminal(status_str: Any) -> bool:
-            # PR #261 round-1 review P2: ``classify_broker_status`` has
-            # a fuzzy fallback that maps ANY unrecognized status
-            # containing ``CANCEL`` (e.g. ``CANCEL_PENDING`` with an
-            # underscore, which is NOT in the canonical map's
-            # ``"CANCEL PENDING"`` entry) to ``CANCELLED`` (a terminal
-            # state). The submit-response path elsewhere in this engine
-            # explicitly treats ``CANCEL_PENDING`` / ``PENDING_CANCEL``
-            # / ``CANCEL_REQUESTED`` as non-terminal — if the ledger
-            # reports a pending cancel while the position snapshot is
-            # missing, the sweep would otherwise clear the marker and
-            # reset trailing state before the exit order is actually
-            # terminal. Explicitly veto pending-cancel variants BEFORE
-            # delegating.
+        def _terminal_state(status_str: Any) -> Optional[Any]:
+            """Return the canonical terminal lifecycle state for the
+            status string, or None if the status is not terminal /
+            cannot be classified.
+
+            PR #261 round-1 review P2: ``classify_broker_status`` has
+            a fuzzy fallback that maps ANY unrecognized status
+            containing ``CANCEL`` (e.g. ``CANCEL_PENDING`` with an
+            underscore, which is NOT in the canonical map's
+            ``"CANCEL PENDING"`` entry) to ``CANCELLED`` (a terminal
+            state). The submit-response path elsewhere in this engine
+            explicitly treats ``CANCEL_PENDING`` / ``PENDING_CANCEL``
+            / ``CANCEL_REQUESTED`` as non-terminal — if the ledger
+            reports a pending cancel while the position snapshot is
+            missing, the sweep would otherwise clear the marker and
+            reset trailing state before the exit order is actually
+            terminal. Explicitly veto pending-cancel variants BEFORE
+            delegating.
+
+            PR #261 round-5 review P2 (exit_engines.py:3274): callers
+            need to differentiate FILLED from CANCELLED/REJECTED/
+            EXPIRED/FAILED — only FILLED proves the position is now
+            flat. Return the classified state so the caller can branch.
+            """
             try:
                 normalised = str(status_str or "").strip().upper().replace("-", "_")
             except Exception:
@@ -3396,22 +3505,24 @@ class PositionTrailingLockEngine:
             )
             for _sub in _PENDING_CANCEL_SUBSTRINGS:
                 if _sub in normalised:
-                    return False
+                    return None
             try:
                 state = classify_broker_status(status_str)
             except Exception:
-                return False
-            return state in TERMINAL_ORDER_STATES
+                return None
+            if state in TERMINAL_ORDER_STATES:
+                return state
+            return None
 
         symbol_str = str(symbol)
         if broker_order_id:
             for order in orders:
                 if str(getattr(order, "order_id", "") or "") == str(broker_order_id):
-                    return _is_terminal(getattr(order, "status", ""))
+                    return _terminal_state(getattr(order, "status", ""))
             # broker_order_id captured but not found in current ledger
             # snapshot — could be a stale snapshot or a missed sync.
             # Fail closed; the inflight timeout will eventually sweep.
-            return False
+            return None
         # broker_order_id unknown — fall back to the most recent
         # ledger entry for this symbol, but only treat it as terminal
         # evidence if it is unambiguously terminal AND it matches the
@@ -3439,7 +3550,7 @@ class PositionTrailingLockEngine:
             or expected_side is None
             or expected_quantity is None
         ):
-            return False
+            return None
         # Normalise the marker's wall-clock submission instant to UTC
         # and compute the cutoff (marker armed minus a small tolerance
         # for any clock skew between the engine and the broker).
@@ -3448,16 +3559,16 @@ class PositionTrailingLockEngine:
             if cutoff.tzinfo is None:
                 cutoff = cutoff.replace(tzinfo=timezone.utc)
         except Exception:  # pragma: no cover - defensive
-            return False
+            return None
         from datetime import timedelta as _td
         cutoff = cutoff - _td(seconds=5.0)
         expected_side_str = str(expected_side or "").strip().upper()
         try:
             expected_qty_int = int(expected_quantity or 0)
         except (TypeError, ValueError):
-            return False
+            return None
         if not expected_side_str or expected_qty_int <= 0:
-            return False
+            return None
         candidate = None
         for order in orders:
             if str(getattr(order, "symbol", "") or "") != symbol_str:
@@ -3493,8 +3604,8 @@ class PositionTrailingLockEngine:
                 continue
             candidate = order  # rely on caller's list ordering (recency)
         if candidate is None:
-            return False
-        return _is_terminal(getattr(candidate, "status", ""))
+            return None
+        return _terminal_state(getattr(candidate, "status", ""))
 
     async def _emit_exit(
         self,

@@ -3571,3 +3571,364 @@ async def test_pr261_round3_legacy_marker_without_spec_hydrates_cleanly():
     assert router.calls == [], (
         "rehydrated legacy marker must block duplicate submission"
     )
+
+
+# ---------------------------------------------------------------------------
+# PR #261 round-5 review — three NEW findings (the other 16 are stale-loop
+# re-flags of round-3 fixes that are demonstrably in code):
+#
+#   P2 (migrations/019:29): migration 019 must include exit_side +
+#   exit_broker_units columns so fresh deployments where migrations OWN
+#   schema get them on the CREATE TABLE — runtime ALTER TABLE on a
+#   DML-only app role would silently fail.
+#
+#   P2 (exit_engines.py:2760): hydrate-pending LIVE gate previously
+#   short-circuited the whole evaluator, suppressing qty==0 cleanup. The
+#   gate must now block ONLY submissions; cleanup paths still run so a
+#   close-during-hydrate-pending cannot preserve stale peak state.
+#
+#   P2 (exit_engines.py:3274): disappeared-symbol terminal-evidence
+#   sweep must NOT reset PositionTrailingLockManager peak/armed state on
+#   non-fill terminal statuses (CANCELLED / REJECTED / EXPIRED / FAILED) —
+#   those statuses are terminal for the EXIT order but do not prove the
+#   position is closed, so the peak the next exit retry needs is lost.
+# ---------------------------------------------------------------------------
+
+
+def test_pr261_round5_migration_019_includes_spec_columns():
+    """P2 (migrations/019:29): a fresh deploy that runs migrations
+    cleanly (without the runtime ALTER TABLE in the backend ``__init__``
+    being able to add the columns — e.g. DML-only app role) must still
+    end up with ``exit_side`` and ``exit_broker_units`` columns. Pin
+    this in the migration file itself."""
+    import os
+
+    migration_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "migrations",
+        "019_position_trailing_lock_inflight.sql",
+    )
+    with open(migration_path, "r", encoding="utf-8") as f:
+        sql = f.read()
+    upper = sql.upper()
+    # The CREATE TABLE must list both columns inline so a DDL-restricted
+    # app role doesn't need to run the runtime ALTER.
+    assert "EXIT_SIDE" in upper, (
+        "migration 019 must declare ``exit_side`` so fresh deploys "
+        "have the column without depending on runtime ALTER TABLE "
+        "(PR #261 round-5 review P2 — migrations/019:29)"
+    )
+    assert "EXIT_BROKER_UNITS" in upper, (
+        "migration 019 must declare ``exit_broker_units`` so fresh "
+        "deploys have the column without depending on runtime ALTER "
+        "(PR #261 round-5 review P2 — migrations/019:29)"
+    )
+    # Idempotent ADD COLUMN IF NOT EXISTS for existing deployments
+    # that already ran an earlier revision of this migration.
+    assert "ADD COLUMN IF NOT EXISTS EXIT_SIDE" in upper, (
+        "migration 019 must include idempotent ADD COLUMN IF NOT "
+        "EXISTS for exit_side so existing deployments running the "
+        "migration after the round-3 fix do not fail"
+    )
+    assert "ADD COLUMN IF NOT EXISTS EXIT_BROKER_UNITS" in upper, (
+        "migration 019 must include idempotent ADD COLUMN IF NOT "
+        "EXISTS for exit_broker_units so existing deployments do not "
+        "fail re-applying this migration"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pr261_round5_hydrate_pending_preserves_qty0_cleanup(monkeypatch):
+    """P2 (exit_engines.py:2760): in LIVE, while the durable inflight
+    hydrate has not succeeded (transient Postgres outage on startup),
+    the engine MUST still run the qty==0 cleanup so a position that
+    closes during the hydrate-pending window does NOT preserve stale
+    peak/armed manager state into a same-symbol reopen.
+
+    Previously the hydrate-pending gate ``return``ed at the top of
+    ``evaluate_runners``, suppressing the cleanup paths in
+    ``_evaluate_runner``. The round-5 fix runs the runner loop with
+    ``submissions_blocked=True`` so submissions remain fail-closed but
+    cleanup still fires."""
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    state_store = StateStore()
+    manager = PositionTrailingLockManager(
+        backend=_NoopPositionTrailingLockBackend()
+    )
+    # Pre-seed manager state so we have something to reset.
+    manager.evaluate(
+        tenant_id="t-1",
+        broker_account_id="A1",
+        symbol="NG22MAY26255CE",
+        current_unrealized_pnl=2500.0,
+        floor_inr=500.0,
+        giveback_pct=0.10,
+        exit_cooldown_seconds=0.0,
+    )
+    assert ("t-1", "A1", "NG22MAY26255CE") in manager._states, (
+        "test scaffolding: manager must have armed peak"
+    )
+
+    class _AlwaysFailingHydrateBackend(_FakeInflightBackend):
+        def load_all(self, *, raise_on_failure: bool = False):
+            self.load_calls += 1
+            self.load_raise_on_failure.append(bool(raise_on_failure))
+            raise RuntimeError("simulated postgres outage")
+
+    backend = _AlwaysFailingHydrateBackend()
+    # Position now reports qty=0 (closed). Engine is in LIVE, durable
+    # backend is unreachable so hydrate will never succeed — submissions
+    # must be fail-closed BUT qty==0 cleanup must still run.
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=0, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-261-R5A")
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=manager,
+        inflight_backend=backend,  # type: ignore[arg-type]
+    )
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    assert engine._inflight_hydrated is False, (
+        "hydrate must NOT have flipped to True with a failing backend"
+    )
+    assert router.calls == [], (
+        "submissions MUST be blocked while hydrate is pending in LIVE "
+        "(PR #261 round-2 P1 — exit_engines.py:2405)"
+    )
+    assert ("t-1", "A1", "NG22MAY26255CE") not in manager._states, (
+        "qty==0 cleanup MUST reset manager state even while hydrate "
+        "is pending in LIVE so a same-symbol reopen does not reuse "
+        "stale peak/armed state (PR #261 round-5 P2 — "
+        "exit_engines.py:2760)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pr261_round5_hydrate_pending_still_blocks_submissions(monkeypatch):
+    """Companion gate to the round-5 hydrate-pending-cleanup test:
+    even with the new cleanup-still-runs evaluator path, a LIVE hydrate-
+    pending state MUST still refuse to submit new exits for non-zero
+    positions. Otherwise the round-2 P1 fail-closed contract is lost."""
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+
+    class _AlwaysFailingHydrateBackend(_FakeInflightBackend):
+        def load_all(self, *, raise_on_failure: bool = False):
+            self.load_calls += 1
+            self.load_raise_on_failure.append(bool(raise_on_failure))
+            raise RuntimeError("simulated postgres outage")
+
+    backend = _AlwaysFailingHydrateBackend()
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-261-R5B")
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(
+            backend=_NoopPositionTrailingLockBackend()
+        ),
+        inflight_backend=backend,  # type: ignore[arg-type]
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert router.calls == [], (
+        "LIVE hydrate-pending must STILL block submissions for non-zero "
+        "positions (preserve PR #261 round-2 P1 fail-closed contract; "
+        "round-5 P2 fix expanded but did not relax it)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pr261_round5_cancelled_terminal_evidence_preserves_peak():
+    """P2 (exit_engines.py:3274): when the disappeared-symbol sweep
+    sees terminal evidence with status=CANCELLED (or any non-FILL
+    terminal status), the marker can be cleared but the
+    ``PositionTrailingLockManager`` peak/armed state MUST be preserved
+    — a CANCELLED exit means the position is likely still open and the
+    historic peak the next exit attempt needs has not been invalidated.
+    """
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    manager = PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend())
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-261-R5C")
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=manager,
+    )
+
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    state_key = ("t-1", "A1", "NG22MAY26255CE")
+    assert state_key in manager._states, (
+        "test scaffolding: manager state must be armed pre-sweep"
+    )
+    pre_peak = manager._states[state_key].peak_unrealized_pnl
+    assert pre_peak > 0.0, "test scaffolding: peak must be > 0"
+
+    _age_inflight_markers_past_grace(engine)
+
+    # Symbol disappears AND the broker ledger reports the exit order
+    # as CANCELLED — terminal for the exit order but the underlying
+    # position is still open. Seed via set_orders to exercise the
+    # active-projection fallback path; the snapshot path is exercised
+    # by other round-1 P2 tests.
+    state_store.set_positions("A1", [])
+    armed_marker = engine._inflight_markers.get(state_key)
+    armed_boi = armed_marker[0] if armed_marker else "BOI-261-R5C"
+    _seed_terminal_broker_order(
+        state_store, "A1",
+        symbol="NG22MAY26255CE", broker_order_id=str(armed_boi),
+        status="CANCELLED",
+    )
+    _mark_positions_sync_fresh(state_store, "A1")
+    await engine.evaluate_runners([_runner("t-1", "A1")])  # 1st miss
+    _mark_positions_sync_fresh(state_store, "A1")
+    await engine.evaluate_runners([_runner("t-1", "A1")])  # 2nd miss
+
+    # Marker should be cleared (CANCELLED IS a canonical terminal
+    # state, so the disappeared-symbol terminal-evidence gate fires).
+    assert state_key not in engine._inflight_markers, (
+        "CANCELLED is a canonical terminal state — the inflight "
+        "marker MUST clear so a legitimate same-symbol reopen is "
+        "not blocked"
+    )
+    # Manager peak/armed state MUST NOT be reset — the position is
+    # likely still open and the peak must remain valid for the next
+    # exit attempt.
+    assert state_key in manager._states, (
+        "PositionTrailingLockManager peak/armed state MUST be "
+        "preserved when terminal evidence is non-fill (CANCELLED). "
+        "The position is likely still open; resetting peaks loses "
+        "the historic peak the next exit retry needs "
+        "(PR #261 round-5 P2 — exit_engines.py:3274)"
+    )
+    assert manager._states[state_key].peak_unrealized_pnl == pre_peak, (
+        "peak value MUST be preserved unchanged on non-fill terminal "
+        "evidence"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pr261_round5_rejected_terminal_evidence_preserves_peak():
+    """Companion to the CANCELLED test — REJECTED is another non-fill
+    terminal state and must also preserve manager peak/armed state.
+    Pins the OrderLifecycleState.FILLED-only branch so a future refactor
+    cannot accidentally widen the reset to all terminal states."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    manager = PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend())
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-261-R5D")
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=manager,
+    )
+
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    state_key = ("t-1", "A1", "NG22MAY26255CE")
+    assert state_key in manager._states
+    _age_inflight_markers_past_grace(engine)
+
+    state_store.set_positions("A1", [])
+    armed_marker = engine._inflight_markers.get(state_key)
+    armed_boi = armed_marker[0] if armed_marker else "BOI-261-R5D"
+    _seed_terminal_broker_order(
+        state_store, "A1",
+        symbol="NG22MAY26255CE", broker_order_id=str(armed_boi),
+        status="REJECTED",
+    )
+    _mark_positions_sync_fresh(state_store, "A1")
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _mark_positions_sync_fresh(state_store, "A1")
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    assert state_key not in engine._inflight_markers, (
+        "REJECTED clears the marker (terminal for the exit order)"
+    )
+    assert state_key in manager._states, (
+        "PositionTrailingLockManager peak/armed state MUST be "
+        "preserved on REJECTED terminal evidence — the position is "
+        "still open (PR #261 round-5 P2 — exit_engines.py:3274)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pr261_round5_filled_terminal_evidence_still_resets_peak():
+    """Counterpart to the non-fill tests — FILLED MUST still reset
+    the manager state. Without this, the new round-5 branching could
+    accidentally suppress the legitimate FILLED reset path and a quick
+    same-symbol reopen would reuse the prior peak (the original
+    issue #250 scenario)."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    manager = PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend())
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-261-R5E")
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=manager,
+    )
+
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    state_key = ("t-1", "A1", "NG22MAY26255CE")
+    assert state_key in manager._states
+    _age_inflight_markers_past_grace(engine)
+
+    state_store.set_positions("A1", [])
+    armed_marker = engine._inflight_markers.get(state_key)
+    armed_boi = armed_marker[0] if armed_marker else "BOI-261-R5E"
+    _seed_terminal_broker_order(
+        state_store, "A1",
+        symbol="NG22MAY26255CE", broker_order_id=str(armed_boi),
+        status="FILLED",
+    )
+    _mark_positions_sync_fresh(state_store, "A1")
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _mark_positions_sync_fresh(state_store, "A1")
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    assert state_key not in engine._inflight_markers
+    assert state_key not in manager._states, (
+        "FILLED MUST reset manager state — the position is now flat "
+        "and the prior peak is no longer relevant (issue #250)"
+    )
