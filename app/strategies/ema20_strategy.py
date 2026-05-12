@@ -2426,6 +2426,12 @@ class Ema20Strategy(BaseStrategy):
             purpose=OrderPurpose.EXIT,
             exchange=exchange,
             symbol_token=str(token) if token is not None else None,
+            # Issue #253: EMA20 entries set position_label=ce_label; exits
+            # must carry the same stable label so replay PnL pairing can key
+            # entries and exits by option_label (e.g. "NIFTY_ATM_CE") rather
+            # than fall back to broker_symbol (e.g. "NIFTYCEXXXXXX") which
+            # mismatches the entry key and orphans the position in PnL.
+            position_label=pos.option_label,
         )
         routing_kwargs = self._routing_kwargs()
         self._exit_in_flight = True

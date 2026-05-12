@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Any
 
 from app.brokers.base import (
     OrderPurpose,
@@ -1414,3 +1415,236 @@ def test_write_full_report_emits_json_and_yaml_artifacts(tmp_path):
     assert (tmp_path / "replay_report.md").exists()
     assert (tmp_path / "replay_results.json").exists()
     assert (tmp_path / "recommendations.yaml").exists()
+
+
+def test_ema20_exit_sets_position_label_for_stable_replay_pairing(monkeypatch):
+    """Issue #253: EMA20 exit must carry position_label so replay PnL
+    pairs entries and exits by option_label (e.g. NIFTY_ATM_CE) without
+    depending on the single-candidate fallback in PnLTracker."""
+
+    import app.strategies.ema20_strategy as ema20_mod
+    from app.strategies.ema20_strategy import Ema20Position
+
+    strategy = replay_runtime_mod.build_ema20_strategy("NIFTY", {})
+    strategy._strategy_id = "ema20_strategy"
+    pos = Ema20Position(
+        option_label="NIFTY_ATM_CE",
+        broker_symbol="NIFTYCEXXXXXX",
+        exchange="NFO",
+        symbol_token="88888",
+        qty=1,
+        requested_lots=1,
+        lot_size=1,
+        broker_qty=1,
+        entry_price=100.0,
+        sl_price=85.0,
+        tp_price=130.0,
+        best_price=100.0,
+        trail_active=False,
+        entry_time=datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc),
+        strategy_context={},
+        original_qty=1,
+    )
+    strategy._managed_positions = {"NIFTY_ATM_CE": pos}
+    strategy.last_price = {"NIFTY_ATM_CE": 110.0}
+
+    captured: dict[str, Any] = {}
+
+    def _fake_bridge(*, strategy_id, order_req, **kwargs):
+        del strategy_id, kwargs
+        captured["order_req"] = order_req
+        return OrderResponse(
+            broker_order_id="REPLAY",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=int(order_req.quantity),
+            average_price=110.0,
+            requested_quantity=int(order_req.quantity),
+        )
+
+    monkeypatch.setattr(ema20_mod, "place_order_via_bridge", _fake_bridge)
+
+    strategy._exit_position(reason="TARGET", position=pos)
+
+    order_req = captured.get("order_req")
+    assert order_req is not None, "EMA20 _exit_position did not call the bridge"
+    assert order_req.position_label == "NIFTY_ATM_CE", (
+        f"EMA20 exit must set position_label=NIFTY_ATM_CE, got "
+        f"{order_req.position_label!r}"
+    )
+
+
+def test_pnl_tracker_pairs_multiple_simultaneous_labels_when_exits_have_position_label():
+    """Issue #253: with the strategy-side fix (EMA20 exit carries
+    position_label), the PnL tracker pairs entries+exits across multiple
+    simultaneously-open labels without needing _fallback_exit_key (which
+    only works when exactly one candidate is open)."""
+    ts = datetime(2026, 3, 2, 9, 15, tzinfo=timezone.utc)
+    fills = [
+        ReplayFill(
+            timestamp=ts,
+            strategy_id="ema20_strategy",
+            underlying="NIFTY",
+            side="BUY",
+            purpose="ENTRY",
+            tag="EMA20_ENTRY",
+            quantity=1,
+            fill_price=100.0,
+            strategy_context={"_replay": {"position_label": "NIFTY_ATM_CE"}},
+            symbol="NIFTYCEXXXXXX",
+        ),
+        ReplayFill(
+            timestamp=ts + timedelta(minutes=1),
+            strategy_id="ema20_strategy",
+            underlying="NIFTY",
+            side="BUY",
+            purpose="ENTRY",
+            tag="EMA20_ENTRY",
+            quantity=1,
+            fill_price=50.0,
+            strategy_context={"_replay": {"position_label": "NIFTY_ATM_PE"}},
+            symbol="NIFTYPEXXXXXX",
+        ),
+        ReplayFill(
+            timestamp=ts + timedelta(minutes=5),
+            strategy_id="ema20_strategy",
+            underlying="NIFTY",
+            side="SELL",
+            purpose="EXIT",
+            tag="EMA20_EXIT_TP",
+            quantity=1,
+            fill_price=120.0,
+            # Issue #253 fix: exit fills carry the same position_label as
+            # their entries, allowing PnL pairing to work even when more
+            # than one position is open simultaneously.
+            strategy_context={"_replay": {"position_label": "NIFTY_ATM_CE"}},
+            symbol="NIFTYCEXXXXXX",
+        ),
+        ReplayFill(
+            timestamp=ts + timedelta(minutes=6),
+            strategy_id="ema20_strategy",
+            underlying="NIFTY",
+            side="SELL",
+            purpose="EXIT",
+            tag="EMA20_EXIT_TP",
+            quantity=1,
+            fill_price=60.0,
+            strategy_context={"_replay": {"position_label": "NIFTY_ATM_PE"}},
+            symbol="NIFTYPEXXXXXX",
+        ),
+    ]
+
+    trades = PnLTracker(fee_model=False).process_fills(fills)
+
+    assert len(trades) == 2
+    # The CE trade should be paired with the CE exit (price 120, entry 100)
+    # and the PE trade with the PE exit (price 60, entry 50). If the keys
+    # mismatched, the trade count would be 0 or the prices would be swapped.
+    pairs = sorted((t.entry_price, t.exit_price) for t in trades)
+    assert pairs == [(50.0, 60.0), (100.0, 120.0)]
+
+
+def test_nifty_spread_replay_iron_condor_rollback_emits_put_unwind_fills(monkeypatch):
+    """Issue #213 acceptance: when an iron-condor CALL-side _enter_spread
+    call fails after the PUT-side succeeds, the strategy must roll back
+    the PUT legs via _force_exit_leg. This pins the rollback path so a
+    regression cannot silently leave PUT legs naked-short in replay."""
+
+    fixed_now = datetime(2026, 3, 3, 10, 15, tzinfo=replay_runtime_mod.IST)
+    meta = replay_runtime_mod.build_nifty_spread_instrument_meta(
+        "NIFTY_IDX",
+        65,
+        min_strike=19000,
+        max_strike=21000,
+    )
+    strategy = NiftyWeeklyCreditSpreadStrategy(
+        meta,
+        order_client=None,
+        risk_manager=None,
+        env_prefix="NIFTY_",
+        underlying_label="NIFTY_IDX",
+        params={
+            "account_equity": 10_000_000.0,
+            "lot_size": 65,
+            # Loosen credit gates so the synthetic prices below pass.
+            "min_credit_pct_of_width": 0.05,
+            "min_condor_total_credit_pct": 0.05,
+            "risk_per_trade_pct": 1.0,
+            "max_total_risk_pct": 1.0,
+            "max_open_spreads": 10,
+        },
+    )
+    strategy._now_ist = lambda: fixed_now
+    # Force a deterministic strike resolver so the test does not depend on
+    # the strategy's option-chain lookup helpers.
+    strategy._find_option_by_strike = lambda strike, side, expiry: f"NIFTY_{side}_{int(strike)}"
+    # Set leg prices so credit-of-width gates pass on both sides.
+    strategy.last_price.update(
+        {
+            "NIFTY_PE_19550": 200.0,
+            "NIFTY_PE_19250": 50.0,
+            "NIFTY_CE_20050": 200.0,
+            "NIFTY_CE_20350": 50.0,
+        }
+    )
+
+    placed: list[Any] = []
+
+    def _capture_place_order(*, label, side, qty, price, tag, purpose, **kwargs):
+        del kwargs
+        purpose_text = (
+            purpose.value if hasattr(purpose, "value") else str(purpose)
+        )
+        placed.append(
+            {
+                "label": label,
+                "side": side,
+                "qty": qty,
+                "price": price,
+                "tag": tag,
+                "purpose": purpose_text,
+            }
+        )
+        # The CALL ENTRY legs fail so the iron-condor rollback path
+        # fires. PUT entries and any subsequent EXIT (rollback) orders all
+        # succeed. _enter_spread checks resp.status in {ACCEPTED, FILLED,
+        # COMPLETE} so anything else is treated as a rejection.
+        if purpose_text == "ENTRY" and "CE" in str(label):
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_call_leg_failure",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        return OrderResponse(
+            broker_order_id=f"REPLAY_{len(placed)}",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=int(qty),
+            average_price=float(price or 0.0),
+            requested_quantity=int(qty),
+        )
+
+    monkeypatch.setattr(strategy, "_place_order", _capture_place_order)
+
+    strategy._try_iron_condor(spot=19800.0, expiry=fixed_now.date())
+
+    purposes = [entry["purpose"] for entry in placed]
+    assert "ENTRY" in purposes, f"expected ENTRY orders to be placed; got {placed!r}"
+    assert "EXIT" in purposes, (
+        "iron-condor rollback must emit EXIT orders to unwind PUT legs "
+        f"after CALL-side failure; got placed={placed!r}"
+    )
+    # Both PUT legs must be unwound (one BUY-to-close on the short leg,
+    # one SELL-to-close on the long leg). This is the rollback signature
+    # specified by issue #213 (matches live _try_iron_condor behaviour).
+    exit_orders = [entry for entry in placed if entry["purpose"] == "EXIT"]
+    exit_pairs = {(entry["label"], entry["side"]) for entry in exit_orders}
+    assert ("NIFTY_PE_19550", "BUY") in exit_pairs, (
+        f"PUT-short leg must be bought back to close; got exits={exit_orders!r}"
+    )
+    assert ("NIFTY_PE_19250", "SELL") in exit_pairs, (
+        f"PUT-long leg must be sold to close; got exits={exit_orders!r}"
+    )
