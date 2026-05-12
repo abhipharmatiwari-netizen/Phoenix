@@ -31,7 +31,15 @@ Scopes: `GLOBAL`, `TENANT`, `ACCOUNT`, `STRATEGY`.
 In the current hub-authoritative runtime:
 
 - The hub-path `GlobalKillSwitchInterceptor` is gated by a single feature flag (`order_router_enforce_global_kill_switch`, env `ORDER_ROUTER_ENFORCE_GLOBAL_KILL_SWITCH`). **The setting defaults to `false`**; when false, `GlobalKillSwitchInterceptor.evaluate()` returns immediately and **neither the `GLOBAL_KILL` env var nor the durable `KillSwitchManager` is consulted** (`app/orders/interceptors.py:292-295`, `app/config/settings.py:279-282`). With the flag set to `true`, the interceptor first checks the `GLOBAL_KILL` env var (HARD-blockable via `GLOBAL_KILL_BLOCK_EXITS`) and then the durable `KillSwitchManager` for any matching scope (`app/orders/interceptors.py:297-374`).
-- **LIVE pre-flight requirement (Codex #256 round-2 P1).** `ORDER_ROUTER_ENFORCE_GLOBAL_KILL_SWITCH=true` must be set in the deployment env and the backend restarted before going LIVE. Without it, **all** kill-switch trips — durable, env-var, manual, and auto — are silently inert at the router. The pre-LIVE checklist must include `curl.exe -s http://localhost/admin/runtime-settings` (or the equivalent) to confirm the flag is on; the dashboard kill-switch panel will not warn you if the underlying interceptor is disabled.
+- **LIVE pre-flight requirement (Codex #256 round-2 P1 / round-3 P2 correction).** `ORDER_ROUTER_ENFORCE_GLOBAL_KILL_SWITCH=true` must be set in the deployment env and the backend restarted before going LIVE. Without it, **all** kill-switch trips — durable, env-var, manual, and auto — are silently inert at the router. There is **no** `/admin/runtime-settings` HTTP endpoint (earlier runbook wording was wrong — `get_runtime_settings` in `app/config/runtime_config.py` is an in-process helper, not a route). The pre-LIVE checklist must therefore confirm the flag is on via one of these working alternatives:
+    1. **Container/process env inspection** (most reliable, works without auth):
+       ```powershell
+       docker compose -f .\docker-compose.live.single.yml exec backend printenv ORDER_ROUTER_ENFORCE_GLOBAL_KILL_SWITCH
+       ```
+       Must print `true` (or `1`). An empty result means the flag is off and the interceptor will short-circuit.
+    2. **Behavioural verification** — trip a SOFT kill switch at GLOBAL scope, attempt a paper-mode test order, confirm the router emits `ORDER_REJECTED_GLOBAL_KILL` in the backend logs, then clear and rearm. If the test order is accepted instead, the interceptor is disabled regardless of what the env claims.
+
+    The dashboard kill-switch panel does **not** warn you when the underlying interceptor is disabled, so this pre-flight step is non-negotiable for LIVE.
 - The legacy stream path uses `RiskManager.kill_switch_activated`. PR #231 (Issue #218) bridges legacy auto-trips into the durable `KillSwitchManager` so the hub interceptor sees them (subject to the enforcement gate above); PR #234 (Issue #222) surfaces any remaining legacy↔durable divergence in `/readyz`.
 - In LIVE hub mode the durable Postgres-backed state is authoritative. `KillSwitchManager` (`app/risk/kill_switch.py`) implements the formal `INACTIVE → TRIPPED → CLEAR_PENDING → CLEARED → INACTIVE` workflow.
 
@@ -83,17 +91,35 @@ So `/positions` will continue to reflect broker reality at the cadence of `Accou
 
 Log into the Angel One terminal (web or mobile) and read the broker-side positions tab as the authoritative, lowest-latency view. Phoenix's `/positions` remains a valid corroborating view — it is **not** disabled by a durable trip.
 
-### Step 3 — If residual exposure exists, square off manually
+### Step 3 — Cancel ALL open broker orders, then (if positions non-zero) square off
 
-If broker-side positions are non-zero, you have three options ordered from preferred to last-resort:
+This step has two distinct sub-actions. **Read both carefully — they are NOT interchangeable.**
 
-1. **Dashboard "Cancel ALL Open Orders"** (PR #240). Use this first to drain non-terminal child orders for every registered `AccountRunner`. It does not place exits; it only cancels working orders. See `dashboard-kill-switch.md` for the message-disambiguation semantics (`skipped` / `raced_filled` / `failed`).
-2. **`POST /admin/break-glass/flatten`** (audited single-contract exit through the hub router at `BREAK_GLASS` mutation priority). Requires a `break_glass` step-up token in LIVE. See `break_glass_flatten.md` for the full request schema and required fields.
+#### 3a — Cancel ALL open broker orders (MANDATORY, regardless of position state)
 
-   > **HARD-trip caveat — break-glass flatten DOES NOT WORK during a HARD trip (Codex #256 round-1 P2 / round-2 P2 reinforcement).** `break-glass/flatten` submits an EXIT order through `OrderRouter.submit_order` (`app/dashboard/admin_routes.py:1017-1023`), and `GlobalKillSwitchInterceptor` **rejects** that exit when any active matching kill-switch record has `block_exits=True` (`app/orders/interceptors.py:339-374`). The interceptor returns `kill_switch_manager_tripped_block_exits` and **no exit order reaches the broker**. **Do not** attempt break-glass flatten as a recovery path while a HARD trip is in force. Your only working paths during a HARD trip are: (a) **temporarily downgrade the durable record from HARD to SOFT in-place** via the dashboard `block_exits` toggle or `KillSwitchManager.set_block_exits(block_exits=False, ...)` (audited as `kill_switch.set_block_exits`) before invoking break-glass — this preserves the entry block while admitting the break-glass exit at the interceptor; or (b) **use the broker UI direct close (option 3 below)** — the recommended last-resort path that always works regardless of the durable trip mode.
-3. **Broker UI direct close** — log into the Angel One terminal and square off positions there. This is the last-resort path; record the action in the incident log alongside the broker order id so the audit trail can be reconciled later.
+**Codex #256 round-3 P1 correction.** This sub-step is **always required** before progressing to Step 4 (request-clear). Do **not** condition it on broker-side positions being non-zero — working / pending broker orders can exist even when current positions are flat (e.g. partially-filled exits whose remaining quantity is still resting on the book, stale stop-loss orders that never triggered, or in-flight entries that were placed seconds before the trip). Cancel-all is the **only** step that drains those broker orders, and Step 4 (`request-clear` → `confirm-clear`) restores router entry eligibility — if open broker orders survive into the cleared window they can still fill against fresh entries placed by automated strategies.
+
+Execute the dashboard **"Cancel ALL Open Orders"** action (PR #240) — or `POST /admin/kill-switch/cancel-all` directly — even when `/positions` and the broker terminal both show flat. The endpoint is idempotent on the broker side and will silently no-op accounts that genuinely have nothing to cancel; it does not place exits, it only cancels working orders. See `dashboard-kill-switch.md` for the per-account message disambiguation (`skipped` / `raced_filled` / `failed`).
+
+> **Precondition (Codex #256 round-3 P2 correction).** `/admin/kill-switch/cancel-all` enforces a hierarchical trip-before-cancel guard: it returns **HTTP 409** unless the durable `KillSwitchManager` has a record in `TRIPPED` or `CLEAR_PENDING` state in the `GLOBAL → TENANT → ACCOUNT` hierarchy covering the target scope (`app/dashboard/admin_routes.py:2041-2149`). **The env-only `GLOBAL_KILL=1` trip does NOT satisfy this precondition** — env-var trips bypass the durable manager entirely (see "Manual — global kill switch via environment" below). If the original trip path was env-var-only, you must either (a) issue a durable `POST /admin/kill-switch/trip` first so cancel-all is permitted, or (b) cancel broker orders directly in the Angel One terminal (last-resort path; not audited by Phoenix).
+
+#### 3b — If broker-side positions are non-zero, square off manually
+
+After Step 3a has drained working orders, inspect broker-side positions (Step 2 already established the broker terminal as the lowest-latency view). If positions are flat, skip to Step 4. If they are non-zero, you have two options:
+
+1. **`POST /admin/break-glass/flatten`** (audited single-contract exit through the hub router at `BREAK_GLASS` mutation priority). Requires a `break_glass` step-up token in LIVE. See `break_glass_flatten.md` for the full request schema and required fields.
+
+   > **HARD-trip caveat — break-glass flatten DOES NOT WORK during a HARD trip (Codex #256 round-1 P2 / round-2 P2 reinforcement).** `break-glass/flatten` submits an EXIT order through `OrderRouter.submit_order` (`app/dashboard/admin_routes.py:1017-1023`), and `GlobalKillSwitchInterceptor` **rejects** that exit when any active matching kill-switch record has `block_exits=True` (`app/orders/interceptors.py:339-374`). The interceptor returns `kill_switch_manager_tripped_block_exits` and **no exit order reaches the broker**. **Do not** attempt break-glass flatten as a recovery path while a HARD trip is in force. Your only working paths during a HARD trip are: (a) **temporarily downgrade the durable record from HARD to SOFT in-place** before invoking break-glass — this preserves the entry block while admitting the break-glass exit at the interceptor (see "HARD → SOFT downgrade — actual paths" below for the exact API/SQL); or (b) **use the broker UI direct close (option 2 below)** — the recommended last-resort path that always works regardless of the durable trip mode.
+2. **Broker UI direct close** — log into the Angel One terminal and square off positions there. This is the last-resort path; record the action in the incident log alongside the broker order id so the audit trail can be reconciled later.
 
 Both the dashboard "Cancel ALL" and `break-glass/flatten` are audited (cancel-all emits `action=kill_switch_cancel_all` with `resource_type=broker_orders` per `app/dashboard/admin_routes.py:2632-2636`; **break-glass flatten emits `action=break_glass_flatten` with `resource_type=position`** per `app/dashboard/admin_routes.py:1114-1118` — **not** `resource_type=break_glass` as earlier wording suggested, Codex #256 round-2 P2 correction). A broker-UI direct close is **not** captured by Phoenix audit — the operator must paste the broker order id into the incident timeline.
+
+#### HARD → SOFT downgrade — actual paths (Codex #256 round-3 P2 correction)
+
+Earlier wording said operators could downgrade an existing HARD trip back to SOFT via the dashboard `block_exits` toggle. **That control does not exist** — the Safety panel only renders **"Upgrade SOFT → HARD"** and only when `!globalRecord?.block_exits` (`frontend/src/components/KillSwitchPanel.tsx:521-528`). There is no dashboard "Downgrade HARD → SOFT" button. The two actually-supported paths are:
+
+1. **HTTP API re-trip (preferred, audited).** `POST /admin/kill-switch/trip` with `block_exits=false` against the same scope+scope_id. When the durable record is already `TRIPPED` or `CLEAR_PENDING` with a different `block_exits` value, the endpoint detects the in-place upgrade/downgrade case and routes through `KillSwitchManager.set_block_exits` rather than rejecting with 409 (`app/dashboard/admin_routes.py:1667-1703`). The action is audited as `kill_switch_block_exits_upgraded` and the response carries `upgraded_in_place=true`. In LIVE this still requires ADMIN role and a non-empty `reason`.
+2. **Direct Postgres UPDATE (break-glass, manual audit only).** When the API is unavailable: `UPDATE kill_switch_state SET block_exits = false, updated_at = now() WHERE scope = 'GLOBAL' AND scope_id = 'GLOBAL' AND state IN ('TRIPPED','CLEAR_PENDING');` — followed by a backend restart so `KillSwitchManager.load_state()` picks up the change. This is **not** audited by Phoenix; capture the SQL evidence in the incident log.
 
 ### Step 4 — Only then follow the clear / rearm sequence
 
@@ -179,10 +205,10 @@ X-Admin-Key: <ADMIN_API_KEY>
 
 ### Via `/readyz`
 
-`/readyz` exposes the following kill-switch fields in its JSON payload (Codex #256 round-1 P2 correction — earlier versions named the divergence field incorrectly):
+`/readyz` exposes the following kill-switch fields in its JSON payload (Codex #256 round-1 P2 + round-3 P2 corrections — earlier versions misnamed the divergence field AND misdescribed `kill_switch_active_count` / `kill_switch_source`):
 
-- `kill_switch_active_count` (int) — count of non-INACTIVE durable records (`app/server.py:1374-1389`).
-- `kill_switch_source` (str) — provenance of the count (`durable` / `unavailable`).
+- `kill_switch_active_count` (int) — count of **actively-blocking** durable records, i.e. those in `TRIPPED` or `CLEAR_PENDING`. The counter explicitly excludes **both** `INACTIVE` **and** `CLEARED` (`app/risk/kill_switch.py:736-738`: `sum(1 for r in records if r.get("state") not in ("INACTIVE", "CLEARED"))`). Monitors that interpret this as "non-INACTIVE" will under-alert because a `CLEARED`-but-not-yet-rearmed record reports zero here even though the state-machine record is still present. On a `/readyz` failure path the field can also be `-1`, meaning durable state could not be verified (fail-closed sentinel).
+- `kill_switch_source` (str) — provenance of the snapshot. Actual emitted values are `kill_switch_manager` (durable manager available and queried), `risk_manager` (durable manager unavailable, fell back to legacy in-memory state from a registered runner), or `unavailable` (neither source reachable — readyz fails with `reason="kill_switch_unavailable: ..."`). The string `durable` is **never** emitted; earlier wording was wrong. Monitors filtering on `kill_switch_source == "durable"` will match zero events.
 - `kill_switch_divergence` (bool) — true when legacy `RiskManager.kill_switch_activated` and durable `KillSwitchManager` disagree (`app/server.py:1346-1348`). **The field is `kill_switch_divergence`, not `kill_switch_divergence_detected`** — monitors must watch the former.
 - `kill_switch_legacy_active` (bool) — value of the legacy in-memory flag at the time the readyz snapshot was taken.
 
