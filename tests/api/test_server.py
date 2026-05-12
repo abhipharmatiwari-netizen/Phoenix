@@ -1814,3 +1814,202 @@ def test_readyz_returns_503_when_orders_sync_is_stale(monkeypatch):
     payload = resp.json()
     assert payload["ready"] is False
     assert payload["reason"] == "orders_sync_stale"
+
+
+# ---------------------------------------------------------------------------
+# Issue #247: /readyz must gate on ACTUAL kill-switch divergence only.
+#
+# Codex P1 from PR #234 surfaced an earlier draft that inverted the gate:
+# the non-divergent (else) branch returned 503 while the actual divergent
+# case only emitted a warning. Round-2 of that review fixed it to:
+#
+#   if div.get("divergent"):  ← only the divergent path fails readiness
+#       ... 503 ...
+#
+# These tests pin that contract so a future refactor cannot silently
+# re-invert it. They also pin the policy that a divergence-detection
+# FAILURE (e.g. hub raises) degrades gracefully (200) rather than
+# flipping /readyz red on an unrelated internal error.
+# ---------------------------------------------------------------------------
+
+
+def _make_readyz_live_stub_for_divergence(
+    monkeypatch,
+    *,
+    div_result=None,
+    div_raises=False,
+    fails_ready_env: str | None = None,
+):
+    """Configure server module so /readyz reaches the divergence gate in LIVE.
+
+    ``div_result`` is the dict returned by ``compute_kill_switch_divergence``.
+    Pass ``div_raises=True`` to make the call raise — this exercises the
+    "divergence pre-check failed" path (must NOT 503).
+    """
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = True
+    runtime.leader_lease_state = {
+        "enabled": True,
+        "owned": True,
+        "task_running": True,
+    }
+
+    def _div_call():
+        if div_raises:
+            raise RuntimeError("simulated divergence-check failure")
+        return dict(div_result or {})
+
+    hub_stub = SimpleNamespace(
+        registered_runner_count=1,
+        running_runner_count=1,
+        failed_runner_count=0,
+        list_runner_ids=lambda: [],
+    )
+    hub_runtime_stub = SimpleNamespace(
+        hub=hub_stub,
+        compute_kill_switch_divergence=_div_call,
+    )
+
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: hub_runtime_stub)
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            env={"TRADE_MODE": "LIVE"},
+            runtime=SimpleNamespace(app_env="production"),
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=True,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+    # LIVE-mode tradeable-instrument gate calls into the multi-instrument-
+    # stream module; mock so the gate passes deterministically here.
+    monkeypatch.setattr(
+        importlib.import_module("app.runners.multi_instrument_stream"),
+        "get_active_instrument_count",
+        lambda: 1,
+    )
+
+    if fails_ready_env is None:
+        monkeypatch.delenv("KILL_SWITCH_DIVERGENCE_FAILS_READY", raising=False)
+    else:
+        monkeypatch.setenv(
+            "KILL_SWITCH_DIVERGENCE_FAILS_READY", fails_ready_env
+        )
+
+    return runtime, hub_runtime_stub
+
+
+def test_readyz_returns_503_when_kill_switch_divergent_in_live(monkeypatch):
+    """Issue #247: /readyz must 503 ONLY when divergent=True (silent-bypass scenario).
+
+    Confirms the fixed gate fires on the actual divergent case
+    (legacy_active=True but durable_global_active=False).
+    """
+    _make_readyz_live_stub_for_divergence(
+        monkeypatch,
+        div_result={
+            "divergent": True,
+            "legacy_active": True,
+            "durable_global_active": False,
+            "legacy_reason": "stream_loss",
+            "divergence_age_seconds": 12.5,
+            "publisher_seen": True,
+        },
+    )
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 503
+    payload = resp.json()
+    assert payload["ready"] is False
+    assert payload["reason"].startswith("kill_switch_divergence")
+    assert "legacy=True durable_global=False" in payload["reason"]
+    assert payload["kill_switch_divergence"] is True
+    assert payload["kill_switch_legacy_active"] is True
+
+
+def test_readyz_returns_200_when_kill_switch_not_divergent_in_live(monkeypatch):
+    """Issue #247: the non-divergent (healthy) case must NOT trigger the gate.
+
+    This is the regression test for the original Codex finding: an earlier
+    draft of PR #234 inverted the condition and 503ed every healthy LIVE
+    instance. The reason field must NOT be kill_switch_divergence here.
+    """
+    _make_readyz_live_stub_for_divergence(
+        monkeypatch,
+        div_result={
+            "divergent": False,
+            "legacy_active": False,
+            "durable_global_active": False,
+            "publisher_seen": True,
+        },
+    )
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["ready"] is True
+    assert payload.get("kill_switch_divergence") is False
+    # Critical: the kill_switch_divergence reason must NEVER appear in the
+    # non-divergent case.
+    assert "kill_switch_divergence" not in str(payload.get("reason", ""))
+
+
+def test_readyz_returns_200_when_divergence_check_raises_in_live(monkeypatch):
+    """Issue #247: divergence pre-check failures must degrade gracefully (200).
+
+    Per policy: /readyz must remain fail-CLOSED on GENUINE safety signals
+    (active kill switch, divergent state) but should NOT flip not-ready on
+    transient signal-collection errors that don't indicate an actual problem.
+    A hub-side exception in ``compute_kill_switch_divergence()`` should be
+    logged and ignored, not promoted to a 503.
+    """
+    _make_readyz_live_stub_for_divergence(monkeypatch, div_raises=True)
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["ready"] is True
+    assert "kill_switch_divergence" not in str(payload.get("reason", ""))
+
+
+def test_readyz_does_not_503_on_divergence_when_fails_ready_disabled(monkeypatch):
+    """Issue #247: KILL_SWITCH_DIVERGENCE_FAILS_READY=false must opt out of the 503.
+
+    Even with divergent=True, when the operator has explicitly opted out
+    via env (e.g. during a managed bridge convergence window) /readyz
+    surfaces the signal in the payload but does not flip not-ready.
+    """
+    _make_readyz_live_stub_for_divergence(
+        monkeypatch,
+        div_result={
+            "divergent": True,
+            "legacy_active": True,
+            "durable_global_active": False,
+        },
+        fails_ready_env="false",
+    )
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz")
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["ready"] is True
+    # Divergence signal is still surfaced (operator visibility) — only the
+    # readiness gate itself is suppressed.
+    assert payload.get("kill_switch_divergence") is True
