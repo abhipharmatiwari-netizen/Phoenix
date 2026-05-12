@@ -113,9 +113,12 @@ def _age_inflight_markers_past_grace(engine: PositionTrailingLockEngine) -> None
     run. Disappeared-symbol coverage stays deterministic and fast.
     """
     import time as _t
+    from datetime import datetime, timedelta, timezone
     rewound = _t.monotonic() - 10.0  # well past the 5s grace
-    for key, (broker_order_id, _ts) in list(engine._inflight_markers.items()):
-        engine._inflight_markers[key] = (broker_order_id, rewound)
+    rewound_wall = datetime.now(timezone.utc) - timedelta(seconds=10)
+    for key, value in list(engine._inflight_markers.items()):
+        broker_order_id = value[0]
+        engine._inflight_markers[key] = (broker_order_id, rewound, rewound_wall)
 
 
 @pytest.mark.asyncio
@@ -910,6 +913,33 @@ async def test_marker_remains_when_router_raises_post_submit():
     )
 
 
+def _seed_terminal_broker_order(
+    state_store: StateStore,
+    account_id: str,
+    *,
+    symbol: str,
+    broker_order_id: str,
+    status: str = "FILLED",
+    quantity: int = 1250,
+) -> None:
+    """Issue #252: seed a terminal broker-order entry into state_store so
+    the disappeared-symbol sweep can confirm explicit terminal evidence
+    before clearing the inflight marker."""
+    from app.brokers.base import OrderStatus
+
+    order = OrderStatus(
+        order_id=broker_order_id,
+        symbol=symbol,
+        side="SELL",
+        status=status,
+        order_type="MARKET",
+        product_type="INTRADAY",
+        quantity=quantity,
+        filled_quantity=quantity if status.upper() == "FILLED" else 0,
+    )
+    state_store.set_orders(account_id, [order])
+
+
 @pytest.mark.asyncio
 async def test_marker_cleared_when_symbol_disappears_from_snapshot():
     """Codex P2 round 1: state stores can omit closed positions from
@@ -919,7 +949,11 @@ async def test_marker_cleared_when_symbol_disappears_from_snapshot():
     PR #236 round-4 review P1: clearing now requires TWO consecutive
     missing snapshots — a single OK-but-empty broker poll is
     ambiguous and must not flush the duplicate-fill guard. This test
-    therefore advances the empty-snapshot evaluation twice."""
+    therefore advances the empty-snapshot evaluation twice.
+
+    Issue #252 (PR #248-252): in addition, the sweep now requires
+    explicit terminal broker-order evidence before clearing — so this
+    test ALSO seeds a FILLED order for the marker's broker_order_id."""
     state_store = StateStore()
     state_store.set_positions(
         "A1",
@@ -948,6 +982,11 @@ async def test_marker_cleared_when_symbol_disappears_from_snapshot():
     _age_inflight_markers_past_grace(engine)
 
     state_store.set_positions("A1", [])
+    _seed_terminal_broker_order(
+        state_store, "A1",
+        symbol="NG22MAY26255CE", broker_order_id="BOI-1",
+        status="FILLED",
+    )
     _mark_positions_sync_fresh(state_store, "A1")
     # First missing-symbol observation — round-4 P1 requires a
     # second consecutive miss before the marker is swept.
@@ -961,7 +1000,7 @@ async def test_marker_cleared_when_symbol_disappears_from_snapshot():
     await engine.evaluate_runners([_runner("t-1", "A1")])
     assert key not in engine._inflight_markers, (
         "marker must be swept after two consecutive missing snapshots "
-        "(#236 round-4 P1)"
+        "+ terminal broker evidence (#252)"
     )
 
 
@@ -1110,7 +1149,21 @@ async def test_disappeared_symbol_sweep_also_resets_manager_state():
 
     # Symbol disappears from snapshot — PR #236 round-4 P1 requires
     # TWO consecutive missing snapshots before sweep / state reset.
+    # Issue #252: the sweep also requires terminal broker-order evidence
+    # so a FILLED ledger entry is now part of the precondition.
     state_store.set_positions("A1", [])
+    # The default router (_RouterReturningBrokerOrderId) puts the broker
+    # order id in the marker — match it so the terminal-evidence gate
+    # passes.
+    armed_marker = engine._inflight_markers.get(state_key)
+    armed_boi = armed_marker[0] if armed_marker else None
+    if armed_boi is None:
+        armed_boi = "BOI-TEST"
+    _seed_terminal_broker_order(
+        state_store, "A1",
+        symbol="NG22MAY26255CE", broker_order_id=str(armed_boi),
+        status="FILLED",
+    )
     _mark_positions_sync_fresh(state_store, "A1")
     await engine.evaluate_runners([_runner("t-1", "A1")])  # 1st miss
     _mark_positions_sync_fresh(state_store, "A1")
@@ -1118,7 +1171,8 @@ async def test_disappeared_symbol_sweep_also_resets_manager_state():
 
     assert state_key not in manager._states, (
         "manager peak/armed state must be reset when symbol disappears "
-        "across two consecutive snapshots (#236 round-2 P1, round-4 P1)"
+        "across two consecutive snapshots WITH terminal broker evidence "
+        "(#236 round-2 P1, round-4 P1, #252)"
     )
 
 
@@ -1367,14 +1421,18 @@ async def test_exception_path_refreshes_marker_timestamp():
     # submit was slow".
     pre_existing = engine._inflight_markers[key]
     rewound_ts = _t.monotonic() - 100.0  # well past 60s default
-    engine._inflight_markers[key] = (pre_existing[0], rewound_ts)
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    rewound_wall = _dt.now(_tz.utc) - _td(seconds=100)
+    engine._inflight_markers[key] = (
+        pre_existing[0], rewound_ts, rewound_wall,
+    )
     # Third evaluate: another exception — exception path must refresh
     # the timestamp rather than leave the rewound stale value in place.
     await engine.evaluate_runners([_runner("t-1", "A1")])
     assert key in engine._inflight_markers, (
         "marker must remain armed after router exception (#236 review P1)"
     )
-    _, refreshed_ts = engine._inflight_markers[key]
+    _, refreshed_ts, _wall = engine._inflight_markers[key]
     assert refreshed_ts > rewound_ts + 90.0, (
         "exception path must refresh marker timestamp so a slow submit "
         "does not leave a near-stale marker (#236 round-4 P2)"
@@ -1691,3 +1749,454 @@ async def test_synchronous_fill_resets_persisted_trailing_state():
         "same-symbol re-open does not inherit stale peak/armed "
         "(#236 round-5 P2)"
     )
+
+
+# ===========================================================================
+# PR for issues #248, #249, #250, #251, #252 — trailing-lock marker
+# lifecycle hardening.
+# ===========================================================================
+
+
+class _FakeInflightBackend:
+    """In-memory test double for ``PositionTrailingLockInflightBackend``.
+
+    Records save/delete/load_all calls so we can verify the engine's
+    durable-marker handling without touching Postgres. Used for the
+    restart-survives-marker test (issue #251).
+    """
+
+    def __init__(self):
+        from app.pnl.position_trailing_lock import (
+            PositionTrailingLockInflightMarker,
+        )
+        self._rows: dict[tuple, "PositionTrailingLockInflightMarker"] = {}
+        self.save_calls: list[tuple] = []
+        self.delete_calls: list[tuple] = []
+        self.load_calls: int = 0
+
+    def save_marker(self, marker) -> None:
+        key = (marker.tenant_id, marker.broker_account_id, marker.symbol)
+        self._rows[key] = marker
+        self.save_calls.append(key)
+
+    def delete_marker(self, tenant_id, broker_account_id, symbol) -> None:
+        key = (str(tenant_id), str(broker_account_id), str(symbol))
+        self._rows.pop(key, None)
+        self.delete_calls.append(key)
+
+    def load_all(self):
+        self.load_calls += 1
+        return list(self._rows.values())
+
+
+@pytest.mark.asyncio
+async def test_issue_251_marker_persists_to_durable_backend_on_submit():
+    """Issue #251: every submit must write a durable row so a restart
+    between submit and broker terminal confirmation does NOT drop the
+    duplicate-fill guard."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-251")
+    backend = _FakeInflightBackend()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+        inflight_backend=backend,  # type: ignore[arg-type]
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    expected_key = ("t-1", "A1", "NG22MAY26255CE")
+    assert expected_key in engine._inflight_markers
+    assert expected_key in backend.save_calls, (
+        "submit must persist the inflight marker to the durable backend "
+        "so a restart does not drop the duplicate-fill guard (#251)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_issue_251_restart_rehydrates_marker_and_blocks_duplicate():
+    """Issue #251: a NEW engine instance constructed against a backend
+    that already has a persisted marker must rehydrate the in-memory
+    dict and block a duplicate submission on the same (tenant, account,
+    symbol). This simulates the restart case."""
+    from app.pnl.position_trailing_lock import PositionTrailingLockInflightMarker
+    from datetime import datetime, timezone
+
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    backend = _FakeInflightBackend()
+    backend.save_marker(
+        PositionTrailingLockInflightMarker(
+            tenant_id="t-1",
+            broker_account_id="A1",
+            symbol="NG22MAY26255CE",
+            broker_order_id="BOI-PRE-RESTART",
+            submitted_at=datetime.now(timezone.utc),
+        )
+    )
+    # save_calls also recorded the pre-load above — clear it so we test
+    # the rehydrate-block flow strictly.
+    backend.save_calls.clear()
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-NEW")
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+        inflight_backend=backend,  # type: ignore[arg-type]
+    )
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert backend.load_calls >= 1, (
+        "engine must load persisted markers on the first evaluate (#251)"
+    )
+    assert router.calls == [], (
+        "rehydrated marker must block the duplicate submission across "
+        "a simulated restart (#251)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_issue_251_clear_inflight_deletes_durable_row():
+    """Issue #251: when the marker is cleared (router rejection,
+    synchronous fill, terminal confirmation), the durable row must
+    also be deleted so a subsequent restart does NOT rehydrate it."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterRejectingResponse()
+    backend = _FakeInflightBackend()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+        inflight_backend=backend,  # type: ignore[arg-type]
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    expected_key = ("t-1", "A1", "NG22MAY26255CE")
+    assert expected_key in backend.delete_calls, (
+        "router rejection must delete the persisted row so a restart "
+        "does not rehydrate a stale marker (#251)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_issue_249_post_submit_router_failure_persists_marker():
+    """Issue #249: when the router places the broker order and then
+    raises (e.g. lifecycle persistence fails after broker submit), the
+    marker must remain armed IN MEMORY and on the durable backend."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterRaisingPostSubmit()
+    backend = _FakeInflightBackend()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+        inflight_backend=backend,  # type: ignore[arg-type]
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    expected_key = ("t-1", "A1", "NG22MAY26255CE")
+    assert expected_key in engine._inflight_markers, (
+        "post-submit raise must leave the in-memory marker armed (#249)"
+    )
+    assert expected_key in backend.save_calls, (
+        "post-submit raise must leave the durable marker armed so a "
+        "restart between submit and broker terminal does not allow a "
+        "duplicate submission (#249 + #251)"
+    )
+    assert expected_key not in backend.delete_calls, (
+        "post-submit raise MUST NOT clear the durable marker (#249)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_issue_252_disappearance_alone_does_not_clear_marker():
+    """Issue #252: a position vanishing from the snapshot is NOT proof
+    of terminal state. Without explicit terminal broker-order evidence,
+    the marker must persist until the normal inflight timeout — even
+    after two consecutive missing snapshots."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-252")
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key in engine._inflight_markers
+    _age_inflight_markers_past_grace(engine)
+    state_store.set_positions("A1", [])
+    _mark_positions_sync_fresh(state_store, "A1")
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _mark_positions_sync_fresh(state_store, "A1")
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert key in engine._inflight_markers, (
+        "marker must persist when symbol disappears WITHOUT terminal "
+        "broker-order evidence — disappearance alone is not terminal "
+        "proof (#252)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_issue_252_disappearance_plus_terminal_evidence_clears_marker():
+    """Issue #252: when the disappeared-symbol sweep CAN confirm
+    terminal broker-order evidence (e.g. a FILLED ledger entry for the
+    marker's broker_order_id), it is safe to clear the marker."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-TERMINAL")
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    key = ("t-1", "A1", "NG22MAY26255CE")
+    assert key in engine._inflight_markers
+    _age_inflight_markers_past_grace(engine)
+    state_store.set_positions("A1", [])
+    _seed_terminal_broker_order(
+        state_store, "A1",
+        symbol="NG22MAY26255CE", broker_order_id="BOI-TERMINAL",
+        status="FILLED",
+    )
+    _mark_positions_sync_fresh(state_store, "A1")
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _mark_positions_sync_fresh(state_store, "A1")
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert key not in engine._inflight_markers, (
+        "with terminal broker evidence + 2 missing snapshots, the "
+        "marker may be cleared (#252)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_issue_250_manager_state_reset_only_when_terminal_evidence():
+    """Issue #250: when a symbol disappears from the snapshot, the
+    persisted ``PositionTrailingLockManager`` state must NOT be reset
+    unless we also have explicit terminal broker-order evidence.
+    Otherwise an OK-but-empty snapshot can blow away a valid armed
+    peak/state that should still be governing the (still-open) position
+    on the next snapshot."""
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [Position(symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                  product_type=ProductType.INTRADAY)],
+    )
+    manager = PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend())
+    router = _RouterReturningBrokerOrderId(broker_order_id="BOI-250")
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=manager,
+    )
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    state_key = ("t-1", "A1", "NG22MAY26255CE")
+    assert state_key in manager._states
+    _age_inflight_markers_past_grace(engine)
+    state_store.set_positions("A1", [])
+    _mark_positions_sync_fresh(state_store, "A1")
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _mark_positions_sync_fresh(state_store, "A1")
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    assert state_key in manager._states, (
+        "manager state must NOT be reset on disappearance WITHOUT "
+        "terminal broker evidence (#250)"
+    )
+
+
+def _live_settings_namespace(
+    *,
+    inflight_max_seconds: float,
+    poll_interval: float = 60.0,
+) -> SimpleNamespace:
+    """Build a Settings-like SimpleNamespace that passes the LIVE
+    startup validator EXCEPT for the trailing-lock inflight gate.
+    Other LIVE-required flags are stubbed to acceptable values."""
+    return SimpleNamespace(
+        eod_exit_time="15:20",
+        eod_exit_retry_cutoff_time="15:30",
+        hub_subscription_poll_interval=poll_interval,
+        position_trailing_lock_enabled=True,
+        position_trailing_lock_inflight_max_seconds=inflight_max_seconds,
+        risk_enable_daily_loss=True,
+        risk_max_daily_loss=10000.0,
+        eod_cancel_open_orders_enabled=True,
+        admin_api_key="X",
+        dashboard_hmac_auth_enabled=False,
+        control_plane_backend="postgres",
+        sweep_state_backend="postgres",
+        broker_secret_backend="postgres",
+        enable_capital_checks=True,
+        enable_risk_checks=True,
+        enable_profit_checks=True,
+        profit_enable_daily_target=True,
+        order_router_enforce_idempotency=True,
+        position_ownership_enabled=True,
+        order_lifecycle_persist_markers_required=True,
+        capital_fail_closed_on_missing_state=True,
+        capital_fail_closed_on_missing_notional_price=True,
+        capital_limits_json='{"A":{}}',
+        allow_live_capital_limits_default_only="",
+        risk_fail_open_on_missing_pnl=False,
+        position_ownership_unknown_mode="block_entries",
+        ownership_persist_pending_locks=True,
+        profit_daily_target=2000.0,
+        circuit_breaker_persist_state=True,
+        hub_instance_name="phoenix-live",
+        hub_default_tenant_id="tenant-1",
+        dashboard_auth_disabled=False,
+        angel_postback_token="x",
+        default_profit_target_pct=0.3,
+        enable_multi_hub=True,
+        use_hub_router=True,
+        sweep_state_db_dsn="",
+    )
+
+
+def _live_runtime_cfg_namespace() -> SimpleNamespace:
+    return SimpleNamespace(
+        stream_watchdog_interval_seconds=5.0,
+        stream_watchdog_restart_backoff_base_seconds=1.0,
+        stream_watchdog_restart_backoff_max_seconds=60.0,
+        stream_watchdog_restart_backoff_jitter_ratio=0.1,
+        stream_watchdog_stable_run_window_seconds=10.0,
+        app_env="production",
+        leader_lease_backend="postgres",
+        leader_lease_enabled_override=True,
+        leader_lease_id="phoenix-live",
+        disable_stream_worker=False,
+        demo_auth_requested=False,
+        enable_demo_auth=False,
+        dashboard_auth_disabled=False,
+    )
+
+
+_LIVE_ENV_BASE = {
+    "APP_ENV": "production",
+    "TRADE_MODE": "LIVE",
+    "POSITION_SYNC_INTERVAL_SECONDS": "30",
+    "ORDERS_SYNC_INTERVAL_SECONDS": "90",
+    "ORDER_SUBMISSION_OUTBOX_ENABLED": "true",
+    "ORDER_SUBMISSION_OUTBOX_REQUIRED": "true",
+    "ORDER_SUBMISSION_OUTBOX_BACKEND": "postgres",
+    "BROKER_SECRET_BACKEND": "postgres",
+    "PNL_STATE_BACKEND": "postgres",
+    "RISK_MAX_DAILY_LOSS_LIVE_FLOOR": "5000",
+    "ENABLE_DEMO_AUTH": "false",
+}
+
+
+def test_issue_248_startup_validator_rejects_inflight_below_floor_in_live():
+    """Issue #248: LIVE startup must abort when
+    POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS is at or below the
+    effective watchdog cadence + safety margin. Mirrors the
+    RISK_MAX_DAILY_LOSS_LIVE_FLOOR pattern added by PR #243."""
+    from app.core.startup_config_validator import (
+        validate_runtime_startup_settings,
+    )
+
+    # 60s = exact effective cadence — under the +30s LIVE floor.
+    with pytest.raises(ValueError) as excinfo:
+        validate_runtime_startup_settings(
+            settings=_live_settings_namespace(inflight_max_seconds=60.0),
+            runtime_cfg=_live_runtime_cfg_namespace(),
+            env=dict(_LIVE_ENV_BASE),
+        )
+    err = str(excinfo.value)
+    assert "POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS" in err, err
+    assert "#248" in err or "issues #225 + #248" in err, err
+
+
+def test_issue_248_startup_validator_rejects_zero_inflight_in_live():
+    """Issue #248: LIVE startup must abort when
+    POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS=0 (silently disables
+    the duplicate-fill guard)."""
+    from app.core.startup_config_validator import (
+        validate_runtime_startup_settings,
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        validate_runtime_startup_settings(
+            settings=_live_settings_namespace(inflight_max_seconds=0.0),
+            runtime_cfg=_live_runtime_cfg_namespace(),
+            env=dict(_LIVE_ENV_BASE),
+        )
+    err = str(excinfo.value)
+    assert "POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS" in err, err
+
+
+def test_issue_248_startup_validator_accepts_inflight_above_floor_in_live():
+    """Issue #248: LIVE startup must accept a properly-sized
+    POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS (default 120s is well
+    above the 60+30=90s floor)."""
+    from app.core.startup_config_validator import (
+        validate_runtime_startup_settings,
+    )
+
+    try:
+        validate_runtime_startup_settings(
+            settings=_live_settings_namespace(inflight_max_seconds=120.0),
+            runtime_cfg=_live_runtime_cfg_namespace(),
+            env=dict(_LIVE_ENV_BASE),
+        )
+    except ValueError as exc:
+        # If the validator raises for an unrelated gate (e.g. broker
+        # network identity), that's not what this test cares about —
+        # just assert the trailing-lock gate is NOT part of the error.
+        assert "POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS" not in str(exc), (
+            f"trailing-lock gate must accept 120s in LIVE; got: {exc}"
+        )

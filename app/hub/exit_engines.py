@@ -24,7 +24,10 @@ from app.pnl.profit_engine import ProfitEngine as SweepProfitEngine
 from app.pnl.profit_lock import ProfitLockManager
 from app.pnl.position_trailing_lock import (
     PositionTrailingLockDecision,
+    PositionTrailingLockInflightBackend,
+    PositionTrailingLockInflightMarker,
     PositionTrailingLockManager,
+    _NoopPositionTrailingLockInflightBackend,
 )
 from app.orders.router import OrderRouter
 from app.orders.position_ownership import (
@@ -1997,6 +2000,14 @@ class PositionTrailingLockEngine:
     _suppression_log_state: Dict[Tuple[str, str], datetime] = field(
         default_factory=dict, init=False, repr=False
     )
+    # Issue #251: durable backend for inflight markers. When wired (LIVE),
+    # markers persist to Postgres so a restart does NOT drop the duplicate-
+    # fill guard between submit_order and broker terminal confirmation.
+    # Default Noop = pre-#251 in-memory-only behaviour (acceptable for
+    # PAPER/SHADOW because no real broker order is at stake).
+    inflight_backend: PositionTrailingLockInflightBackend = field(
+        default_factory=_NoopPositionTrailingLockInflightBackend,
+    )
     # Issue #225: per-(tenant, account, symbol) inflight markers for the
     # most recently submitted trailing-lock exit. Set after submit;
     # checked at the start of the next evaluation cycle to block
@@ -2008,13 +2019,22 @@ class PositionTrailingLockEngine:
     # released between fires. This per-position marker is the
     # idempotency safety net.
     #
-    # Value tuple: (broker_order_id_or_None, monotonic_submitted_at_float).
-    # In-memory only; restart safely resets because the broker order is
-    # no longer in-flight from this process's perspective after restart
-    # (any pending fills are observed via the snapshot polling path).
+    # Value tuple: (broker_order_id_or_None, monotonic_submitted_at_float,
+    # wallclock_submitted_at_datetime). The wall-clock instant is what is
+    # persisted to Postgres (issue #251); the monotonic timestamp is what
+    # the age comparison uses inside the watchdog (monotonic is immune to
+    # wall-clock jumps).
     _inflight_markers: Dict[
-        Tuple[str, str, str], Tuple[Optional[str], float]
+        Tuple[str, str, str],
+        Tuple[Optional[str], float, datetime],
     ] = field(default_factory=dict, init=False, repr=False)
+    # Issue #251: True once the engine has attempted to hydrate the in-memory
+    # marker dict from the durable backend. Lazy because the engine is
+    # constructed at module import time but the backend may not be reachable
+    # until the runtime has wired up Postgres.
+    _inflight_hydrated: bool = field(
+        default=False, init=False, repr=False,
+    )
 
     def _enabled(self) -> bool:
         return bool(getattr(self.settings, "position_trailing_lock_enabled", False))
@@ -2145,15 +2165,23 @@ class PositionTrailingLockEngine:
         marker = self._inflight_markers.get(key)
         if marker is None:
             return False
-        broker_order_id, submitted_at = marker
-        age = _t.monotonic() - float(submitted_at)
+        broker_order_id, submitted_at_mono, _wallclock = marker
+        age = _t.monotonic() - float(submitted_at_mono)
         max_age = self._inflight_max_seconds()
         if age < max_age:
             return True
         # Stale marker — auto-clear and surface as ERROR. Operator can
         # investigate via broker_order_id; trailing-lock will resume
-        # normal evaluation on the next cycle.
+        # normal evaluation on the next cycle. Issue #251: also drop the
+        # persisted row so a subsequent restart does NOT rehydrate the
+        # stale marker.
         self._inflight_markers.pop(key, None)
+        try:
+            self.inflight_backend.delete_marker(
+                str(tenant_id), str(broker_account_id), str(symbol)
+            )
+        except Exception:  # pragma: no cover - defensive
+            pass
         log_event(
             logger,
             event_type="POSITION_TRAILING_LOCK_INFLIGHT_TIMEOUT",
@@ -2217,16 +2245,129 @@ class PositionTrailingLockEngine:
         broker_account_id: Any,
         symbol: str,
         broker_order_id: Optional[str],
+        persist: bool = True,
     ) -> None:
+        """Arm the inflight marker for (tenant, account, symbol).
+
+        Issue #251: also writes to the durable backend so the marker
+        survives a process restart between submit_order and broker
+        terminal confirmation. ``persist=False`` is used by the startup
+        hydration path to seed the in-memory dict from already-persisted
+        rows without re-writing them.
+        """
         import time as _t
         key = (str(tenant_id), str(broker_account_id), str(symbol))
-        self._inflight_markers[key] = (broker_order_id, _t.monotonic())
+        now_mono = _t.monotonic()
+        now_utc = datetime.now(timezone.utc)
+        self._inflight_markers[key] = (broker_order_id, now_mono, now_utc)
+        if persist:
+            try:
+                self.inflight_backend.save_marker(
+                    PositionTrailingLockInflightMarker(
+                        tenant_id=str(tenant_id),
+                        broker_account_id=str(broker_account_id),
+                        symbol=str(symbol),
+                        broker_order_id=broker_order_id,
+                        submitted_at=now_utc,
+                    )
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "trailing-lock inflight marker persist failed (non-fatal; "
+                    "in-memory guard remains): %s",
+                    exc,
+                )
 
     def _clear_inflight_marker(
         self, *, tenant_id: Any, broker_account_id: Any, symbol: str,
     ) -> None:
         key = (str(tenant_id), str(broker_account_id), str(symbol))
         self._inflight_markers.pop(key, None)
+        try:
+            self.inflight_backend.delete_marker(
+                str(tenant_id), str(broker_account_id), str(symbol)
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "trailing-lock inflight marker delete failed (non-fatal; "
+                "in-memory guard already cleared): %s",
+                exc,
+            )
+
+    def _hydrate_inflight_markers_from_backend(self) -> None:
+        """Issue #251: lazy hydration of the in-memory marker dict from
+        the durable backend on first ``evaluate_runners`` invocation.
+
+        Hydration is lazy (not in ``__post_init__``) because the engine
+        dataclass may be constructed before the Postgres pool is reachable
+        in some startup paths. The result is a one-shot import: once
+        hydrated, subsequent submit/clear operations are the authoritative
+        source.
+
+        The reload of ``submitted_at`` becomes both the in-memory monotonic
+        timestamp AND the wall-clock instant. We compute the monotonic
+        equivalent by subtracting (now_utc - persisted_submitted_at) from
+        the current monotonic clock — so the age comparison
+        (``_is_inflight_blocked``) sees the SAME effective marker age as
+        the durable record. This is the critical correctness property:
+        after restart, a 50-second-old marker must STILL be 50 seconds old
+        and not reset to zero.
+        """
+        if self._inflight_hydrated:
+            return
+        self._inflight_hydrated = True
+        try:
+            persisted = list(self.inflight_backend.load_all())
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "trailing-lock inflight marker hydrate FAILED — restart "
+                "duplicate-fill guard is degraded to in-memory only "
+                "(issue #251): %s",
+                exc,
+            )
+            return
+        if not persisted:
+            return
+        import time as _t
+        now_mono = _t.monotonic()
+        now_utc = datetime.now(timezone.utc)
+        hydrated_count = 0
+        for marker in persisted:
+            try:
+                submitted_at = marker.submitted_at
+                if submitted_at.tzinfo is None:
+                    submitted_at = submitted_at.replace(tzinfo=timezone.utc)
+                age_seconds = max(0.0, (now_utc - submitted_at).total_seconds())
+                effective_mono = now_mono - age_seconds
+                key = (
+                    str(marker.tenant_id),
+                    str(marker.broker_account_id),
+                    str(marker.symbol),
+                )
+                self._inflight_markers[key] = (
+                    marker.broker_order_id,
+                    effective_mono,
+                    submitted_at,
+                )
+                hydrated_count += 1
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "trailing-lock inflight marker hydrate row failed "
+                    "(non-fatal, skipping row): %s",
+                    exc,
+                )
+        if hydrated_count:
+            log_event(
+                logger,
+                event_type="POSITION_TRAILING_LOCK_INFLIGHT_HYDRATED",
+                message=(
+                    f"Hydrated {hydrated_count} persisted inflight marker(s) "
+                    "from the durable backend at startup — restart duplicate-"
+                    "fill guard intact (issue #251)."
+                ),
+                level=logging.INFO,
+                hydrated_count=hydrated_count,
+            )
 
     @staticmethod
     def _compute_unrealized_pnl(pos: Any, symbol: str) -> Optional[float]:
@@ -2260,6 +2401,13 @@ class PositionTrailingLockEngine:
     async def evaluate_runners(self, runners: Iterable[AccountRunner]) -> None:
         if not self._enabled():
             return
+        # Issue #251: hydrate persisted inflight markers from the durable
+        # backend on the first evaluate call. Restart-survival depends on
+        # this — otherwise a process restart drops the duplicate-fill
+        # guard immediately. Lazy because the backend may not be reachable
+        # at engine-construction time in some startup orderings.
+        if not self._inflight_hydrated:
+            self._hydrate_inflight_markers_from_backend()
         giveback_pct = float(getattr(self.settings, "position_trailing_lock_giveback_pct", 0.10))
         floor_inr = float(getattr(self.settings, "position_trailing_lock_floor_inr", 500.0))
         cooldown = float(
@@ -2544,8 +2692,8 @@ class PositionTrailingLockEngine:
             marker = self._inflight_markers.get(key)
             if marker is None:
                 continue
-            _, submitted_at = marker
-            if (now_mono - float(submitted_at)) < grace_seconds:
+            _, submitted_at_mono, _wallclock = marker
+            if (now_mono - float(submitted_at_mono)) < grace_seconds:
                 # Just-armed in this cycle (or sub-grace) — do not race.
                 continue
             # PR #236 round-5 review P2: only count this evaluation as
@@ -2570,17 +2718,59 @@ class PositionTrailingLockEngine:
                 # Single missing snapshot is ambiguous (could be a
                 # transient broker glitch). Wait for the next cycle.
                 continue
+            # Issue #252: disappearance from the snapshot is NOT proof of
+            # terminal state. An OK-but-empty/truncated broker poll can
+            # hit this path while the broker order is still live. Require
+            # EXPLICIT broker-order terminal evidence — a snapshot of the
+            # broker order ledger that shows the marker's broker_order_id
+            # in a canonical terminal state — before clearing. If we do
+            # not have such evidence, hold the marker until the normal
+            # ``_is_inflight_blocked`` timeout sweeps it. The timeout
+            # default (120s) is intentionally larger than the watchdog
+            # cadence so the bound is bounded.
+            broker_order_id = marker[0]
+            terminal_evidence = self._marker_has_terminal_broker_evidence(
+                broker_account_id=broker_account_id,
+                symbol=symbol,
+                broker_order_id=broker_order_id,
+            )
+            if not terminal_evidence:
+                # Fall back to inflight timeout — DO NOT clear the marker
+                # on disappearance alone.
+                log_event(
+                    logger,
+                    event_type=(
+                        "POSITION_TRAILING_LOCK_INFLIGHT_HELD_NO_TERMINAL"
+                    ),
+                    message=(
+                        "Symbol disappeared from snapshot but no terminal "
+                        "broker-order evidence yet — holding inflight "
+                        "marker until normal timeout (issue #252)."
+                    ),
+                    level=logging.INFO,
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    symbol=symbol,
+                    broker_order_id=broker_order_id,
+                    consecutive_missing_snapshots=current_misses,
+                )
+                continue
             self._inflight_markers.pop(key, None)
+            try:
+                self.inflight_backend.delete_marker(
+                    tenant_key, account_key, str(symbol)
+                )
+            except Exception:  # pragma: no cover - defensive
+                pass
             self._disappeared_symbol_miss_counts.pop(key, None)
             self._disappeared_symbol_last_fingerprint.pop(key, None)
-            # Issue #225 (PR #236 round-2 review P1): also reset the
-            # persisted ``PositionTrailingLockManager`` state for this
-            # symbol. The qty==0 path resets it; the disappeared-symbol
-            # path was previously omitting this. Without the reset, a
-            # quick same-symbol re-open is evaluated against the stale
-            # peak/armed state and can immediately emit another
-            # trailing-lock exit even though the new position never
-            # armed.
+            # Issue #225 (PR #236 round-2 review P1) + issue #250: also
+            # reset the persisted ``PositionTrailingLockManager`` state
+            # for this symbol. The qty==0 path resets it; the disappeared-
+            # symbol path was previously omitting this. Without the
+            # reset, a quick same-symbol re-open is evaluated against the
+            # stale peak/armed state and can immediately emit another
+            # trailing-lock exit even though the new position never armed.
             try:
                 self.manager.reset_position(
                     tenant_id, broker_account_id, symbol,
@@ -2597,17 +2787,89 @@ class PositionTrailingLockEngine:
                 message=(
                     "Inflight marker cleared because the symbol has been "
                     "absent from the broker position snapshot for "
-                    f"{min_consecutive_misses} consecutive evaluations — "
-                    "the prior exit must have reached terminal state. "
-                    "Persisted trailing-lock state also reset to prevent "
-                    "stale peak/armed bias on a quick re-open."
+                    f"{min_consecutive_misses} consecutive evaluations AND "
+                    "the broker order ledger shows the prior exit in a "
+                    "canonical terminal state. Persisted trailing-lock "
+                    "state also reset to prevent stale peak/armed bias on "
+                    "a quick re-open (issues #250 + #252)."
                 ),
                 level=logging.INFO,
                 tenant_id=tenant_id,
                 broker_account_id=broker_account_id,
                 symbol=symbol,
                 consecutive_missing_snapshots=min_consecutive_misses,
+                broker_order_id=broker_order_id,
             )
+
+    def _marker_has_terminal_broker_evidence(
+        self,
+        *,
+        broker_account_id: Any,
+        symbol: str,
+        broker_order_id: Optional[str],
+    ) -> bool:
+        """Issue #252: return True iff the broker-order ledger shows
+        explicit terminal evidence for the marker.
+
+        Two acceptance paths:
+
+        * **Strict** (preferred): the broker_order_id captured at
+          submission time is present in the orders snapshot AND its
+          status maps to a canonical terminal lifecycle state
+          (FILLED / COMPLETE / EXECUTED / CANCELLED / REJECTED /
+          FAILED / EXPIRED).
+        * **Symbol fallback** (broker_order_id unknown): the most
+          recent ledger entry for this symbol is in a canonical
+          terminal state — used only when the router did not surface
+          a broker_order_id on submit (so we have nothing to match).
+          This is intentionally narrower than "any order for the
+          symbol" so an unrelated entry order from earlier in the
+          session cannot satisfy the gate.
+
+        Returns False on ANY uncertainty — fail closed (hold the
+        marker, accept a longer block, avoid duplicate fills).
+        """
+        try:
+            orders = self.state_store.get_orders(broker_account_id) or []
+        except Exception:  # pragma: no cover - defensive
+            return False
+        if not orders:
+            return False
+        try:
+            from app.orders.order_state import (
+                TERMINAL_ORDER_STATES,
+                classify_broker_status,
+            )
+        except Exception:  # pragma: no cover - defensive
+            return False
+
+        def _is_terminal(status_str: Any) -> bool:
+            try:
+                state = classify_broker_status(status_str)
+            except Exception:
+                return False
+            return state in TERMINAL_ORDER_STATES
+
+        symbol_str = str(symbol)
+        if broker_order_id:
+            for order in orders:
+                if str(getattr(order, "order_id", "") or "") == str(broker_order_id):
+                    return _is_terminal(getattr(order, "status", ""))
+            # broker_order_id captured but not found in current ledger
+            # snapshot — could be a stale snapshot or a missed sync.
+            # Fail closed; the inflight timeout will eventually sweep.
+            return False
+        # broker_order_id unknown — fall back to the most recent
+        # ledger entry for this symbol, but only treat it as terminal
+        # evidence if it is unambiguously terminal.
+        candidate = None
+        for order in orders:
+            if str(getattr(order, "symbol", "") or "") != symbol_str:
+                continue
+            candidate = order  # rely on caller's list ordering (recency)
+        if candidate is None:
+            return False
+        return _is_terminal(getattr(candidate, "status", ""))
 
     async def _emit_exit(
         self,

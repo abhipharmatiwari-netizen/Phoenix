@@ -36,6 +36,8 @@ from app.pnl.profit_lock import ProfitLockManager
 from app.pnl.position_trailing_lock import (
     PositionTrailingLockManager,
     PostgresPositionTrailingLockBackend,
+    PostgresPositionTrailingLockInflightBackend,
+    _NoopPositionTrailingLockInflightBackend,
 )
 from app.orders.order_lifecycle import OrderLifecycleService
 from app.orders.order_outbox import build_order_submission_outbox
@@ -503,6 +505,13 @@ class HubRuntime:
         # `_enabled()` check (driven by POSITION_TRAILING_LOCK_ENABLED) gates
         # whether it actually evaluates anything.
         position_trailing_backend = None
+        # Issue #251: durable backend for trailing-lock INFLIGHT MARKERS
+        # (the duplicate-fill guard). Persisting these to Postgres means a
+        # process restart between submit_order and broker terminal
+        # confirmation no longer drops the guard.
+        position_trailing_inflight_backend = (
+            _NoopPositionTrailingLockInflightBackend()
+        )
         if _runtime_trade_mode() == "LIVE":
             try:
                 position_trailing_backend = PostgresPositionTrailingLockBackend(
@@ -512,6 +521,20 @@ class HubRuntime:
                 logger.warning(
                     "position_trailing_lock: Postgres backend init failed; "
                     "trailing lock will run with in-memory state only: %s",
+                    exc,
+                )
+            try:
+                position_trailing_inflight_backend = (
+                    PostgresPositionTrailingLockInflightBackend(
+                        dsn=get_sweep_state_dsn(self.settings)
+                    )
+                )
+            except Exception as exc:
+                logger.error(
+                    "position_trailing_lock_inflight: Postgres backend init "
+                    "failed; trailing-lock duplicate-fill guard will be "
+                    "in-memory only (restart will DROP the guard, "
+                    "issue #251): %s",
                     exc,
                 )
         self.position_trailing_lock_manager = PositionTrailingLockManager(
@@ -532,6 +555,7 @@ class HubRuntime:
             state_store=self.state_store,
             order_router=self.order_router,
             manager=self.position_trailing_lock_manager,
+            inflight_backend=position_trailing_inflight_backend,
             clock=self.clock,
             kill_switch_manager_provider=lambda: self.kill_switch_manager,
         )

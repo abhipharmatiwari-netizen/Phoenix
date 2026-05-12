@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, Iterable, Optional, Protocol, Tuple, runtime_checkable
+from typing import Dict, Iterable, List, Optional, Protocol, Tuple, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from app.core.identifiers import BrokerAccountId, TenantId
@@ -396,10 +396,248 @@ class PositionTrailingLockManager:
         )
 
 
+# ---------------------------------------------------------------------------
+# Issue #251: durable inflight markers for the trailing-lock duplicate-fill
+# guard. The in-memory dict on ``PositionTrailingLockEngine`` does not survive
+# restarts; a process restart between submit_order and the broker's terminal
+# confirmation drops the ONLY guard against re-submitting the same exit on
+# the next watchdog cycle. We persist the markers to a tiny Postgres table
+# (migration 019) so restart no longer disables the guard.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PositionTrailingLockInflightMarker:
+    """One persisted inflight marker.
+
+    Stored per (tenant, account, symbol) while a trailing-lock exit is awaiting
+    broker terminal confirmation. ``submitted_at`` is the UTC wall-clock instant
+    the marker was armed; the engine compares the age against the configured
+    inflight max age to decide when to auto-clear after a hard timeout.
+    """
+
+    tenant_id: str
+    broker_account_id: str
+    symbol: str
+    broker_order_id: Optional[str]
+    submitted_at: datetime
+
+
+@runtime_checkable
+class PositionTrailingLockInflightBackend(Protocol):
+    def save_marker(self, marker: PositionTrailingLockInflightMarker) -> None: ...
+
+    def delete_marker(
+        self, tenant_id: str, broker_account_id: str, symbol: str
+    ) -> None: ...
+
+    def load_all(self) -> Iterable[PositionTrailingLockInflightMarker]: ...
+
+
+class _NoopPositionTrailingLockInflightBackend:
+    """No-op backend used by tests and non-LIVE runs.
+
+    Persists nothing; the in-memory dict on the engine remains authoritative.
+    Safe to use in PAPER/SHADOW because no real broker order is at stake.
+    """
+
+    def save_marker(self, marker: PositionTrailingLockInflightMarker) -> None:
+        return None
+
+    def delete_marker(
+        self, tenant_id: str, broker_account_id: str, symbol: str
+    ) -> None:
+        return None
+
+    def load_all(self) -> Iterable[PositionTrailingLockInflightMarker]:
+        return iter(())
+
+
+class PostgresPositionTrailingLockInflightBackend:
+    """Postgres backend for inflight trailing-lock markers (issue #251).
+
+    Idempotent ``CREATE TABLE IF NOT EXISTS`` mirrors migration 019. Each
+    call opens a fresh connection (matching the existing
+    PostgresPositionTrailingLockBackend pattern) so the backend can be safely
+    shared across the engine's async lifetime.
+
+    Failure mode is logged + non-fatal: a transient Postgres outage degrades
+    the marker guard to in-memory-only (same behaviour as before issue #251)
+    rather than crashing the watchdog. The startup-time ``load_all`` call
+    is the critical path — see ``PositionTrailingLockEngine.__post_init__``
+    where any load failure surfaces a structured ERROR event.
+    """
+
+    _CREATE_TABLE = """
+    CREATE TABLE IF NOT EXISTS position_trailing_lock_inflight (
+        tenant_id          TEXT        NOT NULL,
+        broker_account_id  TEXT        NOT NULL,
+        symbol             TEXT        NOT NULL,
+        broker_order_id    TEXT,
+        submitted_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (tenant_id, broker_account_id, symbol)
+    );
+    """
+
+    _UPSERT = """
+    INSERT INTO position_trailing_lock_inflight
+        (tenant_id, broker_account_id, symbol, broker_order_id,
+         submitted_at, updated_at)
+    VALUES (%s, %s, %s, %s, %s, %s)
+    ON CONFLICT (tenant_id, broker_account_id, symbol) DO UPDATE SET
+        broker_order_id = EXCLUDED.broker_order_id,
+        submitted_at    = EXCLUDED.submitted_at,
+        updated_at      = EXCLUDED.updated_at;
+    """
+
+    _DELETE = """
+    DELETE FROM position_trailing_lock_inflight
+    WHERE tenant_id = %s AND broker_account_id = %s AND symbol = %s;
+    """
+
+    _LIST_ALL = """
+    SELECT tenant_id, broker_account_id, symbol, broker_order_id, submitted_at
+    FROM position_trailing_lock_inflight;
+    """
+
+    def __init__(self, dsn: str) -> None:
+        from app.data.postgres import connect_with_retry
+
+        self._dsn = dsn
+        conn = connect_with_retry(dsn)
+        try:
+            conn.execute(self._CREATE_TABLE)
+        finally:
+            conn.close()
+
+    def _connect(self):  # noqa: ANN202
+        from app.data.postgres import connect_with_retry
+
+        return connect_with_retry(self._dsn)
+
+    def save_marker(self, marker: PositionTrailingLockInflightMarker) -> None:
+        try:
+            conn = self._connect()
+        except Exception:
+            logger.exception(
+                "position_trailing_lock_inflight: connect failed for save %s/%s/%s",
+                marker.tenant_id,
+                marker.broker_account_id,
+                marker.symbol,
+            )
+            return
+        try:
+            now_utc = datetime.now(timezone.utc)
+            conn.execute(
+                self._UPSERT,
+                (
+                    marker.tenant_id,
+                    marker.broker_account_id,
+                    marker.symbol,
+                    marker.broker_order_id,
+                    marker.submitted_at,
+                    now_utc,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "position_trailing_lock_inflight: save_marker failed %s/%s/%s",
+                marker.tenant_id,
+                marker.broker_account_id,
+                marker.symbol,
+            )
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def delete_marker(
+        self, tenant_id: str, broker_account_id: str, symbol: str
+    ) -> None:
+        try:
+            conn = self._connect()
+        except Exception:
+            logger.exception(
+                "position_trailing_lock_inflight: connect failed for delete %s/%s/%s",
+                tenant_id,
+                broker_account_id,
+                symbol,
+            )
+            return
+        try:
+            conn.execute(self._DELETE, (tenant_id, broker_account_id, symbol))
+        except Exception:
+            logger.exception(
+                "position_trailing_lock_inflight: delete_marker failed %s/%s/%s",
+                tenant_id,
+                broker_account_id,
+                symbol,
+            )
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def load_all(self) -> Iterable[PositionTrailingLockInflightMarker]:
+        try:
+            conn = self._connect()
+        except Exception:
+            logger.exception(
+                "position_trailing_lock_inflight: connect failed for load_all"
+            )
+            return []
+        out: List[PositionTrailingLockInflightMarker] = []
+        try:
+            cur = conn.execute(self._LIST_ALL)
+            for row in cur.fetchall():
+                submitted_at_raw = row[4]
+                if isinstance(submitted_at_raw, datetime):
+                    submitted_at = submitted_at_raw
+                else:
+                    try:
+                        submitted_at = datetime.fromisoformat(
+                            str(submitted_at_raw).replace("Z", "+00:00")
+                        )
+                    except Exception:
+                        # Treat unparseable timestamp as "freshly armed now"
+                        # to fail closed — better to hold the marker briefly
+                        # than to drop the guard.
+                        submitted_at = datetime.now(timezone.utc)
+                if submitted_at.tzinfo is None:
+                    submitted_at = submitted_at.replace(tzinfo=timezone.utc)
+                out.append(
+                    PositionTrailingLockInflightMarker(
+                        tenant_id=str(row[0] or ""),
+                        broker_account_id=str(row[1] or ""),
+                        symbol=str(row[2] or ""),
+                        broker_order_id=(str(row[3]) if row[3] is not None else None),
+                        submitted_at=submitted_at,
+                    )
+                )
+        except Exception:
+            logger.exception(
+                "position_trailing_lock_inflight: load_all failed"
+            )
+            return []
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return out
+
+
 __all__ = [
     "PositionTrailingLockBackend",
     "PositionTrailingLockDecision",
+    "PositionTrailingLockInflightBackend",
+    "PositionTrailingLockInflightMarker",
     "PositionTrailingLockManager",
     "PositionTrailingLockState",
     "PostgresPositionTrailingLockBackend",
+    "PostgresPositionTrailingLockInflightBackend",
+    "_NoopPositionTrailingLockInflightBackend",
 ]
