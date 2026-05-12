@@ -53,6 +53,101 @@ def _resolve_risk_state_path(override: Optional[str] = None) -> Path:
     return _DEFAULT_STATE_PATH
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# Issue #245/#246: bounded, in-call retry policy for the legacy->durable
+# kill-switch bridge. The bridge already retries on subsequent
+# ``evaluate_account_loss`` cycles (see ``_propagate_kill_switch_to_durable_manager``
+# and the retry block in ``_check_kill_switch``), but a transient Postgres
+# blip in the SAME tick that flipped the legacy flag would leave the legacy
+# and durable kill-switch state inconsistent until the next evaluation
+# (~ ticks-to-seconds depending on cadence). For an auto-trip, "next
+# evaluation" is too late — the hub OrderRouter could route fresh entries
+# in that window. Add a brief same-call retry with exponential backoff so
+# a transient blip never escapes a single auto-trip evaluation.
+#
+# Defaults: 3 attempts at 0.2s / 0.5s / 1.0s (worst-case ~1.7s extra
+# latency on the auto-trip path, only on failure). Sleeps may be patched
+# to zero in tests via ``RISK_BRIDGE_RETRY_DELAYS_SECONDS`` (comma
+# separated floats; empty disables sleep). Idempotency: the trip call is
+# guarded by a pre-trip ``get_record`` + ``post-trip re-read on ValueError``
+# (already in place). ``ksm.save_state`` writes the snapshot of the
+# in-memory manager state; re-issuing it on the same connection state is
+# safe.
+_BRIDGE_RETRY_DEFAULT_DELAYS: Tuple[float, ...] = (0.2, 0.5, 1.0)
+
+
+def _bridge_retry_delays() -> Tuple[float, ...]:
+    raw = os.getenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "").strip()
+    if not raw:
+        return _BRIDGE_RETRY_DEFAULT_DELAYS
+    parts: List[float] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            parts.append(max(0.0, float(token)))
+        except ValueError:
+            # Malformed override -> fall back to defaults rather than
+            # silently disabling retries on the live auto-trip path.
+            return _BRIDGE_RETRY_DEFAULT_DELAYS
+    return tuple(parts) if parts else _BRIDGE_RETRY_DEFAULT_DELAYS
+
+
+def _retry_with_backoff(
+    operation: Callable[[], Any],
+    *,
+    op_name: str,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Tuple[bool, Optional[BaseException]]:
+    """Run ``operation`` with bounded exponential backoff.
+
+    Issue #245/#246: protects the legacy->durable kill-switch bridge
+    against transient Postgres / hub-runtime blips that would otherwise
+    leave the legacy ``kill_switch_activated`` flag set while the durable
+    record is not persisted. Idempotency is the caller's responsibility
+    (see ``_propagate_kill_switch_to_durable_manager`` doc).
+
+    Returns ``(succeeded, last_exception)``. The last failure is logged
+    inside this helper so callers can collapse error handling to a single
+    success/fail branch.
+    """
+    delays = _bridge_retry_delays()
+    # Total attempts = 1 (initial) + len(delays) (retries).
+    attempts = 1 + len(delays)
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            operation()
+            if attempt > 1:
+                logger.info(
+                    "kill_switch_bridge_retry_succeeded op=%s attempt=%d/%d",
+                    op_name, attempt, attempts,
+                )
+            return True, None
+        except Exception as exc:  # noqa: BLE001 — bounded retry surface.
+            last_exc = exc
+            if attempt < attempts:
+                delay = delays[attempt - 1]
+                logger.warning(
+                    "kill_switch_bridge_retry op=%s attempt=%d/%d delay=%.2fs exc=%s",
+                    op_name, attempt, attempts, delay, exc,
+                )
+                if delay > 0:
+                    try:
+                        sleep(delay)
+                    except Exception:  # pragma: no cover — sleep should not raise.
+                        pass
+            else:
+                # Final failure surfaced loudly so the operator gets a
+                # P0-grade signal rather than a silent durable/legacy split.
+                logger.error(
+                    "kill_switch_bridge_retry_exhausted op=%s attempts=%d "
+                    "last_exc=%s — legacy flag will retry on next "
+                    "evaluate cycle.",
+                    op_name, attempts, exc,
+                )
+    return False, last_exc
+
 
 # Simple container for risk decision outcomes.
 @dataclass
@@ -474,7 +569,7 @@ class RiskManager:
         auto-trip on daily-loss / drawdown leaves the hub silently routing
         new entries until an operator manually trips.
 
-        Idempotency / retry semantics (PR #231 review):
+        Idempotency / retry semantics (PR #231 review + issues #245/#246):
 
         - Once ``self._durable_kill_switch_bridge_succeeded`` is True, this
           method is a no-op (cheap fast-path).
@@ -482,6 +577,17 @@ class RiskManager:
           the persistence path. The trip path is itself idempotent against
           an already-tripped durable record. Persistence is retried on
           every call until it succeeds.
+        - **In-call bounded retry (issues #245/#246):** each of the three
+          transient-failure surfaces — ``get_record``, ``ksm.trip``, and
+          the Postgres ``save_state`` block — is wrapped in a bounded
+          retry with brief exponential backoff (defaults 0.2/0.5/1.0s for
+          3 retries on top of the initial attempt). This protects against
+          a transient Postgres connection blip within a single auto-trip
+          evaluate cycle. State-machine ``ValueError`` from ``ksm.trip``
+          is NOT retried (it indicates the state is already not INACTIVE,
+          which is handled by the post-trip race re-check). Sleeps may be
+          tuned/zeroed via ``RISK_BRIDGE_RETRY_DELAYS_SECONDS`` (comma
+          separated floats, e.g. ``"0"`` to disable backoff in tests).
         - Lazy-imported to avoid circular dependency on the hub runtime.
         - Never raises into the legacy auto-trip path; all failures are
           logged at ERROR / WARNING and leave
@@ -527,15 +633,28 @@ class RiskManager:
         # action. Surface that as a structured ERROR and exit; the retry
         # will keep firing until either the operator rearms (allowing a
         # fresh trip) or clears the legacy flag (preventing the retry).
+        # Issue #245: bounded same-call retry on transient blips so a
+        # single failed lookup doesn't strand the legacy flag with no
+        # durable counterpart until the next evaluate tick.
         already_tripped = False
-        try:
-            existing_record = ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL")
-        except Exception as exc:
+        record_holder: Dict[str, Any] = {}
+
+        def _do_get_record() -> None:
+            record_holder["record"] = ksm.get_record(
+                KillSwitchScope.GLOBAL, "GLOBAL",
+            )
+
+        get_ok, get_exc = _retry_with_backoff(
+            _do_get_record, op_name="get_record",
+        )
+        if not get_ok:
             logger.error(
-                "kill_switch_bridge_unavailable: get_record query failed: %s",
-                exc,
+                "kill_switch_bridge_unavailable: get_record query failed "
+                "after retries: %s",
+                get_exc,
             )
             return
+        existing_record = record_holder.get("record")
 
         if existing_record is not None:
             existing_state = existing_record.state
@@ -568,20 +687,58 @@ class RiskManager:
             if source:
                 reason_text = f"{reason_text} source={source}"
             bridge_reason = f"risk_manager_auto: {reason_text}"
-            try:
-                record = ksm.trip(
-                    KillSwitchScope.GLOBAL,
-                    "GLOBAL",
-                    reason=bridge_reason,
-                    actor="risk_manager_auto",
-                )
-                logger.warning(
-                    "kill_switch_bridge_tripped record_id=%s scope=GLOBAL "
-                    "actor=risk_manager_auto reason=%s",
-                    record.id,
-                    bridge_reason,
-                )
-            except ValueError as exc:
+            # Issue #245: same-call bounded retry on transient connection
+            # blips inside ``ksm.trip`` (the real implementation writes
+            # through to Postgres). State-machine ValueError is NOT
+            # transient and is re-raised immediately to the post-trip
+            # race re-check below.
+            delays = _bridge_retry_delays()
+            attempts = 1 + len(delays)
+            record: Any = None
+            trip_value_error: Optional[ValueError] = None
+            trip_other_error: Optional[BaseException] = None
+            for attempt in range(1, attempts + 1):
+                try:
+                    record = ksm.trip(
+                        KillSwitchScope.GLOBAL,
+                        "GLOBAL",
+                        reason=bridge_reason,
+                        actor="risk_manager_auto",
+                    )
+                    if attempt > 1:
+                        logger.info(
+                            "kill_switch_bridge_retry_succeeded op=ksm_trip "
+                            "attempt=%d/%d", attempt, attempts,
+                        )
+                    trip_other_error = None
+                    trip_value_error = None
+                    break
+                except ValueError as exc_ve:
+                    trip_value_error = exc_ve
+                    break  # Non-retriable; fall through to race re-check.
+                except Exception as exc_t:  # noqa: BLE001
+                    trip_other_error = exc_t
+                    if attempt < attempts:
+                        delay = delays[attempt - 1]
+                        logger.warning(
+                            "kill_switch_bridge_retry op=ksm_trip "
+                            "attempt=%d/%d delay=%.2fs exc=%s",
+                            attempt, attempts, delay, exc_t,
+                        )
+                        if delay > 0:
+                            try:
+                                time.sleep(delay)
+                            except Exception:  # pragma: no cover
+                                pass
+                    else:
+                        logger.error(
+                            "kill_switch_bridge_retry_exhausted op=ksm_trip "
+                            "attempts=%d last_exc=%s — will retry on next "
+                            "evaluate cycle.",
+                            attempts, exc_t,
+                        )
+
+            if trip_value_error is not None:
                 # ValueError from trip() means "current state is not
                 # INACTIVE" — could be TRIPPED, CLEAR_PENDING, or CLEARED.
                 # Codex P2 (round 2 review): re-read the record AFTER the
@@ -592,17 +749,25 @@ class RiskManager:
                 # this re-check we would persist the CLEARED record and
                 # mark the bridge succeeded while the hub OrderRouter is
                 # NOT actually blocking entries.
-                try:
-                    post_trip_record = ksm.get_record(
-                        KillSwitchScope.GLOBAL, "GLOBAL"
+                exc = trip_value_error
+                post_trip_holder: Dict[str, Any] = {}
+
+                def _do_post_trip_get() -> None:
+                    post_trip_holder["record"] = ksm.get_record(
+                        KillSwitchScope.GLOBAL, "GLOBAL",
                     )
-                except Exception as inner_exc:
+
+                post_ok, post_exc = _retry_with_backoff(
+                    _do_post_trip_get, op_name="post_trip_get_record",
+                )
+                if not post_ok:
                     logger.error(
                         "kill_switch_bridge_unavailable: post-trip "
-                        "get_record failed: %s",
-                        inner_exc,
+                        "get_record failed after retries: %s",
+                        post_exc,
                     )
                     return
+                post_trip_record = post_trip_holder.get("record")
                 post_trip_state = (
                     post_trip_record.state if post_trip_record is not None
                     else None
@@ -636,33 +801,58 @@ class RiskManager:
                         exc,
                     )
                     return
-            except Exception as exc:
+            elif trip_other_error is not None:
                 logger.error(
                     "kill_switch_bridge_trip_failed (will retry next "
                     "evaluate cycle): %s",
-                    exc,
+                    trip_other_error,
                 )
                 return
+            else:
+                logger.warning(
+                    "kill_switch_bridge_tripped record_id=%s scope=GLOBAL "
+                    "actor=risk_manager_auto reason=%s",
+                    record.id,
+                    bridge_reason,
+                )
 
-        # Step 2: persist. Retried on every cycle until it succeeds, even
-        # when the trip itself was idempotent (same-process retry after
-        # a transient Postgres outage).
+        # Step 2: persist. Issue #246: bounded same-call retry with brief
+        # backoff so a transient Postgres connection blip doesn't leave
+        # the durable trip in-memory only (a restart would lose it). The
+        # save is idempotent — ``ksm.save_state(conn)`` writes the
+        # current snapshot of the in-memory manager state; re-issuing
+        # after a partial failure is safe (the manager's state is the
+        # source of truth, the Postgres row is the cache). The outer
+        # retry-on-next-evaluate-cycle remains as the ultimate fallback
+        # if all in-call attempts fail.
         try:
             from app.data.postgres import (
                 connect_with_retry,
                 get_control_plane_dsn,
             )
+        except Exception as exc:
+            logger.error(
+                "kill_switch_bridge_save_state_failed: postgres helpers "
+                "import failed (will retry next evaluate cycle): %s",
+                exc,
+            )
+            return
 
+        def _do_save() -> None:
             with connect_with_retry(
                 get_control_plane_dsn(), autocommit=True
             ) as conn:
                 ksm.save_state(conn)
-        except Exception as exc:
+
+        save_ok, save_exc = _retry_with_backoff(
+            _do_save, op_name="save_state",
+        )
+        if not save_ok:
             logger.error(
-                "kill_switch_bridge_save_state_failed (will retry next "
-                "evaluate cycle; durable trip is in-memory only and will "
-                "NOT survive a restart): %s",
-                exc,
+                "kill_switch_bridge_save_state_failed (all in-call retries "
+                "exhausted — will retry next evaluate cycle; durable trip is "
+                "in-memory only and will NOT survive a restart): %s",
+                save_exc,
             )
             return
 

@@ -256,7 +256,7 @@ def test_bridge_retries_on_subsequent_evaluate_after_initial_failure(
 
 
 def test_bridge_retries_when_persistence_fails_then_succeeds(
-    tmp_path,
+    tmp_path, monkeypatch,
 ):
     """Codex P1: the in-memory trip can succeed but Postgres save_state
     can fail. The legacy flag is already True; future ``should_activate``
@@ -264,7 +264,15 @@ def test_bridge_retries_when_persistence_fails_then_succeeds(
     in-memory durable trip is lost (load_state finds nothing) and the
     auto-trip becomes invisible to the hub OrderRouter — recreating the
     very gap this PR is supposed to close. The retry must persist on the
-    next evaluate cycle."""
+    next evaluate cycle.
+
+    Issues #245/#246: there is now ALSO an in-call bounded retry around
+    ``save_state`` (defaults 3 retries on top of the initial attempt, so
+    4 attempts per evaluate cycle). Disable the backoff sleeps in this
+    test so we don't add ~1.7s wall time per evaluate.
+    """
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+
     rm = _build_risk_manager(tmp_path)
     now = _force_legacy_trip_state(rm)
 
@@ -281,13 +289,18 @@ def test_bridge_retries_when_persistence_fails_then_succeeds(
          patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
         rm._check_kill_switch(now)
 
-    # Trip succeeded in-memory but persistence failed.
+    # Trip succeeded in-memory but persistence failed across 4 in-call
+    # attempts (issues #245/#246).
     assert len(stub_ksm.trip_calls) == 1
-    assert stub_ksm.save_state_calls == 1
+    assert stub_ksm.save_state_calls == 4, (
+        "in-call retry must exhaust 4 attempts before surrendering to the "
+        "next-evaluate-cycle retry (issues #245/#246)"
+    )
     assert rm._durable_kill_switch_bridge_succeeded is False
 
     # Next evaluate: persistence now succeeds. Trip is already in-memory
-    # so the bridge skips the trip call but RETRIES persistence.
+    # so the bridge skips the trip call but RETRIES persistence — and
+    # this time the very first in-call attempt succeeds.
     stub_ksm.save_state_should_fail = False
     with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
          patch("app.data.postgres.connect_with_retry", return_value=_NoopConn()), \
@@ -297,9 +310,9 @@ def test_bridge_retries_when_persistence_fails_then_succeeds(
     assert len(stub_ksm.trip_calls) == 1, (
         "bridge must NOT re-trip when in-memory record already TRIPPED"
     )
-    assert stub_ksm.save_state_calls == 2, (
-        "bridge MUST retry persistence on the next evaluate after first-"
-        "attempt save failure (Codex P1 / PR #231 review)"
+    assert stub_ksm.save_state_calls == 5, (
+        "second evaluate cycle persists on first in-call attempt (total "
+        "4 failed + 1 success = 5)"
     )
     assert rm._durable_kill_switch_bridge_succeeded is True
 
@@ -547,3 +560,259 @@ def test_bridge_re_trips_active_manager_after_runtime_swap(
         "instance (Codex round-2 P2)"
     )
     assert rm._durable_kill_switch_bridge_succeeded is True
+
+
+# ---------------------------------------------------------------------------
+# Issues #245 / #246 — in-call bounded retry on transient bridge failures.
+# The bridge already retries on subsequent evaluate cycles, but a same-tick
+# transient blip would leave the legacy and durable kill-switch state
+# inconsistent until the next tick. Wrap each transient-failure surface
+# (get_record / ksm.trip / save_state) in a bounded same-call retry.
+# ---------------------------------------------------------------------------
+
+
+class _FlakyKillSwitchManager(_StubKillSwitchManager):
+    """Stub whose transient-failure surfaces raise N times then succeed.
+
+    Each counter is consumed per attempt. ``ValueError`` from trip is
+    NOT modelled here — it is non-retriable and tested separately.
+    """
+
+    def __init__(
+        self,
+        *,
+        get_record_failures: int = 0,
+        trip_failures: int = 0,
+        save_state_failures: int = 0,
+        initial_state=None,
+    ):
+        super().__init__(initial_state=initial_state)
+        self._get_record_failures_remaining = get_record_failures
+        self._trip_failures_remaining = trip_failures
+        self._save_state_failures_remaining = save_state_failures
+        self.get_record_attempts = 0
+        self.trip_attempts = 0
+
+    def get_record(self, scope, scope_id):
+        self.get_record_attempts += 1
+        if self._get_record_failures_remaining > 0:
+            self._get_record_failures_remaining -= 1
+            raise ConnectionError("simulated transient get_record blip")
+        return super().get_record(scope, scope_id)
+
+    def trip(self, scope, scope_id, reason, actor):
+        self.trip_attempts += 1
+        if self._trip_failures_remaining > 0:
+            self._trip_failures_remaining -= 1
+            raise ConnectionError("simulated transient trip blip")
+        return super().trip(scope, scope_id, reason, actor)
+
+    def save_state(self, conn):
+        if self._save_state_failures_remaining > 0:
+            self._save_state_failures_remaining -= 1
+            self.save_state_calls += 1
+            raise ConnectionError("simulated transient save_state blip")
+        return super().save_state(conn)
+
+
+def test_in_call_retry_recovers_from_transient_save_state_blip(
+    tmp_path, monkeypatch, caplog,
+):
+    """Issue #246: a transient Postgres blip during ``save_state`` MUST NOT
+    leave the durable trip in-memory only. The bridge must retry inside
+    the same call (3 retries default) with brief backoff, then mark
+    succeeded. This proves the same-tick auto-trip episode persists even
+    when the very first save attempt fails."""
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    # 2 transient save failures then success — still inside the bounded
+    # retry budget (default 1 + 3 = 4 attempts).
+    flaky = _FlakyKillSwitchManager(save_state_failures=2)
+    runtime = SimpleNamespace(kill_switch_manager=flaky)
+
+    class _NoopConn:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", return_value=_NoopConn()), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        rm._check_kill_switch(now)
+
+    # 2 failed + 1 success.
+    assert flaky.save_state_calls == 3
+    assert rm._durable_kill_switch_bridge_succeeded is True, (
+        "in-call retry must recover from a transient save_state blip "
+        "without waiting for the next evaluate cycle (issue #246)"
+    )
+    # Retry attempts logged at WARNING.
+    assert any(
+        "kill_switch_bridge_retry" in rec.message
+        and "op=save_state" in rec.message
+        for rec in caplog.records
+    ), "in-call retry attempts must be logged"
+
+
+def test_in_call_retry_recovers_from_transient_get_record_blip(
+    tmp_path, monkeypatch, stub_postgres_save,
+):
+    """Issue #245 (Codex finding: 'is_tripped lookup failing'): a transient
+    blip during the pre-trip ``get_record`` lookup MUST NOT prevent the
+    bridge from proceeding. The bounded in-call retry should recover."""
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    flaky = _FlakyKillSwitchManager(get_record_failures=2)
+    runtime = SimpleNamespace(kill_switch_manager=flaky)
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime):
+        rm._check_kill_switch(now)
+
+    # get_record retried until success, then the trip happened.
+    assert flaky.get_record_attempts >= 3
+    assert len(flaky.trip_calls) == 1
+    assert rm._durable_kill_switch_bridge_succeeded is True
+
+
+def test_in_call_retry_recovers_from_transient_trip_blip(
+    tmp_path, monkeypatch, stub_postgres_save,
+):
+    """Issue #245: a transient blip during ``ksm.trip`` MUST NOT prevent the
+    durable manager from being tripped within the same auto-trip cycle.
+
+    Non-ValueError exceptions (i.e. genuine transient failures, not state-
+    machine rejections) are retried with the bounded backoff."""
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    flaky = _FlakyKillSwitchManager(trip_failures=2)
+    runtime = SimpleNamespace(kill_switch_manager=flaky)
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime):
+        rm._check_kill_switch(now)
+
+    # trip retried until success.
+    assert flaky.trip_attempts == 3
+    assert len(flaky.trip_calls) == 1
+    assert rm._durable_kill_switch_bridge_succeeded is True
+
+
+def test_in_call_retry_exhaustion_logs_loudly_and_leaves_retry_flag(
+    tmp_path, monkeypatch, caplog,
+):
+    """Issues #245/#246: when ALL in-call retries are exhausted (e.g. a
+    full Postgres outage that lasts longer than ~1.7s), the bridge must:
+      1. log loudly at ERROR (operator-visible structured log).
+      2. NOT silently drop the trip — the legacy flag stays True and the
+         success tracker stays False so the next evaluate cycle retries.
+    """
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    # Persistent failures across the entire retry budget (4 attempts).
+    flaky = _FlakyKillSwitchManager(save_state_failures=99)
+    runtime = SimpleNamespace(kill_switch_manager=flaky)
+
+    class _NoopConn:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", return_value=_NoopConn()), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        rm._check_kill_switch(now)
+
+    # 1 initial + 3 retries = 4 attempts all failed.
+    assert flaky.save_state_calls == 4
+    # The in-call retry surrendered, so the bridge has NOT succeeded.
+    assert rm._durable_kill_switch_bridge_succeeded is False
+    # Legacy flag IS set — the trip is real, just not durable yet.
+    assert rm.kill_switch_activated is True
+    # Loud, structured error logged for operators.
+    assert any(
+        "kill_switch_bridge_retry_exhausted" in rec.message
+        and "op=save_state" in rec.message
+        and rec.levelname == "ERROR"
+        for rec in caplog.records
+    ), (
+        "exhausted in-call retry must surface as a structured ERROR — "
+        "operators must not have to read DEBUG logs to see a stuck bridge"
+    )
+    # Also surfaced via the bridge-specific outer error so existing alerts
+    # keyed on this string still fire.
+    assert any(
+        "kill_switch_bridge_save_state_failed" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_state_machine_value_error_is_not_retried(
+    tmp_path, monkeypatch, stub_postgres_save,
+):
+    """Issue #245 idempotency: a ``ValueError`` from ``ksm.trip`` indicates
+    the state machine has already moved past INACTIVE (TRIPPED /
+    CLEAR_PENDING / CLEARED). This is NOT a transient blip and MUST NOT
+    waste backoff time retrying — the bridge falls through to the
+    post-trip race re-check immediately."""
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    # The race stub: pre-trip get_record sees INACTIVE; trip() raises
+    # ValueError unconditionally; post-trip get_record sees TRIPPED.
+    # The bridge MUST NOT retry the ValueError (non-transient) and MUST
+    # proceed through the post-trip race re-check to persistence.
+    raced = _RaceStubKillSwitchManager(
+        initial_state=None,
+        post_get_state="TRIPPED",
+    )
+
+    # Count distinct trip invocations to prove there was no retry on
+    # ValueError.
+    trip_attempts = {"n": 0}
+    original_trip = raced.trip
+
+    def counting_trip(scope, scope_id, reason, actor):
+        trip_attempts["n"] += 1
+        return original_trip(scope, scope_id, reason, actor)
+
+    raced.trip = counting_trip  # type: ignore[assignment]
+    runtime = SimpleNamespace(kill_switch_manager=raced)
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime):
+        rm._check_kill_switch(now)
+
+    # Critical: trip was invoked exactly ONCE — ValueError is not retried.
+    assert trip_attempts["n"] == 1, (
+        "state-machine ValueError must be treated as non-retriable "
+        "(issue #245 — avoid wasting backoff time on a deterministic "
+        "rejection)"
+    )
+    # Bridge proceeded through the race re-check to persistence and
+    # marked succeeded (post-trip state is TRIPPED).
+    assert rm._durable_kill_switch_bridge_succeeded is True
+
+
+def test_retry_delay_override_respects_env_var(monkeypatch):
+    """Issue #245/#246 plumbing: the retry-delay env override MUST parse
+    correctly so production can tune (or tests can zero) the backoff."""
+    import app.core.risk_manager as rm_mod
+
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0.1, 0.3,0.7")
+    assert rm_mod._bridge_retry_delays() == (0.1, 0.3, 0.7)
+
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+    assert rm_mod._bridge_retry_delays() == (0.0, 0.0, 0.0)
+
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "")
+    assert rm_mod._bridge_retry_delays() == rm_mod._BRIDGE_RETRY_DEFAULT_DELAYS
+
+    # Malformed override falls back to defaults (don't disable retries
+    # silently on the live auto-trip path).
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "not,a,number")
+    assert rm_mod._bridge_retry_delays() == rm_mod._BRIDGE_RETRY_DEFAULT_DELAYS
