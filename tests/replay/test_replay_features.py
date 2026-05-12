@@ -1657,3 +1657,120 @@ def test_nifty_spread_replay_iron_condor_rollback_emits_put_unwind_fills(monkeyp
         "iron-condor rollback must remove the PUT-spread shell from "
         f"open_spreads (#262); got {list(strategy.open_spreads.keys())!r}"
     )
+
+
+def test_nifty_spread_replay_iron_condor_partial_rollback_keeps_spread_tracked(monkeypatch):
+    """Issue #262 round-2: when the iron-condor CALL-side fails AND the
+    broker REJECTS one (or both) of the rollback EXITs on the PUT legs,
+    the spread MUST remain tracked in ``self.open_spreads`` so the
+    normal exit-management path can retry. Without this guard, the live
+    PUT leg would be orphaned (no spread state) and exposure would go
+    unmanaged."""
+
+    fixed_now = datetime(2026, 3, 3, 10, 15, tzinfo=replay_runtime_mod.IST)
+    meta = replay_runtime_mod.build_nifty_spread_instrument_meta(
+        "NIFTY_IDX",
+        65,
+        min_strike=19000,
+        max_strike=21000,
+    )
+    strategy = NiftyWeeklyCreditSpreadStrategy(
+        meta,
+        order_client=None,
+        risk_manager=None,
+        env_prefix="NIFTY_",
+        underlying_label="NIFTY_IDX",
+        params={
+            "account_equity": 10_000_000.0,
+            "lot_size": 65,
+            "min_credit_pct_of_width": 0.05,
+            "min_condor_total_credit_pct": 0.05,
+            "risk_per_trade_pct": 1.0,
+            "max_total_risk_pct": 1.0,
+            "max_open_spreads": 10,
+        },
+    )
+    strategy._now_ist = lambda: fixed_now
+    strategy._find_option_by_strike = lambda strike, side, expiry: f"NIFTY_{side}_{int(strike)}"
+    strategy.last_price.update(
+        {
+            "NIFTY_PE_19550": 200.0,
+            "NIFTY_PE_19250": 50.0,
+            "NIFTY_CE_20050": 200.0,
+            "NIFTY_CE_20350": 50.0,
+        }
+    )
+
+    placed: list[Any] = []
+
+    def _capture_place_order(*, label, side, qty, price, tag, purpose, **kwargs):
+        del kwargs
+        purpose_text = (
+            purpose.value if hasattr(purpose, "value") else str(purpose)
+        )
+        placed.append(
+            {
+                "label": label,
+                "side": side,
+                "qty": qty,
+                "price": price,
+                "tag": tag,
+                "purpose": purpose_text,
+            }
+        )
+        # CALL ENTRY legs fail (triggers the iron-condor rollback path).
+        if purpose_text == "ENTRY" and "CE" in str(label):
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_call_leg_failure",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        # On the rollback path: PUT-short EXIT (BUY) is rejected by the
+        # broker; PUT-long EXIT (SELL) is accepted. This produces the
+        # PARTIAL-ROLLBACK scenario that round-2 must keep tracked.
+        if purpose_text == "EXIT" and label == "NIFTY_PE_19550" and side == "BUY":
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_broker_rejected_put_short_exit",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        return OrderResponse(
+            broker_order_id=f"REPLAY_{len(placed)}",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=int(qty),
+            average_price=float(price or 0.0),
+            requested_quantity=int(qty),
+        )
+
+    monkeypatch.setattr(strategy, "_place_order", _capture_place_order)
+
+    strategy._try_iron_condor(spot=19800.0, expiry=fixed_now.date())
+
+    # The spread MUST still be tracked because at least one rollback EXIT
+    # was broker-rejected. ``_maybe_manage_exits`` needs the spread state
+    # to retry.
+    assert len(strategy.open_spreads) == 1, (
+        "iron-condor partial-rollback must keep the spread tracked when "
+        f"any rollback EXIT is broker-rejected (#262 round-2); "
+        f"got {list(strategy.open_spreads.keys())!r}"
+    )
+    put_spread = next(iter(strategy.open_spreads.values()))
+    # The successful PUT-long EXIT (SELL) must flip long_exit_done=True
+    # so the management path doesn't re-submit it.
+    assert put_spread.long_exit_done is True, (
+        "PUT-long EXIT was broker-accepted; long_exit_done must be set "
+        "so _maybe_manage_exits doesn't double-submit"
+    )
+    # The rejected PUT-short EXIT (BUY) must leave short_exit_done=False
+    # so the management path retries it on the next bar.
+    assert put_spread.short_exit_done is False, (
+        "PUT-short EXIT was broker-rejected; short_exit_done must remain "
+        "False so _maybe_manage_exits retries"
+    )

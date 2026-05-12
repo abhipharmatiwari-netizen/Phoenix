@@ -488,7 +488,9 @@ def test_enter_spread_leg_price_unavailable_logs_reason(monkeypatch, caplog):
             "PUT_SPREAD", "P_SHORT", "P_LONG", credit=50.0, width_pts=300.0,
             expiry=date(2026, 5, 12),
         )
-    assert ok is False
+    # Issue #262 round-2: every failure path of _enter_spread now returns
+    # None (was bool False before — the round-1 sweep missed this branch).
+    assert ok is None
     msgs = [r.getMessage() for r in caplog.records]
     assert any(
         "signal_evaluated_with_reason=entry_leg_price_unavailable" in m

@@ -1432,18 +1432,60 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
             "IRON_CONDOR_CALL", call_short_label, call_long_label, call_credit, call_width, expiry, extra=None,
         ):
             # rollback put side
-            self._force_exit_leg(put_short_label, "BUY", self._qty_for_label(put_short_label))
-            self._force_exit_leg(put_long_label, "SELL", self._qty_for_label(put_long_label))
-            # Issue #262: also remove the orphaned PUT-spread shell from
-            # ``self.open_spreads``. Without this the entry continues to
-            # count toward ``max_open_spreads`` and the next bar iteration
-            # observes a spread whose legs have been force-exited.
-            self.open_spreads.pop(put_spread_id, None)
-            self._reset_exit_retry_state(put_spread_id)
+            put_short_resp = self._force_exit_leg(
+                put_short_label, "BUY", self._qty_for_label(put_short_label),
+            )
+            put_long_resp = self._force_exit_leg(
+                put_long_label, "SELL", self._qty_for_label(put_long_label),
+            )
+
+            def _accepted(resp: Optional[OrderResponse]) -> bool:
+                if resp is None:
+                    return False
+                status = str(getattr(resp, "status", "") or "").upper()
+                return status in {"ACCEPTED", "FILLED", "COMPLETE"}
+
+            short_accepted = _accepted(put_short_resp)
+            long_accepted = _accepted(put_long_resp)
+
+            if short_accepted and long_accepted:
+                # Issue #262 round-1: both rollback legs accepted. Remove
+                # the orphaned PUT-spread shell from ``self.open_spreads``
+                # so it no longer counts toward ``max_open_spreads`` and
+                # later iterations don't manage a spread whose legs are
+                # already gone.
+                self.open_spreads.pop(put_spread_id, None)
+                self._reset_exit_retry_state(put_spread_id)
+                self._log_signal_evaluation(
+                    "condor_call_side_failed_rolled_back_put",
+                    put_short=put_short_label,
+                    put_long=put_long_label,
+                    call_short=call_short_label,
+                    call_long=call_long_label,
+                    put_spread_id=put_spread_id,
+                )
+                return
+
+            # Issue #262 round-2: at least one rollback leg was broker-
+            # rejected. Keep the spread in ``open_spreads`` so
+            # ``_maybe_manage_exits`` can see the still-live exposure and
+            # retry on the next bar. Flip the per-leg ``*_exit_done`` flag
+            # for the legs that DID get accepted so we don't re-submit
+            # those exits.
+            put_spread = self.open_spreads.get(put_spread_id)
+            if put_spread is not None:
+                if short_accepted:
+                    put_spread.short_exit_done = True
+                if long_accepted:
+                    put_spread.long_exit_done = True
             self._log_signal_evaluation(
-                "condor_call_side_failed_rolled_back_put",
+                "condor_call_side_failed_rollback_partial",
                 put_short=put_short_label,
+                put_short_accepted=short_accepted,
+                put_short_status=str(getattr(put_short_resp, "status", "") or "") if put_short_resp else "",
                 put_long=put_long_label,
+                put_long_accepted=long_accepted,
+                put_long_status=str(getattr(put_long_resp, "status", "") or "") if put_long_resp else "",
                 call_short=call_short_label,
                 call_long=call_long_label,
                 put_spread_id=put_spread_id,
@@ -1584,7 +1626,10 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
                 short_price_set=short_price is not None,
                 long_price_set=long_price is not None,
             )
-            return False
+            # Issue #262 round-2: the round-1 sweep missed this early
+            # return — keep the new ``Optional[str]`` contract uniform so
+            # callers can rely on a falsy result for every failure path.
+            return None
         entry_time = self._now_ist()
         self._spread_id_seq += 1
         spread_id = (
@@ -1697,9 +1742,15 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
         return spread_id
 
     # Force exit a single leg at market.
-    def _force_exit_leg(self, label: str, side: str, qty: int) -> None:
+    def _force_exit_leg(self, label: str, side: str, qty: int) -> Optional[OrderResponse]:
+        # Issue #262 round-2: return the broker response so callers (the
+        # ``_try_iron_condor`` rollback path) can detect a broker-side
+        # rejection of the EXIT order. Without this signal the rollback
+        # would pop the spread from ``self.open_spreads`` even when the
+        # broker refused to close the leg — leaving live exposure that
+        # ``_maybe_manage_exits`` can no longer see or retry.
         price = self._latest_price(label) or 0.0
-        self._place_order(
+        return self._place_order(
             label=label,
             side=side,
             qty=qty,
