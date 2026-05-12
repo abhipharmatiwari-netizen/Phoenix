@@ -36,6 +36,8 @@ from app.pnl.profit_lock import ProfitLockManager
 from app.pnl.position_trailing_lock import (
     PositionTrailingLockManager,
     PostgresPositionTrailingLockBackend,
+    PostgresPositionTrailingLockInflightBackend,
+    _NoopPositionTrailingLockInflightBackend,
 )
 from app.orders.order_lifecycle import OrderLifecycleService
 from app.orders.order_outbox import build_order_submission_outbox
@@ -503,7 +505,35 @@ class HubRuntime:
         # `_enabled()` check (driven by POSITION_TRAILING_LOCK_ENABLED) gates
         # whether it actually evaluates anything.
         position_trailing_backend = None
-        if _runtime_trade_mode() == "LIVE":
+        # Issue #251: durable backend for trailing-lock INFLIGHT MARKERS
+        # (the duplicate-fill guard). Persisting these to Postgres means a
+        # process restart between submit_order and broker terminal
+        # confirmation no longer drops the guard.
+        position_trailing_inflight_backend = (
+            _NoopPositionTrailingLockInflightBackend()
+        )
+        # PR #261 round-2 review P1 (runtime.py:539): when the durable
+        # backend cannot be constructed in LIVE, refusing to continue
+        # with the no-op fallback. We CANNOT trust the engine-layer
+        # ``fail_closed=True`` gate against a no-op backend (its
+        # ``save_marker`` always succeeds silently, so ``fail_closed``
+        # never fires) — placing a real broker order in that mode
+        # leaves NO durable restart guard.
+        #
+        # Chosen mitigation: ``runtime-disable`` (preferred over
+        # startup-crash). The hub continues to boot so the rest of the
+        # trading platform — kill switches, broker syncs, alerts, etc.
+        # — remains operable, but the trailing-lock engine refuses to
+        # SUBMIT any exits for the lifetime of the process. A process
+        # restart (after the operator resolves Postgres) is required
+        # to re-arm the engine. We chose runtime-disable rather than
+        # process-exit because crashing the hub on a transient Postgres
+        # blip would take ALL safety machinery offline; runtime-disable
+        # surgically removes only the trailing-lock submission path,
+        # which is the one that depends on the durable backend.
+        _live = _runtime_trade_mode() == "LIVE"
+        _inflight_disabled_in_live = False
+        if _live:
             try:
                 position_trailing_backend = PostgresPositionTrailingLockBackend(
                     dsn=get_sweep_state_dsn(self.settings)
@@ -514,6 +544,32 @@ class HubRuntime:
                     "trailing lock will run with in-memory state only: %s",
                     exc,
                 )
+            try:
+                position_trailing_inflight_backend = (
+                    PostgresPositionTrailingLockInflightBackend(
+                        dsn=get_sweep_state_dsn(self.settings)
+                    )
+                )
+            except Exception as exc:
+                # CRITICAL: do NOT silently fall back to the no-op
+                # backend in LIVE. The no-op cannot enforce the
+                # fail-closed contract that ``_emit_exit`` relies on,
+                # so emitting a real broker order without a durable
+                # marker reopens the very restart-window duplicate-fill
+                # gap issue #251 set out to close.
+                logger.error(
+                    "position_trailing_lock_inflight: Postgres backend init "
+                    "FAILED in LIVE — trailing-lock exit SUBMISSIONS will "
+                    "be DISABLED for the lifetime of this process. Restart "
+                    "the hub after Postgres is reachable to re-enable "
+                    "(PR #261 round-2 review P1 — runtime.py:539): %s",
+                    exc,
+                )
+                _inflight_disabled_in_live = True
+                # Keep the pre-initialized no-op backend so any in-memory
+                # bookkeeping that touches the backend interface still
+                # works; the engine's ``inflight_disabled`` flag is the
+                # actual gate that prevents broker submissions.
         self.position_trailing_lock_manager = PositionTrailingLockManager(
             default_time_zone=self.settings.default_time_zone,
             backend=position_trailing_backend,
@@ -532,8 +588,14 @@ class HubRuntime:
             state_store=self.state_store,
             order_router=self.order_router,
             manager=self.position_trailing_lock_manager,
+            inflight_backend=position_trailing_inflight_backend,
             clock=self.clock,
             kill_switch_manager_provider=lambda: self.kill_switch_manager,
+            # PR #261 round-2 review P1 (runtime.py:539): if the LIVE
+            # backend init failed above, mark the engine as disabled so
+            # ``evaluate_runners`` refuses to submit any trailing-lock
+            # exits for the lifetime of the process.
+            inflight_disabled=_inflight_disabled_in_live,
         )
 
     def audit_position_avg_price_corruption(self) -> dict:

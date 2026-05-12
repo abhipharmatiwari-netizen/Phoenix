@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, Iterable, Optional, Protocol, Tuple, runtime_checkable
+from typing import Dict, Iterable, List, Optional, Protocol, Tuple, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from app.core.identifiers import BrokerAccountId, TenantId
@@ -396,10 +396,420 @@ class PositionTrailingLockManager:
         )
 
 
+# ---------------------------------------------------------------------------
+# Issue #251: durable inflight markers for the trailing-lock duplicate-fill
+# guard. The in-memory dict on ``PositionTrailingLockEngine`` does not survive
+# restarts; a process restart between submit_order and the broker's terminal
+# confirmation drops the ONLY guard against re-submitting the same exit on
+# the next watchdog cycle. We persist the markers to a tiny Postgres table
+# (migration 019) so restart no longer disables the guard.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PositionTrailingLockInflightMarker:
+    """One persisted inflight marker.
+
+    Stored per (tenant, account, symbol) while a trailing-lock exit is awaiting
+    broker terminal confirmation. ``submitted_at`` is the UTC wall-clock instant
+    the marker was armed; the engine compares the age against the configured
+    inflight max age to decide when to auto-clear after a hard timeout.
+
+    PR #261 round-3 review P2 (exit_engines.py:2509): ``exit_side`` and
+    ``exit_broker_units`` are persisted alongside the marker so that the
+    unknown-broker-order-id terminal-evidence fallback can match the right
+    ledger row even after a process restart. Without these, hydration
+    restores the marker but the in-memory ``_inflight_exit_specs`` dict
+    is empty, so the post-restart fallback can never recognise a matching
+    FILLED exit row and the marker is forced to wait for the inflight
+    timeout. Both fields are Optional because legacy persisted rows
+    written before this round-3 change have NULL in the new columns;
+    the engine then falls back to the broker_order_id strict-match
+    path and the spec capture in ``_emit_exit`` repopulates the in-
+    memory dict on the next arm.
+    """
+
+    tenant_id: str
+    broker_account_id: str
+    symbol: str
+    broker_order_id: Optional[str]
+    submitted_at: datetime
+    exit_side: Optional[str] = None
+    exit_broker_units: Optional[int] = None
+
+
+@runtime_checkable
+class PositionTrailingLockInflightBackend(Protocol):
+    # PR #261 round-2 review (root cause): every persistence method accepts
+    # ``raise_on_failure`` so LIVE callers can opt into the fail-closed
+    # contract that the engine layer's ``fail_closed=True`` gates were
+    # designed to enforce. The historical default (``False``) preserves the
+    # PAPER/SHADOW best-effort log-and-continue semantics that several test
+    # fixtures and the legacy non-LIVE call sites rely on.
+    def save_marker(
+        self,
+        marker: PositionTrailingLockInflightMarker,
+        *,
+        raise_on_failure: bool = False,
+    ) -> None: ...
+
+    def delete_marker(
+        self,
+        tenant_id: str,
+        broker_account_id: str,
+        symbol: str,
+        *,
+        raise_on_failure: bool = False,
+    ) -> None: ...
+
+    def load_all(
+        self, *, raise_on_failure: bool = False,
+    ) -> Iterable[PositionTrailingLockInflightMarker]: ...
+
+
+class _NoopPositionTrailingLockInflightBackend:
+    """No-op backend used by tests and non-LIVE runs.
+
+    Persists nothing; the in-memory dict on the engine remains authoritative.
+    Safe to use in PAPER/SHADOW because no real broker order is at stake.
+    """
+
+    def save_marker(
+        self,
+        marker: PositionTrailingLockInflightMarker,
+        *,
+        raise_on_failure: bool = False,
+    ) -> None:
+        return None
+
+    def delete_marker(
+        self,
+        tenant_id: str,
+        broker_account_id: str,
+        symbol: str,
+        *,
+        raise_on_failure: bool = False,
+    ) -> None:
+        return None
+
+    def load_all(
+        self, *, raise_on_failure: bool = False,
+    ) -> Iterable[PositionTrailingLockInflightMarker]:
+        return iter(())
+
+
+class PostgresPositionTrailingLockInflightBackend:
+    """Postgres backend for inflight trailing-lock markers (issue #251).
+
+    Idempotent ``CREATE TABLE IF NOT EXISTS`` mirrors migration 019. Each
+    call opens a fresh connection (matching the existing
+    PostgresPositionTrailingLockBackend pattern) so the backend can be safely
+    shared across the engine's async lifetime.
+
+    Failure mode is selectable per-call via ``raise_on_failure``:
+
+    * ``raise_on_failure=False`` (default) — log + return / yield empty.
+      This preserves the original best-effort semantics used by PAPER/
+      SHADOW tests and any caller that explicitly wants to degrade to
+      in-memory-only on a transient Postgres outage.
+    * ``raise_on_failure=True`` — propagate the underlying exception so
+      the caller can enforce a fail-closed contract. LIVE call sites in
+      ``PositionTrailingLockEngine`` opt into this so the engine's
+      ``fail_closed=True`` gates (PR #261 round-1) actually see the
+      backend failure rather than a silent empty/None.
+
+    PR #261 round-2 review (root cause): the round-1 fix added the
+    ``fail_closed`` parameter on the engine, but the backend continued
+    to swallow Postgres failures internally, so the engine-layer gate
+    never fired. The ``raise_on_failure`` flag is the round-2 fix —
+    every LIVE call site MUST opt in.
+    """
+
+    _CREATE_TABLE = """
+    CREATE TABLE IF NOT EXISTS position_trailing_lock_inflight (
+        tenant_id           TEXT        NOT NULL,
+        broker_account_id   TEXT        NOT NULL,
+        symbol              TEXT        NOT NULL,
+        broker_order_id     TEXT,
+        submitted_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        exit_side           TEXT,
+        exit_broker_units   INTEGER,
+        updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (tenant_id, broker_account_id, symbol)
+    );
+    """
+
+    # PR #261 round-3 review P2 (exit_engines.py:2509): idempotent
+    # ALTER TABLE adds the new columns on existing deployments where
+    # the table was created by an older migration (or an older
+    # ``CREATE TABLE IF NOT EXISTS`` revision of this module).
+    # ``ADD COLUMN IF NOT EXISTS`` is supported by Postgres 9.6+ and
+    # is safe to run on every backend init.
+    _ALTER_ADD_COLUMNS = (
+        (
+            "ALTER TABLE position_trailing_lock_inflight "
+            "ADD COLUMN IF NOT EXISTS exit_side TEXT;"
+        ),
+        (
+            "ALTER TABLE position_trailing_lock_inflight "
+            "ADD COLUMN IF NOT EXISTS exit_broker_units INTEGER;"
+        ),
+    )
+
+    _UPSERT = """
+    INSERT INTO position_trailing_lock_inflight
+        (tenant_id, broker_account_id, symbol, broker_order_id,
+         submitted_at, exit_side, exit_broker_units, updated_at)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (tenant_id, broker_account_id, symbol) DO UPDATE SET
+        broker_order_id   = EXCLUDED.broker_order_id,
+        submitted_at      = EXCLUDED.submitted_at,
+        exit_side         = EXCLUDED.exit_side,
+        exit_broker_units = EXCLUDED.exit_broker_units,
+        updated_at        = EXCLUDED.updated_at;
+    """
+
+    _DELETE = """
+    DELETE FROM position_trailing_lock_inflight
+    WHERE tenant_id = %s AND broker_account_id = %s AND symbol = %s;
+    """
+
+    _LIST_ALL = """
+    SELECT tenant_id, broker_account_id, symbol, broker_order_id,
+           submitted_at, exit_side, exit_broker_units
+    FROM position_trailing_lock_inflight;
+    """
+
+    def __init__(self, dsn: str) -> None:
+        from app.data.postgres import connect_with_retry
+
+        self._dsn = dsn
+        conn = connect_with_retry(dsn)
+        try:
+            conn.execute(self._CREATE_TABLE)
+            # Idempotent ALTER for existing deployments (round-3 P2).
+            for ddl in self._ALTER_ADD_COLUMNS:
+                try:
+                    conn.execute(ddl)
+                except Exception:
+                    logger.exception(
+                        "position_trailing_lock_inflight: idempotent ALTER "
+                        "TABLE failed for `%s` — backend will still operate "
+                        "but the round-3 spec round-trip may be degraded.",
+                        ddl,
+                    )
+        finally:
+            conn.close()
+
+    def _connect(self):  # noqa: ANN202
+        from app.data.postgres import connect_with_retry
+
+        return connect_with_retry(self._dsn)
+
+    def save_marker(
+        self,
+        marker: PositionTrailingLockInflightMarker,
+        *,
+        raise_on_failure: bool = False,
+    ) -> None:
+        try:
+            conn = self._connect()
+        except Exception:
+            logger.exception(
+                "position_trailing_lock_inflight: connect failed for save %s/%s/%s",
+                marker.tenant_id,
+                marker.broker_account_id,
+                marker.symbol,
+            )
+            if raise_on_failure:
+                raise
+            return
+        try:
+            now_utc = datetime.now(timezone.utc)
+            # PR #261 round-3 review P2 (exit_engines.py:2509): round-trip
+            # the exit spec (side + broker units) alongside the marker so
+            # the unknown-broker-order-id terminal-evidence fallback can
+            # match the right ledger row after a restart. Both columns
+            # are NULL-tolerant; legacy markers written before this
+            # change persist with NULL and the engine falls back to the
+            # broker_order_id strict path until the spec is repopulated.
+            exit_side = (
+                str(marker.exit_side).strip().upper()
+                if marker.exit_side
+                else None
+            )
+            exit_broker_units: Optional[int]
+            try:
+                exit_broker_units = (
+                    int(marker.exit_broker_units)
+                    if marker.exit_broker_units is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                exit_broker_units = None
+            conn.execute(
+                self._UPSERT,
+                (
+                    marker.tenant_id,
+                    marker.broker_account_id,
+                    marker.symbol,
+                    marker.broker_order_id,
+                    marker.submitted_at,
+                    exit_side,
+                    exit_broker_units,
+                    now_utc,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "position_trailing_lock_inflight: save_marker failed %s/%s/%s",
+                marker.tenant_id,
+                marker.broker_account_id,
+                marker.symbol,
+            )
+            if raise_on_failure:
+                raise
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def delete_marker(
+        self,
+        tenant_id: str,
+        broker_account_id: str,
+        symbol: str,
+        *,
+        raise_on_failure: bool = False,
+    ) -> None:
+        try:
+            conn = self._connect()
+        except Exception:
+            logger.exception(
+                "position_trailing_lock_inflight: connect failed for delete %s/%s/%s",
+                tenant_id,
+                broker_account_id,
+                symbol,
+            )
+            if raise_on_failure:
+                raise
+            return
+        try:
+            conn.execute(self._DELETE, (tenant_id, broker_account_id, symbol))
+        except Exception:
+            logger.exception(
+                "position_trailing_lock_inflight: delete_marker failed %s/%s/%s",
+                tenant_id,
+                broker_account_id,
+                symbol,
+            )
+            if raise_on_failure:
+                raise
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def load_all(
+        self, *, raise_on_failure: bool = False,
+    ) -> Iterable[PositionTrailingLockInflightMarker]:
+        try:
+            conn = self._connect()
+        except Exception:
+            logger.exception(
+                "position_trailing_lock_inflight: connect failed for load_all"
+            )
+            if raise_on_failure:
+                raise
+            return []
+        out: List[PositionTrailingLockInflightMarker] = []
+        try:
+            cur = conn.execute(self._LIST_ALL)
+            for row in cur.fetchall():
+                submitted_at_raw = row[4]
+                if isinstance(submitted_at_raw, datetime):
+                    submitted_at = submitted_at_raw
+                else:
+                    try:
+                        submitted_at = datetime.fromisoformat(
+                            str(submitted_at_raw).replace("Z", "+00:00")
+                        )
+                    except Exception:
+                        # Treat unparseable timestamp as "freshly armed now"
+                        # to fail closed — better to hold the marker briefly
+                        # than to drop the guard.
+                        submitted_at = datetime.now(timezone.utc)
+                if submitted_at.tzinfo is None:
+                    submitted_at = submitted_at.replace(tzinfo=timezone.utc)
+                # PR #261 round-3 review P2 (exit_engines.py:2509):
+                # round-trip the persisted exit spec so the engine can
+                # repopulate ``_inflight_exit_specs`` on hydration. Rows
+                # written before the round-3 change have NULL in these
+                # columns; treat as ``None`` and let the engine fall
+                # back to the broker_order_id strict-match path.
+                # Defensive index access: tolerate older backends that
+                # might not surface the new columns yet (e.g. mid-roll
+                # deployments where the ALTER TABLE has not yet run).
+                try:
+                    exit_side_raw = row[5]
+                except IndexError:
+                    exit_side_raw = None
+                try:
+                    exit_units_raw = row[6]
+                except IndexError:
+                    exit_units_raw = None
+                exit_side_val: Optional[str] = (
+                    str(exit_side_raw).strip().upper()
+                    if exit_side_raw not in (None, "")
+                    else None
+                )
+                exit_units_val: Optional[int]
+                try:
+                    exit_units_val = (
+                        int(exit_units_raw)
+                        if exit_units_raw is not None
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    exit_units_val = None
+                if exit_units_val is not None and exit_units_val <= 0:
+                    exit_units_val = None
+                out.append(
+                    PositionTrailingLockInflightMarker(
+                        tenant_id=str(row[0] or ""),
+                        broker_account_id=str(row[1] or ""),
+                        symbol=str(row[2] or ""),
+                        broker_order_id=(str(row[3]) if row[3] is not None else None),
+                        submitted_at=submitted_at,
+                        exit_side=exit_side_val,
+                        exit_broker_units=exit_units_val,
+                    )
+                )
+        except Exception:
+            logger.exception(
+                "position_trailing_lock_inflight: load_all failed"
+            )
+            if raise_on_failure:
+                raise
+            return []
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return out
+
+
 __all__ = [
     "PositionTrailingLockBackend",
     "PositionTrailingLockDecision",
+    "PositionTrailingLockInflightBackend",
+    "PositionTrailingLockInflightMarker",
     "PositionTrailingLockManager",
     "PositionTrailingLockState",
     "PostgresPositionTrailingLockBackend",
+    "PostgresPositionTrailingLockInflightBackend",
+    "_NoopPositionTrailingLockInflightBackend",
 ]

@@ -823,6 +823,58 @@ def validate_runtime_startup_settings(
                 "TRADE_MODE=LIVE requires DASHBOARD_AUTH_DISABLED=false"
             )
 
+        # Issue #248: when POSITION_TRAILING_LOCK_ENABLED=true in LIVE, the
+        # inflight-marker timeout must outlast the watchdog cadence so the
+        # marker is the FIRST gate to see an in-flight exit (preventing
+        # duplicate submissions). The Settings-level
+        # ``validate_position_trailing_lock_inflight_window`` model
+        # validator catches the obvious case; this LIVE-only startup gate
+        # is the operator-facing fail-closed backstop and uses the SAME
+        # effective floor (max(10, configured_poll_interval)) plus a
+        # required safety margin so we cannot ship a value that merely
+        # equals the cadence.
+        #
+        # The Settings model validator rejects inflight_max <= effective
+        # poll; we additionally reject anything less than effective_poll +
+        # 30s in LIVE so a marginal value (e.g. effective_poll + 1s)
+        # cannot mask routine latency variance.
+        if bool(getattr(settings, "position_trailing_lock_enabled", False)):
+            import math as _math
+            _inflight_max_live = float(
+                getattr(
+                    settings,
+                    "position_trailing_lock_inflight_max_seconds",
+                    0.0,
+                )
+                or 0.0
+            )
+            _raw_poll = float(
+                getattr(settings, "hub_subscription_poll_interval", 0.0) or 0.0
+            )
+            _effective_poll = (
+                max(10.0, _raw_poll) if _raw_poll > 0.0 else 10.0
+            )
+            _live_floor = _effective_poll + 30.0
+            if not _math.isfinite(_inflight_max_live) or _inflight_max_live <= 0.0:
+                errors.append(
+                    "TRADE_MODE=LIVE with POSITION_TRAILING_LOCK_ENABLED=true "
+                    "requires POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS > 0 "
+                    f"(got {_inflight_max_live!r}). Setting it to 0 or NaN/inf "
+                    "silently disables the trailing-lock duplicate-fill "
+                    "protection (issue #248)."
+                )
+            elif _inflight_max_live < _live_floor:
+                errors.append(
+                    "TRADE_MODE=LIVE with POSITION_TRAILING_LOCK_ENABLED=true "
+                    "requires POSITION_TRAILING_LOCK_INFLIGHT_MAX_SECONDS >= "
+                    f"{_live_floor:.0f}s (effective watchdog cadence "
+                    f"{_effective_poll:.0f}s + 30s safety margin). Got "
+                    f"{_inflight_max_live:.0f}s. A value at or near the "
+                    "watchdog cadence allows the marker to time out BEFORE "
+                    "the next evaluate cycle, recreating the 2026-05-08 "
+                    "duplicate-fill scenario (issues #225 + #248)."
+                )
+
         # §126 / Issue #5: ANGEL_POSTBACK_TOKEN required when LIVE forces direct_broker mode.
         # In LIVE, ANGEL_POSTBACK_AUTH_MODE is forced to direct_broker by the feature-flag
         # policy gate.  direct_broker auth requires ANGEL_POSTBACK_TOKEN; without it every

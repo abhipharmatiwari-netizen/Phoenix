@@ -225,6 +225,53 @@ def test_independent_state_per_symbol():
     assert db.armed is False
 
 
+def test_pr261_round2_postgres_backend_raise_on_failure_propagates(monkeypatch):
+    """PR #261 round-2 root cause: when a Postgres call fails AND the
+    caller passed ``raise_on_failure=True``, the backend MUST propagate
+    the exception (rather than logging it and returning empty / None).
+    Without this, the engine-layer ``fail_closed=True`` gates never
+    fire — the round-1 fix was incomplete.
+    """
+    from app.pnl.position_trailing_lock import (
+        PostgresPositionTrailingLockInflightBackend,
+        PositionTrailingLockInflightMarker,
+    )
+    from datetime import datetime, timezone
+
+    # Skip the real ``__init__`` (which connects + creates the table)
+    # and craft a backend whose ``_connect()`` always raises.
+    backend = PostgresPositionTrailingLockInflightBackend.__new__(
+        PostgresPositionTrailingLockInflightBackend,
+    )
+    backend._dsn = "postgres://stub"
+
+    def _explode(*_a, **_k):
+        raise RuntimeError("simulated postgres outage")
+
+    monkeypatch.setattr(backend, "_connect", _explode)
+
+    marker = PositionTrailingLockInflightMarker(
+        tenant_id="t-1",
+        broker_account_id="A1",
+        symbol="S",
+        broker_order_id=None,
+        submitted_at=datetime.now(timezone.utc),
+    )
+    # Default (raise_on_failure=False): silent best-effort.
+    backend.save_marker(marker)
+    backend.delete_marker("t-1", "A1", "S")
+    out = backend.load_all()
+    assert list(out) == []
+
+    # raise_on_failure=True: propagate so the engine can fail closed.
+    with pytest.raises(RuntimeError):
+        backend.save_marker(marker, raise_on_failure=True)
+    with pytest.raises(RuntimeError):
+        backend.delete_marker("t-1", "A1", "S", raise_on_failure=True)
+    with pytest.raises(RuntimeError):
+        backend.load_all(raise_on_failure=True)
+
+
 def test_user_scenario_naturalgas_2750_to_2475():
     """Reproduces the exact user-stated requirement on real numbers.
 
