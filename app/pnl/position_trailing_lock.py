@@ -425,13 +425,31 @@ class PositionTrailingLockInflightMarker:
 
 @runtime_checkable
 class PositionTrailingLockInflightBackend(Protocol):
-    def save_marker(self, marker: PositionTrailingLockInflightMarker) -> None: ...
-
-    def delete_marker(
-        self, tenant_id: str, broker_account_id: str, symbol: str
+    # PR #261 round-2 review (root cause): every persistence method accepts
+    # ``raise_on_failure`` so LIVE callers can opt into the fail-closed
+    # contract that the engine layer's ``fail_closed=True`` gates were
+    # designed to enforce. The historical default (``False``) preserves the
+    # PAPER/SHADOW best-effort log-and-continue semantics that several test
+    # fixtures and the legacy non-LIVE call sites rely on.
+    def save_marker(
+        self,
+        marker: PositionTrailingLockInflightMarker,
+        *,
+        raise_on_failure: bool = False,
     ) -> None: ...
 
-    def load_all(self) -> Iterable[PositionTrailingLockInflightMarker]: ...
+    def delete_marker(
+        self,
+        tenant_id: str,
+        broker_account_id: str,
+        symbol: str,
+        *,
+        raise_on_failure: bool = False,
+    ) -> None: ...
+
+    def load_all(
+        self, *, raise_on_failure: bool = False,
+    ) -> Iterable[PositionTrailingLockInflightMarker]: ...
 
 
 class _NoopPositionTrailingLockInflightBackend:
@@ -441,15 +459,27 @@ class _NoopPositionTrailingLockInflightBackend:
     Safe to use in PAPER/SHADOW because no real broker order is at stake.
     """
 
-    def save_marker(self, marker: PositionTrailingLockInflightMarker) -> None:
-        return None
-
-    def delete_marker(
-        self, tenant_id: str, broker_account_id: str, symbol: str
+    def save_marker(
+        self,
+        marker: PositionTrailingLockInflightMarker,
+        *,
+        raise_on_failure: bool = False,
     ) -> None:
         return None
 
-    def load_all(self) -> Iterable[PositionTrailingLockInflightMarker]:
+    def delete_marker(
+        self,
+        tenant_id: str,
+        broker_account_id: str,
+        symbol: str,
+        *,
+        raise_on_failure: bool = False,
+    ) -> None:
+        return None
+
+    def load_all(
+        self, *, raise_on_failure: bool = False,
+    ) -> Iterable[PositionTrailingLockInflightMarker]:
         return iter(())
 
 
@@ -461,11 +491,23 @@ class PostgresPositionTrailingLockInflightBackend:
     PostgresPositionTrailingLockBackend pattern) so the backend can be safely
     shared across the engine's async lifetime.
 
-    Failure mode is logged + non-fatal: a transient Postgres outage degrades
-    the marker guard to in-memory-only (same behaviour as before issue #251)
-    rather than crashing the watchdog. The startup-time ``load_all`` call
-    is the critical path — see ``PositionTrailingLockEngine.__post_init__``
-    where any load failure surfaces a structured ERROR event.
+    Failure mode is selectable per-call via ``raise_on_failure``:
+
+    * ``raise_on_failure=False`` (default) — log + return / yield empty.
+      This preserves the original best-effort semantics used by PAPER/
+      SHADOW tests and any caller that explicitly wants to degrade to
+      in-memory-only on a transient Postgres outage.
+    * ``raise_on_failure=True`` — propagate the underlying exception so
+      the caller can enforce a fail-closed contract. LIVE call sites in
+      ``PositionTrailingLockEngine`` opt into this so the engine's
+      ``fail_closed=True`` gates (PR #261 round-1) actually see the
+      backend failure rather than a silent empty/None.
+
+    PR #261 round-2 review (root cause): the round-1 fix added the
+    ``fail_closed`` parameter on the engine, but the backend continued
+    to swallow Postgres failures internally, so the engine-layer gate
+    never fired. The ``raise_on_failure`` flag is the round-2 fix —
+    every LIVE call site MUST opt in.
     """
 
     _CREATE_TABLE = """
@@ -516,7 +558,12 @@ class PostgresPositionTrailingLockInflightBackend:
 
         return connect_with_retry(self._dsn)
 
-    def save_marker(self, marker: PositionTrailingLockInflightMarker) -> None:
+    def save_marker(
+        self,
+        marker: PositionTrailingLockInflightMarker,
+        *,
+        raise_on_failure: bool = False,
+    ) -> None:
         try:
             conn = self._connect()
         except Exception:
@@ -526,6 +573,8 @@ class PostgresPositionTrailingLockInflightBackend:
                 marker.broker_account_id,
                 marker.symbol,
             )
+            if raise_on_failure:
+                raise
             return
         try:
             now_utc = datetime.now(timezone.utc)
@@ -547,6 +596,8 @@ class PostgresPositionTrailingLockInflightBackend:
                 marker.broker_account_id,
                 marker.symbol,
             )
+            if raise_on_failure:
+                raise
         finally:
             try:
                 conn.close()
@@ -554,7 +605,12 @@ class PostgresPositionTrailingLockInflightBackend:
                 pass
 
     def delete_marker(
-        self, tenant_id: str, broker_account_id: str, symbol: str
+        self,
+        tenant_id: str,
+        broker_account_id: str,
+        symbol: str,
+        *,
+        raise_on_failure: bool = False,
     ) -> None:
         try:
             conn = self._connect()
@@ -565,6 +621,8 @@ class PostgresPositionTrailingLockInflightBackend:
                 broker_account_id,
                 symbol,
             )
+            if raise_on_failure:
+                raise
             return
         try:
             conn.execute(self._DELETE, (tenant_id, broker_account_id, symbol))
@@ -575,19 +633,25 @@ class PostgresPositionTrailingLockInflightBackend:
                 broker_account_id,
                 symbol,
             )
+            if raise_on_failure:
+                raise
         finally:
             try:
                 conn.close()
             except Exception:
                 pass
 
-    def load_all(self) -> Iterable[PositionTrailingLockInflightMarker]:
+    def load_all(
+        self, *, raise_on_failure: bool = False,
+    ) -> Iterable[PositionTrailingLockInflightMarker]:
         try:
             conn = self._connect()
         except Exception:
             logger.exception(
                 "position_trailing_lock_inflight: connect failed for load_all"
             )
+            if raise_on_failure:
+                raise
             return []
         out: List[PositionTrailingLockInflightMarker] = []
         try:
@@ -621,6 +685,8 @@ class PostgresPositionTrailingLockInflightBackend:
             logger.exception(
                 "position_trailing_lock_inflight: load_all failed"
             )
+            if raise_on_failure:
+                raise
             return []
         finally:
             try:

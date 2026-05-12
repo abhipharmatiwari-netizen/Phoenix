@@ -2048,6 +2048,38 @@ class PositionTrailingLockEngine:
     _inflight_hydrate_failed_attempts: int = field(
         default=0, init=False, repr=False,
     )
+    # PR #261 round-2 review P1 (runtime.py:539): when the LIVE startup
+    # path detects that the durable Postgres backend could not be
+    # constructed, ``HubRuntime`` sets this flag so the engine refuses to
+    # submit any trailing-lock exit until a process restart re-attempts
+    # the backend init. Without this flag, the engine would happily write
+    # ``fail_closed=True`` markers to the in-memory noop backend (which
+    # cannot raise) and the durable duplicate-fill guard would be missing
+    # in production.
+    inflight_disabled: bool = field(default=False, repr=False)
+    # PR #261 round-2 review P2 (exit_engines.py:3047): when the marker
+    # is armed PRE-submit we do not know the broker_order_id yet. To
+    # make the unknown-id terminal-evidence fallback robust we capture
+    # the expected exit ``side`` and ``quantity`` (lots) at arming time
+    # so the disappeared-symbol fallback can match the right ledger row
+    # rather than any unrelated entry order for the same symbol.
+    _inflight_exit_specs: Dict[
+        Tuple[str, str, str],
+        Tuple[Optional[str], Optional[int]],
+    ] = field(default_factory=dict, init=False, repr=False)
+
+    @staticmethod
+    def _is_live_mode() -> bool:
+        """Return True iff the process is running in LIVE TRADE_MODE.
+
+        Centralised so every fail-closed gate sees the same answer in the
+        same evaluation cycle, and so tests can monkeypatch the env var.
+        """
+        import os
+        return (
+            str(os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper()
+            == "LIVE"
+        )
 
     def _enabled(self) -> bool:
         return bool(getattr(self.settings, "position_trailing_lock_enabled", False))
@@ -2286,6 +2318,14 @@ class PositionTrailingLockEngine:
         self._inflight_markers[key] = (broker_order_id, now_mono, now_utc)
         if persist:
             try:
+                # PR #261 round-2 review P1 (root cause): when the caller
+                # has opted into fail-closed (LIVE pre-submit), request
+                # ``raise_on_failure=True`` so a Postgres outage actually
+                # bubbles up here. The historical default
+                # (``raise_on_failure=False``) keeps the legacy log-only
+                # behaviour for post-submit refresh paths where the
+                # broker order has ALREADY been placed and the in-memory
+                # marker remains the authoritative duplicate-fill guard.
                 self.inflight_backend.save_marker(
                     PositionTrailingLockInflightMarker(
                         tenant_id=str(tenant_id),
@@ -2293,7 +2333,8 @@ class PositionTrailingLockEngine:
                         symbol=str(symbol),
                         broker_order_id=broker_order_id,
                         submitted_at=now_utc,
-                    )
+                    ),
+                    raise_on_failure=bool(fail_closed),
                 )
             except Exception as exc:
                 if fail_closed:
@@ -2339,15 +2380,41 @@ class PositionTrailingLockEngine:
     ) -> None:
         key = (str(tenant_id), str(broker_account_id), str(symbol))
         self._inflight_markers.pop(key, None)
+        self._inflight_exit_specs.pop(key, None)
+        # PR #261 round-2 review P2 (position_trailing_lock.py:568): in
+        # LIVE, request ``raise_on_failure=True`` so a swallowed delete
+        # cannot leave a stale durable row that a subsequent restart
+        # would rehydrate. We surface the failure as a structured ERROR
+        # event so the operator can clean up manually. In non-LIVE the
+        # historical log-only path is preserved (no broker order at
+        # stake).
+        live = self._is_live_mode()
         try:
             self.inflight_backend.delete_marker(
-                str(tenant_id), str(broker_account_id), str(symbol)
+                str(tenant_id),
+                str(broker_account_id),
+                str(symbol),
+                raise_on_failure=live,
             )
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                "trailing-lock inflight marker delete failed (non-fatal; "
-                "in-memory guard already cleared): %s",
-                exc,
+        except Exception as exc:
+            log_event(
+                logger,
+                event_type=(
+                    "POSITION_TRAILING_LOCK_INFLIGHT_DELETE_FAILED"
+                ),
+                message=(
+                    "Durable inflight marker delete FAILED in LIVE — "
+                    "the in-memory guard is already cleared but the "
+                    "durable row remains and a process restart will "
+                    "rehydrate the stale marker. Operator action: "
+                    "investigate Postgres health and DELETE the row "
+                    "manually if needed (PR #261 round-2 review P2)."
+                ),
+                level=logging.ERROR,
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=symbol,
+                error=repr(exc),
             )
 
     def _hydrate_inflight_markers_from_backend(self) -> None:
@@ -2385,8 +2452,19 @@ class PositionTrailingLockEngine:
         """
         if self._inflight_hydrated:
             return
+        # PR #261 round-2 review P1 (root cause): force the backend to
+        # PROPAGATE Postgres failures rather than silently returning an
+        # empty list. Without ``raise_on_failure=True``, the backend's
+        # exception handler converts a connect/query failure into ``[]``,
+        # the ``except Exception`` arm below never fires, and we
+        # incorrectly flip ``_inflight_hydrated = True`` — permanently
+        # disabling retries for the lifetime of the process. With this
+        # flag the failure now bubbles up here so the retry/degraded
+        # bookkeeping below can actually run.
         try:
-            persisted = list(self.inflight_backend.load_all())
+            persisted = list(
+                self.inflight_backend.load_all(raise_on_failure=True)
+            )
         except Exception as exc:
             self._inflight_hydrate_failed_attempts += 1
             log_event(
@@ -2396,7 +2474,7 @@ class PositionTrailingLockEngine:
                     "trailing-lock inflight marker hydrate attempt FAILED — "
                     "duplicate-fill guard is degraded to in-memory only "
                     "for this eval cycle; will retry on next cycle "
-                    "(PR #261 round-1 review P1, issue #251)."
+                    "(PR #261 round-1/round-2 review P1, issue #251)."
                 ),
                 level=logging.WARNING,
                 failed_attempts=self._inflight_hydrate_failed_attempts,
@@ -2481,6 +2559,29 @@ class PositionTrailingLockEngine:
     async def evaluate_runners(self, runners: Iterable[AccountRunner]) -> None:
         if not self._enabled():
             return
+        # PR #261 round-2 review P1 (runtime.py:539): if HubRuntime
+        # detected at startup that the durable Postgres backend could
+        # not be initialised in LIVE, the engine is permanently disabled
+        # for the lifetime of the process — the in-memory noop backend
+        # is NOT a safe substitute because ``fail_closed=True`` writes
+        # would silently succeed against it and the engine would happily
+        # submit broker orders with no durable restart guard. A process
+        # restart is required after the operator has resolved the
+        # Postgres outage.
+        if self.inflight_disabled:
+            log_event(
+                logger,
+                event_type="POSITION_TRAILING_LOCK_DISABLED_NO_BACKEND",
+                message=(
+                    "Trailing-lock evaluation skipped: durable inflight "
+                    "backend was not constructed at startup (LIVE). "
+                    "Restart the process after Postgres is reachable "
+                    "to re-enable trailing-lock exits (PR #261 round-2 "
+                    "review P1 — runtime.py:539)."
+                ),
+                level=logging.ERROR,
+            )
+            return
         # Issue #251: hydrate persisted inflight markers from the durable
         # backend on the first evaluate call. Restart-survival depends on
         # this — otherwise a process restart drops the duplicate-fill
@@ -2488,6 +2589,32 @@ class PositionTrailingLockEngine:
         # at engine-construction time in some startup orderings.
         if not self._inflight_hydrated:
             self._hydrate_inflight_markers_from_backend()
+        # PR #261 round-2 review P1 (exit_engines.py:2405): in LIVE, if
+        # we still do not have a successful hydrate (Postgres still
+        # unreachable), refuse to submit trailing-lock exits this cycle.
+        # The empty in-memory marker set is NOT proof "no exits are
+        # in-flight" — it is "we could not read the durable record" —
+        # and proceeding with normal evaluation would re-submit an exit
+        # for a position whose persisted marker we simply could not
+        # load. Fail closed.
+        if self._is_live_mode() and not self._inflight_hydrated:
+            log_event(
+                logger,
+                event_type=(
+                    "POSITION_TRAILING_LOCK_SKIPPED_HYDRATE_PENDING"
+                ),
+                message=(
+                    "Trailing-lock evaluation skipped this cycle: durable "
+                    "inflight marker hydrate has not succeeded yet in LIVE. "
+                    "Submitting exits with an unknown durable-marker state "
+                    "could place a duplicate exit for a position whose "
+                    "persisted marker simply could not be loaded "
+                    "(PR #261 round-2 review P1 — exit_engines.py:2405)."
+                ),
+                level=logging.ERROR,
+                failed_attempts=self._inflight_hydrate_failed_attempts,
+            )
+            return
         giveback_pct = float(getattr(self.settings, "position_trailing_lock_giveback_pct", 0.10))
         floor_inr = float(getattr(self.settings, "position_trailing_lock_floor_inr", 500.0))
         cooldown = float(
@@ -2809,10 +2936,17 @@ class PositionTrailingLockEngine:
             # default (120s) is intentionally larger than the watchdog
             # cadence so the bound is bounded.
             broker_order_id = marker[0]
+            _, marker_submitted_at_mono, marker_submitted_at_wall = marker
+            expected_side, expected_quantity = self._inflight_exit_specs.get(
+                key, (None, None),
+            )
             terminal_evidence = self._marker_has_terminal_broker_evidence(
                 broker_account_id=broker_account_id,
                 symbol=symbol,
                 broker_order_id=broker_order_id,
+                marker_submitted_at=marker_submitted_at_wall,
+                expected_side=expected_side,
+                expected_quantity=expected_quantity,
             )
             if not terminal_evidence:
                 # PR #261 round-1 review P2: the comment above promises
@@ -2832,14 +2966,58 @@ class PositionTrailingLockEngine:
                 max_age = self._inflight_max_seconds()
                 if age_seconds >= max_age:
                     self._inflight_markers.pop(key, None)
+                    self._inflight_exit_specs.pop(key, None)
+                    live = self._is_live_mode()
                     try:
                         self.inflight_backend.delete_marker(
-                            tenant_key, account_key, str(symbol)
+                            tenant_key,
+                            account_key,
+                            str(symbol),
+                            raise_on_failure=live,
                         )
-                    except Exception:  # pragma: no cover - defensive
-                        pass
+                    except Exception as _exc:
+                        log_event(
+                            logger,
+                            event_type=(
+                                "POSITION_TRAILING_LOCK_INFLIGHT_DELETE_FAILED"
+                            ),
+                            message=(
+                                "Durable inflight marker delete FAILED while "
+                                "ageing out a disappeared-symbol marker — "
+                                "the in-memory marker is cleared but the "
+                                "durable row remains. Operator should "
+                                "DELETE the row manually if a restart "
+                                "rehydrates a stale marker (PR #261 "
+                                "round-2 review P2)."
+                            ),
+                            level=logging.ERROR,
+                            tenant_id=tenant_id,
+                            broker_account_id=broker_account_id,
+                            symbol=symbol,
+                            error=repr(_exc),
+                        )
                     self._disappeared_symbol_miss_counts.pop(key, None)
                     self._disappeared_symbol_last_fingerprint.pop(key, None)
+                    # PR #261 round-2 review P2 (exit_engines.py:2834):
+                    # also RESET ``PositionTrailingLockManager`` state.
+                    # The terminal-evidence branch below already does
+                    # this — the timeout branch was the missing mirror.
+                    # Without this reset, a same-symbol re-open after
+                    # the timeout would reuse the stale peak/armed
+                    # state and could emit another trailing-lock exit
+                    # immediately on the new position's first evaluate
+                    # cycle (issue #250).
+                    try:
+                        self.manager.reset_position(
+                            tenant_id, broker_account_id, symbol,
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning(
+                            "trailing-lock state reset failed after "
+                            "disappeared-symbol timeout for %s "
+                            "(non-fatal): %s",
+                            symbol, exc,
+                        )
                     log_event(
                         logger,
                         event_type=(
@@ -2848,11 +3026,13 @@ class PositionTrailingLockEngine:
                         message=(
                             "Disappeared-symbol inflight marker exceeded "
                             "max age without terminal broker-order "
-                            "evidence — auto-clearing to prevent "
-                            "permanent log churn. Investigate "
-                            "broker_order_id and reconcile manually if "
-                            "duplicate fills are observed "
-                            "(PR #261 round-1 review P2)."
+                            "evidence — auto-clearing AND resetting "
+                            "persisted trailing-lock manager state to "
+                            "prevent a same-symbol re-open from reusing "
+                            "a stale peak. Investigate broker_order_id "
+                            "and reconcile manually if duplicate fills "
+                            "are observed (PR #261 round-1 review P2 "
+                            "+ round-2 review P2 — exit_engines.py:2834)."
                         ),
                         level=logging.ERROR,
                         tenant_id=tenant_id,
@@ -2937,6 +3117,9 @@ class PositionTrailingLockEngine:
         broker_account_id: Any,
         symbol: str,
         broker_order_id: Optional[str],
+        marker_submitted_at: Optional[datetime] = None,
+        expected_side: Optional[str] = None,
+        expected_quantity: Optional[int] = None,
     ) -> bool:
         """Issue #252: return True iff the broker-order ledger shows
         explicit terminal evidence for the marker.
@@ -2949,12 +3132,16 @@ class PositionTrailingLockEngine:
           (FILLED / COMPLETE / EXECUTED / CANCELLED / REJECTED /
           FAILED / EXPIRED).
         * **Symbol fallback** (broker_order_id unknown): the most
-          recent ledger entry for this symbol is in a canonical
-          terminal state — used only when the router did not surface
-          a broker_order_id on submit (so we have nothing to match).
-          This is intentionally narrower than "any order for the
-          symbol" so an unrelated entry order from earlier in the
-          session cannot satisfy the gate.
+          recent ledger entry for this symbol that ALSO matches the
+          marker's captured ``expected_side`` / ``expected_quantity``
+          and is dated at or after ``marker_submitted_at`` (minus a
+          small tolerance) is in a canonical terminal state. Without
+          these extra criteria an older filled entry order for the
+          same symbol (which is common in the broker ledger) would
+          satisfy the gate and the engine would clear the marker
+          while the actual exit order is still live — reopening the
+          very duplicate-submit window this guard is meant to close
+          (PR #261 round-2 review P2 — exit_engines.py:3047).
 
         Returns False on ANY uncertainty — fail closed (hold the
         marker, accept a longer block, avoid duplicate fills).
@@ -3039,10 +3226,77 @@ class PositionTrailingLockEngine:
             return False
         # broker_order_id unknown — fall back to the most recent
         # ledger entry for this symbol, but only treat it as terminal
-        # evidence if it is unambiguously terminal.
+        # evidence if it is unambiguously terminal AND it matches the
+        # captured marker spec (side opposite to the position, exit
+        # quantity in lots, submitted at or after the marker armed).
+        # Without these criteria an older filled ENTRY order for the
+        # same symbol would satisfy the gate and clear the marker
+        # while the actual exit order is still live (PR #261 round-2
+        # review P2 — exit_engines.py:3047).
+        #
+        # If the caller could not supply ``expected_side`` /
+        # ``expected_quantity`` (e.g. legacy code paths that have not
+        # been upgraded yet), we fail CLOSED rather than fall back to
+        # the historical permissive symbol-only match. The cost of
+        # being too strict is a longer wait for the inflight timeout
+        # to fire; the cost of being too lax is the duplicate-fill
+        # scenario this PR exists to prevent.
+        if (
+            marker_submitted_at is None
+            or expected_side is None
+            or expected_quantity is None
+        ):
+            return False
+        # Normalise the marker's wall-clock submission instant to UTC
+        # and compute the cutoff (marker armed minus a small tolerance
+        # for any clock skew between the engine and the broker).
+        try:
+            cutoff = marker_submitted_at
+            if cutoff.tzinfo is None:
+                cutoff = cutoff.replace(tzinfo=timezone.utc)
+        except Exception:  # pragma: no cover - defensive
+            return False
+        from datetime import timedelta as _td
+        cutoff = cutoff - _td(seconds=5.0)
+        expected_side_str = str(expected_side or "").strip().upper()
+        try:
+            expected_qty_int = int(expected_quantity or 0)
+        except (TypeError, ValueError):
+            return False
+        if not expected_side_str or expected_qty_int <= 0:
+            return False
         candidate = None
         for order in orders:
             if str(getattr(order, "symbol", "") or "") != symbol_str:
+                continue
+            # Side must match exit direction (opposite of position).
+            order_side = str(
+                getattr(order, "side", "") or ""
+            ).strip().upper()
+            if order_side != expected_side_str:
+                continue
+            # Quantity (lots) must match the marker's exit size.
+            try:
+                order_qty = int(getattr(order, "quantity", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if order_qty != expected_qty_int:
+                continue
+            # Timestamp must be at or after the marker armed (with
+            # tolerance). An entry order filled BEFORE this marker
+            # was armed cannot be the exit order.
+            updated_at_raw = getattr(order, "updated_at", None)
+            if not updated_at_raw:
+                continue
+            try:
+                updated_at = datetime.fromisoformat(
+                    str(updated_at_raw).replace("Z", "+00:00")
+                )
+            except Exception:
+                continue
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            if updated_at < cutoff:
                 continue
             candidate = order  # rely on caller's list ordering (recency)
         if candidate is None:
@@ -3116,9 +3370,31 @@ class PositionTrailingLockEngine:
         # without the durable guard. PAPER/SHADOW preserves the
         # historical log-only behaviour since no real broker order is at
         # stake.
-        import os as _os
-        _trade_mode = str(_os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper()
-        _fail_closed_persist = (_trade_mode == "LIVE")
+        _fail_closed_persist = self._is_live_mode()
+        # PR #261 round-2 review P2 (exit_engines.py:3047): capture the
+        # expected exit side / quantity BEFORE the pre-submit marker
+        # arming so the disappeared-symbol terminal-evidence fallback
+        # (when the router never surfaces a broker_order_id) can match
+        # the right ledger row rather than any unrelated entry order
+        # for the same symbol. Indexed by the same (tenant, account,
+        # symbol) key the marker uses.
+        _key = (
+            str(tenant_id), str(broker_account_id), str(decision.symbol),
+        )
+        try:
+            _exit_side = exit_plan.order_req.side
+            _exit_side_str = (
+                _exit_side.value
+                if hasattr(_exit_side, "value")
+                else str(_exit_side or "")
+            ).strip().upper()
+            _exit_lots = int(exit_plan.lots or 0)
+            self._inflight_exit_specs[_key] = (
+                _exit_side_str or None,
+                _exit_lots if _exit_lots > 0 else None,
+            )
+        except Exception:  # pragma: no cover - defensive
+            self._inflight_exit_specs[_key] = (None, None)
         try:
             self._set_inflight_marker(
                 tenant_id=tenant_id,
