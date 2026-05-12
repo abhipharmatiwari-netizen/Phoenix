@@ -91,21 +91,91 @@ _BRIDGE_RETRY_DEFAULT_DELAYS: Tuple[float, ...] = (0.2, 0.5, 1.0)
 # the 10-second emergency-square-off budget.
 _BRIDGE_POSTGRES_CONNECT_TIMEOUT_DEFAULT_SECONDS: int = 2
 
+# Issue #258 round-2 P1 (Codex): hard wall-clock deadline that bounds the
+# ENTIRE bridge call (get_record + trip+audit + save_state) from the
+# top of ``_propagate_kill_switch_to_durable_manager`` until it returns.
+# When the deadline is exceeded, the bridge logs
+# ``kill_switch_bridge_deadline_exceeded`` ERROR and returns False so the
+# caller's emergency ``square_off_all`` runs without further delay.
+#
+# Why this is necessary on top of the per-call ``connect_timeout`` and
+# bounded outer retry: even with ``max_attempts=1``,
+# ``connect_with_retry`` iterates ALL DSN candidates per call (the IPv4
+# fast-path then the original host); the audit write inside
+# ``KillSwitchManager.trip`` calls ``connect_with_retry`` with the
+# DEFAULTS (``max_attempts=3``, 5s connect timeout); and any other code
+# path the bridge depends on can leak retries. Defaulting to 5s gives
+# the bridge a fail-closed-fast contract: it either persists within ~5s
+# or it bails out and ``evaluate_account_loss`` flattens.
+_BRIDGE_TOTAL_DEADLINE_DEFAULT_SECONDS: float = 5.0
+
 
 def _bridge_postgres_connect_timeout_seconds() -> int:
     """Per-attempt Postgres connect timeout used by the bridge persistence
     path. Overridable via ``RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS``
-    for ops tuning. Clamped to >= 1s."""
+    for ops tuning. Clamped to >= 1s.
+
+    Issue #258 round-2 P2 (Codex): non-finite numeric overrides such as
+    ``inf`` / ``1e309`` raise ``OverflowError`` from ``int(float(...))``
+    rather than ``ValueError``. Catch ``Exception`` AND explicitly reject
+    non-finite values so a malformed env var cannot raise out of the
+    auto-trip path (``_propagate_kill_switch_to_durable_manager`` runs
+    BEFORE ``square_off_all`` — any exception escaping this helper would
+    block the emergency exit).
+    """
     raw = os.getenv("RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS", "").strip()
     if not raw:
         return _BRIDGE_POSTGRES_CONNECT_TIMEOUT_DEFAULT_SECONDS
     try:
-        return max(1, int(float(raw)))
-    except ValueError:
+        parsed = float(raw)
+        if not math.isfinite(parsed):
+            return _BRIDGE_POSTGRES_CONNECT_TIMEOUT_DEFAULT_SECONDS
+        return max(1, int(parsed))
+    except Exception:
+        # Any parse / overflow failure -> fall back to defaults rather
+        # than silently propagating into the live auto-trip path.
         return _BRIDGE_POSTGRES_CONNECT_TIMEOUT_DEFAULT_SECONDS
 
 
+def _bridge_total_deadline_seconds() -> float:
+    """Hard wall-clock deadline for the whole legacy->durable bridge call.
+
+    Overridable via ``RISK_BRIDGE_TOTAL_DEADLINE_SECONDS``. Clamped to
+    >= 1.0s so a misconfiguration can't disable the deadline entirely
+    (which would re-introduce the unbounded-wait bug this guards against).
+
+    Issue #258 round-2 P2 (Codex): the same non-finite / overflow safety
+    applies here — fall back to the default rather than raise out of the
+    auto-trip path.
+    """
+    raw = os.getenv("RISK_BRIDGE_TOTAL_DEADLINE_SECONDS", "").strip()
+    if not raw:
+        return _BRIDGE_TOTAL_DEADLINE_DEFAULT_SECONDS
+    try:
+        parsed = float(raw)
+        if not math.isfinite(parsed):
+            return _BRIDGE_TOTAL_DEADLINE_DEFAULT_SECONDS
+        return max(1.0, parsed)
+    except Exception:
+        return _BRIDGE_TOTAL_DEADLINE_DEFAULT_SECONDS
+
+
 def _bridge_retry_delays() -> Tuple[float, ...]:
+    """Inter-attempt backoff delays for the bridge's bounded same-call
+    retry. The retry count is ``1 + len(delays)``.
+
+    Issue #258 round-2 P2 (Codex): the previous behaviour treated a
+    single-token shorthand like ``RISK_BRIDGE_RETRY_DELAYS_SECONDS=0`` as
+    "zero backoff", which collapsed the retry count from the documented
+    4 attempts (1 + 3) down to 2 attempts (1 + 1). That regresses the
+    transient-blip recovery the bridge is supposed to provide. The fix:
+    when EVERY parsed delay is zero AND the parsed length is shorter
+    than the default delays list, expand to a same-length all-zero
+    tuple so the attempt count is preserved while the backoff is
+    effectively disabled. Tests / ops can still set an explicit
+    ``"0,0,0"`` to be unambiguous; the shorthand is preserved for
+    convenience but no longer silently reduces the retry budget.
+    """
     raw = os.getenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "").strip()
     if not raw:
         return _BRIDGE_RETRY_DEFAULT_DELAYS
@@ -115,12 +185,28 @@ def _bridge_retry_delays() -> Tuple[float, ...]:
         if not token:
             continue
         try:
-            parts.append(max(0.0, float(token)))
-        except ValueError:
+            value = float(token)
+            if not math.isfinite(value):
+                # Non-finite override -> fall back to defaults rather
+                # than treat as zero (which would silently disable
+                # backoff on the live auto-trip path).
+                return _BRIDGE_RETRY_DEFAULT_DELAYS
+            parts.append(max(0.0, value))
+        except Exception:
             # Malformed override -> fall back to defaults rather than
             # silently disabling retries on the live auto-trip path.
             return _BRIDGE_RETRY_DEFAULT_DELAYS
-    return tuple(parts) if parts else _BRIDGE_RETRY_DEFAULT_DELAYS
+    if not parts:
+        return _BRIDGE_RETRY_DEFAULT_DELAYS
+    # Preserve attempt count when the shorthand zeroes out backoff but
+    # provides fewer delays than the default (e.g. a single "0" token).
+    # Without this, the bridge silently drops from 4 attempts to 2.
+    if (
+        all(delay == 0.0 for delay in parts)
+        and len(parts) < len(_BRIDGE_RETRY_DEFAULT_DELAYS)
+    ):
+        return tuple(0.0 for _ in _BRIDGE_RETRY_DEFAULT_DELAYS)
+    return tuple(parts)
 
 
 class _BridgeConcurrentMutationAbort(Exception):
@@ -132,12 +218,88 @@ class _BridgeConcurrentMutationAbort(Exception):
     """
 
 
+class _BridgeDeadlineExceeded(Exception):
+    """Sentinel raised by the deadline check to abort a retry loop or
+    pre-step gate when the bridge's total wall-clock budget has been
+    exhausted (Issue #258 round-2 P1 cluster). Caught by callers and the
+    retry helper; the bridge then exits WITHOUT marking succeeded so
+    ``evaluate_account_loss`` can proceed to ``square_off_all`` without
+    further delay.
+    """
+
+
+class _BridgeDeadline:
+    """Wall-clock deadline tracker shared by every step of the bridge.
+
+    Issue #258 round-2 P1 cluster (Codex): the bridge has three separate
+    retry / connection paths before ``square_off_all`` runs — ``get_
+    record``, ``ksm.trip`` (whose audit write nests its own
+    ``connect_with_retry`` with default ``max_attempts=3`` and a 5s
+    connect timeout via ``app/core/audit_log.py``), and the
+    ``save_state`` Postgres block (whose ``connect_with_retry`` iterates
+    DSN candidates even with ``max_attempts=1``). Bounding each in
+    isolation isn't enough — operators have reported real-world Postgres
+    blips that compound across all three. A single hard deadline
+    accumulating across every step is the only way to guarantee
+    emergency square-off is not delayed past the legacy-broker action
+    budget.
+
+    Usage:
+      deadline = _BridgeDeadline(timeout_seconds=5.0)
+      deadline.check("before_get_record")  # raises if elapsed >= timeout
+      deadline.connect_timeout_seconds(min_default=2)
+      deadline.remaining()  # seconds left, 0 if past deadline
+    """
+
+    def __init__(self, *, timeout_seconds: float) -> None:
+        self._timeout = float(timeout_seconds)
+        self._start = time.monotonic()
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self._start
+
+    def remaining(self) -> float:
+        return max(0.0, self._timeout - self.elapsed())
+
+    def is_exceeded(self) -> bool:
+        return self.elapsed() >= self._timeout
+
+    def check(self, step: str) -> None:
+        """Raise ``_BridgeDeadlineExceeded`` if the deadline has elapsed.
+        ``step`` is a short tag used in the structured log emitted by
+        the caller's exception handler."""
+        if self.is_exceeded():
+            raise _BridgeDeadlineExceeded(
+                f"deadline_exceeded step={step} elapsed={self.elapsed():.2f}s "
+                f"timeout={self._timeout:.2f}s"
+            )
+
+    def connect_timeout_seconds(self, *, min_default: int) -> int:
+        """Per-attempt connect timeout clamped to the remaining deadline
+        budget. Used to ensure a single Postgres connect attempt cannot
+        eat more time than the bridge has left."""
+        remaining = self.remaining()
+        # Clamp to >= 1s — psycopg requires >= 1 — but never exceed the
+        # remaining wall-clock window so we always have time to log the
+        # deadline-exceeded before square-off runs.
+        if remaining <= 1.0:
+            return 1
+        return max(1, min(int(min_default), int(remaining)))
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid only
+        return (
+            f"_BridgeDeadline(timeout={self._timeout:.2f}s "
+            f"elapsed={self.elapsed():.2f}s)"
+        )
+
+
 def _retry_with_backoff(
     operation: Callable[[], Any],
     *,
     op_name: str,
     sleep: Callable[[float], None] = time.sleep,
     pre_attempt_check: Optional[Callable[[], None]] = None,
+    deadline: Optional[_BridgeDeadline] = None,
 ) -> Tuple[bool, Optional[BaseException]]:
     """Run ``operation`` with bounded exponential backoff.
 
@@ -155,6 +317,16 @@ def _retry_with_backoff(
     mutated by a concurrent operator action between attempts and bail
     out cleanly rather than persisting a now-stale snapshot.
 
+    Issue #258 round-2 P1 cluster: ``deadline`` (optional) bounds the
+    total wall-clock budget across every step of the bridge. If the
+    deadline is already exceeded BEFORE an attempt or BEFORE a backoff
+    sleep, the loop stops immediately and returns
+    ``(False, _BridgeDeadlineExceeded(...))``. The pre-attempt deadline
+    check fires for the very first attempt too, so a bridge call that
+    arrives already over budget exits without running ``operation`` at
+    all (rather than letting ``connect_with_retry``'s DSN candidate
+    iteration leak time).
+
     Returns ``(succeeded, last_exception)``. The last failure is logged
     inside this helper so callers can collapse error handling to a single
     success/fail branch.
@@ -164,6 +336,23 @@ def _retry_with_backoff(
     attempts = 1 + len(delays)
     last_exc: Optional[BaseException] = None
     for attempt in range(1, attempts + 1):
+        # Issue #258 round-2 P1: hard deadline check BEFORE every attempt
+        # (including attempt 1). A bridge call that arrives already over
+        # budget — e.g. because an earlier step burned the entire window —
+        # must NOT start a fresh ``connect_with_retry`` whose DSN-candidate
+        # iteration would push us further past the square-off deadline.
+        if deadline is not None and deadline.is_exceeded():
+            abort = _BridgeDeadlineExceeded(
+                f"deadline_exceeded op={op_name} attempt={attempt}/{attempts} "
+                f"elapsed={deadline.elapsed():.2f}s"
+            )
+            logger.error(
+                "kill_switch_bridge_deadline_exceeded op=%s attempt=%d/%d "
+                "elapsed=%.2fs — abandoning retry; emergency square-off "
+                "will proceed.",
+                op_name, attempt, attempts, deadline.elapsed(),
+            )
+            return False, abort
         if pre_attempt_check is not None:
             try:
                 pre_attempt_check()
@@ -191,7 +380,32 @@ def _retry_with_backoff(
         except Exception as exc:  # noqa: BLE001 — bounded retry surface.
             last_exc = exc
             if attempt < attempts:
+                # Issue #258 round-2 P1: clip the inter-attempt sleep to
+                # the remaining deadline budget. Sleeping past the
+                # deadline would waste square-off budget on a retry the
+                # next iteration would just abandon anyway.
                 delay = delays[attempt - 1]
+                if deadline is not None:
+                    remaining = deadline.remaining()
+                    if remaining <= 0.0:
+                        # Already over budget — exit the loop without
+                        # sleeping (the next iteration's deadline check
+                        # would fire anyway, but logging here gives a
+                        # cleaner operator signal).
+                        logger.error(
+                            "kill_switch_bridge_deadline_exceeded op=%s "
+                            "attempt=%d/%d elapsed=%.2fs (before backoff) — "
+                            "abandoning retry; emergency square-off "
+                            "will proceed.",
+                            op_name, attempt, attempts, deadline.elapsed(),
+                        )
+                        return False, _BridgeDeadlineExceeded(
+                            f"deadline_exceeded op={op_name} "
+                            f"attempt={attempt}/{attempts} "
+                            f"elapsed={deadline.elapsed():.2f}s before backoff"
+                        )
+                    if delay > remaining:
+                        delay = remaining
                 logger.warning(
                     "kill_switch_bridge_retry op=%s attempt=%d/%d delay=%.2fs exc=%s",
                     op_name, attempt, attempts, delay, exc,
@@ -656,10 +870,22 @@ class RiskManager:
           ``save_state`` path calls ``connect_with_retry`` with
           ``max_attempts=1`` and a tight per-attempt connect timeout
           (default 2s, overridable via
-          ``RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS``). Worst-case
-          total wall-clock for persistence is ~9.7s — under the 10s
-          emergency-square-off budget so a Postgres outage does not
-          delay ``square_off_all`` on the auto-trip path.
+          ``RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS``).
+        - **Hard wall-clock deadline (PR #258 round-2 P1 cluster, Codex):**
+          a single ``_BridgeDeadline`` (default 5s, overridable via
+          ``RISK_BRIDGE_TOTAL_DEADLINE_SECONDS``) bounds the ENTIRE
+          bridge call across ``get_record`` + ``ksm.trip`` (whose audit
+          write nests its own ``connect_with_retry(max_attempts=3,
+          connect_timeout=5)`` in ``app/core/audit_log.py``) + the
+          persistence path (whose ``connect_with_retry`` iterates DSN
+          candidates even with ``max_attempts=1``). The retry helper
+          checks the deadline before every attempt and clips
+          inter-attempt sleeps to the remaining budget. The per-attempt
+          connect timeout is also clamped to the remaining budget. Any
+          step that would exceed the deadline logs
+          ``kill_switch_bridge_deadline_exceeded`` ERROR and returns
+          False so ``evaluate_account_loss`` can proceed to
+          ``square_off_all`` without further delay.
         - **Concurrent-mutation guard (PR #258 round-1 P2, Codex):** the
           save loop captures an identity fingerprint
           ``(id, state, block_exits, updated_at)`` of the in-memory
@@ -670,6 +896,20 @@ class RiskManager:
           ``kill_switch_bridge_save_state_aborted_concurrent_mutation``
           at ERROR, and leaves ``_durable_kill_switch_bridge_succeeded``
           False so the next evaluate cycle re-validates from scratch.
+        - **Same-manager fingerprint recheck (PR #258 round-2 P2, Codex):**
+          after a successful save, the bridge ALWAYS re-reads the
+          record and matches its fingerprint against the entry
+          snapshot — regardless of whether the active manager is the
+          same instance. This catches a same-manager operator
+          clear/rearm landing AFTER ``pre_attempt_check`` ran but
+          BEFORE the save flushed, which would otherwise persist a
+          stale TRIPPED snapshot and silently suppress retries.
+        - **Unaudited partial-trip detection (PR #258 round-2 P2, Codex):**
+          when the FIRST ``ksm.trip`` attempt mutates the in-memory
+          record but raises in ``_emit_audit`` (or any post-mutation
+          step), the bridge re-emits the audit through
+          ``app.core.audit_log.emit_audit_event`` before marking
+          succeeded so the trip remains durably accountable.
         - Lazy-imported to avoid circular dependency on the hub runtime.
         - Never raises into the legacy auto-trip path; all failures are
           logged at ERROR / WARNING and leave
@@ -681,6 +921,18 @@ class RiskManager:
         """
         if self._durable_kill_switch_bridge_succeeded:
             return
+
+        # Issue #258 round-2 P1 cluster (Codex): single hard wall-clock
+        # deadline shared across every step of the bridge. See
+        # ``_BridgeDeadline`` for why each-step bounding is insufficient
+        # (audit-write inside ``ksm.trip`` calls ``connect_with_retry``
+        # with default ``max_attempts=3`` × 5s, and ``connect_with_retry``
+        # iterates DSN candidates per call even with ``max_attempts=1``).
+        # Default 5s — fail-closed-fast so ``square_off_all`` always runs
+        # within the legacy-broker action budget on a Postgres outage.
+        deadline = _BridgeDeadline(
+            timeout_seconds=_bridge_total_deadline_seconds(),
+        )
 
         try:
             from app.hub.runtime import get_hub_runtime
@@ -707,6 +959,17 @@ class RiskManager:
             )
             return
 
+        # Deadline check after the import + runtime resolution. These
+        # are cheap in steady state but lazy-imports can take 100s of ms
+        # on a cold path; bail out if we've already burned the budget.
+        if deadline.is_exceeded():
+            logger.error(
+                "kill_switch_bridge_deadline_exceeded step=post_resolve "
+                "elapsed=%.2fs — emergency square-off will proceed.",
+                deadline.elapsed(),
+            )
+            return
+
         # Step 1: ensure the durable manager is in TRIPPED state. The trip
         # path is idempotent — if a record already exists in TRIPPED or
         # CLEAR_PENDING, we skip the trip but still proceed to persistence.
@@ -727,9 +990,15 @@ class RiskManager:
             )
 
         get_ok, get_exc = _retry_with_backoff(
-            _do_get_record, op_name="get_record",
+            _do_get_record, op_name="get_record", deadline=deadline,
         )
         if not get_ok:
+            if isinstance(get_exc, _BridgeDeadlineExceeded):
+                # Already logged loudly by the retry helper / deadline
+                # check. Return without marking succeeded so the next
+                # evaluate cycle retries; emergency square-off proceeds
+                # immediately in this cycle.
+                return
             logger.error(
                 "kill_switch_bridge_unavailable: get_record query failed "
                 "after retries: %s",
@@ -774,12 +1043,44 @@ class RiskManager:
             # through to Postgres). State-machine ValueError is NOT
             # transient and is re-raised immediately to the post-trip
             # race re-check below.
+            #
+            # Issue #258 round-2 P1 (Codex): the deadline check runs
+            # before every attempt — ``ksm.trip`` calls ``_emit_audit``
+            # which itself triggers a Postgres ``connect_with_retry``
+            # with the default ``max_attempts=3`` and 5s connect timeout
+            # (see ``app/core/audit_log.py``). A single audit write
+            # during a Postgres outage can therefore consume the entire
+            # square-off budget; the deadline guarantees we exit before
+            # that happens.
+            #
+            # Issue #258 round-2 P2 (Codex): track whether the FIRST
+            # ksm.trip attempt mutated the in-memory record but then
+            # raised in ``_emit_audit`` (or any post-mutation step).
+            # If so, the in-memory state is TRIPPED but the audit row
+            # was never written. The bridge MUST NOT silently mark this
+            # as succeeded — we re-emit the audit through the bridge
+            # before proceeding so the trip is durably accountable.
             delays = _bridge_retry_delays()
             attempts = 1 + len(delays)
             record: Any = None
             trip_value_error: Optional[ValueError] = None
             trip_other_error: Optional[BaseException] = None
+            first_attempt_post_mutation_error: bool = False
             for attempt in range(1, attempts + 1):
+                # Issue #258 round-2 P1: hard deadline check before EACH
+                # trip attempt. ``ksm.trip``'s audit write nests a
+                # ``connect_with_retry(max_attempts=3, connect_timeout=5)``
+                # in the default audit_log path, so a single attempt
+                # can stall ~15s. Without this guard the retry budget
+                # would be uncapped on a Postgres outage.
+                if deadline.is_exceeded():
+                    logger.error(
+                        "kill_switch_bridge_deadline_exceeded op=ksm_trip "
+                        "attempt=%d/%d elapsed=%.2fs — emergency square-off "
+                        "will proceed.",
+                        attempt, attempts, deadline.elapsed(),
+                    )
+                    return
                 try:
                     record = ksm.trip(
                         KillSwitchScope.GLOBAL,
@@ -800,8 +1101,57 @@ class RiskManager:
                     break  # Non-retriable; fall through to race re-check.
                 except Exception as exc_t:  # noqa: BLE001
                     trip_other_error = exc_t
+                    # Issue #258 round-2 P2: check whether the in-memory
+                    # state was mutated to TRIPPED despite the exception.
+                    # This happens when ``ksm.trip`` raises AFTER
+                    # ``self._records[key] = record`` — e.g. ``_emit_audit``
+                    # throws on a JSONL disk-full or similar. Recording
+                    # this flag lets the post-trip race recheck know the
+                    # current TRIPPED state has NO matching audit row.
+                    if attempt == 1:
+                        try:
+                            mutation_record = ksm.get_record(
+                                KillSwitchScope.GLOBAL, "GLOBAL",
+                            )
+                            mutation_state = (
+                                mutation_record.state
+                                if mutation_record is not None else None
+                            )
+                            if mutation_state in (
+                                KillSwitchState.TRIPPED,
+                                KillSwitchState.CLEAR_PENDING,
+                            ):
+                                first_attempt_post_mutation_error = True
+                                logger.error(
+                                    "kill_switch_bridge_unaudited_partial_trip "
+                                    "detected: ksm.trip raised %s AFTER "
+                                    "mutating in-memory state to %s — audit "
+                                    "row may be missing; will re-emit audit "
+                                    "via fallback path before marking "
+                                    "succeeded.",
+                                    type(exc_t).__name__,
+                                    mutation_state.value,
+                                )
+                        except Exception:
+                            # Lookup failure — leave the flag unset and
+                            # let the post-trip recheck path handle it.
+                            pass
                     if attempt < attempts:
                         delay = delays[attempt - 1]
+                        # Clip backoff to the remaining deadline so we
+                        # never sleep past the square-off budget.
+                        remaining = deadline.remaining()
+                        if remaining <= 0.0:
+                            logger.error(
+                                "kill_switch_bridge_deadline_exceeded "
+                                "op=ksm_trip attempt=%d/%d elapsed=%.2fs "
+                                "(before backoff) — emergency square-off "
+                                "will proceed.",
+                                attempt, attempts, deadline.elapsed(),
+                            )
+                            return
+                        if delay > remaining:
+                            delay = remaining
                         logger.warning(
                             "kill_switch_bridge_retry op=ksm_trip "
                             "attempt=%d/%d delay=%.2fs exc=%s",
@@ -841,8 +1191,11 @@ class RiskManager:
 
                 post_ok, post_exc = _retry_with_backoff(
                     _do_post_trip_get, op_name="post_trip_get_record",
+                    deadline=deadline,
                 )
                 if not post_ok:
+                    if isinstance(post_exc, _BridgeDeadlineExceeded):
+                        return
                     logger.error(
                         "kill_switch_bridge_unavailable: post-trip "
                         "get_record failed after retries: %s",
@@ -883,11 +1236,38 @@ class RiskManager:
                         exc,
                     )
                     return
+                # Issue #258 round-2 P2: if the FIRST attempt's exception
+                # came from AFTER the in-memory mutation (e.g.
+                # ``_emit_audit`` raised), the trip is now in-memory
+                # TRIPPED but the audit row is missing. The subsequent
+                # ``ksm.trip`` retries raised ValueError ("not INACTIVE")
+                # without emitting an audit either. Re-emit the audit
+                # event through ``emit_audit_event`` directly so the
+                # trip is durably accountable before we mark succeeded.
+                if first_attempt_post_mutation_error and post_trip_record is not None:
+                    self._reemit_kill_switch_bridge_audit(
+                        record=post_trip_record,
+                        bridge_reason=bridge_reason,
+                    )
             elif trip_other_error is not None:
+                # All retries raised non-ValueError exceptions and the
+                # state did not transition (no post-trip TRIPPED detected
+                # via the first-attempt path either). Bail out — next
+                # evaluate cycle retries.
+                #
+                # Issue #258 round-2 P2 corner case: if every attempt
+                # raised AFTER mutation (i.e. the mutation IS in place
+                # but every audit failed), ``first_attempt_post_mutation_error``
+                # is True; we still bail out here because we never
+                # successfully ran ksm.trip to completion. The next
+                # evaluate cycle will see TRIPPED via get_record and
+                # the bridge will proceed to persistence — at which
+                # point the audit re-emit fires via the ValueError
+                # branch above.
                 logger.error(
                     "kill_switch_bridge_trip_failed (will retry next "
-                    "evaluate cycle): %s",
-                    trip_other_error,
+                    "evaluate cycle; first_attempt_post_mutation=%s): %s",
+                    first_attempt_post_mutation_error, trip_other_error,
                 )
                 return
             else:
@@ -975,14 +1355,24 @@ class RiskManager:
             pre_save_fp = None
             fingerprint_captured = False
 
-        connect_timeout_seconds = _bridge_postgres_connect_timeout_seconds()
+        configured_connect_timeout = _bridge_postgres_connect_timeout_seconds()
 
         def _do_save() -> None:
+            # Issue #258 round-2 P1: clip the per-attempt connect
+            # timeout to the remaining deadline so a single Postgres
+            # connect attempt cannot eat more time than the bridge has
+            # left. ``connect_with_retry`` ALSO iterates DSN candidates
+            # per call (POSTGRES_FORCE_IPV4=true / host=host.docker.internal
+            # → 2 candidates) even with ``max_attempts=1``, so a tight
+            # per-attempt timeout is the only way to bound this path.
+            effective_timeout = deadline.connect_timeout_seconds(
+                min_default=configured_connect_timeout,
+            )
             with connect_with_retry(
                 get_control_plane_dsn(),
                 autocommit=True,
                 max_attempts=1,
-                connect_timeout_seconds=connect_timeout_seconds,
+                connect_timeout_seconds=effective_timeout,
             ) as conn:
                 ksm.save_state(conn)
 
@@ -1005,6 +1395,7 @@ class RiskManager:
             _do_save,
             op_name="save_state",
             pre_attempt_check=_abort_if_concurrent_mutation,
+            deadline=deadline,
         )
         if not save_ok:
             if isinstance(save_exc, _BridgeConcurrentMutationAbort):
@@ -1016,6 +1407,9 @@ class RiskManager:
                     save_exc,
                 )
                 return
+            if isinstance(save_exc, _BridgeDeadlineExceeded):
+                # Deadline already logged loudly by the retry helper.
+                return
             logger.error(
                 "kill_switch_bridge_save_state_failed (all in-call retries "
                 "exhausted — will retry next evaluate cycle; durable trip is "
@@ -1023,6 +1417,40 @@ class RiskManager:
                 save_exc,
             )
             return
+
+        # Issue #258 round-2 P2 (Codex line 987): always re-verify the
+        # current record fingerprint against the pre-save snapshot —
+        # regardless of whether the active manager is a different
+        # instance. The previous logic only checked the swap branch,
+        # but a same-manager operator clear/rearm during the FINAL
+        # backoff window (between the last pre_attempt_check and the
+        # successful save) would otherwise persist a stale TRIPPED
+        # snapshot and silently suppress future retries. Re-read and
+        # match against the entry fingerprint here so a same-manager
+        # mutation is detected too.
+        if fingerprint_captured:
+            try:
+                post_save_record = ksm.get_record(
+                    KillSwitchScope.GLOBAL, "GLOBAL",
+                )
+            except Exception as exc:
+                logger.error(
+                    "kill_switch_bridge_post_save_recheck_failed (will "
+                    "retry next evaluate cycle): %s",
+                    exc,
+                )
+                return
+            post_save_fp = _record_fingerprint(post_save_record)
+            if post_save_fp != pre_save_fp:
+                logger.error(
+                    "kill_switch_bridge_post_save_fingerprint_mismatch "
+                    "expected=%s current=%s — operator clear/rearm "
+                    "intervened on the same manager AFTER save succeeded; "
+                    "bridge will NOT mark succeeded; next evaluate cycle "
+                    "will re-validate.",
+                    pre_save_fp, post_save_fp,
+                )
+                return
 
         # Codex P2 (round 2 review): verify the active KillSwitchManager
         # on the hub runtime sees the trip BEFORE we declare success. The
@@ -1101,6 +1529,83 @@ class RiskManager:
         # Both trip and persistence succeeded AND the active manager sees
         # the trip. Stop retrying.
         self._durable_kill_switch_bridge_succeeded = True
+
+    def _reemit_kill_switch_bridge_audit(
+        self,
+        *,
+        record: Any,
+        bridge_reason: str,
+    ) -> None:
+        """Re-emit a kill-switch trip audit when the first ksm.trip call
+        mutated the in-memory record but raised AFTER the mutation
+        (Issue #258 round-2 P2 / Codex line 803). Without this, the
+        retry loop sees the existing TRIPPED record on the second
+        attempt, raises ValueError, falls through the post-trip race
+        recheck, and marks the bridge succeeded — leaving the trip
+        durably in-memory but with NO audit row.
+
+        This helper imports ``emit_audit_event`` lazily (no import-time
+        circular dep) and writes the audit row directly so the trip
+        remains accountable. Failures here are logged but do NOT
+        prevent the bridge from marking succeeded — an audit miss is
+        a P1 visibility issue, not a correctness issue at runtime;
+        the alternative would be to leave the live hub OrderRouter
+        without a trip blocking entries.
+        """
+        try:
+            from app.core.audit_log import emit_audit_event
+            from app.risk.kill_switch import KillSwitchState
+        except Exception as exc:
+            logger.error(
+                "kill_switch_bridge_audit_reemit_unavailable: import "
+                "failed: %s", exc,
+            )
+            return
+
+        try:
+            state_val = getattr(
+                getattr(record, "state", None), "value", "TRIPPED",
+            )
+            scope_obj = getattr(record, "scope", None)
+            scope_val = getattr(scope_obj, "value", "GLOBAL")
+            scope_id_val = getattr(record, "scope_id", "GLOBAL")
+            record_id_val = getattr(record, "id", "unknown")
+            emit_audit_event(
+                actor="risk_manager_auto",
+                action="kill_switch.trip",
+                resource_type="kill_switch",
+                resource_id=str(record_id_val),
+                before={
+                    "state": KillSwitchState.INACTIVE.value,
+                    "scope": scope_val,
+                    "scope_id": scope_id_val,
+                },
+                after={
+                    "state": state_val,
+                    "scope": scope_val,
+                    "scope_id": scope_id_val,
+                },
+                metadata={
+                    "reason": bridge_reason,
+                    "bridge_reemit": True,
+                    "bridge_reemit_cause": (
+                        "first_attempt_post_mutation_audit_failure"
+                    ),
+                },
+            )
+            logger.warning(
+                "kill_switch_bridge_audit_reemitted record_id=%s "
+                "scope=%s scope_id=%s — original ksm.trip mutated the "
+                "in-memory record but raised before audit; audit row "
+                "has been written via the bridge fallback path.",
+                record_id_val, scope_val, scope_id_val,
+            )
+        except Exception as exc:
+            logger.error(
+                "kill_switch_bridge_audit_reemit_failed: %s — trip is "
+                "durable but the audit row is missing; operator must "
+                "manually annotate the incident.", exc,
+            )
 
     def _publish_legacy_kill_switch_state_to_hub(self) -> None:
         """Publish the in-memory legacy kill-switch flag to the hub runtime

@@ -1078,3 +1078,521 @@ def test_bridge_postgres_connect_timeout_env_override(monkeypatch):
         rm_mod._bridge_postgres_connect_timeout_seconds()
         == rm_mod._BRIDGE_POSTGRES_CONNECT_TIMEOUT_DEFAULT_SECONDS
     )
+
+
+# ---------------------------------------------------------------------------
+# PR #258 round-2 Codex review:
+#   P1 cluster — Total retry budget BEFORE emergency square-off must be < 10s
+#                (lines 731, 788, 985, 1008). Addressed via a single
+#                ``_BridgeDeadline`` wall-clock accumulator.
+#   P2         — Non-finite timeout overrides (lines 104, 105)
+#   P2         — Preserve retry count when zeroing backoff (line 164)
+#   P2         — Same-manager fingerprint recheck after save (line 987)
+#   P2         — Unaudited partial-trip detection (line 803)
+# ---------------------------------------------------------------------------
+
+
+def test_bridge_total_deadline_env_override(monkeypatch):
+    """PR #258 round-2 P1: ``RISK_BRIDGE_TOTAL_DEADLINE_SECONDS`` parses
+    correctly. Non-finite / overflow / malformed values fall back to the
+    default rather than raise out of the auto-trip path."""
+    import app.core.risk_manager as rm_mod
+
+    monkeypatch.delenv("RISK_BRIDGE_TOTAL_DEADLINE_SECONDS", raising=False)
+    assert (
+        rm_mod._bridge_total_deadline_seconds()
+        == rm_mod._BRIDGE_TOTAL_DEADLINE_DEFAULT_SECONDS
+    )
+
+    monkeypatch.setenv("RISK_BRIDGE_TOTAL_DEADLINE_SECONDS", "3.5")
+    assert rm_mod._bridge_total_deadline_seconds() == 3.5
+
+    # Clamped to >= 1s so the deadline is never effectively disabled.
+    monkeypatch.setenv("RISK_BRIDGE_TOTAL_DEADLINE_SECONDS", "0.1")
+    assert rm_mod._bridge_total_deadline_seconds() == 1.0
+
+    # Non-finite (Codex P2 line 104/105): inf must fall back to default
+    # rather than raise OverflowError into the auto-trip path.
+    monkeypatch.setenv("RISK_BRIDGE_TOTAL_DEADLINE_SECONDS", "inf")
+    assert (
+        rm_mod._bridge_total_deadline_seconds()
+        == rm_mod._BRIDGE_TOTAL_DEADLINE_DEFAULT_SECONDS
+    )
+
+    # Overflow: 1e309 is bigger than float max → float() raises
+    # OverflowError. The helper must catch it.
+    monkeypatch.setenv("RISK_BRIDGE_TOTAL_DEADLINE_SECONDS", "1e309")
+    assert (
+        rm_mod._bridge_total_deadline_seconds()
+        == rm_mod._BRIDGE_TOTAL_DEADLINE_DEFAULT_SECONDS
+    )
+
+    # Malformed -> default.
+    monkeypatch.setenv("RISK_BRIDGE_TOTAL_DEADLINE_SECONDS", "garbage")
+    assert (
+        rm_mod._bridge_total_deadline_seconds()
+        == rm_mod._BRIDGE_TOTAL_DEADLINE_DEFAULT_SECONDS
+    )
+
+
+def test_bridge_postgres_connect_timeout_handles_non_finite_safely(monkeypatch):
+    """PR #258 round-2 P2 (Codex line 104/105): ``int(float('inf'))`` raises
+    ``OverflowError``, not ``ValueError``. The env override parser MUST
+    catch every parse failure so a malformed override during an auto-trip
+    cannot raise out of ``_propagate_kill_switch_to_durable_manager``
+    before ``square_off_all`` runs."""
+    import app.core.risk_manager as rm_mod
+
+    # Non-finite float -> default.
+    monkeypatch.setenv("RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS", "inf")
+    assert (
+        rm_mod._bridge_postgres_connect_timeout_seconds()
+        == rm_mod._BRIDGE_POSTGRES_CONNECT_TIMEOUT_DEFAULT_SECONDS
+    )
+
+    # OverflowError-producing literal -> default (the bug we are fixing).
+    monkeypatch.setenv("RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS", "1e309")
+    assert (
+        rm_mod._bridge_postgres_connect_timeout_seconds()
+        == rm_mod._BRIDGE_POSTGRES_CONNECT_TIMEOUT_DEFAULT_SECONDS
+    )
+
+    # Negative infinity treated the same.
+    monkeypatch.setenv("RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS", "-inf")
+    assert (
+        rm_mod._bridge_postgres_connect_timeout_seconds()
+        == rm_mod._BRIDGE_POSTGRES_CONNECT_TIMEOUT_DEFAULT_SECONDS
+    )
+
+    # NaN treated the same.
+    monkeypatch.setenv("RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS", "nan")
+    assert (
+        rm_mod._bridge_postgres_connect_timeout_seconds()
+        == rm_mod._BRIDGE_POSTGRES_CONNECT_TIMEOUT_DEFAULT_SECONDS
+    )
+
+
+def test_bridge_retry_delays_preserves_attempt_count_for_zero_shorthand(monkeypatch):
+    """PR #258 round-2 P2 (Codex line 164): the docstring lets operators
+    write ``RISK_BRIDGE_RETRY_DELAYS_SECONDS=0`` to disable backoff. But
+    the retry count is ``len(delays)``, so the shorthand silently reduced
+    the bridge from 4 attempts (1 + 3) to 2 attempts (1 + 1). Fix:
+    preserve the default attempt count when every parsed delay is zero
+    and the parsed length is shorter than the default."""
+    import app.core.risk_manager as rm_mod
+
+    # Single-token zero shorthand → preserves 3-delay length (4 attempts).
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0")
+    delays = rm_mod._bridge_retry_delays()
+    assert len(delays) == len(rm_mod._BRIDGE_RETRY_DEFAULT_DELAYS), (
+        "PR #258 round-2 P2: '0' shorthand must NOT reduce the retry "
+        "count — it must expand to all-zero delays of the default length"
+    )
+    assert all(d == 0.0 for d in delays), (
+        "all expanded delays must be zero (the operator's intent)"
+    )
+
+    # Two-token zero shorthand also expands.
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0")
+    delays = rm_mod._bridge_retry_delays()
+    assert len(delays) == len(rm_mod._BRIDGE_RETRY_DEFAULT_DELAYS)
+    assert all(d == 0.0 for d in delays)
+
+    # Explicit full-length "0,0,0" stays unchanged.
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+    assert rm_mod._bridge_retry_delays() == (0.0, 0.0, 0.0)
+
+    # Non-zero single value remains a single retry (operator explicitly
+    # asked for fewer attempts) — only the zero-shorthand case expands.
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0.5")
+    assert rm_mod._bridge_retry_delays() == (0.5,)
+
+    # Mixed-zero-and-nonzero stays as parsed (operator is explicit).
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0.5")
+    assert rm_mod._bridge_retry_delays() == (0.0, 0.5)
+
+
+def test_bridge_retry_delays_rejects_non_finite_safely(monkeypatch):
+    """PR #258 round-2 P2: ``float('inf')`` is finite from a parse POV
+    but ``math.isfinite(inf) == False``. A non-finite delay would cause
+    unbounded sleep — fall back to defaults instead."""
+    import app.core.risk_manager as rm_mod
+
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0.2,inf,1.0")
+    assert (
+        rm_mod._bridge_retry_delays()
+        == rm_mod._BRIDGE_RETRY_DEFAULT_DELAYS
+    ), "non-finite delay must fall back to default rather than parse to inf"
+
+
+def test_bridge_aborts_when_deadline_exceeded_by_slow_save(
+    tmp_path, monkeypatch, caplog,
+):
+    """PR #258 round-2 P1: when ``connect_with_retry`` is SLOW (the
+    realistic Postgres-outage scenario where DSN candidates each consume
+    their full connect_timeout), the bridge MUST abort within the total
+    deadline rather than spend the full retry budget. Mock
+    ``connect_with_retry`` to sleep 3s per call; with a 2s deadline the
+    bridge should attempt at most ONE save and then exit cleanly.
+    """
+    import time as _time
+    import app.core.risk_manager as rm_mod
+
+    # 2s deadline — tight. Each fake connect sleeps 3s and raises so the
+    # retry helper would otherwise loop 4× × 3s + backoff = ~13s.
+    monkeypatch.setenv("RISK_BRIDGE_TOTAL_DEADLINE_SECONDS", "2")
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+    monkeypatch.setenv("RISK_BRIDGE_POSTGRES_CONNECT_TIMEOUT_SECONDS", "5")
+
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    stub_ksm = _StubKillSwitchManager()
+    runtime = SimpleNamespace(kill_switch_manager=stub_ksm)
+
+    save_call_count = {"n": 0}
+
+    def _slow_connect(*_args, **_kwargs):
+        save_call_count["n"] += 1
+        _time.sleep(3.0)  # exceeds the 2s deadline on the very first call
+        raise ConnectionError("simulated slow postgres outage")
+
+    t0 = _time.monotonic()
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", side_effect=_slow_connect), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        rm._check_kill_switch(now)
+    elapsed = _time.monotonic() - t0
+
+    # Wall-clock must stay near the deadline (one slow attempt + abort).
+    # Allow generous slack for CI / Windows scheduler jitter.
+    assert elapsed < 5.0, (
+        "bridge MUST abort once the wall-clock deadline is reached "
+        "(PR #258 round-2 P1); took %.2fs" % elapsed
+    )
+    # The bridge gave up before exhausting retries.
+    assert save_call_count["n"] <= 2, (
+        "deadline must short-circuit retries; got %d save attempts"
+        % save_call_count["n"]
+    )
+    assert rm._durable_kill_switch_bridge_succeeded is False
+    # Legacy flag is set — square-off proceeds on the legacy path.
+    assert rm.kill_switch_activated is True
+    # Loud deadline log surfaced.
+    assert any(
+        "kill_switch_bridge_deadline_exceeded" in rec.message
+        and rec.levelname == "ERROR"
+        for rec in caplog.records
+    ), "deadline abort MUST surface as structured ERROR"
+
+    assert rm_mod._BRIDGE_TOTAL_DEADLINE_DEFAULT_SECONDS == 5.0
+
+
+def test_bridge_aborts_when_audit_write_blocks_past_deadline(
+    tmp_path, monkeypatch, caplog,
+):
+    """PR #258 round-2 P1 (Codex line 788): ``KillSwitchManager.trip``
+    emits an audit event via ``app/core/audit_log.py``, which calls
+    ``connect_with_retry`` with default ``max_attempts=3`` and 5s
+    connect timeout. During a Postgres outage that single call can
+    block for ~15s — long past the emergency square-off budget. The
+    bridge's hard deadline MUST short-circuit even when the slow step
+    is INSIDE ``ksm.trip`` (audit) rather than in our own save path.
+
+    We model this by making the stub ``ksm.trip`` sleep ~3s per call
+    so the per-attempt sleep + backoff exceed a tight 2s deadline.
+    """
+    import time as _time
+
+    monkeypatch.setenv("RISK_BRIDGE_TOTAL_DEADLINE_SECONDS", "2")
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    class _SlowAuditKillSwitchManager(_StubKillSwitchManager):
+        def __init__(self):
+            super().__init__()
+            self.trip_call_count = 0
+
+        def trip(self, scope, scope_id, reason, actor):
+            self.trip_call_count += 1
+            # Simulate the audit-write Postgres retry blocking ~3s.
+            _time.sleep(3.0)
+            raise ConnectionError("simulated slow audit-write blip")
+
+    slow = _SlowAuditKillSwitchManager()
+    runtime = SimpleNamespace(kill_switch_manager=slow)
+
+    class _NoopConn:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    t0 = _time.monotonic()
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", return_value=_NoopConn()), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        rm._check_kill_switch(now)
+    elapsed = _time.monotonic() - t0
+
+    # Deadline short-circuited the retry loop — at most a couple of
+    # ksm.trip invocations should have run.
+    assert elapsed < 5.0, (
+        "bridge MUST exit within the deadline even when ksm.trip "
+        "is slow due to audit-write retries (PR #258 round-2 P1, "
+        "Codex line 788); took %.2fs" % elapsed
+    )
+    assert slow.trip_call_count <= 2, (
+        "audit-write deadline guard must short-circuit ksm.trip retries; "
+        "got %d attempts" % slow.trip_call_count
+    )
+    assert rm._durable_kill_switch_bridge_succeeded is False
+    assert any(
+        "kill_switch_bridge_deadline_exceeded" in rec.message
+        and "op=ksm_trip" in rec.message
+        and rec.levelname == "ERROR"
+        for rec in caplog.records
+    )
+
+
+def test_bridge_aborts_when_dsn_candidates_exhaust_deadline(
+    tmp_path, monkeypatch, caplog,
+):
+    """PR #258 round-2 P1 (Codex line 985): when ``POSTGRES_FORCE_IPV4``
+    is true or the host is ``host.docker.internal``,
+    ``connect_with_retry`` iterates 2 DSN candidates per call — even
+    with ``max_attempts=1``. So a single save attempt can consume
+    ``2 × connect_timeout`` rather than ``1 × connect_timeout``. The
+    deadline guard must bound the TOTAL wall-clock regardless. Model
+    this by making each connect attempt sleep 2s (simulating the IPv4
+    candidate timing out, then the original host candidate timing out)
+    and asserting the bridge exits within the deadline.
+    """
+    import time as _time
+
+    monkeypatch.setenv("RISK_BRIDGE_TOTAL_DEADLINE_SECONDS", "2")
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    stub_ksm = _StubKillSwitchManager()
+    runtime = SimpleNamespace(kill_switch_manager=stub_ksm)
+
+    save_call_count = {"n": 0}
+
+    def _two_candidate_sim(*_args, **_kwargs):
+        # Simulate connect_with_retry iterating 2 DSN candidates, each
+        # waiting its full per-attempt timeout.
+        save_call_count["n"] += 1
+        _time.sleep(2.0)  # IPv4 candidate timeout
+        _time.sleep(2.0)  # original host candidate timeout
+        raise ConnectionError("simulated all-DSN-candidates exhausted")
+
+    t0 = _time.monotonic()
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", side_effect=_two_candidate_sim), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        rm._check_kill_switch(now)
+    elapsed = _time.monotonic() - t0
+
+    # Without the deadline, 4 outer attempts × 4s = 16s. With the
+    # deadline, the bridge must give up after the first attempt's
+    # 4s already exceeded the 2s budget — typically just one call.
+    assert elapsed < 8.0, (
+        "DSN-candidate iteration must not defeat the bridge deadline "
+        "(PR #258 round-2 P1, Codex line 985); took %.2fs" % elapsed
+    )
+    assert save_call_count["n"] <= 2
+    assert rm._durable_kill_switch_bridge_succeeded is False
+
+
+def test_bridge_rejects_unaudited_partial_trip_with_audit_reemit(
+    tmp_path, monkeypatch, caplog,
+):
+    """PR #258 round-2 P2 (Codex line 803): when ``ksm.trip`` mutates the
+    in-memory record but raises in ``_emit_audit`` AFTER the mutation,
+    the retry calls ``trip`` again → ValueError → post-trip recheck
+    sees TRIPPED state and treats it as success — even though the
+    original transition was NOT audited.
+
+    Fix: detect this case. If the FIRST trip attempt raised AND the
+    record is now TRIPPED, re-emit the audit through the bridge's
+    fallback path so the trip remains durably accountable.
+    """
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    class _MutateThenAuditFailsKillSwitchManager(_StubKillSwitchManager):
+        """First trip: mutate state to TRIPPED then raise (audit failed).
+        Second trip: state is now TRIPPED so raise ValueError. Get_record
+        reports TRIPPED throughout."""
+
+        def __init__(self):
+            super().__init__()
+            self.trip_call_count = 0
+
+        def trip(self, scope, scope_id, reason, actor):
+            self.trip_call_count += 1
+            if self.trip_call_count == 1:
+                # Mutate in-memory state to TRIPPED, then raise (model
+                # _emit_audit blowing up after _records[key] = record).
+                self._state_text = "TRIPPED"
+                raise IOError("simulated audit-write disk-full")
+            # Subsequent attempts see the existing TRIPPED state.
+            raise ValueError(
+                "Cannot trip kill switch: current state is TRIPPED"
+            )
+
+    flaky = _MutateThenAuditFailsKillSwitchManager()
+    runtime = SimpleNamespace(kill_switch_manager=flaky)
+
+    class _NoopConn:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    # Capture audit emissions via the bridge's fallback path.
+    audit_emissions: list = []
+
+    def _capture_audit(**kwargs):
+        audit_emissions.append(kwargs)
+        return {"audit_id": "stub"}
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", return_value=_NoopConn()), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"), \
+         patch("app.core.audit_log.emit_audit_event", side_effect=_capture_audit):
+        rm._check_kill_switch(now)
+
+    # The bridge MUST log that an unaudited partial trip was detected.
+    assert any(
+        "kill_switch_bridge_unaudited_partial_trip" in rec.message
+        and rec.levelname == "ERROR"
+        for rec in caplog.records
+    ), (
+        "bridge MUST log unaudited_partial_trip when the first ksm.trip "
+        "mutated state but raised before audit (PR #258 round-2 P2)"
+    )
+    # And it MUST re-emit the audit through the fallback path.
+    assert any(
+        evt.get("actor") == "risk_manager_auto"
+        and evt.get("action") == "kill_switch.trip"
+        and evt.get("metadata", {}).get("bridge_reemit") is True
+        for evt in audit_emissions
+    ), (
+        "bridge MUST re-emit the trip audit when the original audit "
+        "write failed post-mutation (PR #258 round-2 P2)"
+    )
+    # The bridge marks succeeded because the durable state IS TRIPPED
+    # and we've now ensured the audit is on record.
+    assert rm._durable_kill_switch_bridge_succeeded is True
+    assert any(
+        "kill_switch_bridge_audit_reemitted" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_bridge_aborts_on_same_manager_mutation_between_save_retries(
+    tmp_path, monkeypatch, caplog,
+):
+    """PR #258 round-2 P2 (Codex line 987): the round-1 fingerprint
+    guard only verified the active manager when it was a DIFFERENT
+    object. If the SAME manager object is mutated (operator
+    clear/rearm during backoff or between the final pre_attempt_check
+    and the save flush), the bridge would mark success despite the
+    state mismatch. Fix: ALWAYS re-read the record state after save
+    succeeds and check fingerprint against the entry fingerprint
+    regardless of manager identity.
+
+    We model the race by mutating the manager's record AFTER save
+    returns successfully (the pre_attempt_check window has closed)
+    and asserting the bridge does NOT mark succeeded.
+    """
+    monkeypatch.setenv("RISK_BRIDGE_RETRY_DELAYS_SECONDS", "0,0,0")
+
+    rm = _build_risk_manager(tmp_path)
+    now = _force_legacy_trip_state(rm)
+
+    from app.risk.kill_switch import KillSwitchState
+
+    class _MutateAfterSaveKillSwitchManager(_StubKillSwitchManager):
+        """Save succeeds; AFTER save the get_record returns a different
+        fingerprint (simulating operator clear/rearm landing between
+        the final pre_attempt_check and the post-save recheck)."""
+
+        def __init__(self):
+            super().__init__()
+            self._save_succeeded = False
+            # Stable initial fingerprint shape so pre-save snapshot
+            # captures it; we'll mutate id after save.
+            self._record_id = "rec-original"
+
+        def get_record(self, scope, scope_id):
+            from types import SimpleNamespace as _SN
+            return _SN(
+                id=self._record_id,
+                state=KillSwitchState.TRIPPED,
+                scope=scope,
+                scope_id=scope_id,
+                trip_reason=None,
+                tripped_by=None,
+                block_exits=False,
+                updated_at="2026-05-12T00:00:00Z",
+            )
+
+        def is_tripped(self, scope, scope_id):
+            return True
+
+        def trip(self, scope, scope_id, reason, actor):
+            # Already TRIPPED; the bridge should not need to call us.
+            raise ValueError(
+                "Cannot trip kill switch: current state is TRIPPED"
+            )
+
+        def save_state(self, conn):
+            self.save_state_calls += 1
+            self._save_succeeded = True
+            # Mutate the record id to simulate operator-driven rearm
+            # cycle landing after pre_attempt_check but before our
+            # post-save recheck.
+            self._record_id = "rec-after-operator-rearm"
+
+    mutating = _MutateAfterSaveKillSwitchManager()
+    runtime = SimpleNamespace(kill_switch_manager=mutating)
+
+    class _NoopConn:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime), \
+         patch("app.data.postgres.connect_with_retry", return_value=_NoopConn()), \
+         patch("app.data.postgres.get_control_plane_dsn", return_value="x"):
+        rm._check_kill_switch(now)
+
+    # Save was attempted (pre_attempt_check passed because the mutation
+    # had not yet happened) and succeeded.
+    assert mutating.save_state_calls == 1
+    # But the post-save fingerprint recheck (PR #258 round-2 P2) caught
+    # the same-manager mutation and refused to mark succeeded.
+    assert rm._durable_kill_switch_bridge_succeeded is False, (
+        "bridge MUST NOT mark succeeded when the same-manager record "
+        "fingerprint changed AFTER save succeeded (PR #258 round-2 P2, "
+        "Codex line 987)"
+    )
+    assert any(
+        "kill_switch_bridge_post_save_fingerprint_mismatch" in rec.message
+        and rec.levelname == "ERROR"
+        for rec in caplog.records
+    ), "same-manager mutation MUST surface as structured ERROR"
+
+
+def test_bridge_total_deadline_default_under_emergency_square_off_threshold():
+    """Sanity: the default deadline must be substantially under the
+    legacy 10s square-off budget so a real outage in production gives
+    operators headroom AND the legacy emergency exit fires within the
+    broker action window."""
+    import app.core.risk_manager as rm_mod
+    assert rm_mod._BRIDGE_TOTAL_DEADLINE_DEFAULT_SECONDS == 5.0
+    assert rm_mod._BRIDGE_TOTAL_DEADLINE_DEFAULT_SECONDS < 10.0
