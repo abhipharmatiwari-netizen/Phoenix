@@ -35,6 +35,11 @@ from app.brokers.base import (
     TimeInForce,
 )
 from app.core.signal_metrics import is_submitted_order_response
+from app.orders.order_state import (
+    OrderLifecycleState,
+    classify_broker_status,
+    is_terminal_fill,
+)
 
 logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -420,6 +425,13 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
             ],
             "short_exit_done": bool(spread.short_exit_done),
             "long_exit_done": bool(spread.long_exit_done),
+            # Issue #262 round-5 (Codex round-4 P1 line 1531): persist
+            # ``force_exit_required`` so that after a process restart in a
+            # failed-condor rollback state the restored ``OpenSpread`` can
+            # still fast-path retries through ``_maybe_manage_exits``. Without
+            # this, the flag would default to False and the spread would only
+            # be retried when TP/SL/EOD triggered a normal exit decision.
+            "force_exit_required": bool(spread.force_exit_required),
             "managed_exit_mode": "strategy",
             "broker_brackets_enabled": False,
         }
@@ -534,6 +546,12 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
         ]
         short_exit_done = parse_bool(base_context.get("short_exit_done"), default=False)
         long_exit_done = parse_bool(base_context.get("long_exit_done"), default=False)
+        # Issue #262 round-5 (Codex round-4 P1 line 1531): restore the
+        # rollback-pending flag so a process restart inside a failed-condor
+        # rollback continues to fast-path retries via _maybe_manage_exits.
+        force_exit_required = parse_bool(
+            base_context.get("force_exit_required"), default=False
+        )
         entry_time_candidates = [
             parse_datetime(item.get("entry", {}).get("entry_ts")) for item in entries
         ]
@@ -682,6 +700,7 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
             extra_legs=extra_legs,
             short_exit_done=bool(short_exit_done),
             long_exit_done=bool(long_exit_done),
+            force_exit_required=bool(force_exit_required),
         )
 
     def _restore_legacy_spreads(self, entries: List[Dict[str, Any]]) -> List[OpenSpread]:
@@ -1448,37 +1467,39 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
                 put_long_label, "SELL", self._qty_for_label(put_long_label),
             )
 
-            # Issue #262 round-3 (Codex round-2 P1 #1): treat any
-            # broker-submitted status as "submitted", not just the strict
-            # {ACCEPTED, FILLED, COMPLETE} set. ``is_submitted_order_response``
-            # is the canonical predicate used elsewhere in the platform and
-            # also recognises Angel's ``SUCCESS`` and other normalised
-            # placement statuses.
-            def _is_submitted(resp: Optional[OrderResponse]) -> bool:
-                if resp is None:
-                    return False
-                return is_submitted_order_response(
-                    status=getattr(resp, "status", ""),
-                    broker_order_id=getattr(resp, "broker_order_id", ""),
-                )
-
-            # Issue #262 round-3 (Codex round-2 P1 #2): only treat the
-            # rollback as "complete" (safe to drop the spread shell) when
-            # both legs reach a terminal fill status. ``ACCEPTED`` /
-            # ``SUCCESS`` means the broker accepted the order, not that it
-            # filled — if the order later cancels or fails, dropping the
-            # spread state here would orphan the live PUT exposure beyond
-            # ``_maybe_manage_exits``'s reach.
+            # Issue #262 round-5: classify each leg's response via the
+            # canonical ``classify_broker_status`` map in
+            # ``app/orders/order_state.py`` so the rollback path recognises
+            # every fill spelling the platform already treats as filled
+            # (FILLED, COMPLETE, COMPLETED, FULL, EXECUTED) and every
+            # rejection spelling (REJECTED, FAILED, ERROR, etc.). Round-4
+            # used a hand-rolled subset that omitted FULL / EXECUTED and
+            # would have force-retried legs that were already fully closed
+            # (Codex round-4 P1 line 1476).
             def _is_filled(resp: Optional[OrderResponse]) -> bool:
                 if resp is None:
                     return False
-                status = str(getattr(resp, "status", "") or "").upper()
-                return status in {"FILLED", "COMPLETE", "COMPLETED"}
+                return is_terminal_fill(
+                    classify_broker_status(getattr(resp, "status", ""))
+                )
+
+            def _is_rejected(resp: Optional[OrderResponse]) -> bool:
+                # A missing response is treated as rejected for safety
+                # (caller-side retry).
+                if resp is None:
+                    return True
+                state = classify_broker_status(getattr(resp, "status", ""))
+                return state in {
+                    OrderLifecycleState.REJECTED,
+                    OrderLifecycleState.FAILED,
+                    OrderLifecycleState.CANCELLED,
+                    OrderLifecycleState.EXPIRED,
+                }
 
             short_filled = _is_filled(put_short_resp)
             long_filled = _is_filled(put_long_resp)
-            short_submitted = _is_submitted(put_short_resp)
-            long_submitted = _is_submitted(put_long_resp)
+            short_rejected = _is_rejected(put_short_resp)
+            long_rejected = _is_rejected(put_long_resp)
 
             if short_filled and long_filled:
                 # Both rollback legs reached a terminal fill — safe to drop
@@ -1532,11 +1553,11 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
             self._log_signal_evaluation(
                 "condor_call_side_failed_rollback_partial",
                 put_short=put_short_label,
-                put_short_submitted=short_submitted,
+                put_short_rejected=short_rejected,
                 put_short_filled=short_filled,
                 put_short_status=str(getattr(put_short_resp, "status", "") or "") if put_short_resp else "",
                 put_long=put_long_label,
-                put_long_submitted=long_submitted,
+                put_long_rejected=long_rejected,
                 put_long_filled=long_filled,
                 put_long_status=str(getattr(put_long_resp, "status", "") or "") if put_long_resp else "",
                 call_short=call_short_label,
@@ -1545,11 +1566,23 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
                 force_exit_required=True,
             )
 
-            # Force an immediate retry of any still-open leg via the
-            # normal exit path. ``_exit_spread`` honours its own
-            # backoff/circuit-breaker, so calling it here just shifts the
-            # next-bar retry to a same-bar retry.
-            self._exit_spread(put_spread_id)
+            # Issue #262 round-5 (Codex round-4 P1 line 1552): only fire
+            # the same-bar ``_exit_spread`` retry when every non-FILLED
+            # leg is REJECTED. Otherwise the retry would re-submit a leg
+            # that the broker has already accepted but not yet filled
+            # (Angel ``SUCCESS``/``ACCEPTED``), risking double execution.
+            # When at least one leg is in the SUBMITTED-but-not-FILLED
+            # state, defer to the next-bar ``_maybe_manage_exits``
+            # fast-path (via ``force_exit_required = True``) which gives
+            # the original broker submission time to reach a terminal
+            # state before we retry.
+            non_filled_legs_all_rejected = (
+                (short_filled or short_rejected)
+                and (long_filled or long_rejected)
+                and (short_rejected or long_rejected)
+            )
+            if non_filled_legs_all_rejected:
+                self._exit_spread(put_spread_id)
             return
         # Full condor (all 4 legs) is in place -- emit the unambiguous
         # full-spread-opened signal. (Codex P2 round-3 #1.)
@@ -1888,17 +1921,23 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
         status_short = "SKIPPED"
         status_long = "SKIPPED"
         state_changed = False
-        # Issue #262 round-4: for spreads marked ``force_exit_required``
-        # (failed-condor rollback follow-up), require a strict FILLED /
-        # COMPLETE status before flipping ``*_exit_done = True``. The
-        # default codebase semantic ("submit = done") would otherwise
-        # cause ``_exit_spread`` to pop the spread on the next bar after
-        # a SUCCESS submission, recreating the orphan-exposure case.
-        terminal_statuses = (
-            {"FILLED", "COMPLETE", "COMPLETED"}
-            if spread.force_exit_required
-            else None
-        )
+        # Issue #262 round-5 (Codex round-4 P1 line 1900): for spreads
+        # marked ``force_exit_required`` (failed-condor rollback
+        # follow-up), require a CANONICAL terminal-FILL status before
+        # flipping ``*_exit_done = True``. ``is_terminal_fill`` /
+        # ``classify_broker_status`` recognise every fill spelling the
+        # platform supports (FILLED, COMPLETE, COMPLETED, FULL, EXECUTED)
+        # — round-4 used a hand-rolled subset that would have left
+        # FULL/EXECUTED responses stuck in retry loops. The default
+        # codebase semantic ("any non-rejected = submitted = done") is
+        # preserved for regular exits.
+        force_exit_strict = bool(spread.force_exit_required)
+
+        def _leg_is_terminal(status: str) -> bool:
+            if force_exit_strict:
+                return is_terminal_fill(classify_broker_status(status))
+            return status.upper() not in {"REJECTED", "FAILED"}
+
         try:
             if not spread.short_exit_done:
                 sp_price = self._latest_price(spread.short_leg.label) or 0.0
@@ -1914,12 +1953,7 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
                     symbol_token=spread.short_leg.symbol_token,
                 )
                 status_short = str(getattr(resp_short, "status", "")).upper()
-                short_terminal = (
-                    status_short in terminal_statuses
-                    if terminal_statuses is not None
-                    else status_short not in {"REJECTED", "FAILED"}
-                )
-                if short_terminal:
+                if _leg_is_terminal(status_short):
                     spread.short_exit_done = True
                     state_changed = True
             if not spread.long_exit_done:
@@ -1936,12 +1970,7 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
                     symbol_token=spread.long_leg.symbol_token,
                 )
                 status_long = str(getattr(resp_long, "status", "")).upper()
-                long_terminal = (
-                    status_long in terminal_statuses
-                    if terminal_statuses is not None
-                    else status_long not in {"REJECTED", "FAILED"}
-                )
-                if long_terminal:
+                if _leg_is_terminal(status_long):
                     spread.long_exit_done = True
                     state_changed = True
         except Exception:

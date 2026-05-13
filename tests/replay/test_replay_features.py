@@ -1900,6 +1900,142 @@ def test_nifty_spread_replay_iron_condor_rollback_success_status_is_submitted(mo
         "rollback did not terminate cleanly — force_exit_required must be "
         "set so _maybe_manage_exits keeps retrying (Codex round-3 P1)."
     )
+    # Round-5 contract (Codex round-4 P1 line 1552): when BOTH legs are in
+    # the SUBMITTED-but-not-FILLED state (status=SUCCESS maps to ACKED),
+    # the rollback path must NOT fire a same-bar _exit_spread retry.
+    # Otherwise the still-pending broker orders would be re-submitted,
+    # risking double execution if both copies later fill. The defer-to-
+    # next-bar path lets the original submissions reach a terminal state
+    # before any retry.
+    exit_orders = [e for e in placed if e["purpose"] == "EXIT"]
+    short_exits = [e for e in exit_orders if e["label"] == "NIFTY_PE_19550"]
+    long_exits = [e for e in exit_orders if e["label"] == "NIFTY_PE_19250"]
+    assert len(short_exits) == 1, (
+        "Both rollback EXITs returned SUCCESS (submitted-not-filled). "
+        "Round-5 must NOT same-bar-retry the PUT-short EXIT — the original "
+        "submission is still pending; got "
+        f"{short_exits!r}"
+    )
+    assert len(long_exits) == 1, (
+        "Both rollback EXITs returned SUCCESS (submitted-not-filled). "
+        "Round-5 must NOT same-bar-retry the PUT-long EXIT — the original "
+        "submission is still pending; got "
+        f"{long_exits!r}"
+    )
+
+
+def test_nifty_spread_replay_iron_condor_rollback_full_status_is_filled(monkeypatch):
+    """Issue #262 round-5 (Codex round-4 P1 line 1476): _is_filled / _exit_spread
+    must accept ALL canonical fill spellings recognised by
+    ``app.orders.order_state._BROKER_STATUS_MAP``: FILLED, COMPLETE, COMPLETED,
+    FULL, EXECUTED. The round-4 hand-rolled set omitted FULL/EXECUTED, so a
+    broker returning FULL/EXECUTED for both rollback EXITs would be misclassified
+    as partial rollback and trigger an unnecessary retry.
+    """
+    strategy, fixed_now = _iron_condor_rollback_strategy()
+    placed: list[Any] = []
+
+    def _capture_place_order(*, label, side, qty, price, tag, purpose, **kwargs):
+        del kwargs
+        purpose_text = purpose.value if hasattr(purpose, "value") else str(purpose)
+        placed.append({"label": label, "side": side, "purpose": purpose_text})
+        if purpose_text == "ENTRY" and "CE" in str(label):
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_call_leg_failure",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        # Rollback EXITs return FULL (one of the canonical fill spellings).
+        if purpose_text == "EXIT":
+            return OrderResponse(
+                broker_order_id=f"REPLAY_{len(placed)}",
+                status="FULL",
+                message="filled",
+                filled_quantity=int(qty),
+                average_price=float(price or 0.0),
+                requested_quantity=int(qty),
+            )
+        return OrderResponse(
+            broker_order_id=f"REPLAY_{len(placed)}",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=int(qty),
+            average_price=float(price or 0.0),
+            requested_quantity=int(qty),
+        )
+
+    monkeypatch.setattr(strategy, "_place_order", _capture_place_order)
+    strategy._try_iron_condor(spot=19800.0, expiry=fixed_now.date())
+
+    # FULL is canonically a terminal fill — rollback must pop the
+    # orphan PUT-spread shell as if it had returned COMPLETE.
+    assert strategy.open_spreads == {}, (
+        "FULL is a canonical terminal-fill status (per _BROKER_STATUS_MAP); "
+        "the rollback must pop the orphan PUT-spread shell. "
+        f"Codex round-4 P1 line 1476. Got {list(strategy.open_spreads.keys())!r}"
+    )
+
+
+def test_nifty_spread_replay_iron_condor_rollback_persists_force_exit_required(monkeypatch):
+    """Issue #262 round-5 (Codex round-4 P1 line 1531): force_exit_required must
+    survive a process restart. ``_spread_leg_strategy_context`` serialises the
+    flag and ``_restore_spread_from_entries`` reads it back. Without persistence
+    a restart mid-rollback would lose the fast-path-retry signal and the failed-
+    condor PUT exposure would only be retried when TP/SL/EOD triggered.
+    """
+    strategy, fixed_now = _iron_condor_rollback_strategy()
+    placed: list[Any] = []
+
+    def _capture_place_order(*, label, side, qty, price, tag, purpose, **kwargs):
+        del kwargs
+        purpose_text = purpose.value if hasattr(purpose, "value") else str(purpose)
+        placed.append({"label": label, "side": side, "purpose": purpose_text})
+        if purpose_text == "ENTRY" and "CE" in str(label):
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_call_leg_failure",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        # Both rollback EXITs accepted but not filled — sets force_exit_required.
+        if purpose_text == "EXIT":
+            return OrderResponse(
+                broker_order_id=f"REPLAY_{len(placed)}",
+                status="SUCCESS",
+                message="ok",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        return OrderResponse(
+            broker_order_id=f"REPLAY_{len(placed)}",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=int(qty),
+            average_price=float(price or 0.0),
+            requested_quantity=int(qty),
+        )
+
+    monkeypatch.setattr(strategy, "_place_order", _capture_place_order)
+    strategy._try_iron_condor(spot=19800.0, expiry=fixed_now.date())
+
+    put_spread = next(iter(strategy.open_spreads.values()))
+    assert put_spread.force_exit_required is True
+
+    # Serialise to the per-leg strategy_context that gets written to the
+    # restart-recovery store. force_exit_required must be present.
+    ctx_short = strategy._spread_leg_strategy_context(put_spread, leg_role="short")
+    ctx_long = strategy._spread_leg_strategy_context(put_spread, leg_role="long")
+    assert ctx_short.get("force_exit_required") is True, (
+        "_spread_leg_strategy_context must serialise force_exit_required "
+        "(Codex round-4 P1 line 1531)"
+    )
+    assert ctx_long.get("force_exit_required") is True
 
 
 def test_nifty_spread_replay_iron_condor_rollback_both_rejected_forces_retry(monkeypatch):
