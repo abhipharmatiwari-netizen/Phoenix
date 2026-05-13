@@ -91,7 +91,14 @@ x-live-backend-env: &live-backend-env
   USE_HUB_ROUTER_FOR_MIDCPNIFTY_OPTIONS: "true"
   USE_HUB_ROUTER_FOR_NG_OPTIONS: "true"
   AUTO_STRATEGY_SELECT_ENABLED: "true"
-  AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING: "${AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING:-2}"
+  # Must be 3 (or higher) to fit the NIFTY direction-aware regime mapping
+  # in app/config/strategy_env.yaml (TRENDING_UP / TRENDING_DOWN list 3
+  # strategies: direction-matched, opposite-direction-for-management,
+  # spread). Lower caps truncate the spread out of the selection and
+  # break SL/TP/EOD management of any spread carried into TRENDING_UP/DOWN.
+  # See issue #212 / PR #265 + Codex round-4 P1. Matches the safe default
+  # raised in app/config/settings.py.
+  AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING: "${AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING:-3}"
   AUTO_STRATEGY_MIN_HOLD_SECONDS: "${AUTO_STRATEGY_MIN_HOLD_SECONDS:-180}"
 
   TRADE_MODE: "LIVE"

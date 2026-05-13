@@ -104,6 +104,16 @@ _LIVE_PROTECTED_OVERRIDE_KEYS = {
     "capital_margin_short_option_per_lot",
     "capital_margin_futures_per_lot",
     "capital_margin_futures_rate",
+    # Issue #212 / PR #265 round-5 (Codex round-4 P1
+    # "Protect runtime cap overrides from dropping spread management"):
+    # the NIFTY direction-aware mapping lists 3 strategies per
+    # TRENDING_UP / TRENDING_DOWN split. A runtime override that lowers
+    # ``auto_strategy_max_active_per_underlying`` would truncate the
+    # spread strategy out of selection and lose SL/TP/EOD management of
+    # any spread carried into the trending regime. Protect the value in
+    # LIVE so runtime config providers cannot regress the safe default
+    # without break-glass approval.
+    "auto_strategy_max_active_per_underlying",
 }
 
 _LIVE_BREAK_GLASS_FLAG_ENV = "LIVE_RUNTIME_OVERRIDE_BREAK_GLASS"
@@ -180,6 +190,22 @@ def _live_break_glass_status() -> tuple[bool, dict[str, Any]]:
     return True, metadata
 
 
+# Issue #212 / PR #265 round-9 (Codex round-8 P2 "Allow safe cap raises
+# from runtime config"): for keys where a higher value is strictly safer
+# (e.g. ``auto_strategy_max_active_per_underlying`` — raising the cap
+# can only INCLUDE more strategies in the selection and never truncate
+# any), allow runtime config to push the value UP without break-glass
+# while continuing to reject downward overrides. Without this, an
+# operator whose unversioned deploy env still pins the legacy cap=2
+# cannot use runtime config to safely raise it to 3 (the value the new
+# NIFTY direction-aware mapping needs) without break-glass approval.
+_LIVE_PROTECTED_OVERRIDE_KEYS_UPWARD_SAFE: frozenset[str] = frozenset(
+    {
+        "auto_strategy_max_active_per_underlying",
+    }
+)
+
+
 def _live_override_violations(
     *,
     base_settings: Settings,
@@ -193,6 +219,21 @@ def _live_override_violations(
         base_value = getattr(base_settings, key, None)
         if override_value == base_value:
             continue
+        # Allow strictly-safer upward overrides for whitelisted numeric
+        # keys (see _LIVE_PROTECTED_OVERRIDE_KEYS_UPWARD_SAFE).
+        if key in _LIVE_PROTECTED_OVERRIDE_KEYS_UPWARD_SAFE:
+            try:
+                override_num = float(override_value)  # type: ignore[arg-type]
+                base_num = float(base_value)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                override_num = None  # type: ignore[assignment]
+                base_num = None  # type: ignore[assignment]
+            if (
+                override_num is not None
+                and base_num is not None
+                and override_num >= base_num
+            ):
+                continue
         violations[key] = {
             "base": base_value,
             "override": override_value,

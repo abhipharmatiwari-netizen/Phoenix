@@ -861,7 +861,81 @@ strategy_selection:
       #    replay (#214) and direction-filtering already blocks it
       #    on bear days; promoting the spread here is the higher-
       #    value choice for this PR's diagnostic goal.
-      TRENDING: ["nifty_weekly_credit_spreads", "put_momentum_scalper", "exclusive_nifty_ce_buy"]
+      #
+      # 5. TRENDING_UP / TRENDING_DOWN keys (issue #212) make the
+      #    direction-conditional intent explicit. Each split lists THREE
+      #    strategies — direction-matched first, opposite-direction
+      #    second, spread third:
+      #      - TRENDING_UP:   [exclusive_nifty_ce_buy (long CE), put_momentum_scalper, spread]
+      #      - TRENDING_DOWN: [put_momentum_scalper (long PE), exclusive_nifty_ce_buy, spread]
+      #
+      #    ==================================================================
+      #    REQUIRED: AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING >= 3
+      #    ==================================================================
+      #    The selector truncates the per-regime list to
+      #    ``AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING`` items, so a cap
+      #    below 3 would drop the spread strategy out of the selection
+      #    and a spread opened during NORMAL/CHOPPY/HIGH_VOL that is
+      #    carried into TRENDING_UP/DOWN would lose its SL/TP/EOD
+      #    management.
+      #
+      #    The committed default in ``app/config/settings.py`` was raised
+      #    from 2 -> 3 (issue #212 / PR #265 round-4) to make this the
+      #    safe default for any deployment that does not explicitly set
+      #    the env var. The OCI live env example
+      #    (``docs/runbooks/oci-live.env.example``) also pins 3 so
+      #    operator-edited copies inherit the correct value.
+      #    Codex round-2 P1 on PR #265 drove this enforcement: a
+      #    comment-only operator note was insufficient because unversioned
+      #    env files could silently miss the override.
+      #    ==================================================================
+      #
+      #    With cap=3 in effect:
+      #      - Position-1 dispatch precedence ensures only the
+      #        direction-matched side gets new ENTRY dispatch when the
+      #        cap is reduced to 1.
+      #      - The OPPOSITE-direction strategy stays selected for
+      #        SL/TP/EOD management of any open position from the prior
+      #        regime (its internal direction-gate self-rejects new
+      #        entries on the wrong side; PR #265 Codex round-1 P1 fix).
+      #      - The spread stays selected for SL/TP/EOD management of
+      #        any open spread carried across the flip (PR #265 Codex
+      #        round-2 P1 fix).
+      #
+      #    Set-membership of the cap=3 selection is identical between
+      #    TRENDING_UP and TRENDING_DOWN — only the ordering differs.
+      #    A fast bull->bear flip during the
+      #    AUTO_STRATEGY_MIN_HOLD_SECONDS hold window therefore does
+      #    not change the actively-dispatched strategy SET; the hold
+      #    cannot defer management coverage (PR #265 Codex round-1
+      #    P2 #2 fix).
+      #
+      #    Legacy TRENDING is retained for backward compatibility when
+      #    the classifier cannot resolve direction (missing +DI/-DI/EMA/
+      #    slope ctx fields — see
+      #    RegimeClassifier._directional_trending_regime).
+      # PR #265 round-6 (Codex round-5 P2 "Preserve legacy TRENDING
+      # truncation when raising the cap"): legacy TRENDING was originally
+      # a 3-entry list that the env-default cap=2 truncated to
+      # ``[spread, put_momentum_scalper]``. Round-4 raised the committed
+      # cap to 3 (so the direction-aware splits fit), but that also
+      # dropped the implicit cap=2 truncation on the direction-ambiguous
+      # TRENDING fallback path. Trim legacy TRENDING back to 2 entries so
+      # fallback dispatch matches the pre-#265 behaviour and the
+      # operator's documented intent ("EXCLUSIVE_CE is the truncated one"
+      # in the comment block above).
+      #
+      # PR #265 Codex P1 follow-up: keep exclusive_nifty_ce_buy selected
+      # in HIGH_VOL as the third cap=3 member. A CE can now be opened in
+      # TRENDING_UP, and selector membership gates the strategy's on_bar /
+      # on_tick stop, trail, and EOD management. HIGH_VOL can follow a
+      # bullish trend, so dropping CE there would leave the open CE
+      # unmanaged. Keep spread + put first to preserve the historical
+      # cap=2 prefix; the startup validator requires cap >= 3 when the
+      # selector is enabled so the management member is not truncated.
+      TRENDING: ["nifty_weekly_credit_spreads", "put_momentum_scalper"]
+      TRENDING_UP: ["exclusive_nifty_ce_buy", "put_momentum_scalper", "nifty_weekly_credit_spreads"]
+      TRENDING_DOWN: ["put_momentum_scalper", "exclusive_nifty_ce_buy", "nifty_weekly_credit_spreads"]
       NORMAL: ["nifty_weekly_credit_spreads", "exclusive_nifty_ce_buy"]
       CHOPPY: ["nifty_weekly_credit_spreads", "exclusive_nifty_ce_buy"]
       HIGH_VOL: ["nifty_weekly_credit_spreads", "put_momentum_scalper", "exclusive_nifty_ce_buy"]
