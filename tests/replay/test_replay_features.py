@@ -1648,3 +1648,748 @@ def test_nifty_spread_replay_iron_condor_rollback_emits_put_unwind_fills(monkeyp
     assert ("NIFTY_PE_19250", "SELL") in exit_pairs, (
         f"PUT-long leg must be sold to close; got exits={exit_orders!r}"
     )
+    # Issue #262: the rollback must ALSO remove the orphaned PUT-spread
+    # shell from ``self.open_spreads``. Before the fix, the PUT spread
+    # entry remained in the dict after its legs were force-exited, counting
+    # toward ``max_open_spreads`` and producing stale state in subsequent
+    # bar iterations.
+    assert strategy.open_spreads == {}, (
+        "iron-condor rollback must remove the PUT-spread shell from "
+        f"open_spreads (#262); got {list(strategy.open_spreads.keys())!r}"
+    )
+
+
+def test_nifty_spread_replay_iron_condor_partial_rollback_keeps_spread_tracked(monkeypatch):
+    """Issue #262 round-2: when the iron-condor CALL-side fails AND the
+    broker REJECTS one (or both) of the rollback EXITs on the PUT legs,
+    the spread MUST remain tracked in ``self.open_spreads`` so the
+    normal exit-management path can retry. Without this guard, the live
+    PUT leg would be orphaned (no spread state) and exposure would go
+    unmanaged."""
+
+    fixed_now = datetime(2026, 3, 3, 10, 15, tzinfo=replay_runtime_mod.IST)
+    meta = replay_runtime_mod.build_nifty_spread_instrument_meta(
+        "NIFTY_IDX",
+        65,
+        min_strike=19000,
+        max_strike=21000,
+    )
+    strategy = NiftyWeeklyCreditSpreadStrategy(
+        meta,
+        order_client=None,
+        risk_manager=None,
+        env_prefix="NIFTY_",
+        underlying_label="NIFTY_IDX",
+        params={
+            "account_equity": 10_000_000.0,
+            "lot_size": 65,
+            "min_credit_pct_of_width": 0.05,
+            "min_condor_total_credit_pct": 0.05,
+            "risk_per_trade_pct": 1.0,
+            "max_total_risk_pct": 1.0,
+            "max_open_spreads": 10,
+        },
+    )
+    strategy._now_ist = lambda: fixed_now
+    strategy._find_option_by_strike = lambda strike, side, expiry: f"NIFTY_{side}_{int(strike)}"
+    strategy.last_price.update(
+        {
+            "NIFTY_PE_19550": 200.0,
+            "NIFTY_PE_19250": 50.0,
+            "NIFTY_CE_20050": 200.0,
+            "NIFTY_CE_20350": 50.0,
+        }
+    )
+
+    placed: list[Any] = []
+
+    def _capture_place_order(*, label, side, qty, price, tag, purpose, **kwargs):
+        del kwargs
+        purpose_text = (
+            purpose.value if hasattr(purpose, "value") else str(purpose)
+        )
+        placed.append(
+            {
+                "label": label,
+                "side": side,
+                "qty": qty,
+                "price": price,
+                "tag": tag,
+                "purpose": purpose_text,
+            }
+        )
+        # CALL ENTRY legs fail (triggers the iron-condor rollback path).
+        if purpose_text == "ENTRY" and "CE" in str(label):
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_call_leg_failure",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        # On the rollback path: PUT-short EXIT (BUY) is rejected by the
+        # broker; PUT-long EXIT (SELL) is accepted. This produces the
+        # PARTIAL-ROLLBACK scenario that round-2 must keep tracked.
+        if purpose_text == "EXIT" and label == "NIFTY_PE_19550" and side == "BUY":
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_broker_rejected_put_short_exit",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        return OrderResponse(
+            broker_order_id=f"REPLAY_{len(placed)}",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=int(qty),
+            average_price=float(price or 0.0),
+            requested_quantity=int(qty),
+        )
+
+    monkeypatch.setattr(strategy, "_place_order", _capture_place_order)
+
+    strategy._try_iron_condor(spot=19800.0, expiry=fixed_now.date())
+
+    # The spread MUST still be tracked because at least one rollback EXIT
+    # was broker-rejected. ``_maybe_manage_exits`` needs the spread state
+    # to retry.
+    assert len(strategy.open_spreads) == 1, (
+        "iron-condor partial-rollback must keep the spread tracked when "
+        f"any rollback EXIT is broker-rejected (#262 round-2); "
+        f"got {list(strategy.open_spreads.keys())!r}"
+    )
+    put_spread = next(iter(strategy.open_spreads.values()))
+    # The successful PUT-long EXIT (SELL) returned COMPLETE which IS a
+    # terminal fill — long_exit_done must be True (Codex round-3 contract).
+    assert put_spread.long_exit_done is True, (
+        "PUT-long EXIT returned COMPLETE (terminal fill); long_exit_done "
+        "must be True"
+    )
+    # The rejected PUT-short EXIT (BUY) must leave short_exit_done=False
+    # so the management path retries it on the next bar.
+    assert put_spread.short_exit_done is False, (
+        "PUT-short EXIT was broker-rejected; short_exit_done must remain "
+        "False so _maybe_manage_exits retries"
+    )
+    # Round-4: the rollback did not terminate cleanly so force_exit_required
+    # must be set; _maybe_manage_exits uses this to fast-path retry.
+    assert put_spread.force_exit_required is True, (
+        "rollback did not terminate cleanly — force_exit_required must be "
+        "set (Codex round-3 P1)"
+    )
+
+
+def _iron_condor_rollback_strategy(monkeypatch_ignored=None):
+    """Shared setup helper for Codex round-2 P1 regression tests.
+
+    Returns a configured strategy + a placed[] sink. The caller monkey-patches
+    ``strategy._place_order`` with a custom capture function that controls the
+    broker response per-leg.
+    """
+    fixed_now = datetime(2026, 3, 3, 10, 15, tzinfo=replay_runtime_mod.IST)
+    meta = replay_runtime_mod.build_nifty_spread_instrument_meta(
+        "NIFTY_IDX",
+        65,
+        min_strike=19000,
+        max_strike=21000,
+    )
+    strategy = NiftyWeeklyCreditSpreadStrategy(
+        meta,
+        order_client=None,
+        risk_manager=None,
+        env_prefix="NIFTY_",
+        underlying_label="NIFTY_IDX",
+        params={
+            "account_equity": 10_000_000.0,
+            "lot_size": 65,
+            "min_credit_pct_of_width": 0.05,
+            "min_condor_total_credit_pct": 0.05,
+            "risk_per_trade_pct": 1.0,
+            "max_total_risk_pct": 1.0,
+            "max_open_spreads": 10,
+        },
+    )
+    strategy._now_ist = lambda: fixed_now
+    strategy._find_option_by_strike = lambda strike, side, expiry: f"NIFTY_{side}_{int(strike)}"
+    strategy.last_price.update(
+        {
+            "NIFTY_PE_19550": 200.0,
+            "NIFTY_PE_19250": 50.0,
+            "NIFTY_CE_20050": 200.0,
+            "NIFTY_CE_20350": 50.0,
+        }
+    )
+    return strategy, fixed_now
+
+
+def test_nifty_spread_replay_iron_condor_rollback_success_status_is_submitted(monkeypatch):
+    """Issue #262 round-3 (Codex round-2 P1 #1): the rollback path must
+    treat any broker-submitted status as submitted, not only the strict
+    {ACCEPTED, FILLED, COMPLETE} set. Angel SmartAPI normalises successful
+    placements to ``SUCCESS`` (``app/brokers/angel_client.py`` line 1882);
+    a too-strict acceptance check misclassifies real submissions as
+    rejections and double-submits the rollback EXITs.
+    """
+    strategy, fixed_now = _iron_condor_rollback_strategy()
+    placed: list[Any] = []
+
+    def _capture_place_order(*, label, side, qty, price, tag, purpose, **kwargs):
+        del kwargs
+        purpose_text = purpose.value if hasattr(purpose, "value") else str(purpose)
+        placed.append({"label": label, "side": side, "purpose": purpose_text})
+        if purpose_text == "ENTRY" and "CE" in str(label):
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_call_leg_failure",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        # Rollback EXITs return Angel-style "SUCCESS" (submitted but not
+        # yet filled). The round-3 fix must classify SUCCESS as submitted.
+        if purpose_text == "EXIT":
+            return OrderResponse(
+                broker_order_id=f"REPLAY_{len(placed)}",
+                status="SUCCESS",
+                message="ok",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        return OrderResponse(
+            broker_order_id=f"REPLAY_{len(placed)}",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=int(qty),
+            average_price=float(price or 0.0),
+            requested_quantity=int(qty),
+        )
+
+    monkeypatch.setattr(strategy, "_place_order", _capture_place_order)
+    strategy._try_iron_condor(spot=19800.0, expiry=fixed_now.date())
+
+    # Both rollback EXITs returned SUCCESS (submitted, not filled).
+    # Round-4 contract (Codex round-3 P1): SUCCESS is NOT a terminal fill,
+    # so ``*_exit_done`` stays False for the rollback path (preventing the
+    # round-3 orphan-pop scenario where the spread would be popped on
+    # next bar via _exit_spread). The spread is kept tracked with
+    # ``force_exit_required = True`` so _maybe_manage_exits / _exit_spread
+    # continue to drive retries until fills are confirmed or operator
+    # intervention.
+    assert len(strategy.open_spreads) == 1, (
+        "SUCCESS-returning rollback EXITs must keep the spread tracked "
+        "until FILLED is confirmed (Codex round-2 P1 #2); "
+        f"got {list(strategy.open_spreads.keys())!r}"
+    )
+    put_spread = next(iter(strategy.open_spreads.values()))
+    assert put_spread.short_exit_done is False, (
+        "PUT-short EXIT returned SUCCESS (submitted, not FILLED). For "
+        "force_exit_required spreads, *_exit_done must remain False until "
+        "a terminal FILL is confirmed (Codex round-3 P1)."
+    )
+    assert put_spread.long_exit_done is False, (
+        "PUT-long EXIT returned SUCCESS (submitted, not FILLED). For "
+        "force_exit_required spreads, *_exit_done must remain False until "
+        "a terminal FILL is confirmed (Codex round-3 P1)."
+    )
+    assert put_spread.force_exit_required is True, (
+        "rollback did not terminate cleanly — force_exit_required must be "
+        "set so _maybe_manage_exits keeps retrying (Codex round-3 P1)."
+    )
+    # Round-5 contract (Codex round-4 P1 line 1552): when BOTH legs are in
+    # the SUBMITTED-but-not-FILLED state (status=SUCCESS maps to ACKED),
+    # the rollback path must NOT fire a same-bar _exit_spread retry.
+    # Otherwise the still-pending broker orders would be re-submitted,
+    # risking double execution if both copies later fill. The defer-to-
+    # next-bar path lets the original submissions reach a terminal state
+    # before any retry.
+    exit_orders = [e for e in placed if e["purpose"] == "EXIT"]
+    short_exits = [e for e in exit_orders if e["label"] == "NIFTY_PE_19550"]
+    long_exits = [e for e in exit_orders if e["label"] == "NIFTY_PE_19250"]
+    assert len(short_exits) == 1, (
+        "Both rollback EXITs returned SUCCESS (submitted-not-filled). "
+        "Round-5 must NOT same-bar-retry the PUT-short EXIT — the original "
+        "submission is still pending; got "
+        f"{short_exits!r}"
+    )
+    assert len(long_exits) == 1, (
+        "Both rollback EXITs returned SUCCESS (submitted-not-filled). "
+        "Round-5 must NOT same-bar-retry the PUT-long EXIT — the original "
+        "submission is still pending; got "
+        f"{long_exits!r}"
+    )
+
+
+def test_nifty_spread_replay_iron_condor_rollback_full_status_is_filled(monkeypatch):
+    """Issue #262 round-5 (Codex round-4 P1 line 1476): _is_filled / _exit_spread
+    must accept ALL canonical fill spellings recognised by
+    ``app.orders.order_state._BROKER_STATUS_MAP``: FILLED, COMPLETE, COMPLETED,
+    FULL, EXECUTED. The round-4 hand-rolled set omitted FULL/EXECUTED, so a
+    broker returning FULL/EXECUTED for both rollback EXITs would be misclassified
+    as partial rollback and trigger an unnecessary retry.
+    """
+    strategy, fixed_now = _iron_condor_rollback_strategy()
+    placed: list[Any] = []
+
+    def _capture_place_order(*, label, side, qty, price, tag, purpose, **kwargs):
+        del kwargs
+        purpose_text = purpose.value if hasattr(purpose, "value") else str(purpose)
+        placed.append({"label": label, "side": side, "purpose": purpose_text})
+        if purpose_text == "ENTRY" and "CE" in str(label):
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_call_leg_failure",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        # Rollback EXITs return FULL (one of the canonical fill spellings).
+        if purpose_text == "EXIT":
+            return OrderResponse(
+                broker_order_id=f"REPLAY_{len(placed)}",
+                status="FULL",
+                message="filled",
+                filled_quantity=int(qty),
+                average_price=float(price or 0.0),
+                requested_quantity=int(qty),
+            )
+        return OrderResponse(
+            broker_order_id=f"REPLAY_{len(placed)}",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=int(qty),
+            average_price=float(price or 0.0),
+            requested_quantity=int(qty),
+        )
+
+    monkeypatch.setattr(strategy, "_place_order", _capture_place_order)
+    strategy._try_iron_condor(spot=19800.0, expiry=fixed_now.date())
+
+    # FULL is canonically a terminal fill — rollback must pop the
+    # orphan PUT-spread shell as if it had returned COMPLETE.
+    assert strategy.open_spreads == {}, (
+        "FULL is a canonical terminal-fill status (per _BROKER_STATUS_MAP); "
+        "the rollback must pop the orphan PUT-spread shell. "
+        f"Codex round-4 P1 line 1476. Got {list(strategy.open_spreads.keys())!r}"
+    )
+
+
+def test_nifty_spread_replay_iron_condor_rollback_persists_force_exit_required(monkeypatch):
+    """Issue #262 round-5 (Codex round-4 P1 line 1531): force_exit_required must
+    survive a process restart. ``_spread_leg_strategy_context`` serialises the
+    flag and ``_restore_spread_from_entries`` reads it back. Without persistence
+    a restart mid-rollback would lose the fast-path-retry signal and the failed-
+    condor PUT exposure would only be retried when TP/SL/EOD triggered.
+    """
+    strategy, fixed_now = _iron_condor_rollback_strategy()
+    placed: list[Any] = []
+
+    def _capture_place_order(*, label, side, qty, price, tag, purpose, **kwargs):
+        del kwargs
+        purpose_text = purpose.value if hasattr(purpose, "value") else str(purpose)
+        placed.append({"label": label, "side": side, "purpose": purpose_text})
+        if purpose_text == "ENTRY" and "CE" in str(label):
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_call_leg_failure",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        # Both rollback EXITs accepted but not filled — sets force_exit_required.
+        if purpose_text == "EXIT":
+            return OrderResponse(
+                broker_order_id=f"REPLAY_{len(placed)}",
+                status="SUCCESS",
+                message="ok",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        return OrderResponse(
+            broker_order_id=f"REPLAY_{len(placed)}",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=int(qty),
+            average_price=float(price or 0.0),
+            requested_quantity=int(qty),
+        )
+
+    monkeypatch.setattr(strategy, "_place_order", _capture_place_order)
+    strategy._try_iron_condor(spot=19800.0, expiry=fixed_now.date())
+
+    put_spread = next(iter(strategy.open_spreads.values()))
+    assert put_spread.force_exit_required is True
+
+    # Serialise to the per-leg strategy_context that gets written to the
+    # restart-recovery store. force_exit_required must be present.
+    ctx_short = strategy._spread_leg_strategy_context(put_spread, leg_role="short")
+    ctx_long = strategy._spread_leg_strategy_context(put_spread, leg_role="long")
+    assert ctx_short.get("force_exit_required") is True, (
+        "_spread_leg_strategy_context must serialise force_exit_required "
+        "(Codex round-4 P1 line 1531)"
+    )
+    assert ctx_long.get("force_exit_required") is True
+
+
+def test_nifty_spread_replay_iron_condor_rollback_syncs_risk_manager_on_force_exit(monkeypatch):
+    """Issue #262 round-6 (Codex round-5 P1 line 1551 "Persist forced rollback
+    state when setting it"): when the rollback partial branch sets
+    ``force_exit_required = True``, it must call
+    ``_sync_spread_state_to_risk_manager`` so the new state is flushed to the
+    persistence layer. Without this, a process restart between the rollback
+    branch and the next manage cycle would restore the old entry context
+    (written by ``_enter_spread`` with ``force_exit_required = False``) and
+    lose the fast-path-retry signal.
+    """
+    strategy, fixed_now = _iron_condor_rollback_strategy()
+
+    def _capture_place_order(*, label, side, qty, price, tag, purpose, **kwargs):
+        del kwargs
+        purpose_text = purpose.value if hasattr(purpose, "value") else str(purpose)
+        if purpose_text == "ENTRY" and "CE" in str(label):
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_call_leg_failure",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        if purpose_text == "EXIT":
+            # Submitted-but-not-filled rollback (round-5 path skips
+            # same-bar _exit_spread so persistence sync is the ONLY way
+            # the new force_exit_required state reaches the persistence
+            # store before the next bar).
+            return OrderResponse(
+                broker_order_id="REPLAY_PENDING",
+                status="SUCCESS",
+                message="ok",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        return OrderResponse(
+            broker_order_id="REPLAY_OK",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=int(qty),
+            average_price=float(price or 0.0),
+            requested_quantity=int(qty),
+        )
+
+    monkeypatch.setattr(strategy, "_place_order", _capture_place_order)
+
+    sync_calls: list[Any] = []
+    original_sync = strategy._sync_spread_state_to_risk_manager
+
+    def _capture_sync(spread):
+        sync_calls.append({
+            "spread_id": spread.spread_id,
+            "force_exit_required": bool(spread.force_exit_required),
+            "short_exit_done": bool(spread.short_exit_done),
+            "long_exit_done": bool(spread.long_exit_done),
+        })
+        return original_sync(spread)
+
+    monkeypatch.setattr(strategy, "_sync_spread_state_to_risk_manager", _capture_sync)
+
+    strategy._try_iron_condor(spot=19800.0, expiry=fixed_now.date())
+
+    # The rollback partial branch must have called the persistence sync
+    # AT LEAST ONCE with force_exit_required = True. (Round-6 also calls
+    # it via _exit_spread on any subsequent same-bar retry — that path
+    # is not exercised here because both EXITs returned SUCCESS, which
+    # leaves the same-bar retry off per round-5 design.)
+    force_exit_syncs = [c for c in sync_calls if c["force_exit_required"]]
+    assert force_exit_syncs, (
+        "Rollback partial branch must call _sync_spread_state_to_risk_manager "
+        "after setting force_exit_required=True so persistence captures the "
+        "new state (Codex round-5 P1 line 1551). Got sync_calls="
+        f"{sync_calls!r}"
+    )
+
+
+def test_nifty_spread_replay_iron_condor_partial_fill_retries_only_remainder(monkeypatch):
+    """Issue #262 round-6 (Codex round-5 P1 line 1937): under the strict
+    ``force_exit_required`` path in ``_exit_spread``, a broker
+    ``PARTIAL_FILL`` response must update the leg's effective qty so the
+    next retry submits only the unfilled remainder. Without this, the
+    next retry would re-submit the FULL original qty and over-close
+    (or even reverse) the already-filled units.
+    """
+    strategy, fixed_now = _iron_condor_rollback_strategy()
+    placed: list[Any] = []
+
+    # The strategy creates a PUT spread; rollback gets triggered by CALL
+    # REJECTED. We arrange BOTH rollback EXITs as REJECTED so the
+    # round-5 path fires the same-bar _exit_spread retry. On that retry
+    # the broker returns PARTIAL for the short PUT leg (1 of 65 lots
+    # filled) and FILLED for the long PUT leg. Round-6 must shrink the
+    # short leg qty from 65 -> 64 so a subsequent retry submits qty=64.
+    short_label = "NIFTY_PE_19550"
+    long_label = "NIFTY_PE_19250"
+    short_exit_attempt = {"n": 0}
+
+    def _capture_place_order(*, label, side, qty, price, tag, purpose, **kwargs):
+        del kwargs
+        purpose_text = purpose.value if hasattr(purpose, "value") else str(purpose)
+        placed.append({"label": label, "side": side, "qty": int(qty), "purpose": purpose_text})
+        if purpose_text == "ENTRY" and "CE" in str(label):
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_call_leg_failure",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        if purpose_text == "EXIT" and label == short_label and side == "BUY":
+            short_exit_attempt["n"] += 1
+            if short_exit_attempt["n"] == 1:
+                # First rollback EXIT for the short leg: broker REJECTED.
+                # Triggers round-5 same-bar _exit_spread retry.
+                return OrderResponse(
+                    broker_order_id="",
+                    status="REJECTED",
+                    message="simulated_rejected",
+                    filled_quantity=0,
+                    average_price=None,
+                    requested_quantity=int(qty),
+                )
+            # Same-bar _exit_spread retry returns PARTIAL_FILL (1 of qty).
+            return OrderResponse(
+                broker_order_id="REPLAY_PARTIAL",
+                status="PARTIAL",
+                message="partial",
+                filled_quantity=1,
+                average_price=float(price or 0.0),
+                requested_quantity=int(qty),
+            )
+        # Long leg behaves normally: REJECTED on first try (rollback),
+        # FILLED on retry. We only care about the short leg's qty
+        # tracking, but the long leg must also reach a terminal state
+        # for the test to be deterministic.
+        if purpose_text == "EXIT" and label == long_label and side == "SELL":
+            return OrderResponse(
+                broker_order_id="REPLAY_LONG",
+                status="COMPLETE",
+                message="filled",
+                filled_quantity=int(qty),
+                average_price=float(price or 0.0),
+                requested_quantity=int(qty),
+            )
+        return OrderResponse(
+            broker_order_id="REPLAY_OK",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=int(qty),
+            average_price=float(price or 0.0),
+            requested_quantity=int(qty),
+        )
+
+    monkeypatch.setattr(strategy, "_place_order", _capture_place_order)
+    strategy._try_iron_condor(spot=19800.0, expiry=fixed_now.date())
+
+    # Verify the short leg's qty was shrunk after the PARTIAL_FILL.
+    # The spread is still tracked because the short leg has
+    # remaining=qty-1 unfilled (and short_exit_done stays False for the
+    # strict force_exit_required path until terminal FILL is confirmed).
+    assert len(strategy.open_spreads) == 1, (
+        "Spread must stay tracked while short leg has unfilled remainder; "
+        f"got {list(strategy.open_spreads.keys())!r}"
+    )
+    put_spread = next(iter(strategy.open_spreads.values()))
+    original_qty = 65  # nifty lot_size in the test fixture
+    assert int(put_spread.short_leg.qty) == original_qty - 1, (
+        f"Round-6 must shrink short_leg.qty by filled_quantity (1) so the "
+        f"next retry submits only the remainder; got "
+        f"short_leg.qty={put_spread.short_leg.qty!r}, expected "
+        f"{original_qty - 1}. Codex round-5 P1 line 1937."
+    )
+    # The most recent short EXIT submission must have used the original
+    # qty (the retry that received PARTIAL). The shrink applies for the
+    # NEXT submission; we verify here that the strategy state is correct
+    # for that next submission.
+    short_exits = [e for e in placed if e["label"] == short_label and e["side"] == "BUY"]
+    assert short_exits, "expected at least one short-leg EXIT submission"
+
+
+def test_nifty_spread_replay_iron_condor_rollback_partial_shrinks_leg_and_persists(monkeypatch):
+    """Issue #262 round-7 (Codex round-6 P1 "Handle rollback partial fills
+    before queuing retries" + "Persist partial-fill quantity reductions"):
+    when the rollback ``_force_exit_leg`` response is ``PARTIAL`` for a
+    leg, the rollback partial branch must:
+
+      1. Shrink the leg's qty by ``filled_quantity`` so the next retry
+         doesn't over-close the already-filled portion.
+      2. Persist the reduced qty (via ``_sync_spread_state_to_risk_manager``)
+         so a process restart can't restore the stale pre-partial qty.
+    """
+    strategy, fixed_now = _iron_condor_rollback_strategy()
+    short_label_local = "NIFTY_PE_19550"
+    long_label_local = "NIFTY_PE_19250"
+
+    def _capture_place_order(*, label, side, qty, price, tag, purpose, **kwargs):
+        del kwargs
+        purpose_text = purpose.value if hasattr(purpose, "value") else str(purpose)
+        if purpose_text == "ENTRY" and "CE" in str(label):
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_call_leg_failure",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        if purpose_text == "EXIT" and label == short_label_local and side == "BUY":
+            return OrderResponse(
+                broker_order_id="REPLAY_PARTIAL_SHORT",
+                status="PARTIAL",
+                message="partial",
+                filled_quantity=1,
+                average_price=float(price or 0.0),
+                requested_quantity=int(qty),
+            )
+        if purpose_text == "EXIT" and label == long_label_local and side == "SELL":
+            return OrderResponse(
+                broker_order_id="REPLAY_LONG_FILL",
+                status="COMPLETE",
+                message="filled",
+                filled_quantity=int(qty),
+                average_price=float(price or 0.0),
+                requested_quantity=int(qty),
+            )
+        return OrderResponse(
+            broker_order_id="REPLAY_OK",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=int(qty),
+            average_price=float(price or 0.0),
+            requested_quantity=int(qty),
+        )
+
+    monkeypatch.setattr(strategy, "_place_order", _capture_place_order)
+
+    sync_calls: list[Any] = []
+    original_sync = strategy._sync_spread_state_to_risk_manager
+
+    def _capture_sync(spread):
+        sync_calls.append({
+            "short_qty": int(spread.short_leg.qty),
+            "long_qty": int(spread.long_leg.qty),
+            "force_exit_required": bool(spread.force_exit_required),
+        })
+        return original_sync(spread)
+
+    monkeypatch.setattr(strategy, "_sync_spread_state_to_risk_manager", _capture_sync)
+
+    strategy._try_iron_condor(spot=19800.0, expiry=fixed_now.date())
+
+    assert len(strategy.open_spreads) == 1, (
+        f"Spread must stay tracked after PARTIAL rollback; "
+        f"got {list(strategy.open_spreads.keys())!r}"
+    )
+    put_spread = next(iter(strategy.open_spreads.values()))
+    original_qty = 65  # nifty lot_size in the test fixture
+    assert int(put_spread.short_leg.qty) == original_qty - 1, (
+        f"Short leg qty must be shrunk by filled_quantity (1); "
+        f"got {put_spread.short_leg.qty!r}, expected {original_qty - 1}. "
+        f"Codex round-6 P1 'Handle rollback partial fills before queuing retries'."
+    )
+    assert put_spread.long_exit_done is True
+    assert put_spread.short_exit_done is False
+    assert put_spread.force_exit_required is True
+
+    shrunk_syncs = [c for c in sync_calls if c["short_qty"] == original_qty - 1]
+    assert shrunk_syncs, (
+        "Persistence sync must capture the reduced short leg qty after "
+        "partial-fill (Codex round-6 P1 line 1973). Got sync_calls="
+        f"{sync_calls!r}"
+    )
+
+
+def test_nifty_spread_replay_iron_condor_rollback_both_rejected_forces_retry(monkeypatch):
+    """Issue #262 round-3 (Codex round-2 P1 #3): when BOTH rollback EXITs
+    are broker-rejected, both ``*_exit_done`` flags stay False. Without
+    the round-3 retry kick, ``_maybe_manage_exits``'s fast-path (which
+    requires at least one ``*_exit_done`` to be True) wouldn't add the
+    spread to ``to_close``, leaving the failed-condor PUT exposure
+    unmanaged until TP/SL/EOD. The round-3 fix forces an immediate
+    ``_exit_spread`` retry so the rejected legs are re-attempted.
+    """
+    strategy, fixed_now = _iron_condor_rollback_strategy()
+    placed: list[Any] = []
+
+    def _capture_place_order(*, label, side, qty, price, tag, purpose, **kwargs):
+        del kwargs
+        purpose_text = purpose.value if hasattr(purpose, "value") else str(purpose)
+        placed.append({"label": label, "side": side, "purpose": purpose_text})
+        if purpose_text == "ENTRY" and "CE" in str(label):
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_call_leg_failure",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        # BOTH rollback EXITs are broker-rejected.
+        if purpose_text == "EXIT":
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_broker_rejected_rollback_exit",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        return OrderResponse(
+            broker_order_id=f"REPLAY_{len(placed)}",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=int(qty),
+            average_price=float(price or 0.0),
+            requested_quantity=int(qty),
+        )
+
+    monkeypatch.setattr(strategy, "_place_order", _capture_place_order)
+    strategy._try_iron_condor(spot=19800.0, expiry=fixed_now.date())
+
+    # Spread must stay tracked (no leg was even submitted).
+    assert len(strategy.open_spreads) == 1, (
+        "Both rollback EXITs rejected — spread must stay tracked; got "
+        f"{list(strategy.open_spreads.keys())!r}"
+    )
+    put_spread = next(iter(strategy.open_spreads.values()))
+    assert put_spread.short_exit_done is False
+    assert put_spread.long_exit_done is False
+    # Round-4: force_exit_required must be set so _maybe_manage_exits
+    # keeps retrying regardless of *_exit_done state.
+    assert put_spread.force_exit_required is True, (
+        "Both rollback EXITs rejected — force_exit_required must be set "
+        "(Codex round-3 P1)"
+    )
+
+    # Round-3 must have force-invoked ``_exit_spread`` which submits a
+    # retry EXIT for each rejected leg. Without the round-3 fix the
+    # rollback path would emit exactly 2 EXIT orders (the initial
+    # rollback) and then sit on a spread with both flags False that
+    # ``_maybe_manage_exits``'s fast-path will not retry.
+    exit_orders = [e for e in placed if e["purpose"] == "EXIT"]
+    short_exits = [e for e in exit_orders if e["label"] == "NIFTY_PE_19550"]
+    long_exits = [e for e in exit_orders if e["label"] == "NIFTY_PE_19250"]
+    assert len(short_exits) >= 2, (
+        "PUT-short EXIT was rejected — round-3 must force an immediate "
+        f"_exit_spread retry; got {short_exits!r}"
+    )
+    assert len(long_exits) >= 2, (
+        "PUT-long EXIT was rejected — round-3 must force an immediate "
+        f"_exit_spread retry; got {long_exits!r}"
+    )

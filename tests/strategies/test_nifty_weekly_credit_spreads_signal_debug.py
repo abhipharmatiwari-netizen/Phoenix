@@ -413,7 +413,9 @@ def test_enter_spread_does_not_emit_spread_opened_directly(monkeypatch, caplog):
             "PUT_SPREAD", "P_SHORT", "P_LONG", credit=50.0, width_pts=300.0,
             expiry=date(2026, 5, 12),
         )
-    assert ok is True
+    # Issue #262: _enter_spread returns the spread_id (truthy str) on
+    # success / None on failure.
+    assert ok
     msgs = [r.getMessage() for r in caplog.records]
     # spread_opened MUST NOT appear from _enter_spread itself; only the
     # higher-level builder emits it after the full structure is in place.
@@ -465,7 +467,8 @@ def test_enter_spread_short_leg_rejected_logs_reason(monkeypatch, caplog):
             "PUT_SPREAD", "P_SHORT", "P_LONG", credit=50.0, width_pts=300.0,
             expiry=date(2026, 5, 12),
         )
-    assert ok is False
+    # Issue #262: _enter_spread returns None on failure (was False before).
+    assert ok is None
     msgs = [r.getMessage() for r in caplog.records]
     assert any(
         "signal_evaluated_with_reason=entry_short_leg_order_rejected" in m
@@ -485,7 +488,9 @@ def test_enter_spread_leg_price_unavailable_logs_reason(monkeypatch, caplog):
             "PUT_SPREAD", "P_SHORT", "P_LONG", credit=50.0, width_pts=300.0,
             expiry=date(2026, 5, 12),
         )
-    assert ok is False
+    # Issue #262 round-2: every failure path of _enter_spread now returns
+    # None (was bool False before — the round-1 sweep missed this branch).
+    assert ok is None
     msgs = [r.getMessage() for r in caplog.records]
     assert any(
         "signal_evaluated_with_reason=entry_leg_price_unavailable" in m
