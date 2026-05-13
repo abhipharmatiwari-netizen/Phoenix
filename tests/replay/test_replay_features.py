@@ -1762,17 +1762,23 @@ def test_nifty_spread_replay_iron_condor_partial_rollback_keeps_spread_tracked(m
         f"got {list(strategy.open_spreads.keys())!r}"
     )
     put_spread = next(iter(strategy.open_spreads.values()))
-    # The successful PUT-long EXIT (SELL) must flip long_exit_done=True
-    # so the management path doesn't re-submit it.
+    # The successful PUT-long EXIT (SELL) returned COMPLETE which IS a
+    # terminal fill — long_exit_done must be True (Codex round-3 contract).
     assert put_spread.long_exit_done is True, (
-        "PUT-long EXIT was broker-accepted; long_exit_done must be set "
-        "so _maybe_manage_exits doesn't double-submit"
+        "PUT-long EXIT returned COMPLETE (terminal fill); long_exit_done "
+        "must be True"
     )
     # The rejected PUT-short EXIT (BUY) must leave short_exit_done=False
     # so the management path retries it on the next bar.
     assert put_spread.short_exit_done is False, (
         "PUT-short EXIT was broker-rejected; short_exit_done must remain "
         "False so _maybe_manage_exits retries"
+    )
+    # Round-4: the rollback did not terminate cleanly so force_exit_required
+    # must be set; _maybe_manage_exits uses this to fast-path retry.
+    assert put_spread.force_exit_required is True, (
+        "rollback did not terminate cleanly — force_exit_required must be "
+        "set (Codex round-3 P1)"
     )
 
 
@@ -1866,34 +1872,33 @@ def test_nifty_spread_replay_iron_condor_rollback_success_status_is_submitted(mo
     monkeypatch.setattr(strategy, "_place_order", _capture_place_order)
     strategy._try_iron_condor(spot=19800.0, expiry=fixed_now.date())
 
-    # Both rollback EXITs returned SUCCESS (submitted, not filled). Round-3
-    # contract: spread stays tracked (since not FILLED) BUT both
-    # ``*_exit_done`` flags are True (since both submitted) so the
-    # management path won't re-submit either leg.
+    # Both rollback EXITs returned SUCCESS (submitted, not filled).
+    # Round-4 contract (Codex round-3 P1): SUCCESS is NOT a terminal fill,
+    # so ``*_exit_done`` stays False for the rollback path (preventing the
+    # round-3 orphan-pop scenario where the spread would be popped on
+    # next bar via _exit_spread). The spread is kept tracked with
+    # ``force_exit_required = True`` so _maybe_manage_exits / _exit_spread
+    # continue to drive retries until fills are confirmed or operator
+    # intervention.
     assert len(strategy.open_spreads) == 1, (
         "SUCCESS-returning rollback EXITs must keep the spread tracked "
         "until FILLED is confirmed (Codex round-2 P1 #2); "
         f"got {list(strategy.open_spreads.keys())!r}"
     )
     put_spread = next(iter(strategy.open_spreads.values()))
-    assert put_spread.short_exit_done is True, (
-        "PUT-short EXIT returned SUCCESS; must be classified as submitted "
-        "(Codex round-2 P1 #1)"
+    assert put_spread.short_exit_done is False, (
+        "PUT-short EXIT returned SUCCESS (submitted, not FILLED). For "
+        "force_exit_required spreads, *_exit_done must remain False until "
+        "a terminal FILL is confirmed (Codex round-3 P1)."
     )
-    assert put_spread.long_exit_done is True, (
-        "PUT-long EXIT returned SUCCESS; must be classified as submitted "
-        "(Codex round-2 P1 #1)"
+    assert put_spread.long_exit_done is False, (
+        "PUT-long EXIT returned SUCCESS (submitted, not FILLED). For "
+        "force_exit_required spreads, *_exit_done must remain False until "
+        "a terminal FILL is confirmed (Codex round-3 P1)."
     )
-    # Exactly one rollback EXIT per leg — round-3 must NOT have forced a
-    # second submission for either leg (both were submitted).
-    exit_orders = [e for e in placed if e["purpose"] == "EXIT"]
-    short_exits = [e for e in exit_orders if e["label"] == "NIFTY_PE_19550"]
-    long_exits = [e for e in exit_orders if e["label"] == "NIFTY_PE_19250"]
-    assert len(short_exits) == 1, (
-        f"PUT-short EXIT was submitted (SUCCESS) — no retry expected; got {short_exits!r}"
-    )
-    assert len(long_exits) == 1, (
-        f"PUT-long EXIT was submitted (SUCCESS) — no retry expected; got {long_exits!r}"
+    assert put_spread.force_exit_required is True, (
+        "rollback did not terminate cleanly — force_exit_required must be "
+        "set so _maybe_manage_exits keeps retrying (Codex round-3 P1)."
     )
 
 
@@ -1952,6 +1957,12 @@ def test_nifty_spread_replay_iron_condor_rollback_both_rejected_forces_retry(mon
     put_spread = next(iter(strategy.open_spreads.values()))
     assert put_spread.short_exit_done is False
     assert put_spread.long_exit_done is False
+    # Round-4: force_exit_required must be set so _maybe_manage_exits
+    # keeps retrying regardless of *_exit_done state.
+    assert put_spread.force_exit_required is True, (
+        "Both rollback EXITs rejected — force_exit_required must be set "
+        "(Codex round-3 P1)"
+    )
 
     # Round-3 must have force-invoked ``_exit_spread`` which submits a
     # retry EXIT for each rejected leg. Without the round-3 fix the
