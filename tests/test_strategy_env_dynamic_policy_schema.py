@@ -166,3 +166,76 @@ def test_nifty_mapping_has_trending_up_and_down_split() -> None:
         "selection so CE positions opened in TRENDING_UP continue to be "
         f"managed after a HIGH_VOL transition; got {high_vol!r}"
     )
+
+
+def test_banknifty_mapping_has_direction_aware_split() -> None:
+    """
+    Issue #266: BANKNIFTY_IDX should mirror NIFTY's direction-aware
+    pattern. BANKNIFTY has no native bullish strategy configured, so
+    TRENDING_UP is intentionally empty (explicit no-trade on bull-trend
+    BANKNIFTY days). TRENDING_DOWN contains the bear-biased strategies.
+    Legacy TRENDING is retained for backward-compat fallback when the
+    classifier cannot resolve direction.
+    """
+    cfg_path = Path(__file__).resolve().parents[1] / "app" / "config" / "strategy_env.yaml"
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+
+    mapping = (
+        ((raw.get("strategy_selection") or {}).get("mapping") or {}).get("BANKNIFTY_IDX") or {}
+    )
+    assert isinstance(mapping, dict), "BANKNIFTY_IDX selector mapping must be a dict"
+
+    assert "TRENDING_UP" in mapping, "BANKNIFTY_IDX must declare TRENDING_UP (issue #266)"
+    assert "TRENDING_DOWN" in mapping, "BANKNIFTY_IDX must declare TRENDING_DOWN (issue #266)"
+    assert "TRENDING" in mapping, "Legacy TRENDING must remain for backward-compat fallback"
+
+    up = list(mapping["TRENDING_UP"])
+    down = list(mapping["TRENDING_DOWN"])
+
+    assert up == [], (
+        "BANKNIFTY_IDX TRENDING_UP must be empty — no bullish strategy "
+        f"is configured for BANKNIFTY; got {up!r}"
+    )
+    assert "put_momentum_scalper" in down, (
+        "BANKNIFTY_IDX TRENDING_DOWN must include put_momentum_scalper "
+        f"(bear-biased); got {down!r}"
+    )
+
+
+def test_ng_fut_mapping_has_explicit_trending_up_no_trade() -> None:
+    """
+    Issue #266: NG_FUT TRENDING_UP must be explicitly empty so the
+    selector does not silently fall through to the legacy TRENDING key
+    (or a typo'd lowercase key) on bull-trend NG days. ema20_strategy
+    is bear-biased; it self-rejects on bull bars anyway, but the
+    explicit empty list documents the no-trade intent.
+    """
+    cfg_path = Path(__file__).resolve().parents[1] / "app" / "config" / "strategy_env.yaml"
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+
+    mapping = (
+        ((raw.get("strategy_selection") or {}).get("mapping") or {}).get("NG_FUT") or {}
+    )
+    assert isinstance(mapping, dict), "NG_FUT selector mapping must be a dict"
+
+    assert "TRENDING_UP" in mapping, (
+        "NG_FUT must declare TRENDING_UP explicitly (issue #266) so the "
+        "selector resolution is deterministic on bull-trend NG bars"
+    )
+    assert "TRENDING_DOWN" in mapping, "NG_FUT must declare TRENDING_DOWN (issue #266)"
+
+    up = list(mapping["TRENDING_UP"])
+    down = list(mapping["TRENDING_DOWN"])
+
+    assert up == [], (
+        f"NG_FUT TRENDING_UP must be empty (no-trade on bull-trend); got {up!r}"
+    )
+    assert "ema20_strategy" in down, (
+        f"NG_FUT TRENDING_DOWN must include ema20_strategy; got {down!r}"
+    )
+    # Guard against the original lowercase typo: TRENDING_down must not
+    # exist as a separate key.
+    assert "TRENDING_down" not in mapping, (
+        "NG_FUT must not have lowercase 'TRENDING_down' key — the regime "
+        "enum is uppercase TRENDING_DOWN (issue #266)"
+    )

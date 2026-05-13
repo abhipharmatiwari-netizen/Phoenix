@@ -941,13 +941,36 @@ strategy_selection:
       HIGH_VOL: ["nifty_weekly_credit_spreads", "put_momentum_scalper", "exclusive_nifty_ce_buy"]
       NO_TRADE: ["exclusive_nifty_ce_buy"]
     BANKNIFTY_IDX:
+      # Issue #266: direction-aware split mirroring the NIFTY pattern.
+      # BANKNIFTY has no native bullish strategy in the current lineup
+      # (both put_momentum_scalper and ema20_strategy are bear-biased),
+      # so TRENDING_UP is intentionally empty — explicit no-trade on
+      # bull-trend BANKNIFTY days. Legacy TRENDING is retained as the
+      # backward-compatible fallback when MarketContext direction
+      # fields are unavailable (rare, but matches the NIFTY pattern).
+      # Cross-flip management caveat: an open position from
+      # TRENDING_DOWN that carries into TRENDING_UP loses dispatch
+      # (is_strategy_active -> False -> on_bar/on_tick not invoked).
+      # Operator-acknowledged risk; same as the NIFTY design choice.
       TRENDING: ["put_momentum_scalper"]
+      TRENDING_UP: []
+      TRENDING_DOWN: ["put_momentum_scalper", "ema20_strategy"]
       NORMAL: ["ema20_strategy"]
       CHOPPY: ["ema20_strategy"]
       HIGH_VOL: ["ema20_strategy", "put_momentum_scalper"]
       NO_TRADE: []
     NG_FUT:
-      TRENDING: ["ema20_strategy"]
+      # Issue #266: make the direction split explicit. ema20_strategy
+      # is bear-biased (close < EMA20 + RSI falling) so it self-rejects
+      # on bull-trend NG bars; TRENDING_UP: [] documents the no-trade-
+      # on-bull intent so the selector does not silently fall through
+      # to the legacy TRENDING list (which also no longer exists for
+      # NG_FUT after this change). The classifier will emit
+      # TRENDING_UP/TRENDING_DOWN when ADX + DI conditions are met,
+      # and the empty TRENDING_UP key makes the selector resolution
+      # deterministic.
+      TRENDING_UP: []
+      TRENDING_DOWN: ["ema20_strategy"]
       NORMAL: ["ema20_strategy"]
       CHOPPY: ["ema20_strategy"]
       HIGH_VOL: ["ema20_strategy"]
