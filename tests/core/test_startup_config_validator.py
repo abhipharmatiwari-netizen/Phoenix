@@ -340,6 +340,78 @@ def test_validator_skips_cap_check_when_selector_disabled():
     )
 
 
+def test_validator_uses_runtime_settings_when_provided():
+    """PR #265 round-8 (Codex round-7 P2 "Validate cap when runtime enables
+    selector" + "Validate cap after runtime overrides"): when the caller
+    passes ``runtime_settings`` the validator must consult that resolved
+    Settings object for both ``auto_strategy_select_enabled`` and
+    ``auto_strategy_max_active_per_underlying`` rather than the raw env
+    mapping. This matches the source the stream uses to construct
+    ``StrategySelector`` and catches the scenario where the env entries
+    diverge from the resolved Settings (e.g. runtime config provider
+    overrides).
+    """
+    cfg = _valid_cfg()
+    cfg["strategy_selection"] = {
+        "mapping": {
+            "NIFTY_IDX": {
+                "TRENDING_UP": ["a", "b", "c"],
+            },
+        },
+    }
+    # Env says cap is unset and selector unset — old validator would
+    # skip the check. With runtime_settings showing select=true,
+    # cap=2, the new validator must reject.
+    settings_low_cap = SimpleNamespace(
+        auto_strategy_select_enabled=True,
+        auto_strategy_max_active_per_underlying=2,
+    )
+    with pytest.raises(ValueError, match=r"strategy_selection\.mapping\.NIFTY_IDX"):
+        validate_startup_config(
+            strategy_cfg=cfg,
+            trade_mode="LIVE",
+            disable_trading_window_filter=False,
+            known_strategy_names=KNOWN_STRATEGIES,
+            env={},
+            runtime_settings=settings_low_cap,
+        )
+
+    # Env says cap=2 but runtime_settings has cap=3 — old validator
+    # would reject. With runtime_settings precedence, the validator
+    # must accept (the stream will use cap=3 via runtime_settings).
+    settings_safe_cap = SimpleNamespace(
+        auto_strategy_select_enabled=True,
+        auto_strategy_max_active_per_underlying=3,
+    )
+    validate_startup_config(
+        strategy_cfg=cfg,
+        trade_mode="LIVE",
+        disable_trading_window_filter=False,
+        known_strategy_names=KNOWN_STRATEGIES,
+        env={"AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING": "2"},
+        runtime_settings=settings_safe_cap,
+    )
+
+    # runtime_settings disables the selector — even with env cap=2 and
+    # 3-entry mapping, the validator must skip (selector won't be
+    # constructed).
+    settings_select_off = SimpleNamespace(
+        auto_strategy_select_enabled=False,
+        auto_strategy_max_active_per_underlying=2,
+    )
+    validate_startup_config(
+        strategy_cfg=cfg,
+        trade_mode="LIVE",
+        disable_trading_window_filter=False,
+        known_strategy_names=KNOWN_STRATEGIES,
+        env={
+            "AUTO_STRATEGY_SELECT_ENABLED": "true",
+            "AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING": "2",
+        },
+        runtime_settings=settings_select_off,
+    )
+
+
 def test_validator_rejects_unknown_trade_mode():
     cfg = _valid_cfg()
     with pytest.raises(ValueError, match="TRADE_MODE must be one of PAPER\\|LIVE\\|SHADOW"):

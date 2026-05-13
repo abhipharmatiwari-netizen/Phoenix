@@ -2330,6 +2330,11 @@ def stream_multi_instruments(
         disable_trading_window_filter=_DISABLE_TRADING_WINDOW_FILTER,
         known_strategy_names=STRATEGY_REGISTRY.keys(),
         env=boot_cfg.env,
+        # PR #265 round-8 (Codex round-7 P2): pass resolved Settings so
+        # the selector cap-vs-mapping validator matches the same
+        # auto_strategy_select_enabled / auto_strategy_max_active_per_underlying
+        # source the stream uses below.
+        runtime_settings=settings,
     )
     initial_flags: Dict[str, bool] = {}
     for entry in normalized_strategy_entries:

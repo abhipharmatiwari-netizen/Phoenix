@@ -706,6 +706,13 @@ class AppRuntime:
                 disable_trading_window_filter=disable_trading_window_filter,
                 known_strategy_names=all_canonical_strategy_names(),
                 env=boot_cfg.env,
+                # PR #265 round-8 (Codex round-7 P2 "Validate cap when
+                # runtime enables selector" + "Validate cap after runtime
+                # overrides"): pass resolved settings so the selector
+                # cap-vs-mapping validator sees the same effective values
+                # the stream consumes when constructing StrategySelector
+                # — not just raw env entries.
+                runtime_settings=settings,
             )
 
         enable_leader_lease = (

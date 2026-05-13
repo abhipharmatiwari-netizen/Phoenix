@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import time as dt_time
-from typing import Any, Dict, Iterable, Mapping
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 from app.core.lot_size import lot_size_for_symbol_optional
 from app.core.broker_network_identity import live_broker_network_identity_env_errors
@@ -916,6 +916,7 @@ def _validate_strategy_selector_cap_for_mapping(
     *,
     strategy_cfg: Mapping[str, Any],
     env_map: Mapping[str, Any],
+    runtime_settings: Any = None,
 ) -> list[str]:
     """Issue #212 / PR #265 round-6 (Codex round-5 P1 "Enforce cap before
     adding three-entry trending mappings"): fail closed at startup when the
@@ -934,21 +935,41 @@ def _validate_strategy_selector_cap_for_mapping(
     unversioned deploy env — this validator catches that case.
 
     PR #265 round-7 (Codex round-6 P2 "Skip selector cap validation when
-    selector is disabled"): if ``AUTO_STRATEGY_SELECT_ENABLED`` is false
-    or unset, ``multi_instrument_stream`` does not construct a
-    ``StrategySelector`` at all, so the cap cannot truncate anything.
-    Skip the check in that mode to avoid blocking startup on
-    deployments that have auto-selection disabled but kept a legacy
-    cap setting (e.g. ``AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=2``).
+    selector is disabled"): skip when the selector is disabled in the
+    effective settings (the stream only constructs ``StrategySelector``
+    when ``auto_strategy_select_enabled`` is true, so the cap cannot
+    truncate anything otherwise).
+
+    PR #265 round-8 (Codex round-7 P2 "Validate cap when runtime enables
+    selector" + "Validate cap after runtime overrides"): prefer the
+    resolved ``runtime_settings`` (the same object passed into
+    ``StrategySelectorConfig.from_raw`` in
+    ``app/runners/multi_instrument_stream.py``) for both the
+    ``auto_strategy_select_enabled`` and
+    ``auto_strategy_max_active_per_underlying`` lookups, so the
+    validator matches the selector's actual enable / cap source even
+    when runtime config providers override the env-backed Settings.
+    Fall back to the raw env mapping when ``runtime_settings`` is not
+    supplied (preserves callers that haven't been updated).
     """
     errors: list[str] = []
-    select_enabled_raw = env_map.get("AUTO_STRATEGY_SELECT_ENABLED")
-    select_enabled = str(select_enabled_raw or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+
+    def _truthy(value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    # Resolve "is the selector enabled" using the same source the stream
+    # consults — resolved Settings (or runtime overrides) when available,
+    # falling back to the raw env entry for backward compatibility.
+    if runtime_settings is not None and hasattr(
+        runtime_settings, "auto_strategy_select_enabled"
+    ):
+        select_enabled = bool(
+            getattr(runtime_settings, "auto_strategy_select_enabled", False)
+        )
+    else:
+        select_enabled = _truthy(env_map.get("AUTO_STRATEGY_SELECT_ENABLED"))
     if not select_enabled:
         return errors
 
@@ -981,27 +1002,46 @@ def _validate_strategy_selector_cap_for_mapping(
     if not longest_per_underlying:
         return errors
 
-    raw_cap = env_map.get("AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING")
-    if raw_cap is None or str(raw_cap).strip() == "":
-        # Env var not explicitly set — Settings default applies (raised to 3
-        # in round-4). Skip the check: the env-default path is already safe
-        # and we don't want to fail closed when an absent env var would
-        # actually inherit the safe value.
-        return errors
-    try:
-        effective_cap = int(str(raw_cap).strip())
-    except (TypeError, ValueError):
-        # Malformed value will be caught elsewhere; do not double-report.
+    # Resolve the effective cap. Prefer the resolved Settings value so the
+    # validator sees the same number the selector will actually use; fall
+    # back to env reading + None (means "skip — Settings default applies")
+    # when ``runtime_settings`` is not provided.
+    effective_cap: Optional[int]
+    if runtime_settings is not None and hasattr(
+        runtime_settings, "auto_strategy_max_active_per_underlying"
+    ):
+        try:
+            effective_cap = int(
+                getattr(runtime_settings, "auto_strategy_max_active_per_underlying")
+            )
+        except (TypeError, ValueError):
+            effective_cap = None
+    else:
+        raw_cap = env_map.get("AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING")
+        if raw_cap is None or str(raw_cap).strip() == "":
+            # Env var not explicitly set — Settings default applies (raised
+            # to 3 in round-4). Skip the check: the env-default path is
+            # already safe and we don't want to fail closed when an absent
+            # env var would actually inherit the safe value.
+            return errors
+        try:
+            effective_cap = int(str(raw_cap).strip())
+        except (TypeError, ValueError):
+            # Malformed value will be caught elsewhere; do not double-report.
+            return errors
+
+    if effective_cap is None:
         return errors
 
     for underlying, (regime, length) in sorted(longest_per_underlying.items()):
         if length > effective_cap:
             errors.append(
                 f"strategy_selection.mapping.{underlying}.{regime} lists "
-                f"{length} strategies but AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING="
-                f"{effective_cap} truncates selection to {effective_cap}. "
-                f"Raise the env var (>= {length}) or shorten the per-regime "
-                f"list. See PR #265 / Codex round-5."
+                f"{length} strategies but the resolved cap "
+                f"auto_strategy_max_active_per_underlying={effective_cap} "
+                f"truncates selection to {effective_cap}. Raise the cap "
+                f"(>= {length}) or shorten the per-regime list. "
+                f"See PR #265 / Codex round-5+."
             )
     return errors
 
@@ -1013,6 +1053,7 @@ def validate_startup_config(
     disable_trading_window_filter: bool,
     known_strategy_names: Iterable[str],
     env: Mapping[str, Any] | None = None,
+    runtime_settings: Any = None,
 ) -> None:
     errors: list[str] = []
     env_map = env or {}
@@ -1025,6 +1066,7 @@ def validate_startup_config(
         _validate_strategy_selector_cap_for_mapping(
             strategy_cfg=strategy_cfg,
             env_map=env_map,
+            runtime_settings=runtime_settings,
         )
     )
     known = {str(x).strip() for x in known_strategy_names if str(x).strip()}
