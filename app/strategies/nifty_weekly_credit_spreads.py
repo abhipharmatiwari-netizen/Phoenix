@@ -34,7 +34,6 @@ from app.brokers.base import (
     ProductType,
     TimeInForce,
 )
-from app.core.signal_metrics import is_submitted_order_response
 from app.orders.order_state import (
     OrderLifecycleState,
     classify_broker_status,
