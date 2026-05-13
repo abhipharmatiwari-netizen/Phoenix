@@ -1540,6 +1540,31 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
             # retry-bias is the safer of the two.
             put_spread = self.open_spreads.get(put_spread_id)
             if put_spread is not None:
+                # Issue #262 round-7 (Codex round-6 P1 "Handle rollback
+                # partial fills before queuing retries"): if either
+                # rollback ``_force_exit_leg`` response is a
+                # ``PARTIAL_FILL``, shrink the corresponding leg's qty
+                # by the filled amount BEFORE the spread is queued for
+                # follow-up retries. Without this, the next retry
+                # through ``_maybe_manage_exits`` -> ``_exit_spread``
+                # would submit the full original quantity and over-close
+                # the already-filled portion. (The same helper is used
+                # inside ``_exit_spread``; this call covers the
+                # initial-rollback responses which never pass through
+                # ``_exit_spread``.)
+                short_partial_reduced = self._apply_partial_fill_to_leg(
+                    put_spread.short_leg, put_short_resp
+                )
+                long_partial_reduced = self._apply_partial_fill_to_leg(
+                    put_spread.long_leg, put_long_resp
+                )
+                # A leg that was fully consumed by the partial fill is
+                # treated as done so the management path stops retrying
+                # it (qty <= 0 is meaningless to re-submit).
+                if short_partial_reduced and int(put_spread.short_leg.qty) <= 0:
+                    put_spread.short_exit_done = True
+                if long_partial_reduced and int(put_spread.long_leg.qty) <= 0:
+                    put_spread.long_exit_done = True
                 # Only legs that have confirmed FILL receive the
                 # terminal ``*_exit_done = True`` marker; submitted-only
                 # legs stay False so ``_exit_spread`` re-attempts them
@@ -1553,11 +1578,14 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
                 # forced rollback state when setting it"): flush the
                 # mutated OpenSpread to the risk-manager persistence
                 # path so a process restart before the next manage
-                # cycle sees ``force_exit_required = True`` in the
+                # cycle sees ``force_exit_required = True`` (and any
+                # partial-fill qty reduction from above) in the
                 # restored strategy_context. Without this, the only
                 # persisted entry context is the one written by
-                # ``_enter_spread`` with ``force_exit_required = False``,
-                # so the fast-path retry signal would be lost on restart.
+                # ``_enter_spread`` with ``force_exit_required = False``
+                # and the original qty, so the fast-path retry signal
+                # AND the shrunken qty would both be lost on restart
+                # (Codex round-6 P1 line 1973).
                 self._sync_spread_state_to_risk_manager(put_spread)
             self._log_signal_evaluation(
                 "condor_call_side_failed_rollback_partial",
@@ -1861,6 +1889,46 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
             purpose=OrderPurpose.EXIT,
         )
 
+    def _apply_partial_fill_to_leg(
+        self, leg: SpreadLeg, resp: Any
+    ) -> bool:
+        """Issue #262 round-6/round-7: when the broker confirms a
+        ``PARTIAL_FILL`` for a force-exit leg, shrink the leg's
+        effective ``qty`` by the filled amount so the next retry
+        submits only the unfilled remainder. Without this, a retry
+        would re-submit the full original qty and could over-close (or
+        even reverse) the already-filled units.
+
+        Returns True iff the leg quantity was actually reduced. The
+        caller uses this to flush persistence so a restart can't
+        restore the stale pre-partial quantity (Codex round-6 P1 line
+        1973).
+
+        Lifted from the original closure inside ``_exit_spread`` (round-6)
+        so it can also run in the ``_try_iron_condor`` rollback partial
+        branch (Codex round-6 P1 "Handle rollback partial fills before
+        queuing retries"). The check is gated on the caller — only the
+        force-exit / rollback paths invoke it; the regular exit path
+        keeps the "any non-rejected = submitted = done" convention.
+        """
+        if resp is None:
+            return False
+        state = classify_broker_status(getattr(resp, "status", ""))
+        if state != OrderLifecycleState.PARTIAL_FILL:
+            return False
+        try:
+            filled = int(getattr(resp, "filled_quantity", 0) or 0)
+        except (TypeError, ValueError):
+            filled = 0
+        if filled <= 0:
+            return False
+        original = int(leg.qty)
+        remaining = max(0, original - filled)
+        if remaining >= original:
+            return False
+        leg.qty = remaining
+        return True
+
     # Compute the current spread mark-to-market.
     def _current_spread_ltp(self, spread: OpenSpread) -> Optional[float]:
         sp = self._latest_price(spread.short_leg.label)
@@ -1947,31 +2015,6 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
                 return is_terminal_fill(classify_broker_status(status))
             return status.upper() not in {"REJECTED", "FAILED"}
 
-        def _apply_partial_fill(leg: SpreadLeg, resp: Any) -> None:
-            """Issue #262 round-6 (Codex round-5 P1 line 1937): when the
-            broker confirms a PARTIAL_FILL for a force_exit_required leg,
-            shrink the leg's effective qty by the filled amount so the
-            next retry submits only the unfilled remainder. Without this,
-            a retry would re-submit the full original qty and could
-            over-close (or even reverse) the already-filled units.
-            ``OrderResponse.filled_quantity`` is the broker's confirmed
-            fill count.
-            """
-            if not force_exit_strict:
-                return
-            state = classify_broker_status(getattr(resp, "status", ""))
-            if state != OrderLifecycleState.PARTIAL_FILL:
-                return
-            try:
-                filled = int(getattr(resp, "filled_quantity", 0) or 0)
-            except (TypeError, ValueError):
-                filled = 0
-            if filled <= 0:
-                return
-            remaining = max(0, int(leg.qty) - filled)
-            if remaining < int(leg.qty):
-                leg.qty = remaining
-
         try:
             if not spread.short_exit_done:
                 sp_price = self._latest_price(spread.short_leg.label) or 0.0
@@ -1990,12 +2033,17 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
                 if _leg_is_terminal(status_short):
                     spread.short_exit_done = True
                     state_changed = True
-                else:
-                    _apply_partial_fill(spread.short_leg, resp_short)
+                elif force_exit_strict and self._apply_partial_fill_to_leg(
+                    spread.short_leg, resp_short
+                ):
+                    # Issue #262 round-7 (Codex round-6 P1 line 1973):
+                    # treat a qty reduction as a state change so the
+                    # caller flushes persistence (otherwise the next bar
+                    # would still see the original qty after a restart).
+                    state_changed = True
                     # If the partial fill closed everything, mark done.
-                    if force_exit_strict and int(spread.short_leg.qty) <= 0:
+                    if int(spread.short_leg.qty) <= 0:
                         spread.short_exit_done = True
-                        state_changed = True
             if not spread.long_exit_done:
                 lp_price = self._latest_price(spread.long_leg.label) or 0.0
                 resp_long = self._place_order(
@@ -2013,11 +2061,12 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
                 if _leg_is_terminal(status_long):
                     spread.long_exit_done = True
                     state_changed = True
-                else:
-                    _apply_partial_fill(spread.long_leg, resp_long)
-                    if force_exit_strict and int(spread.long_leg.qty) <= 0:
+                elif force_exit_strict and self._apply_partial_fill_to_leg(
+                    spread.long_leg, resp_long
+                ):
+                    state_changed = True
+                    if int(spread.long_leg.qty) <= 0:
                         spread.long_exit_done = True
-                        state_changed = True
         except Exception:
             if state_changed:
                 self._sync_spread_state_to_risk_manager(spread)

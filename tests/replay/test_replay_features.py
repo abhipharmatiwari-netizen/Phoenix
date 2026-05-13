@@ -2221,6 +2221,100 @@ def test_nifty_spread_replay_iron_condor_partial_fill_retries_only_remainder(mon
     assert short_exits, "expected at least one short-leg EXIT submission"
 
 
+def test_nifty_spread_replay_iron_condor_rollback_partial_shrinks_leg_and_persists(monkeypatch):
+    """Issue #262 round-7 (Codex round-6 P1 "Handle rollback partial fills
+    before queuing retries" + "Persist partial-fill quantity reductions"):
+    when the rollback ``_force_exit_leg`` response is ``PARTIAL`` for a
+    leg, the rollback partial branch must:
+
+      1. Shrink the leg's qty by ``filled_quantity`` so the next retry
+         doesn't over-close the already-filled portion.
+      2. Persist the reduced qty (via ``_sync_spread_state_to_risk_manager``)
+         so a process restart can't restore the stale pre-partial qty.
+    """
+    strategy, fixed_now = _iron_condor_rollback_strategy()
+    short_label_local = "NIFTY_PE_19550"
+    long_label_local = "NIFTY_PE_19250"
+
+    def _capture_place_order(*, label, side, qty, price, tag, purpose, **kwargs):
+        del kwargs
+        purpose_text = purpose.value if hasattr(purpose, "value") else str(purpose)
+        if purpose_text == "ENTRY" and "CE" in str(label):
+            return OrderResponse(
+                broker_order_id="",
+                status="REJECTED",
+                message="simulated_call_leg_failure",
+                filled_quantity=0,
+                average_price=None,
+                requested_quantity=int(qty),
+            )
+        if purpose_text == "EXIT" and label == short_label_local and side == "BUY":
+            return OrderResponse(
+                broker_order_id="REPLAY_PARTIAL_SHORT",
+                status="PARTIAL",
+                message="partial",
+                filled_quantity=1,
+                average_price=float(price or 0.0),
+                requested_quantity=int(qty),
+            )
+        if purpose_text == "EXIT" and label == long_label_local and side == "SELL":
+            return OrderResponse(
+                broker_order_id="REPLAY_LONG_FILL",
+                status="COMPLETE",
+                message="filled",
+                filled_quantity=int(qty),
+                average_price=float(price or 0.0),
+                requested_quantity=int(qty),
+            )
+        return OrderResponse(
+            broker_order_id="REPLAY_OK",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=int(qty),
+            average_price=float(price or 0.0),
+            requested_quantity=int(qty),
+        )
+
+    monkeypatch.setattr(strategy, "_place_order", _capture_place_order)
+
+    sync_calls: list[Any] = []
+    original_sync = strategy._sync_spread_state_to_risk_manager
+
+    def _capture_sync(spread):
+        sync_calls.append({
+            "short_qty": int(spread.short_leg.qty),
+            "long_qty": int(spread.long_leg.qty),
+            "force_exit_required": bool(spread.force_exit_required),
+        })
+        return original_sync(spread)
+
+    monkeypatch.setattr(strategy, "_sync_spread_state_to_risk_manager", _capture_sync)
+
+    strategy._try_iron_condor(spot=19800.0, expiry=fixed_now.date())
+
+    assert len(strategy.open_spreads) == 1, (
+        f"Spread must stay tracked after PARTIAL rollback; "
+        f"got {list(strategy.open_spreads.keys())!r}"
+    )
+    put_spread = next(iter(strategy.open_spreads.values()))
+    original_qty = 65  # nifty lot_size in the test fixture
+    assert int(put_spread.short_leg.qty) == original_qty - 1, (
+        f"Short leg qty must be shrunk by filled_quantity (1); "
+        f"got {put_spread.short_leg.qty!r}, expected {original_qty - 1}. "
+        f"Codex round-6 P1 'Handle rollback partial fills before queuing retries'."
+    )
+    assert put_spread.long_exit_done is True
+    assert put_spread.short_exit_done is False
+    assert put_spread.force_exit_required is True
+
+    shrunk_syncs = [c for c in sync_calls if c["short_qty"] == original_qty - 1]
+    assert shrunk_syncs, (
+        "Persistence sync must capture the reduced short leg qty after "
+        "partial-fill (Codex round-6 P1 line 1973). Got sync_calls="
+        f"{sync_calls!r}"
+    )
+
+
 def test_nifty_spread_replay_iron_condor_rollback_both_rejected_forces_retry(monkeypatch):
     """Issue #262 round-3 (Codex round-2 P1 #3): when BOTH rollback EXITs
     are broker-rejected, both ``*_exit_done`` flags stay False. Without
