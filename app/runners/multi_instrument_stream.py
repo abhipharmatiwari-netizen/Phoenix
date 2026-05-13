@@ -2324,17 +2324,21 @@ def stream_multi_instruments(
         strategy_cfg.get("strategies", []) if isinstance(strategy_cfg, dict) else []
     )
     normalized_strategy_entries = _normalize_strategy_entries(strategies_cfg_raw)
+    # PR #265 round-9 (Codex round-8 P2 "Pass the same runtime settings
+    # used by the selector"): below, ``_runtime_settings()`` returns
+    # ``get_runtime_settings(base_settings=settings)`` and that proxy is
+    # what ``StrategySelectorConfig.from_raw`` consumes. Use the same
+    # proxy here so the cap-vs-mapping validator sees the same
+    # ``auto_strategy_select_enabled`` /
+    # ``auto_strategy_max_active_per_underlying`` values the selector
+    # will actually start with.
     validate_startup_config(
         strategy_cfg=(strategy_cfg if isinstance(strategy_cfg, dict) else {}),
         trade_mode=trade_mode,
         disable_trading_window_filter=_DISABLE_TRADING_WINDOW_FILTER,
         known_strategy_names=STRATEGY_REGISTRY.keys(),
         env=boot_cfg.env,
-        # PR #265 round-8 (Codex round-7 P2): pass resolved Settings so
-        # the selector cap-vs-mapping validator matches the same
-        # auto_strategy_select_enabled / auto_strategy_max_active_per_underlying
-        # source the stream uses below.
-        runtime_settings=settings,
+        runtime_settings=_runtime_settings(),
     )
     initial_flags: Dict[str, bool] = {}
     for entry in normalized_strategy_entries:

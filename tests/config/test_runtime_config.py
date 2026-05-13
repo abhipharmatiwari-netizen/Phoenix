@@ -81,6 +81,68 @@ def test_runtime_config_auto_enable_allows_cloud_run_markers(monkeypatch):
     assert runtime_mod.RuntimeConfigProvider._is_enabled(settings) is True
 
 
+def test_live_override_allows_upward_cap_raise_without_break_glass(monkeypatch):
+    """PR #265 round-9 (Codex round-8 P2 "Allow safe cap raises from
+    runtime config"): a runtime override that raises
+    ``auto_strategy_max_active_per_underlying`` above the base value is
+    strictly safer (the selection can only include more strategies,
+    never truncate any), so it must be allowed in LIVE without
+    break-glass. Downward overrides must still be rejected because they
+    re-introduce the truncation risk the round-5 protection was added
+    to prevent.
+    """
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    monkeypatch.setenv("PROFIT_SWEEP_STRATEGY", "SIMPLE")
+    monkeypatch.setenv("PROFIT_DAILY_TARGET", "2000")
+    monkeypatch.delenv("LIVE_RUNTIME_OVERRIDE_BREAK_GLASS", raising=False)
+    monkeypatch.delenv(
+        "LIVE_RUNTIME_OVERRIDE_BREAK_GLASS_APPROVED_BY", raising=False
+    )
+    monkeypatch.delenv(
+        "LIVE_RUNTIME_OVERRIDE_BREAK_GLASS_UNTIL", raising=False
+    )
+    # Pin base cap to legacy 2 so the upward override (3) is a strict
+    # increase regardless of the committed Settings default.
+    monkeypatch.setenv("AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING", "2")
+    _reset_settings_cache()
+
+    import app.config.settings as settings_mod
+    import app.config.runtime_config as runtime_mod
+
+    base = settings_mod.get_settings()
+    snapshot_up = runtime_mod._RuntimeOverrideSnapshot(
+        global_overrides={"auto_strategy_max_active_per_underlying": 3},
+        account_overrides={},
+        strategy_overrides={},
+        fetched_at_epoch=time.time(),
+    )
+    monkeypatch.setattr(
+        runtime_mod._provider, "_get_snapshot", lambda _s: snapshot_up
+    )
+    monkeypatch.setattr(runtime_mod, "emit_audit_event", lambda **kwargs: kwargs)
+
+    resolved = runtime_mod.get_runtime_settings(base_settings=base)
+    assert resolved.auto_strategy_max_active_per_underlying == 3, (
+        "Safe upward cap override must be applied without break-glass; "
+        f"got {resolved.auto_strategy_max_active_per_underlying!r}"
+    )
+
+    snapshot_down = runtime_mod._RuntimeOverrideSnapshot(
+        global_overrides={"auto_strategy_max_active_per_underlying": 1},
+        account_overrides={},
+        strategy_overrides={},
+        fetched_at_epoch=time.time(),
+    )
+    monkeypatch.setattr(
+        runtime_mod._provider, "_get_snapshot", lambda _s: snapshot_down
+    )
+    with pytest.raises(
+        ValueError,
+        match="LIVE runtime overrides require break-glass approval",
+    ):
+        runtime_mod.get_runtime_settings(base_settings=base)
+
+
 def test_auto_strategy_max_active_per_underlying_is_protected_in_live():
     """Issue #212 / PR #265 round-5 (Codex round-4 P1 "Protect runtime cap
     overrides from dropping spread management"): the NIFTY direction-aware

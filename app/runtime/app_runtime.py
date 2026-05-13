@@ -12,6 +12,7 @@ from functools import lru_cache
 from typing import Any, Callable, Optional
 
 from app.config.boot_config import RuntimeConfig, initialize_boot_config
+from app.config.runtime_config import get_runtime_settings
 from app.config.settings import get_settings
 from app.core.anti_pattern_guards import (
     mark_reconciliation_complete,
@@ -700,19 +701,25 @@ class AppRuntime:
                 runtime_cfg=runtime_cfg,
                 env=boot_cfg.env,
             )
+            # PR #265 round-9 (Codex round-8 P2 "Resolve provider
+            # overrides before AppRuntime validation"): the actual
+            # ``StrategySelector`` is constructed from
+            # ``get_runtime_settings(base_settings=settings)``, which
+            # layers runtime-config-provider overrides on top of the
+            # env-backed ``Settings``. Resolve the same proxy here so
+            # the cap-vs-mapping validator sees the values the stream
+            # will actually use. Round-8 passed the base settings
+            # which missed the env-unset + provider-overrides case.
+            resolved_settings_for_validator = get_runtime_settings(
+                base_settings=settings
+            )
             validate_startup_config(
                 strategy_cfg=boot_cfg.strategy_env,
                 trade_mode=trade_mode,
                 disable_trading_window_filter=disable_trading_window_filter,
                 known_strategy_names=all_canonical_strategy_names(),
                 env=boot_cfg.env,
-                # PR #265 round-8 (Codex round-7 P2 "Validate cap when
-                # runtime enables selector" + "Validate cap after runtime
-                # overrides"): pass resolved settings so the selector
-                # cap-vs-mapping validator sees the same effective values
-                # the stream consumes when constructing StrategySelector
-                # — not just raw env entries.
-                runtime_settings=settings,
+                runtime_settings=resolved_settings_for_validator,
             )
 
         enable_leader_lease = (
