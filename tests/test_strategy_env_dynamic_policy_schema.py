@@ -44,13 +44,23 @@ def test_all_ema20_blocks_include_dynamic_policy_stub() -> None:
 
 def test_nifty_mapping_has_trending_up_and_down_split() -> None:
     """
-    Issue #212: NIFTY_IDX selector mapping must declare the operator-recommended
-    direction-aware split:
-      - TRENDING_UP   -> include exclusive_nifty_ce_buy (bullish long-CE)
-      - TRENDING_DOWN -> include put_momentum_scalper  (bearish long-PE)
+    Issue #212 (round-2, after Codex review on PR #265):
 
-    The legacy TRENDING bucket is retained for backward-compatible behaviour
-    when the classifier cannot resolve direction (missing +DI/-DI/EMA ctx).
+    The NIFTY_IDX selector mapping must declare TRENDING_UP / TRENDING_DOWN
+    with the direction-matched strategy at POSITION 1 so it survives the
+    AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING cap (even at cap=1):
+      - TRENDING_UP:   exclusive_nifty_ce_buy first  (long CE bull-trend)
+      - TRENDING_DOWN: put_momentum_scalper  first   (long PE bear-trend)
+
+    The OPPOSITE-direction strategy must be RETAINED in each split
+    (Codex round-1 P1 on PR #265). Selector membership gates
+    `on_bar`/`on_tick` dispatch, which in turn runs each strategy's
+    SL/TP/EOD exit logic. Dropping the opposite-direction strategy would
+    leave any open position from the prior direction unmanaged after
+    a regime flip. The opposite-direction strategy stays selected for
+    MANAGEMENT only — its internal direction-gate self-rejects entries.
+
+    Legacy TRENDING is retained for backward compatibility.
     """
     cfg_path = Path(__file__).resolve().parents[1] / "app" / "config" / "strategy_env.yaml"
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
@@ -67,17 +77,47 @@ def test_nifty_mapping_has_trending_up_and_down_split() -> None:
     up = list(mapping["TRENDING_UP"])
     down = list(mapping["TRENDING_DOWN"])
 
-    assert "exclusive_nifty_ce_buy" in up, (
-        "TRENDING_UP must include exclusive_nifty_ce_buy (long CE matches bull-trend)"
+    # --- Direction-matched strategy at position 1 (cap=1 survival) ---
+    assert up[0] == "exclusive_nifty_ce_buy", (
+        "TRENDING_UP position-1 must be exclusive_nifty_ce_buy so it "
+        "survives AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1; "
+        f"got {up!r}"
     )
-    assert "put_momentum_scalper" not in up, (
-        "TRENDING_UP must not dispatch put_momentum_scalper "
-        "(its internal direction-gate would reject every bar)"
+    assert down[0] == "put_momentum_scalper", (
+        "TRENDING_DOWN position-1 must be put_momentum_scalper so it "
+        "survives AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1; "
+        f"got {down!r}"
     )
-    assert "put_momentum_scalper" in down, (
-        "TRENDING_DOWN must include put_momentum_scalper (long PE matches bear-trend)"
+
+    # --- Opposite-direction strategy retained for cross-flip management ---
+    # (Codex round-1 P1 on PR #265: open CE position from TRENDING_UP must
+    #  remain managed if regime flips to TRENDING_DOWN; ditto open PE.)
+    assert "put_momentum_scalper" in up, (
+        "TRENDING_UP must retain put_momentum_scalper for cross-flip "
+        "management of open PE positions (PR #265 round-1 P1); "
+        f"got {up!r}"
     )
-    assert "exclusive_nifty_ce_buy" not in down, (
-        "TRENDING_DOWN must not dispatch exclusive_nifty_ce_buy "
-        "(its internal direction-gate would reject every bar)"
+    assert "exclusive_nifty_ce_buy" in down, (
+        "TRENDING_DOWN must retain exclusive_nifty_ce_buy for cross-flip "
+        "management of open CE positions (PR #265 round-1 P1); "
+        f"got {down!r}"
+    )
+
+    # --- Spread retained for management in both splits ---
+    assert "nifty_weekly_credit_spreads" in up, (
+        f"TRENDING_UP must include nifty_weekly_credit_spreads; got {up!r}"
+    )
+    assert "nifty_weekly_credit_spreads" in down, (
+        f"TRENDING_DOWN must include nifty_weekly_credit_spreads; got {down!r}"
+    )
+
+    # --- Cap=2 set-membership invariance across direction flips ---
+    # Active-strategy SET (under cap=2) is identical across the two
+    # splits, only the ordering differs. This ensures a fast direction
+    # flip during AUTO_STRATEGY_MIN_HOLD_SECONDS does not change the
+    # dispatched strategy set — the hold window cannot defer management
+    # coverage (PR #265 round-1 P2 #2).
+    assert set(up[:2]) == set(down[:2]), (
+        "Cap=2 selection must have identical membership across "
+        f"TRENDING_UP[:2]={up[:2]!r} and TRENDING_DOWN[:2]={down[:2]!r}"
     )
