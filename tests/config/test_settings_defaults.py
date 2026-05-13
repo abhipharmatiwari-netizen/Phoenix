@@ -94,7 +94,13 @@ class TestProductionCriticalDefaults:
             "Strategies held 67% longer than compose expects."
         )
 
-    def test_auto_strategy_max_active_per_underlying_default_2(self, monkeypatch):
+    def test_auto_strategy_max_active_per_underlying_default_3(self, monkeypatch):
+        """Issue #212 / PR #265 round-4: committed default raised from 2 -> 3
+        so the NIFTY TRENDING_UP / TRENDING_DOWN mapping (which lists 3
+        strategies: direction-matched, opposite-direction-for-management,
+        spread) does not silently truncate the spread out of selection on
+        any deployment that forgets to set the env var explicitly.
+        """
         monkeypatch.delenv("AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING", raising=False)
         for k, v in [
             ("PROFIT_SWEEP_ENABLED", "false"),
@@ -108,9 +114,10 @@ class TestProductionCriticalDefaults:
         ]:
             monkeypatch.setenv(k, v)
         s = _fresh_settings()
-        assert s.auto_strategy_max_active_per_underlying == 2, (
-            f"Expected 2 got {s.auto_strategy_max_active_per_underlying}. "
-            "Half strategies activated per underlying when env missing."
+        assert s.auto_strategy_max_active_per_underlying == 3, (
+            f"Expected 3 got {s.auto_strategy_max_active_per_underlying}. "
+            "NIFTY direction-aware regime mapping requires cap >= 3 to keep "
+            "the spread strategy in TRENDING_UP/DOWN selection (PR #265)."
         )
 
     def test_new_typed_fields_present(self, monkeypatch):

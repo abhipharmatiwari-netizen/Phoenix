@@ -870,20 +870,24 @@ strategy_selection:
       #      - TRENDING_DOWN: [put_momentum_scalper (long PE), exclusive_nifty_ce_buy, spread]
       #
       #    ==================================================================
-      #    LIVE PREREQUISITE: AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=3
+      #    REQUIRED: AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING >= 3
       #    ==================================================================
-      #    The env default for AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING
-      #    is 2 (see app/config/settings.py). That cap would TRUNCATE
-      #    the spread strategy out of the TRENDING_UP / TRENDING_DOWN
-      #    selection (it sits at position 3), so a spread opened during
-      #    NORMAL/CHOPPY/HIGH_VOL/legacy_TRENDING and then carried into
-      #    TRENDING_UP/DOWN would stop receiving on_bar/on_tick ticks
-      #    and its SL/TP/EOD management would not run. LIVE DEPLOYMENT
-      #    MUST SET AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=3 in
-      #    /opt/phoenix/phoenix-deploy.env (or the equivalent OCI deploy
-      #    env source). This is a hard prerequisite for the direction-
-      #    aware split to be safe under cross-regime spread carry-over
-      #    (Codex round-2 P1 finding on PR #265).
+      #    The selector truncates the per-regime list to
+      #    ``AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING`` items, so a cap
+      #    below 3 would drop the spread strategy out of the selection
+      #    and a spread opened during NORMAL/CHOPPY/HIGH_VOL that is
+      #    carried into TRENDING_UP/DOWN would lose its SL/TP/EOD
+      #    management.
+      #
+      #    The committed default in ``app/config/settings.py`` was raised
+      #    from 2 -> 3 (issue #212 / PR #265 round-4) to make this the
+      #    safe default for any deployment that does not explicitly set
+      #    the env var. The OCI live env example
+      #    (``docs/runbooks/oci-live.env.example``) also pins 3 so
+      #    operator-edited copies inherit the correct value.
+      #    Codex round-2 P1 on PR #265 drove this enforcement: a
+      #    comment-only operator note was insufficient because unversioned
+      #    env files could silently miss the override.
       #    ==================================================================
       #
       #    With cap=3 in effect:

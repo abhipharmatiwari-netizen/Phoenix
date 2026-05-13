@@ -307,9 +307,19 @@ class Settings(BaseSettings):
         description="Enable adaptive strategy auto-selection by market regime.",
     )
     auto_strategy_max_active_per_underlying: int = Field(
-        default=2,
+        default=3,
         validation_alias="AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING",
-        description="Maximum active strategies per underlying when auto-selection is enabled.",
+        description=(
+            "Maximum active strategies per underlying when auto-selection is enabled. "
+            "Default raised from 2 -> 3 to match the NIFTY direction-aware regime "
+            "mapping (issue #212 / PR #265): the TRENDING_UP / TRENDING_DOWN splits "
+            "list 3 strategies (direction-matched, opposite-direction-for-management, "
+            "spread). Under cap=2 the spread would be truncated out of the selection "
+            "and any spread carried over from NORMAL/CHOPPY/HIGH_VOL would lose its "
+            "SL/TP/EOD management (Codex round-2 P1 on PR #265). LIVE deploy env "
+            "should explicitly set this value to keep behaviour pinned regardless of "
+            "future default changes."
+        ),
     )
     auto_strategy_min_hold_seconds: float = Field(
         default=180.0,
