@@ -134,12 +134,12 @@ def test_nifty_mapping_has_trending_up_and_down_split() -> None:
         f"TRENDING_UP[:3]={up[:3]!r} and TRENDING_DOWN[:3]={down[:3]!r}"
     )
 
-    # --- Legacy TRENDING / HIGH_VOL must stay capped at 2 entries ---
+    # --- Legacy TRENDING must stay capped at 2 entries ---
     # PR #265 round-6 (Codex round-5 P2 "Preserve legacy TRENDING
     # truncation when raising the cap"): the committed cap=3 default
     # (round-4) inadvertently let ``exclusive_nifty_ce_buy`` fire on the
     # legacy TRENDING fallback path (the previous env-default cap=2
-    # truncated it). Trim the lists back to 2 entries so direction-
+    # truncated it). Trim legacy TRENDING back to 2 entries so direction-
     # fallback dispatch matches the pre-#265 behaviour.
     legacy_trending = list(mapping["TRENDING"])
     assert len(legacy_trending) == 2, (
@@ -151,12 +151,18 @@ def test_nifty_mapping_has_trending_up_and_down_split() -> None:
         "round-6 trim — direction-fallback should match pre-#265 "
         f"dispatch [spread, put_momentum]; got {legacy_trending!r}"
     )
+    # --- HIGH_VOL retains CE for post-TRENDING_UP management ---
+    # Codex P1 follow-up on PR #265: a CE opened during TRENDING_UP must
+    # continue receiving on_bar/on_tick management after a later move into
+    # HIGH_VOL. Keep the historical first-two prefix for spread / put, but
+    # include CE as the third cap=3 member.
     high_vol = list(mapping["HIGH_VOL"])
-    assert len(high_vol) == 2, (
-        f"HIGH_VOL must be 2 entries (same rationale as legacy TRENDING); "
-        f"got {high_vol!r}"
-    )
-    assert "exclusive_nifty_ce_buy" not in high_vol, (
-        "HIGH_VOL must NOT include exclusive_nifty_ce_buy after round-6 "
-        f"trim; got {high_vol!r}"
+    assert high_vol[:2] == [
+        "nifty_weekly_credit_spreads",
+        "put_momentum_scalper",
+    ], f"HIGH_VOL must preserve the historical cap=2 prefix; got {high_vol!r}"
+    assert "exclusive_nifty_ce_buy" in high_vol[:3], (
+        "HIGH_VOL must retain exclusive_nifty_ce_buy within the cap=3 "
+        "selection so CE positions opened in TRENDING_UP continue to be "
+        f"managed after a HIGH_VOL transition; got {high_vol!r}"
     )
