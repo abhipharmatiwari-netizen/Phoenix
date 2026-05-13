@@ -863,36 +863,48 @@ strategy_selection:
       #    value choice for this PR's diagnostic goal.
       #
       # 5. TRENDING_UP / TRENDING_DOWN keys (issue #212) make the
-      #    direction-conditional intent explicit by ordering each
-      #    direction-matched strategy at position 1 so it survives the
-      #    AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING cap (even at cap=1):
+      #    direction-conditional intent explicit. Each split lists THREE
+      #    strategies — direction-matched first, opposite-direction
+      #    second, spread third:
       #      - TRENDING_UP:   [exclusive_nifty_ce_buy (long CE), put_momentum_scalper, spread]
       #      - TRENDING_DOWN: [put_momentum_scalper (long PE), exclusive_nifty_ce_buy, spread]
       #
-      #    The OPPOSITE-direction strategy is intentionally retained in
-      #    each split (PR #265 Codex round-1 P1 fix). Selector membership
-      #    is also used by `is_strategy_active` to gate `on_bar`/`on_tick`
-      #    dispatch, which in turn runs each strategy's SL/TP/EOD exit
-      #    logic. If a CE position is opened during TRENDING_UP and the
-      #    regime flips to TRENDING_DOWN, dropping `exclusive_nifty_ce_buy`
-      #    from the new selection would leave the open CE position
-      #    UNMANAGED until manual intervention. Keeping both direction
-      #    strategies in both splits preserves cross-flip management
-      #    while the direction-matched ordering ensures only the matched
-      #    side is dispatched as position 1 under cap=1; the wrong-side
-      #    strategy is either selected at position 2 (cap=2) where its
-      #    internal direction-gate self-rejects entries (so it only
-      #    consumes management bars, not entry capacity), or truncated
-      #    out (cap=1) and re-acquired on the next flip.
+      #    ==================================================================
+      #    LIVE PREREQUISITE: AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=3
+      #    ==================================================================
+      #    The env default for AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING
+      #    is 2 (see app/config/settings.py). That cap would TRUNCATE
+      #    the spread strategy out of the TRENDING_UP / TRENDING_DOWN
+      #    selection (it sits at position 3), so a spread opened during
+      #    NORMAL/CHOPPY/HIGH_VOL/legacy_TRENDING and then carried into
+      #    TRENDING_UP/DOWN would stop receiving on_bar/on_tick ticks
+      #    and its SL/TP/EOD management would not run. LIVE DEPLOYMENT
+      #    MUST SET AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=3 in
+      #    /opt/phoenix/phoenix-deploy.env (or the equivalent OCI deploy
+      #    env source). This is a hard prerequisite for the direction-
+      #    aware split to be safe under cross-regime spread carry-over
+      #    (Codex round-2 P1 finding on PR #265).
+      #    ==================================================================
       #
-      #    Set-membership of the cap=2 selection is identical between
-      #    TRENDING_UP and TRENDING_DOWN, only the ordering differs.
-      #    This means a fast bull->bear flip during the
-      #    AUTO_STRATEGY_MIN_HOLD_SECONDS hold window does not change
-      #    the actively-dispatched STRATEGY SET (only the precedence
-      #    under cap=1), so the effective dispatch on bar-2 of a flip
-      #    is the same as bar-1 under cap=2 — the hold window does not
-      #    defer management coverage.
+      #    With cap=3 in effect:
+      #      - Position-1 dispatch precedence ensures only the
+      #        direction-matched side gets new ENTRY dispatch when the
+      #        cap is reduced to 1.
+      #      - The OPPOSITE-direction strategy stays selected for
+      #        SL/TP/EOD management of any open position from the prior
+      #        regime (its internal direction-gate self-rejects new
+      #        entries on the wrong side; PR #265 Codex round-1 P1 fix).
+      #      - The spread stays selected for SL/TP/EOD management of
+      #        any open spread carried across the flip (PR #265 Codex
+      #        round-2 P1 fix).
+      #
+      #    Set-membership of the cap=3 selection is identical between
+      #    TRENDING_UP and TRENDING_DOWN — only the ordering differs.
+      #    A fast bull->bear flip during the
+      #    AUTO_STRATEGY_MIN_HOLD_SECONDS hold window therefore does
+      #    not change the actively-dispatched strategy SET; the hold
+      #    cannot defer management coverage (PR #265 Codex round-1
+      #    P2 #2 fix).
       #
       #    Legacy TRENDING is retained for backward compatibility when
       #    the classifier cannot resolve direction (missing +DI/-DI/EMA/

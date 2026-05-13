@@ -111,13 +111,25 @@ def test_nifty_mapping_has_trending_up_and_down_split() -> None:
         f"TRENDING_DOWN must include nifty_weekly_credit_spreads; got {down!r}"
     )
 
-    # --- Cap=2 set-membership invariance across direction flips ---
-    # Active-strategy SET (under cap=2) is identical across the two
-    # splits, only the ordering differs. This ensures a fast direction
-    # flip during AUTO_STRATEGY_MIN_HOLD_SECONDS does not change the
+    # --- Cap=3 set-membership invariance across direction flips ---
+    # LIVE deployment must run with AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=3
+    # (env default is 2 — see app/config/settings.py — and must be
+    # overridden in /opt/phoenix/phoenix-deploy.env). Under cap=3 the
+    # active-strategy SET is identical across the two splits; only the
+    # ordering differs. A fast direction flip during
+    # AUTO_STRATEGY_MIN_HOLD_SECONDS therefore does not change the
     # dispatched strategy set — the hold window cannot defer management
-    # coverage (PR #265 round-1 P2 #2).
-    assert set(up[:2]) == set(down[:2]), (
-        "Cap=2 selection must have identical membership across "
-        f"TRENDING_UP[:2]={up[:2]!r} and TRENDING_DOWN[:2]={down[:2]!r}"
+    # coverage (PR #265 Codex round-1 P2 #2 fix). The cap=3 prerequisite
+    # itself is the PR #265 Codex round-2 P1 fix (without it, the spread
+    # is truncated out of the TRENDING_UP/DOWN selection at position 3
+    # and any spread carried over from NORMAL/CHOPPY/HIGH_VOL would lose
+    # its on_bar/on_tick management).
+    assert len(up) >= 3 and len(down) >= 3, (
+        "TRENDING_UP / TRENDING_DOWN must list at least 3 strategies "
+        "(direction-matched, opposite-direction, spread) so cap=3 "
+        f"captures all three; got up={up!r} down={down!r}"
+    )
+    assert set(up[:3]) == set(down[:3]), (
+        "Cap=3 selection must have identical set-membership across "
+        f"TRENDING_UP[:3]={up[:3]!r} and TRENDING_DOWN[:3]={down[:3]!r}"
     )
