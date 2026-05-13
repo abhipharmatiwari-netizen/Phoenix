@@ -219,6 +219,80 @@ def test_validator_accepts_shadow_mode():
     )
 
 
+def test_validator_rejects_explicit_cap_below_mapping_length():
+    """Issue #212 / PR #265 round-6 (Codex round-5 P1 "Enforce cap before
+    adding three-entry trending mappings"): an operator who sets an
+    explicit ``AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING`` below the longest
+    per-regime mapping list must fail closed at startup. Without this,
+    a 3-entry ``TRENDING_UP`` list under cap=2 silently truncates the
+    3rd strategy (``nifty_weekly_credit_spreads`` in the NIFTY direction-
+    aware mapping) and the spread's SL/TP/EOD management would be lost
+    for any spread carried across the flip.
+    """
+    cfg = _valid_cfg()
+    cfg["strategy_selection"] = {
+        "mapping": {
+            "NIFTY_IDX": {
+                "TRENDING_UP": ["a", "b", "c"],
+                "TRENDING_DOWN": ["b", "a", "c"],
+            },
+        },
+    }
+    env = {"AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING": "2"}
+    with pytest.raises(ValueError, match=r"strategy_selection\.mapping\.NIFTY_IDX"):
+        validate_startup_config(
+            strategy_cfg=cfg,
+            trade_mode="LIVE",
+            disable_trading_window_filter=False,
+            known_strategy_names=KNOWN_STRATEGIES,
+            env=env,
+        )
+
+
+def test_validator_accepts_cap_matching_mapping_length():
+    """Round-6: when the explicit cap equals (or exceeds) the longest
+    per-regime list, the validator accepts the config."""
+    cfg = _valid_cfg()
+    cfg["strategy_selection"] = {
+        "mapping": {
+            "NIFTY_IDX": {
+                "TRENDING_UP": ["a", "b", "c"],
+                "TRENDING_DOWN": ["b", "a", "c"],
+            },
+        },
+    }
+    env = {"AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING": "3"}
+    validate_startup_config(
+        strategy_cfg=cfg,
+        trade_mode="LIVE",
+        disable_trading_window_filter=False,
+        known_strategy_names=KNOWN_STRATEGIES,
+        env=env,
+    )
+
+
+def test_validator_skips_cap_check_when_env_unset():
+    """Round-6: when the env var is absent the Settings default applies
+    (raised to 3 in round-4). The validator does not double-check the
+    absent-env case so the safe-default path is not blocked."""
+    cfg = _valid_cfg()
+    cfg["strategy_selection"] = {
+        "mapping": {
+            "NIFTY_IDX": {
+                "TRENDING_UP": ["a", "b", "c"],
+            },
+        },
+    }
+    # env intentionally does not include AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING
+    validate_startup_config(
+        strategy_cfg=cfg,
+        trade_mode="LIVE",
+        disable_trading_window_filter=False,
+        known_strategy_names=KNOWN_STRATEGIES,
+        env={},
+    )
+
+
 def test_validator_rejects_unknown_trade_mode():
     cfg = _valid_cfg()
     with pytest.raises(ValueError, match="TRADE_MODE must be one of PAPER\\|LIVE\\|SHADOW"):

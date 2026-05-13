@@ -133,3 +133,30 @@ def test_nifty_mapping_has_trending_up_and_down_split() -> None:
         "Cap=3 selection must have identical set-membership across "
         f"TRENDING_UP[:3]={up[:3]!r} and TRENDING_DOWN[:3]={down[:3]!r}"
     )
+
+    # --- Legacy TRENDING / HIGH_VOL must stay capped at 2 entries ---
+    # PR #265 round-6 (Codex round-5 P2 "Preserve legacy TRENDING
+    # truncation when raising the cap"): the committed cap=3 default
+    # (round-4) inadvertently let ``exclusive_nifty_ce_buy`` fire on the
+    # legacy TRENDING fallback path (the previous env-default cap=2
+    # truncated it). Trim the lists back to 2 entries so direction-
+    # fallback dispatch matches the pre-#265 behaviour.
+    legacy_trending = list(mapping["TRENDING"])
+    assert len(legacy_trending) == 2, (
+        f"Legacy TRENDING must be 2 entries (cap=3 default would otherwise "
+        f"fire all 3); got {legacy_trending!r}"
+    )
+    assert "exclusive_nifty_ce_buy" not in legacy_trending, (
+        "Legacy TRENDING must NOT include exclusive_nifty_ce_buy after "
+        "round-6 trim — direction-fallback should match pre-#265 "
+        f"dispatch [spread, put_momentum]; got {legacy_trending!r}"
+    )
+    high_vol = list(mapping["HIGH_VOL"])
+    assert len(high_vol) == 2, (
+        f"HIGH_VOL must be 2 entries (same rationale as legacy TRENDING); "
+        f"got {high_vol!r}"
+    )
+    assert "exclusive_nifty_ce_buy" not in high_vol, (
+        "HIGH_VOL must NOT include exclusive_nifty_ce_buy after round-6 "
+        f"trim; got {high_vol!r}"
+    )

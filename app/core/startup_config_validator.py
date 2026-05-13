@@ -912,6 +912,82 @@ def validate_runtime_startup_settings(
         raise ValueError(f"Startup runtime setting validation failed:\n{details}")
 
 
+def _validate_strategy_selector_cap_for_mapping(
+    *,
+    strategy_cfg: Mapping[str, Any],
+    env_map: Mapping[str, Any],
+) -> list[str]:
+    """Issue #212 / PR #265 round-6 (Codex round-5 P1 "Enforce cap before
+    adding three-entry trending mappings"): fail closed at startup when the
+    operator's effective ``AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING`` is
+    smaller than the longest per-regime list in any
+    ``strategy_selection.mapping.<UNDERLYING>``.
+
+    The selector slices ``selection[:max_active_per_underlying]``, so a
+    YAML mapping with 3 entries (e.g. ``TRENDING_UP: [a, b, c]``) silently
+    drops the 3rd entry under cap=2. For the NIFTY direction-aware
+    mapping the 3rd entry is ``nifty_weekly_credit_spreads`` whose
+    SL/TP/EOD management would then be silently lost for any spread
+    carried across the flip. Round-4 raised the committed default to 3
+    and round-5 protected the runtime config override path, but an
+    operator can still set an explicit value below 3 in their
+    unversioned deploy env — this validator catches that case.
+    """
+    errors: list[str] = []
+    selection = (
+        strategy_cfg.get("strategy_selection") if isinstance(strategy_cfg, Mapping) else None
+    )
+    mapping = (
+        selection.get("mapping")
+        if isinstance(selection, Mapping)
+        else None
+    )
+    if not isinstance(mapping, Mapping):
+        return errors
+
+    longest_per_underlying: dict[str, tuple[str, int]] = {}
+    for raw_underlying, raw_regimes in mapping.items():
+        if not isinstance(raw_regimes, Mapping):
+            continue
+        for raw_regime_name, raw_strategies in raw_regimes.items():
+            if not isinstance(raw_strategies, (list, tuple)):
+                continue
+            length = len(raw_strategies)
+            current = longest_per_underlying.get(str(raw_underlying), ("", 0))
+            if length > current[1]:
+                longest_per_underlying[str(raw_underlying)] = (
+                    str(raw_regime_name),
+                    length,
+                )
+
+    if not longest_per_underlying:
+        return errors
+
+    raw_cap = env_map.get("AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING")
+    if raw_cap is None or str(raw_cap).strip() == "":
+        # Env var not explicitly set — Settings default applies (raised to 3
+        # in round-4). Skip the check: the env-default path is already safe
+        # and we don't want to fail closed when an absent env var would
+        # actually inherit the safe value.
+        return errors
+    try:
+        effective_cap = int(str(raw_cap).strip())
+    except (TypeError, ValueError):
+        # Malformed value will be caught elsewhere; do not double-report.
+        return errors
+
+    for underlying, (regime, length) in sorted(longest_per_underlying.items()):
+        if length > effective_cap:
+            errors.append(
+                f"strategy_selection.mapping.{underlying}.{regime} lists "
+                f"{length} strategies but AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING="
+                f"{effective_cap} truncates selection to {effective_cap}. "
+                f"Raise the env var (>= {length}) or shorten the per-regime "
+                f"list. See PR #265 / Codex round-5."
+            )
+    return errors
+
+
 def validate_startup_config(
     *,
     strategy_cfg: Mapping[str, Any],
@@ -927,6 +1003,12 @@ def validate_startup_config(
         errors.append(
             f"TRADE_MODE must be one of PAPER|LIVE|SHADOW, got '{trade_mode}'"
         )
+    errors.extend(
+        _validate_strategy_selector_cap_for_mapping(
+            strategy_cfg=strategy_cfg,
+            env_map=env_map,
+        )
+    )
     known = {str(x).strip() for x in known_strategy_names if str(x).strip()}
     ema20_names = {str(name).strip() for name in EMA20_STRATEGY_NAMES if str(name).strip()}
 
