@@ -81,6 +81,30 @@ def test_runtime_config_auto_enable_allows_cloud_run_markers(monkeypatch):
     assert runtime_mod.RuntimeConfigProvider._is_enabled(settings) is True
 
 
+def test_auto_strategy_max_active_per_underlying_is_protected_in_live():
+    """Issue #212 / PR #265 round-5 (Codex round-4 P1 "Protect runtime cap
+    overrides from dropping spread management"): the NIFTY direction-aware
+    regime mapping lists 3 strategies per TRENDING_UP / TRENDING_DOWN
+    split. A runtime override that lowers
+    ``auto_strategy_max_active_per_underlying`` below 3 would truncate the
+    spread strategy out of selection and lose SL/TP/EOD management of any
+    spread carried into the trending regime. This regression test pins
+    that ``auto_strategy_max_active_per_underlying`` cannot be overridden
+    by a runtime config provider in LIVE without break-glass approval.
+    """
+    import app.config.runtime_config as runtime_mod
+
+    assert "auto_strategy_max_active_per_underlying" in runtime_mod._LIVE_PROTECTED_OVERRIDE_KEYS, (
+        "auto_strategy_max_active_per_underlying must be in "
+        "_LIVE_PROTECTED_OVERRIDE_KEYS so a runtime override cannot lower "
+        "the cap below the NIFTY direction-aware mapping requirement "
+        "(PR #265 Codex round-4 P1)."
+    )
+    # Sanity: the key must also be in the broader allow-list otherwise the
+    # protection is moot (the value would never be applied either way).
+    assert "auto_strategy_max_active_per_underlying" in runtime_mod._ALLOWED_OVERRIDE_KEYS
+
+
 def test_live_runtime_settings_rejects_protected_overrides_without_break_glass(
     monkeypatch,
 ):

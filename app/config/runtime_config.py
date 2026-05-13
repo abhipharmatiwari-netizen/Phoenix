@@ -104,6 +104,16 @@ _LIVE_PROTECTED_OVERRIDE_KEYS = {
     "capital_margin_short_option_per_lot",
     "capital_margin_futures_per_lot",
     "capital_margin_futures_rate",
+    # Issue #212 / PR #265 round-5 (Codex round-4 P1
+    # "Protect runtime cap overrides from dropping spread management"):
+    # the NIFTY direction-aware mapping lists 3 strategies per
+    # TRENDING_UP / TRENDING_DOWN split. A runtime override that lowers
+    # ``auto_strategy_max_active_per_underlying`` would truncate the
+    # spread strategy out of selection and lose SL/TP/EOD management of
+    # any spread carried into the trending regime. Protect the value in
+    # LIVE so runtime config providers cannot regress the safe default
+    # without break-glass approval.
+    "auto_strategy_max_active_per_underlying",
 }
 
 _LIVE_BREAK_GLASS_FLAG_ENV = "LIVE_RUNTIME_OVERRIDE_BREAK_GLASS"
