@@ -932,8 +932,26 @@ def _validate_strategy_selector_cap_for_mapping(
     and round-5 protected the runtime config override path, but an
     operator can still set an explicit value below 3 in their
     unversioned deploy env — this validator catches that case.
+
+    PR #265 round-7 (Codex round-6 P2 "Skip selector cap validation when
+    selector is disabled"): if ``AUTO_STRATEGY_SELECT_ENABLED`` is false
+    or unset, ``multi_instrument_stream`` does not construct a
+    ``StrategySelector`` at all, so the cap cannot truncate anything.
+    Skip the check in that mode to avoid blocking startup on
+    deployments that have auto-selection disabled but kept a legacy
+    cap setting (e.g. ``AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=2``).
     """
     errors: list[str] = []
+    select_enabled_raw = env_map.get("AUTO_STRATEGY_SELECT_ENABLED")
+    select_enabled = str(select_enabled_raw or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not select_enabled:
+        return errors
+
     selection = (
         strategy_cfg.get("strategy_selection") if isinstance(strategy_cfg, Mapping) else None
     )

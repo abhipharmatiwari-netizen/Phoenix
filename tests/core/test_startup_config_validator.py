@@ -238,7 +238,10 @@ def test_validator_rejects_explicit_cap_below_mapping_length():
             },
         },
     }
-    env = {"AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING": "2"}
+    env = {
+        "AUTO_STRATEGY_SELECT_ENABLED": "true",
+        "AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING": "2",
+    }
     with pytest.raises(ValueError, match=r"strategy_selection\.mapping\.NIFTY_IDX"):
         validate_startup_config(
             strategy_cfg=cfg,
@@ -261,7 +264,10 @@ def test_validator_accepts_cap_matching_mapping_length():
             },
         },
     }
-    env = {"AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING": "3"}
+    env = {
+        "AUTO_STRATEGY_SELECT_ENABLED": "true",
+        "AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING": "3",
+    }
     validate_startup_config(
         strategy_cfg=cfg,
         trade_mode="LIVE",
@@ -289,7 +295,48 @@ def test_validator_skips_cap_check_when_env_unset():
         trade_mode="LIVE",
         disable_trading_window_filter=False,
         known_strategy_names=KNOWN_STRATEGIES,
-        env={},
+        env={"AUTO_STRATEGY_SELECT_ENABLED": "true"},
+    )
+
+
+def test_validator_skips_cap_check_when_selector_disabled():
+    """PR #265 round-7 (Codex round-6 P2 "Skip selector cap validation
+    when selector is disabled"): if ``AUTO_STRATEGY_SELECT_ENABLED`` is
+    false or unset, ``multi_instrument_stream`` doesn't construct a
+    ``StrategySelector`` at all, so the cap cannot truncate anything.
+    The validator must NOT block startup on legacy
+    ``AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=2`` env values when
+    auto-selection is disabled — that combination is harmless.
+    """
+    cfg = _valid_cfg()
+    cfg["strategy_selection"] = {
+        "mapping": {
+            "NIFTY_IDX": {
+                "TRENDING_UP": ["a", "b", "c"],
+            },
+        },
+    }
+    # Selector disabled + a legacy explicit cap=2 (would otherwise
+    # trigger the cap-too-low rejection).
+    env_disabled = {
+        "AUTO_STRATEGY_SELECT_ENABLED": "false",
+        "AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING": "2",
+    }
+    validate_startup_config(
+        strategy_cfg=cfg,
+        trade_mode="LIVE",
+        disable_trading_window_filter=False,
+        known_strategy_names=KNOWN_STRATEGIES,
+        env=env_disabled,
+    )
+    # Selector flag entirely absent — same skip behaviour.
+    env_unset = {"AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING": "2"}
+    validate_startup_config(
+        strategy_cfg=cfg,
+        trade_mode="LIVE",
+        disable_trading_window_filter=False,
+        known_strategy_names=KNOWN_STRATEGIES,
+        env=env_unset,
     )
 
 
