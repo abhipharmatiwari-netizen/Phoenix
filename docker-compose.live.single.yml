@@ -346,6 +346,7 @@ services:
                       ('broker_accounts'),
                       ('subscriptions'),
                       ('strategy_configs'),
+                      ('strategy_config_candidates'),
                       ('broker_credentials')
                   ) AS req(required_table)
                   WHERE NOT EXISTS (
