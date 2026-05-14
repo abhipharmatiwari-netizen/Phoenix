@@ -6,11 +6,20 @@
 # NSE holiday, nginx is also stopped for a complete system shutdown.
 # Otherwise nginx stays up (serves 502 gracefully; LB health checks continue).
 #
-# Cron entry (on OCI VM, cron runs in UTC):
-#   30 18 * * 0-4 /opt/phoenix/stop-phoenix.sh >> /opt/phoenix/logs/cron-scheduler.log 2>&1
-#   (00:00 IST Mon-Fri = 18:30 UTC Sun-Thu)
+# Cron schedule is installed via /etc/cron.d/phoenix — see scripts/phoenix.cron
+# in this repo. That file pins CRON_TZ=UTC and PATH so the schedule and tool
+# resolution do not depend on the VM's system timezone or the cron daemon's
+# minimal default PATH.
 
 set -eu
+
+on_exit() {
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') [stop-phoenix] FATAL: aborted (exit $rc)"
+    fi
+}
+trap on_exit EXIT
 
 COMPOSE_FILE="/opt/phoenix/app/docker-compose.oci-live.yml"
 OVERRIDE_FILE="/opt/phoenix/phoenix-override.yml"

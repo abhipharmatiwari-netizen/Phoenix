@@ -153,11 +153,26 @@ docker compose \
   up -d --no-build --force-recreate backend nginx
 ```
 
-For scheduled starts and stops, install the repo-tracked scripts as VM cron jobs only after validating they point at the same compose and env files:
+For scheduled starts and stops, first validate the scripts point at the same compose and env files used above:
 
 ```bash
 sudo /opt/phoenix/start-phoenix.sh
 sudo /opt/phoenix/stop-phoenix.sh
+```
+
+Then install the tracked cron file (do **not** hand-edit a user crontab — the tracked file pins `CRON_TZ=UTC` and `PATH` so the 03:30 UTC / 18:30 UTC entries fire at the intended IST wall-clock times regardless of the VM's system timezone, and so `docker`/`python3` resolve under cron's minimal environment):
+
+```bash
+sudo install -m 644 -o root -g root \
+  /opt/phoenix/app/scripts/phoenix.cron /etc/cron.d/phoenix
+sudo systemctl restart cron
+```
+
+Confirm cron picked it up and the next scheduled run is in the expected UTC window:
+
+```bash
+sudo journalctl -u cron --since "5 min ago" | grep -i phoenix
+tail -f /opt/phoenix/logs/cron-scheduler.log
 ```
 
 ## Validation

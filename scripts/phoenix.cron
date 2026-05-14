@@ -1,0 +1,34 @@
+# /etc/cron.d/phoenix — Phoenix backend market-day start/stop schedule
+#
+# Install on the OCI VM:
+#   sudo install -m 644 -o root -g root \
+#     /opt/phoenix/app/scripts/phoenix.cron /etc/cron.d/phoenix
+#   sudo systemctl restart cron   # or `crond` on RHEL-family
+#
+# Verify it loaded:
+#   sudo grep CRON /var/log/syslog | tail -5     # Debian/Ubuntu
+#   sudo journalctl -u cron --since "10 min ago" # systemd
+#
+# Logs from the scripts themselves:
+#   tail -f /opt/phoenix/logs/cron-scheduler.log
+#
+# Why this file exists (vs. user crontab):
+#   - CRON_TZ pins schedule interpretation to UTC, so the entries fire at the
+#     intended wall-clock IST time regardless of the VM's system timezone.
+#   - Explicit PATH ensures `docker`, `docker compose`, and `python3` resolve
+#     under cron's otherwise-minimal environment.
+#   - Files in /etc/cron.d run as the user named in field 6 (root here), which
+#     is required for docker socket and /run/secrets access.
+
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRON_TZ=UTC
+MAILTO=""
+
+# Start backend at 09:00 IST Mon-Fri = 03:30 UTC Mon-Fri.
+# (IST is UTC+5:30; 03:30 UTC never crosses a date boundary into IST so the
+# UTC day-of-week 1-5 maps cleanly to IST Mon-Fri.)
+30 3 * * 1-5 root /opt/phoenix/start-phoenix.sh >> /opt/phoenix/logs/cron-scheduler.log 2>&1
+
+# Stop backend at 00:00 IST Mon-Fri = 18:30 UTC Sun-Thu.
+30 18 * * 0-4 root /opt/phoenix/stop-phoenix.sh >> /opt/phoenix/logs/cron-scheduler.log 2>&1

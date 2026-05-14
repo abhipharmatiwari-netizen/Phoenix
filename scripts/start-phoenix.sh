@@ -5,9 +5,11 @@
 # Skips start on NSE market holidays listed in /opt/phoenix/nse-holidays.txt.
 # Restarts nginx first if it was stopped during a prior holiday full-shutdown.
 #
-# Cron entry (on OCI VM, cron runs in UTC):
-#   30 3 * * 1-5 /opt/phoenix/start-phoenix.sh >> /opt/phoenix/logs/cron-scheduler.log 2>&1
-#   (09:00 IST Mon-Fri = 03:30 UTC Mon-Fri)
+# Cron schedule is installed via /etc/cron.d/phoenix — see scripts/phoenix.cron
+# in this repo. That file pins CRON_TZ=UTC and PATH so the schedule and tool
+# resolution do not depend on the VM's system timezone or the cron daemon's
+# minimal default PATH. Do NOT hand-edit a user crontab to schedule this — use
+# the tracked cron.d file so the env pins travel with the entry.
 #
 # Holiday file format: /opt/phoenix/nse-holidays.txt
 #   One date per line in YYYY-MM-DD format (IST calendar date).
@@ -15,6 +17,17 @@
 #   Update annually or when NSE announces special sessions/closures.
 
 set -eu
+
+# Surface any aborted run in the shared cron log — without this, `set -e`
+# failures inside docker/python calls exit silently and look identical to "cron
+# never fired" during triage.
+on_exit() {
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') [start-phoenix] FATAL: aborted (exit $rc)"
+    fi
+}
+trap on_exit EXIT
 
 COMPOSE_FILE="/opt/phoenix/app/docker-compose.oci-live.yml"
 OVERRIDE_FILE="/opt/phoenix/phoenix-override.yml"
