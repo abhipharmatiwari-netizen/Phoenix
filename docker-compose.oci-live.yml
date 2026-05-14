@@ -336,7 +336,8 @@ services:
                   SELECT required_table AS name
                   FROM (VALUES
                       ('tenants'), ('broker_accounts'), ('subscriptions'),
-                      ('strategy_configs'), ('broker_credentials'),
+                      ('strategy_configs'), ('strategy_config_candidates'),
+                      ('broker_credentials'),
                       ('circuit_breaker_state'), ('pnl_snapshots'), ('profit_lock_state'),
                       ('position_trailing_lock_state'), ('trades')
                   ) AS req(required_table)
