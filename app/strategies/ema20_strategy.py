@@ -2338,8 +2338,27 @@ class Ema20Strategy(BaseStrategy):
         # Keyed by option_label (not position object) so the guard survives
         # the Ema20Position being replaced via sync_position_from_risk_manager
         # while an exit is in flight.
+        #
+        # Replay-flag bypass mirroring the entry-cooloff fix (issue #232
+        # line 1656): replay/backtest harnesses process historical candles
+        # in a tight loop, so wall-clock ``time.monotonic()`` does not
+        # advance while the strategy fires across many simulated bars. The
+        # 60-second pending-exit window would block ALL same-label re-exits
+        # within that real-time window and produce <1 closed trade per
+        # multi-day replay regardless of parameter sweep choices. Skip the
+        # wall-clock CHECK in replay; the guard is still ARMED on every
+        # bridge submission below, so LIVE PHX#199 protection is identical
+        # when the replay flag is off. The existing 60s auto-recover (a few
+        # lines below) handles any stale-guard cleanup that the in-replay
+        # bypass would otherwise leave behind.
+        try:
+            from app.orders.replay_context import get_replay_flag
+            in_replay = bool(get_replay_flag())
+        except Exception:  # pragma: no cover - defensive
+            in_replay = False
+
         prior_pending = self._pending_exit_by_label.get(pos.option_label)
-        if prior_pending is not None:
+        if not in_replay and prior_pending is not None:
             age = now_mono - prior_pending
             if age < self._pending_exit_max_seconds:
                 logger.info(

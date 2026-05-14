@@ -329,3 +329,67 @@ def test_global_exit_in_flight_flag_does_not_replace_per_label_guard(monkeypatch
     assert strategy._exit_in_flight is False
     # But the per-label guard should still be set.
     assert "NG_ATM_CE_255" in strategy._pending_exit_by_label
+
+
+def test_replay_flag_bypasses_pending_exit_guard(monkeypatch):
+    """Replay-mode regression: ``_pending_exit_by_label`` uses
+    ``time.monotonic()`` which does not advance through replayed bars in a
+    backtest. Without a replay bypass, the first exit on a label arms the
+    guard with the current wall-clock and every subsequent exit attempt on
+    the SAME label within the 60-second window is suppressed — producing
+    <1 closed trade per multi-day replay across all parameter combos.
+
+    The fix mirrors the existing entry-cooloff bypass (issue #232 / PR
+    #232 line 1656): detect replay context via
+    ``app.orders.replay_context.get_replay_flag`` and skip the wall-clock
+    guard CHECK there. The guard is still ARMED on every bridge
+    submission, so the PHX#199 LIVE protection is preserved when the
+    replay flag is off.
+    """
+    from app.orders.replay_context import isolated_replay_flag
+
+    mod, strategy = _make_strategy(monkeypatch)
+    _seed_short_position(mod, strategy)
+    calls: List[dict] = []
+    _patch_bridge_success(monkeypatch, mod, calls)
+
+    with isolated_replay_flag(True):
+        # First exit fires and arms the guard.
+        strategy._exit_position(reason="SL")
+        assert len(calls) == 1
+        assert "NG_ATM_CE_255" in strategy._pending_exit_by_label, (
+            "guard must still be ARMED after success in replay — only the "
+            "CHECK is bypassed; the guard itself is unchanged so LIVE "
+            "PHX#199 protection is identical when replay flag is off"
+        )
+
+        # Re-seed the same label so a SECOND exit can be attempted; in
+        # replay, multiple session boundaries fire force_exit_all on the
+        # same label across days within microseconds of real wall-clock.
+        _seed_short_position(mod, strategy)
+
+        # Second exit on the same label must fire in replay even though
+        # ``_pending_exit_by_label`` still has a recent wall-clock entry.
+        strategy._exit_position(reason="SL")
+        assert len(calls) == 2, (
+            "Second same-label exit must fire in replay; the wall-clock "
+            "guard is bypassed via get_replay_flag(). Pre-fix this would "
+            "be suppressed with pending_age<60s, producing <1 trade per "
+            "multi-day replay across all parameter sweeps."
+        )
+
+    # Sanity: with the replay flag CLEARED, the guard suppresses the
+    # second exit (preserves PHX#199 LIVE protection).
+    calls.clear()
+    mod_b, strategy_b = _make_strategy(monkeypatch)
+    _seed_short_position(mod_b, strategy_b)
+    _patch_bridge_success(monkeypatch, mod_b, calls)
+    strategy_b._exit_position(reason="SL")
+    assert len(calls) == 1
+    _seed_short_position(mod_b, strategy_b)
+    strategy_b._exit_position(reason="SL")
+    assert len(calls) == 1, (
+        "Without replay flag, the per-label guard MUST suppress the "
+        "duplicate exit attempt within the 60s wall-clock window — "
+        "preserves PHX#199 protection."
+    )
