@@ -1,0 +1,12 @@
+[Unit]
+Description=Phoenix backend stop at 00:00 IST Mon-Fri (18:30 UTC Sun-Thu)
+Documentation=https://github.com/abhipharmatiwari-netizen/Phoenix/blob/main/docs/runbooks/oci_live_deployment.md
+
+[Timer]
+OnCalendar=Sun..Thu *-*-* 18:30:00 UTC
+Persistent=true
+AccuracySec=30s
+Unit=phoenix-stop.service
+
+[Install]
+WantedBy=timers.target

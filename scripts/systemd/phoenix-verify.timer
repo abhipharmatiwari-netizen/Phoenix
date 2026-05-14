@@ -1,0 +1,12 @@
+[Unit]
+Description=Phoenix backend morning-start verification at 09:10 IST Mon-Fri (03:40 UTC)
+Documentation=https://github.com/abhipharmatiwari-netizen/Phoenix/blob/main/docs/runbooks/oci_live_deployment.md
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 03:40:00 UTC
+Persistent=true
+AccuracySec=30s
+Unit=phoenix-verify.service
+
+[Install]
+WantedBy=timers.target

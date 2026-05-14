@@ -160,20 +160,40 @@ sudo /opt/phoenix/start-phoenix.sh
 sudo /opt/phoenix/stop-phoenix.sh
 ```
 
-Then install the tracked cron file (do **not** hand-edit a user crontab — the tracked file pins `CRON_TZ=UTC` and `PATH` so the 03:30 UTC / 18:30 UTC entries fire at the intended IST wall-clock times regardless of the VM's system timezone, and so `docker`/`python3` resolve under cron's minimal environment):
+Then install the scheduler via the tracked installer. It runs preflight checks (docker reachable as root, compose/env/secret files present, systemd >= 247, log dir writable, holidays file) and **refuses to install** if any prerequisite is missing — so you can never end up with an enabled-but-broken 9 AM timer:
 
 ```bash
-sudo install -m 644 -o root -g root \
-  /opt/phoenix/app/scripts/phoenix.cron /etc/cron.d/phoenix
-sudo systemctl restart cron
+# systemd timers (preferred — native timezone support, journald-logged,
+# Persistent=true catches missed runs after reboot, includes a 09:10 IST
+# self-heal verifier):
+sudo bash /opt/phoenix/app/scripts/install-scheduler.sh
+
+# Fallback for VMs without systemd >= 247 (uses /etc/cron.d/phoenix
+# with CRON_TZ=UTC and explicit PATH):
+sudo bash /opt/phoenix/app/scripts/install-scheduler.sh --cron
+
+# Validate prereqs without installing anything:
+sudo bash /opt/phoenix/app/scripts/install-scheduler.sh --preflight-only
 ```
 
-Confirm cron picked it up and the next scheduled run is in the expected UTC window:
+The installer is idempotent — rerun it after any change to the units or the cron file. Confirm the schedule loaded:
 
 ```bash
-sudo journalctl -u cron --since "5 min ago" | grep -i phoenix
+# systemd:
+systemctl list-timers 'phoenix-*' --all
+journalctl -u phoenix-start.service -u phoenix-verify.service --since "10 min ago"
+
+# cron fallback:
+sudo grep CRON /var/log/syslog | tail -5
 tail -f /opt/phoenix/logs/cron-scheduler.log
 ```
+
+Why systemd is preferred over cron for this schedule:
+
+- `OnCalendar=Mon..Fri *-*-* 03:30:00 UTC` interprets the timezone explicitly, so the schedule is independent of the VM's system timezone (cron interprets entries in the daemon's local TZ unless `CRON_TZ` is set in the crontab).
+- `Persistent=true` means a missed run (VM powered off through 03:30 UTC, then booted before 09:00 IST) still fires once on boot, instead of silently skipping the trading day.
+- `phoenix-verify.timer` at 03:40 UTC checks backend health 10 minutes after the scheduled start and self-heals once; if it still fails, a `FATAL` line lands in the log for alerting.
+- All stdout/stderr is captured by journald automatically — no PATH or redirection gotchas.
 
 ## Validation
 

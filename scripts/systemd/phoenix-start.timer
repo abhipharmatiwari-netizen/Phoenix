@@ -1,0 +1,17 @@
+[Unit]
+Description=Phoenix backend start at 09:00 IST Mon-Fri (03:30 UTC)
+Documentation=https://github.com/abhipharmatiwari-netizen/Phoenix/blob/main/docs/runbooks/oci_live_deployment.md
+
+[Timer]
+# UTC suffix is interpreted by systemd regardless of the VM's system timezone,
+# eliminating the cron-daemon-timezone class of failure entirely.
+OnCalendar=Mon..Fri *-*-* 03:30:00 UTC
+# If the VM was off or the timer was inactive at 03:30 UTC and the next boot
+# happens before market open, fire the unit on resume so we don't silently
+# skip the trading day.
+Persistent=true
+AccuracySec=30s
+Unit=phoenix-start.service
+
+[Install]
+WantedBy=timers.target

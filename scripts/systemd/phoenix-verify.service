@@ -1,0 +1,14 @@
+[Unit]
+Description=Phoenix backend morning-start verification + self-heal
+Documentation=https://github.com/abhipharmatiwari-netizen/Phoenix/blob/main/docs/runbooks/oci_live_deployment.md
+After=phoenix-start.service docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/phoenix/verify-morning-start.sh
+StandardOutput=append:/opt/phoenix/logs/cron-scheduler.log
+StandardError=append:/opt/phoenix/logs/cron-scheduler.log
+Restart=no

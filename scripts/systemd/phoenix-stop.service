@@ -1,0 +1,14 @@
+[Unit]
+Description=Phoenix backend market-close stop (delegates to /opt/phoenix/stop-phoenix.sh)
+Documentation=https://github.com/abhipharmatiwari-netizen/Phoenix/blob/main/docs/runbooks/oci_live_deployment.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/phoenix/stop-phoenix.sh
+StandardOutput=append:/opt/phoenix/logs/cron-scheduler.log
+StandardError=append:/opt/phoenix/logs/cron-scheduler.log
+Restart=no

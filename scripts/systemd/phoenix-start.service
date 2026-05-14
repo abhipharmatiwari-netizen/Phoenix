@@ -1,0 +1,19 @@
+[Unit]
+Description=Phoenix backend market-open start (delegates to /opt/phoenix/start-phoenix.sh)
+Documentation=https://github.com/abhipharmatiwari-netizen/Phoenix/blob/main/docs/runbooks/oci_live_deployment.md
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+# PATH is set explicitly because systemd's default service PATH does not
+# include /usr/local/bin where docker compose v2 sometimes installs.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/phoenix/start-phoenix.sh
+StandardOutput=append:/opt/phoenix/logs/cron-scheduler.log
+StandardError=append:/opt/phoenix/logs/cron-scheduler.log
+# Do not restart on failure — the verify timer handles recovery so we get
+# observable evidence in the log instead of silent retries.
+Restart=no
