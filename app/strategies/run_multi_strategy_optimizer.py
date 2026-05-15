@@ -8,10 +8,16 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-from datetime import datetime
+import os
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
+from app.strategies.candidate_writer import (
+    CandidateBatch,
+    CandidateWriter,
+    CandidateWriterError,
+)
 from app.strategies.ml_param_optimizer import (
     ParameterSet,
     ParameterEnsemble,
@@ -31,13 +37,69 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _env_int_default(env_name: str, fallback: int) -> int:
+    """Read an env-var as int with safe fallback.
+
+    PR #288 codex round-5 P3: argparse evaluates ``default=`` at parser
+    construction time, so a bad ambient ``OPTIMIZER_*`` env-var
+    (``"invalid"``, ``""``, etc.) would crash via ``int(...)`` before
+    argparse could process a valid CLI override. Wrap the conversion so
+    a broken env-var is logged once and falls back to the documented
+    default — the operator can still pass the right value on the CLI.
+    """
+    raw = os.getenv(env_name, "")
+    if raw == "":
+        return fallback
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Ignoring invalid %s=%r; using fallback %d",
+            env_name,
+            raw,
+            fallback,
+        )
+        return fallback
+
+
 class MultiStrategyOptimizer:
     """Orchestrates optimization across all three strategies and underlyings."""
 
-    def __init__(self, postgres_dsn: Optional[str] = None):
+    def __init__(
+        self,
+        postgres_dsn: Optional[str] = None,
+        *,
+        lookback_days: int = 20,
+        loader_end_date: Optional[date] = None,
+    ) -> None:
+        """
+        Args:
+            postgres_dsn: Connection string for indicator_bars.
+            lookback_days: Backtest window length in days. Threaded through
+                to ``RealDataBacktester`` so the candidate writer's
+                ``backtest_window`` field reflects the data the simulator
+                actually scored on (PR #288 codex round-1 P2). Previously
+                the backtester hardcoded ``days_back=20`` while the
+                writer recorded whatever the CLI specified, making
+                promoted candidates non-reproducible when
+                ``--lookback-days != 20``.
+            loader_end_date: PR #288 codex round-5 P2 — captured IST
+                date used as ``end_date`` for every loader call. Without
+                this, ``fetch_indicator_bars`` re-evaluates
+                ``datetime.now(IST).date()`` per query, so a run
+                spanning IST midnight queries different windows for
+                different candidates while the writer records a single
+                ``backtest_window`` based on the start-of-run date.
+        """
         self.postgres_dsn = postgres_dsn
+        self.lookback_days = max(1, int(lookback_days))
+        self.loader_end_date = loader_end_date
         self.loader = PostgresIndicatorLoader(dsn=postgres_dsn)
-        self.backtester = RealDataBacktester(self.loader)
+        self.backtester = RealDataBacktester(
+            self.loader,
+            lookback_days=self.lookback_days,
+            end_date=loader_end_date,
+        )
         self.runner = StrategyOptimizationRunner()
         self.results = {}
 
@@ -373,12 +435,96 @@ def main():
         default="multi_strategy_optimization_results.json",
         help="Output JSON file"
     )
+    # Issue #272: optional Postgres promotion of top-N candidates into
+    # public.strategy_config_candidates (status='pending'). The live
+    # strategy_configs row is never mutated by this flag — that's the
+    # admin approval API's job (#275).
+    parser.add_argument(
+        "--promote-to-candidate",
+        action="store_true",
+        help=(
+            "After optimization, persist top-N candidates per (strategy, "
+            "underlying) into the strategy_config_candidates review queue. "
+            "Existing pending rows with identical params are superseded."
+        ),
+    )
+    parser.add_argument(
+        "--candidates-per-strategy",
+        type=int,
+        default=3,
+        help=(
+            "When --promote-to-candidate is set, the maximum number of "
+            "top candidates per (strategy, underlying) to insert as "
+            "'pending' (default: 3)."
+        ),
+    )
+    parser.add_argument(
+        "--tenant-id",
+        type=str,
+        default=os.getenv("OPTIMIZER_TENANT_ID", ""),
+        help=(
+            "Tenant scoping for strategy_configs lookup (default: env "
+            "OPTIMIZER_TENANT_ID). Required when --promote-to-candidate."
+        ),
+    )
+    parser.add_argument(
+        "--broker-account-id",
+        type=str,
+        default=os.getenv("OPTIMIZER_BROKER_ACCOUNT_ID", ""),
+        help=(
+            "Broker account scoping for strategy_configs lookup (default: "
+            "env OPTIMIZER_BROKER_ACCOUNT_ID). Required when "
+            "--promote-to-candidate."
+        ),
+    )
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=_env_int_default("OPTIMIZER_LOOKBACK_DAYS", 20),
+        help=(
+            "Backtest lookback in days; used as the recorded "
+            "backtest_window when --promote-to-candidate is set "
+            "(default: env OPTIMIZER_LOOKBACK_DAYS or 20)."
+        ),
+    )
+    # PR #288 codex round-5 P2: split-DB support. When ``--dsn`` points
+    # at a separate indicator-bars DB (which doesn't have
+    # ``strategy_configs`` / ``strategy_config_candidates``), the
+    # candidate writer needs a different connection string. Default is
+    # to share ``--dsn`` so the typical single-DB setup keeps working.
+    parser.add_argument(
+        "--candidate-writer-dsn",
+        type=str,
+        default=os.getenv("OPTIMIZER_CANDIDATE_WRITER_DSN", ""),
+        help=(
+            "Postgres DSN for the candidate writer (defaults to --dsn). "
+            "Override when indicator_bars and strategy_configs live in "
+            "different databases (env: OPTIMIZER_CANDIDATE_WRITER_DSN)."
+        ),
+    )
 
     args = parser.parse_args()
 
     try:
-        optimizer = MultiStrategyOptimizer(postgres_dsn=args.dsn)
-        optimizer.optimize_all(
+        # PR #288 codex round-4 P2: capture the IST date BEFORE any
+        # loader call so the candidate writer's ``backtest_window``
+        # matches the actual end-date the loader saw, even if the run
+        # spans IST midnight.
+        from app.strategies.postgres_data_loader import IST as _IST
+        loader_end_date = datetime.now(_IST).date()
+
+        optimizer = MultiStrategyOptimizer(
+            postgres_dsn=args.dsn,
+            lookback_days=args.lookback_days,
+            # PR #288 codex round-5 P2: thread the captured date so
+            # every ``fetch_indicator_bars`` call uses the SAME end
+            # date instead of re-evaluating ``datetime.now(IST).date()``
+            # per query — eliminates the IST-midnight drift between
+            # the data the simulator scored on and the
+            # ``backtest_window`` recorded with the candidate.
+            loader_end_date=loader_end_date,
+        )
+        results = optimizer.optimize_all(
             n_iterations=args.iterations,
             strategies=args.strategies,
             underlyings=args.underlyings,
@@ -393,9 +539,145 @@ def main():
         report_path.write_text(report)
         logger.info(f"Report exported to: {report_path.absolute()}")
 
+        if args.promote_to_candidate:
+            # PR #288 codex round-5 P2: split-DB support — when set,
+            # ``--candidate-writer-dsn`` overrides ``--dsn`` for the
+            # writer's ``strategy_configs`` / ``strategy_config_candidates``
+            # connection. Defaults to ``--dsn`` so the typical single-DB
+            # case keeps working.
+            writer_dsn = args.candidate_writer_dsn or args.dsn
+            _promote_top_candidates(
+                results=results,
+                tenant_id=args.tenant_id,
+                broker_account_id=args.broker_account_id,
+                lookback_days=args.lookback_days,
+                candidates_per_strategy=args.candidates_per_strategy,
+                dsn=writer_dsn,
+                loader_end_date=loader_end_date,
+            )
+
     except Exception as e:
         logger.error(f"Optimization failed: {e}", exc_info=True)
         raise
+
+
+def _promote_top_candidates(
+    *,
+    results: Dict[str, Any],
+    tenant_id: str,
+    broker_account_id: str,
+    lookback_days: int,
+    candidates_per_strategy: int,
+    dsn: Optional[str],
+    loader_end_date: Optional[date] = None,
+) -> None:
+    """Insert top-N candidates per (strategy, underlying) into the review queue.
+
+    Per-strategy ``CandidateWriterError`` is logged and skipped — one
+    missing ``strategy_configs`` row must not abort the rest of the
+    run. Any OTHER exception (loader unreachable, missing
+    ``strategy_config_candidates`` table, generic SQL error) propagates
+    out so an infrastructure failure surfaces as a non-zero exit and a
+    failed CI / cron run — PR #288 codex round-4 P2. The previous
+    catch-all ``except Exception`` made a broken control-plane DB look
+    like a successful "0 rows inserted" nightly.
+
+    Each candidate insert runs in its own transaction
+    (see ``CandidateWriter``).
+
+    ``loader_end_date`` (PR #288 codex round-4 P2): when supplied, the
+    ``backtest_window`` is anchored on this date instead of
+    ``datetime.now(IST).date()``. Callers that already invoked the
+    loader earlier in the run pass the same date the loader used; this
+    keeps the recorded ``backtest_window`` aligned with the data even
+    when the run spans IST midnight.
+    """
+    if not tenant_id or not broker_account_id:
+        raise SystemExit(
+            "--promote-to-candidate requires --tenant-id and "
+            "--broker-account-id (or OPTIMIZER_TENANT_ID / "
+            "OPTIMIZER_BROKER_ACCOUNT_ID env vars)."
+        )
+    # PR #288 codex round-3 P2: derive ``today`` from the same IST clock
+    # the loader uses for its query end date
+    # (``datetime.now(IST).date()`` in
+    # ``PostgresIndicatorLoader.fetch_indicator_bars``). The previous
+    # ``date.today()`` returned the container's local date (UTC in
+    # production), so a nightly run between 18:30–23:59 UTC stored a
+    # ``backtest_window`` one IST day earlier than the data actually
+    # loaded — making promoted candidates non-reproducible in that
+    # exact window.
+    #
+    # PR #288 codex round-4 P2: when ``loader_end_date`` is supplied,
+    # use it directly. The loader uses ``datetime.now(IST).date()`` at
+    # CALL time, so a backtest that started before IST midnight and a
+    # promotion that runs after midnight saw a different "today". If
+    # the caller wants reproducibility they should capture the date at
+    # backtest-start time and pass it here.
+    from app.strategies.postgres_data_loader import IST as _IST
+    today = loader_end_date if loader_end_date is not None else datetime.now(_IST).date()
+    window = (today - timedelta(days=max(1, lookback_days)), today)
+    writer = CandidateWriter(
+        tenant_id=tenant_id,
+        broker_account_id=broker_account_id,
+        dsn=dsn,
+    )
+    logger.info(
+        "Promoting top-%d candidates per (strategy, underlying) "
+        "into strategy_config_candidates (optimizer_version=%s, window=%s..%s)",
+        candidates_per_strategy,
+        writer.optimizer_version,
+        window[0],
+        window[1],
+    )
+    total_inserted = 0
+    for strategy_name, by_underlying in (results or {}).items():
+        for underlying_label, result in (by_underlying or {}).items():
+            if not isinstance(result, dict) or "error" in result:
+                logger.warning(
+                    "Skipping %s/%s — no usable result (%s)",
+                    strategy_name,
+                    underlying_label,
+                    result.get("error") if isinstance(result, dict) else type(result).__name__,
+                )
+                continue
+            top = result.get("top_5") or []
+            if not top:
+                logger.warning(
+                    "Skipping %s/%s — empty top_5", strategy_name, underlying_label
+                )
+                continue
+            try:
+                batch = CandidateBatch(
+                    strategy_name=strategy_name,
+                    underlying_label=underlying_label,
+                    top_candidates=top,
+                    backtest_window=window,
+                )
+                inserted = writer.write_batch(
+                    batch, candidates_per_strategy=candidates_per_strategy
+                )
+                total_inserted += len(inserted)
+            except CandidateWriterError as exc:
+                # Expected per-(strategy, underlying) misconfig — log and
+                # continue. Missing strategy_configs row, disabled
+                # registry rows, malformed candidate.params, etc.
+                logger.error(
+                    "Candidate write failed for %s/%s: %s",
+                    strategy_name,
+                    underlying_label,
+                    exc,
+                )
+            # NOTE PR #288 codex round-4 P2: any OTHER exception
+            # (loader unreachable, missing candidates table, generic
+            # SQL error, broken connection mid-batch) propagates out.
+            # An infrastructure failure must not be silently absorbed
+            # into a "0 rows inserted" success log.
+    logger.info(
+        "Candidate promotion complete: %d rows inserted across all "
+        "(strategy, underlying) pairs.",
+        total_inserted,
+    )
 
 
 if __name__ == "__main__":
