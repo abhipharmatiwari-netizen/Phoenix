@@ -87,14 +87,28 @@ def test_fk_to_strategy_configs_no_cascade(migration_sql: str) -> None:
 
 def test_status_check_constraint_lists_all_lifecycle_states(migration_sql: str) -> None:
     norm = _normalize(migration_sql)
-    for state in ("pending", "approved", "rejected", "promoted", "superseded"):
-        assert f"'{state}'" in norm, (
-            f"status CHECK constraint missing lifecycle state: {state!r}. "
-            "The full lifecycle is documented in the migration header."
-        )
-    assert "CHECK (status IN (" in norm, (
-        "status column must enforce a CHECK constraint, not just a default."
+
+    # PR #281 codex P3: search the CHECK clause body only — not the full
+    # migration text. The previous test passed even when a state was
+    # silently dropped from the CHECK clause as long as the comment
+    # headers still mentioned it, so drift between constraint and docs
+    # was undetectable. Extract the body inside `CHECK (status IN (...))`
+    # and assert each state is present there.
+    match = re.search(
+        r"CHECK\s*\(\s*status\s+IN\s*\(([^)]+)\)\s*\)",
+        norm,
+        flags=re.IGNORECASE,
     )
+    assert match, (
+        "status column must enforce a CHECK constraint of the form "
+        "CHECK (status IN ('pending', 'approved', ...))."
+    )
+    check_body = match.group(1)
+    for state in ("pending", "approved", "rejected", "promoted", "superseded"):
+        assert f"'{state}'" in check_body, (
+            f"status CHECK constraint missing lifecycle state: {state!r}. "
+            f"CHECK body: {check_body!r}"
+        )
 
 
 def test_indexes_present(migration_sql: str) -> None:
