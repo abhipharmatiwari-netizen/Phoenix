@@ -20,7 +20,6 @@ from app.strategies.ml_param_optimizer import (
     ParameterSpace,
     ParameterSet,
     ParameterEnsemble,
-    BacktestMetrics,
 )
 
 logging.basicConfig(
@@ -162,11 +161,10 @@ def run_optimization(
     logger.info(f"\nTotal configurations evaluated: {len(all_sets)}")
 
     # Stage 4: Ensemble ranking
-    logger.info(f"\n[Stage 4] Ensemble Ranking & Pareto Analysis...")
+    logger.info("\n[Stage 4] Ensemble Ranking & Pareto Analysis...")
     ensemble = ParameterEnsemble(all_sets)
 
-    top_10 = ensemble.top_n(10)
-    logger.info(f"\n  Top 10 Configurations (by composite score):")
+    logger.info("\n  Top 10 Configurations (by composite score):")
     for i, param_set in enumerate(all_sets[:10], 1):
         metrics = param_set.metrics
         logger.info(
@@ -188,7 +186,7 @@ def run_optimization(
         )
 
     # Export results
-    logger.info(f"\n[Stage 5] Exporting Results...")
+    logger.info("\n[Stage 5] Exporting Results...")
     results = {
         "timestamp": datetime.now().isoformat(),
         "total_iterations": len(all_sets),

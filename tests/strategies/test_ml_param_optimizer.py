@@ -4,8 +4,6 @@ Unit tests for ML parameter optimization framework.
 
 import pytest
 from datetime import datetime, timedelta
-import numpy as np
-import pandas as pd
 
 from app.strategies.ml_param_optimizer import (
     ParameterSpace,
@@ -357,6 +355,111 @@ class TestRiskAdjustedOptimizer:
 
         filtered = RiskAdjustedOptimizer.filter_by_win_rate(sets, min_win_rate=0.5)
         assert len(filtered) == 1
+
+
+class TestCodexRegressions:
+    """Regression tests for PR #283 codex review findings.
+
+    Each test pins a specific bug that codex caught in the original
+    f729add commit so the fix can't silently regress.
+    """
+
+    def test_categorical_normalization_roundtrips(self):
+        """P2: normalizing [60,300,600]/3 had clipped all values to 1.0,
+        so denormalize always returned the last category."""
+        space = ParameterSpace(
+            name="signal_timeframe",
+            param_type="categorical",
+            categories=[60, 300, 600],
+        )
+        optimizer = BayesianOptimizer([space], backtester=None)  # type: ignore[arg-type]
+        for value in (60, 300, 600):
+            norm = optimizer._normalize_params({"signal_timeframe": value})
+            params = optimizer._denormalize_params(norm)
+            assert params["signal_timeframe"] == value, (
+                f"categorical {value} should round-trip; got {params['signal_timeframe']}"
+            )
+
+    def test_score_returns_signed_value_for_losing_configs(self):
+        """P2: previous max(0, score) made every losing candidate tie."""
+        losing = BacktestMetrics(
+            total_trades=5,
+            total_pnl=-1000.0,
+            win_rate=0.2,
+            profit_factor=0.3,
+            max_drawdown=-500.0,
+        )
+        worse = BacktestMetrics(
+            total_trades=5,
+            total_pnl=-2000.0,
+            win_rate=0.1,
+            profit_factor=0.1,
+            max_drawdown=-1000.0,
+        )
+        assert losing.score > worse.score, (
+            "least-bad losing config must outrank a strictly worse one"
+        )
+        assert losing.score < 0, "score must be signed (not clamped to zero)"
+
+    def test_pareto_frontier_preserves_lower_drawdown(self):
+        """P2: previous filter kept WORSE drawdowns and dropped lower-risk
+        alternatives. With (-100) vs (-500), -100 (lower abs) must stay
+        on the frontier."""
+        sets = [
+            ParameterSet(
+                params={"name": "high_profit_high_dd"},
+                metrics=BacktestMetrics(total_trades=10, total_pnl=1000, max_drawdown=-500),
+            ),
+            ParameterSet(
+                params={"name": "low_profit_low_dd"},
+                metrics=BacktestMetrics(total_trades=10, total_pnl=500, max_drawdown=-100),
+            ),
+        ]
+        ensemble = ParameterEnsemble(sets)
+        frontier = ensemble.pareto_frontier()
+        names = {p["name"] for p in frontier}
+        # Both are Pareto-optimal: one trades higher profit for higher DD,
+        # the other trades lower profit for lower DD. Both must survive.
+        assert "high_profit_high_dd" in names
+        assert "low_profit_low_dd" in names
+
+    def test_to_json_serializes_pareto_without_attribute_error(self):
+        """P2: to_json used to call .params/.metrics on dicts returned by
+        pareto_frontier(), which raised AttributeError."""
+        sets = [
+            ParameterSet(
+                params={"k": 1},
+                metrics=BacktestMetrics(total_trades=10, total_pnl=500, max_drawdown=-100),
+            ),
+            ParameterSet(
+                params={"k": 2},
+                metrics=BacktestMetrics(total_trades=10, total_pnl=1000, max_drawdown=-500),
+            ),
+        ]
+        ensemble = ParameterEnsemble(sets)
+        payload = ensemble.to_json()
+        import json
+        data = json.loads(payload)
+        assert "top_10" in data and "pareto_frontier" in data
+        for entry in data["pareto_frontier"]:
+            assert "params" in entry and "metrics" in entry
+
+    def test_ema20_backtester_accepts_real_dataframe(self):
+        """P2: ``self.ohlc_data = data or generate(...)`` raised on real
+        DataFrames because DataFrames cannot be truth-tested."""
+        import pandas as pd
+
+        bars = pd.DataFrame({
+            "timestamp": pd.date_range("2026-01-01", periods=200, freq="5min"),
+            "open": [25000.0] * 200,
+            "high": [25050.0] * 200,
+            "low": [24950.0] * 200,
+            "close": [25000.0 + i * 0.1 for i in range(200)],
+            "volume": [1000] * 200,
+        })
+        backtester = Ema20Backtester(ohlc_data=bars)
+        # Must keep the caller's frame, not replace it with synthetic data.
+        assert backtester.ohlc_data is bars
 
 
 if __name__ == "__main__":

@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 
 logger = logging.getLogger(__name__)
@@ -88,7 +88,15 @@ class BacktestMetrics:
 
     @property
     def score(self) -> float:
-        """Composite profitability score (higher is better)."""
+        """Composite profitability score (higher is better).
+
+        PR #283 codex P2: returns the signed score so that configurations
+        which lose money over the optimizer window can still be ranked
+        against each other by least-bad performance. Clamping to zero
+        made every losing candidate tie and let evaluation order pick
+        ``best_params`` arbitrarily on short windows. Callers that need a
+        non-negative scalar should clamp at the call site.
+        """
         if self.total_trades == 0:
             return 0.0
 
@@ -98,7 +106,7 @@ class BacktestMetrics:
         score += (self.win_rate * self.profit_factor) * 500  # 40% weight on consistency
         score -= abs(self.max_drawdown) * 0.2  # 20% penalty for drawdown
 
-        return max(0, score)
+        return score
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -137,7 +145,12 @@ class Ema20Backtester:
         Args:
             ohlc_data: DataFrame with columns [timestamp, open, high, low, close, volume]
         """
-        self.ohlc_data = ohlc_data or self._generate_synthetic_data()
+        # PR #283 codex P2: pandas DataFrames cannot be used in boolean
+        # context (ValueError: The truth value of a DataFrame is ambiguous).
+        # Explicitly compare to None so callers can pass a real DataFrame.
+        self.ohlc_data = (
+            ohlc_data if ohlc_data is not None else self._generate_synthetic_data()
+        )
 
     def _generate_synthetic_data(self, days: int = 20, bars_per_day: int = 48) -> pd.DataFrame:
         """Generate realistic synthetic OHLC data for testing."""
@@ -153,13 +166,13 @@ class Ema20Backtester:
             o = price[i]
             c = price[i + 1]
             h = max(o, c) * (1 + abs(np.random.normal(0, 0.003)))
-            l = min(o, c) * (1 - abs(np.random.normal(0, 0.003)))
+            low = min(o, c) * (1 - abs(np.random.normal(0, 0.003)))
             v = np.random.randint(1000, 50000)
             data.append({
                 'timestamp': dates[i],
                 'open': o,
                 'high': h,
-                'low': l,
+                'low': low,
                 'close': c,
                 'volume': v,
             })
@@ -314,7 +327,18 @@ class BayesianOptimizer:
             elif space.param_type == "bool":
                 val = 1.0 if params[space.name] else 0.0
             elif space.param_type == "categorical":
-                val = params[space.name] / len(space.categories)
+                # PR #283 codex P2: normalize by category INDEX, not by the
+                # category value itself. The previous ``value / len(cats)``
+                # clipped non-trivial values (e.g. ``signal_timeframe`` =
+                # 60/300/600 over 3 categories ⇒ all >= 1.0 ⇒ clipped to
+                # 1.0) so denormalize always returned the last category.
+                categories = space.categories or [params[space.name]]
+                try:
+                    idx = categories.index(params[space.name])
+                except ValueError:
+                    idx = 0
+                divisor = max(1, len(categories) - 1)
+                val = idx / divisor
             else:
                 val = 0.5
             normalized.append(np.clip(val, 0, 1))
@@ -359,11 +383,11 @@ class BayesianOptimizer:
         for iteration in range(int(n_iterations * 0.8)):
             # Use expected improvement heuristic
             if len(self.evaluated) >= 5:
-                # Fit simple model to observed scores
-                X = np.array([self._normalize_params(p.params) for p in self.evaluated])
-                y = np.array([p.score() for p in self.evaluated])
-
-                # Perturb best parameters with decreasing exploration
+                # NOTE: a future enhancement would fit a Gaussian-process
+                # regressor over (X=normalized params, y=observed scores).
+                # The current implementation uses the simpler perturb-the-
+                # best heuristic with a decaying noise schedule, which is
+                # cheap and good enough for 50–100-iteration runs.
                 decay = 0.9 ** (iteration / int(n_iterations * 0.8))
                 best_normalized = self._normalize_params(self.best_params)
 
@@ -396,23 +420,56 @@ class ParameterEnsemble:
         return [p.params for p in self.param_sets[:n]]
 
     def pareto_frontier(self) -> List[Dict[str, Any]]:
-        """Return Pareto-optimal configurations (tradeoff between profit and drawdown)."""
+        """Return Pareto-optimal configurations (tradeoff between profit and drawdown).
+
+        PR #283 codex P2: drawdown is stored as a NEGATIVE number
+        (``min(cumulative - peak)``). The previous filter ``>= min_drawdown``
+        kept candidates whose drawdown was *more negative* — i.e. WORSE
+        — than the seen minimum, and discarded lower-risk candidates.
+        Compare absolute drawdown so the frontier preserves the
+        lower-risk tradeoff that is the whole point of Pareto here.
+        """
         frontier = []
 
         # Sort by profit descending
         sorted_sets = sorted(self.param_sets, key=lambda p: p.metrics.total_pnl, reverse=True)
 
-        min_drawdown = float('inf')
+        best_dd_abs = float('inf')
         for param_set in sorted_sets:
-            if param_set.metrics.max_drawdown >= min_drawdown:
+            dd_abs = abs(param_set.metrics.max_drawdown)
+            if dd_abs >= best_dd_abs:
                 continue
             frontier.append(param_set)
-            min_drawdown = param_set.metrics.max_drawdown
+            best_dd_abs = dd_abs
 
         return [p.params for p in frontier]
 
+    def _pareto_frontier_sets(self) -> List[ParameterSet]:
+        """Internal: same logic as ``pareto_frontier`` but returns the
+        ``ParameterSet`` objects so ``to_json`` can serialize metrics
+        without re-looking-them-up.
+        """
+        frontier: List[ParameterSet] = []
+        sorted_sets = sorted(self.param_sets, key=lambda p: p.metrics.total_pnl, reverse=True)
+        best_dd_abs = float('inf')
+        for param_set in sorted_sets:
+            dd_abs = abs(param_set.metrics.max_drawdown)
+            if dd_abs >= best_dd_abs:
+                continue
+            frontier.append(param_set)
+            best_dd_abs = dd_abs
+        return frontier
+
     def to_json(self) -> str:
-        """Export results as JSON."""
+        """Export results as JSON.
+
+        PR #283 codex P2: previously iterated ``pareto_frontier()`` which
+        returns ``List[Dict]`` (params only) and tried to read
+        ``p.params`` / ``p.metrics`` on each — would have raised
+        ``AttributeError`` on any caller using this helper. Now uses the
+        internal ``_pareto_frontier_sets`` helper which preserves the
+        ``ParameterSet`` so metrics serialize cleanly.
+        """
         results = {
             "top_10": [
                 {
@@ -426,7 +483,7 @@ class ParameterEnsemble:
                     "params": p.params,
                     "metrics": p.metrics.to_dict() if p.metrics else {}
                 }
-                for p in self.pareto_frontier()
+                for p in self._pareto_frontier_sets()
             ],
         }
         return json.dumps(results, indent=2, default=str)

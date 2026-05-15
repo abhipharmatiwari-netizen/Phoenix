@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
-import numpy as np
+from typing import Any, Callable, Dict, List, Tuple
 
 from app.strategies.ml_param_optimizer import (
     ParameterSet,
@@ -82,39 +81,50 @@ class MultiObjectiveOptimizer:
     def pareto_dominance(self) -> List[ParameterSet]:
         """
         Find Pareto-optimal solutions.
-        A configuration dominates another if it's better on ALL objectives.
+
+        A candidate is Pareto-optimal iff NO other candidate strictly
+        dominates it. ``other`` dominates ``candidate`` when ``other`` is
+        at-least-as-good on every objective and strictly better on at
+        least one. Objectives:
+          - total_pnl: higher is better
+          - win_rate:  higher is better
+          - max_drawdown: lower absolute value is better (drawdowns are
+            stored as non-positive numbers; closer to zero is safer)
+
+        PR #283 codex P2: the previous implementation asked whether the
+        CANDIDATE dominated someone else, then excluded the candidate
+        when it did — the inverse of correct Pareto filtering. It also
+        compared raw ``max_drawdown`` instead of absolute drawdown, which
+        rewarded WORSE risk.
         """
-        frontier = []
+        frontier: List[ParameterSet] = []
 
         for candidate in self.param_sets:
-            dominates = False
+            dominated = False
+            cand_dd_abs = abs(candidate.metrics.max_drawdown)
 
             for other in self.param_sets:
-                if candidate == other:
+                if candidate is other:
                     continue
+                other_dd_abs = abs(other.metrics.max_drawdown)
 
-                # Candidate dominates if:
-                # - Higher profit AND
-                # - Better win rate AND
-                # - Lower drawdown
-                candidate_better = (
-                    candidate.metrics.total_pnl >= other.metrics.total_pnl and
-                    candidate.metrics.win_rate >= other.metrics.win_rate and
-                    candidate.metrics.max_drawdown >= other.metrics.max_drawdown
+                other_at_least_as_good = (
+                    other.metrics.total_pnl >= candidate.metrics.total_pnl
+                    and other.metrics.win_rate >= candidate.metrics.win_rate
+                    and other_dd_abs <= cand_dd_abs
                 )
+                if not other_at_least_as_good:
+                    continue
+                strictly_better = (
+                    other.metrics.total_pnl > candidate.metrics.total_pnl
+                    or other.metrics.win_rate > candidate.metrics.win_rate
+                    or other_dd_abs < cand_dd_abs
+                )
+                if strictly_better:
+                    dominated = True
+                    break
 
-                if candidate_better:
-                    # Check if strictly better in at least one dimension
-                    strictly_better = (
-                        candidate.metrics.total_pnl > other.metrics.total_pnl or
-                        candidate.metrics.win_rate > other.metrics.win_rate or
-                        candidate.metrics.max_drawdown > other.metrics.max_drawdown
-                    )
-                    if strictly_better:
-                        dominates = True
-                        break
-
-            if not dominates:
+            if not dominated:
                 frontier.append(candidate)
 
         return frontier

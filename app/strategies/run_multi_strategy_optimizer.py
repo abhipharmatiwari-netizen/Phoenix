@@ -11,10 +11,8 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
-import pandas as pd
 
 from app.strategies.ml_param_optimizer import (
-    BayesianOptimizer,
     ParameterSet,
     ParameterEnsemble,
     BacktestMetrics,
@@ -23,12 +21,7 @@ from app.strategies.postgres_data_loader import (
     PostgresIndicatorLoader,
     RealDataBacktester,
 )
-from app.strategies.strategy_optimizers import (
-    Ema20ParameterOptimizer,
-    ExclusiveNiftyCeParameterOptimizer,
-    PutMomentumParameterOptimizer,
-    StrategyOptimizationRunner,
-)
+from app.strategies.strategy_optimizers import StrategyOptimizationRunner
 
 logging.basicConfig(
     level=logging.INFO,
@@ -90,7 +83,6 @@ class MultiStrategyOptimizer:
 
         # Run optimization
         logger.info(f"\n[Stage 1] Bayesian Optimization ({int(n_iterations * 0.5)} iterations)...")
-        optimizer = BayesianOptimizer(param_spaces, None)  # No backtester, use custom func
 
         evaluated = []
         best_score = -float('inf')
@@ -151,14 +143,13 @@ class MultiStrategyOptimizer:
                 best_score = metrics.score
                 best_params = child_params
 
-        logger.info(f"\n[Stage 3] Ensemble Analysis...")
+        logger.info("\n[Stage 3] Ensemble Analysis...")
         ensemble = ParameterEnsemble(evaluated)
-        top_5 = ensemble.top_n(5)
         pareto = ensemble.pareto_frontier()
 
         logger.info(f"  Total configurations tested: {len(evaluated)}")
         logger.info(f"  Best score: {best_score:.2f}")
-        logger.info(f"  Top 5 configurations:")
+        logger.info("  Top 5 configurations:")
 
         for i, param_set in enumerate(evaluated[:5], 1):
             m = param_set.metrics
@@ -245,7 +236,6 @@ class MultiStrategyOptimizer:
                 if "error" in result:
                     continue
 
-                best = result.get("best_parameters", {})
                 if result.get("top_5"):
                     top_metrics = result["top_5"][0]["metrics"]
                     report.append(
@@ -279,7 +269,7 @@ class MultiStrategyOptimizer:
                 report.append(f"- Total PnL: ${top_metrics.get('total_pnl', 0):.0f}")
                 report.append(f"- Win Rate: {top_metrics.get('win_rate', 0):.1%}")
                 report.append(f"- Max Drawdown: ${top_metrics.get('max_drawdown', 0):.0f}")
-                report.append(f"\n**Optimal Parameters:**")
+                report.append("\n**Optimal Parameters:**")
 
                 for key, value in sorted(best_params.items()):
                     if isinstance(value, float):
@@ -328,7 +318,7 @@ def main():
 
     try:
         optimizer = MultiStrategyOptimizer(postgres_dsn=args.dsn)
-        results = optimizer.optimize_all(
+        optimizer.optimize_all(
             n_iterations=args.iterations,
             strategies=args.strategies,
             underlyings=args.underlyings,

@@ -7,13 +7,8 @@ from __future__ import annotations
 
 import logging
 from typing import List, Dict, Any
-import numpy as np
 
-from app.strategies.ml_param_optimizer import (
-    ParameterSpace,
-    ParameterSet,
-    BacktestMetrics,
-)
+from app.strategies.ml_param_optimizer import ParameterSpace
 
 logger = logging.getLogger(__name__)
 

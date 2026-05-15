@@ -21,6 +21,29 @@ logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
+def _redact_dsn(dsn: Optional[str]) -> str:
+    """Return a host/db label safe for logs.
+
+    Connection strings can include the database password — either as a
+    ``password=`` keyword or in the URL userinfo (``postgresql://user:pw@host``).
+    Slicing the raw DSN leaks credentials into OCI logs (PR #283 codex P2).
+    This helper extracts just host + dbname when possible and otherwise
+    returns ``"<dsn-redacted>"``.
+    """
+    if not dsn:
+        return "<no-dsn>"
+    try:
+        # Late import keeps the module importable without psycopg.
+        from psycopg.conninfo import conninfo_to_dict  # type: ignore
+        parts = conninfo_to_dict(dsn)
+    except Exception:
+        return "<dsn-redacted>"
+    host = parts.get("host", "?")
+    port = parts.get("port", "?")
+    dbname = parts.get("dbname") or parts.get("database") or "?"
+    return f"{host}:{port}/{dbname}"
+
+
 class PostgresIndicatorLoader:
     """Load real OHLC + indicator data from PostgreSQL indicator_bars table."""
 
@@ -55,9 +78,9 @@ class PostgresIndicatorLoader:
 
         try:
             self._conn = connect_with_retry(self.dsn, autocommit=True)
-            logger.info(f"Connected to PostgreSQL: {self.dsn[:50]}...")
+            logger.info("Connected to PostgreSQL: %s", _redact_dsn(self.dsn))
         except Exception as e:
-            logger.error(f"Failed to connect to PostgreSQL: {e}")
+            logger.error("Failed to connect to PostgreSQL %s: %s", _redact_dsn(self.dsn), e)
             raise
 
     def disconnect(self):
@@ -102,6 +125,12 @@ class PostgresIndicatorLoader:
         end_date = end_date or datetime.now(IST).date()
         start_date = end_date - timedelta(days=days_back)
 
+        # PR #283 codex P1: the baseline ``indicator_bars`` schema in
+        # migrations/000_indicator_bars.sql defines OHLC + indicators
+        # but NO volume column, so a previous ``COALESCE(vol, 0) AS volume``
+        # caused the query to fail before any rows were returned. Volume
+        # is not consumed by the optimizer's simulators, so it is simply
+        # omitted from the SELECT.
         query = f"""
         SELECT
             ts_start as timestamp,
@@ -109,7 +138,6 @@ class PostgresIndicatorLoader:
             h as high,
             l as low,
             c as close,
-            COALESCE(vol, 0) as volume,
             atr,
             rsi,
             macd,
@@ -142,7 +170,7 @@ class PostgresIndicatorLoader:
 
             # Convert to DataFrame
             columns = [
-                "timestamp", "open", "high", "low", "close", "volume",
+                "timestamp", "open", "high", "low", "close",
                 "atr", "rsi", "macd", "macd_signal", "ema_20", "ema_30",
                 "ema_50", "adx", "plus_di", "minus_di"
             ]
@@ -212,30 +240,25 @@ class RealDataBacktester:
         self.loader = loader
 
     def backtest_ema20(self, params: Dict[str, Any], underlying_label: str) -> Dict[str, Any]:
-        """Backtest EMA20 strategy on real data."""
-        try:
-            df = self.loader.fetch_indicator_bars(
-                underlying_label=underlying_label,
-                timeframe_seconds=params.get("signal_timeframe", 300),
-                days_back=20,
-            )
+        """Backtest EMA20 strategy on real data.
 
-            if df.empty:
-                logger.warning(f"No data for {underlying_label}, skipping backtest")
-                return {
-                    "total_trades": 0,
-                    "total_pnl": 0,
-                    "win_rate": 0,
-                    "sharpe_ratio": 0,
-                    "max_drawdown": 0,
-                }
+        PR #283 codex P2: data-access failures (loader query error, missing
+        columns, connection misconfig) are NOT swallowed into zero-trade
+        results — they propagate so the multi-strategy orchestrator's
+        per-(strategy,underlying) ``try/except`` can record the actual
+        error rather than silently emit JSON as though the run succeeded.
+        Empty result sets remain a soft no-op (returns zero metrics) so
+        a strategy with no matching bars during the window is not
+        treated as a failure.
+        """
+        df = self.loader.fetch_indicator_bars(
+            underlying_label=underlying_label,
+            timeframe_seconds=params.get("signal_timeframe", 300),
+            days_back=20,
+        )
 
-            # Simulate EMA20 strategy
-            metrics = self._simulate_ema20(df, params)
-            return metrics
-
-        except Exception as e:
-            logger.error(f"Error backtesting EMA20 on {underlying_label}: {e}")
+        if df.empty:
+            logger.warning(f"No data for {underlying_label}, skipping backtest")
             return {
                 "total_trades": 0,
                 "total_pnl": 0,
@@ -244,43 +267,41 @@ class RealDataBacktester:
                 "max_drawdown": 0,
             }
 
+        return self._simulate_ema20(df, params)
+
     def backtest_exclusive_nifty_ce(self, params: Dict[str, Any], underlying_label: str) -> Dict[str, Any]:
-        """Backtest Exclusive Nifty CE Buy strategy on real data."""
-        try:
-            df = self.loader.fetch_indicator_bars(
-                underlying_label=underlying_label,
-                timeframe_seconds=300,  # 5min bars
-                days_back=20,
-            )
+        """Backtest Exclusive Nifty CE Buy strategy on real data.
 
-            if df.empty:
-                return {"total_trades": 0, "total_pnl": 0, "win_rate": 0}
+        See ``backtest_ema20`` for the surface-failures rationale (PR #283
+        codex P2).
+        """
+        df = self.loader.fetch_indicator_bars(
+            underlying_label=underlying_label,
+            timeframe_seconds=300,  # 5min bars
+            days_back=20,
+        )
 
-            metrics = self._simulate_exclusive_nifty_ce(df, params)
-            return metrics
-
-        except Exception as e:
-            logger.error(f"Error backtesting Exclusive Nifty CE on {underlying_label}: {e}")
+        if df.empty:
             return {"total_trades": 0, "total_pnl": 0, "win_rate": 0}
+
+        return self._simulate_exclusive_nifty_ce(df, params)
 
     def backtest_put_momentum(self, params: Dict[str, Any], underlying_label: str) -> Dict[str, Any]:
-        """Backtest Put Momentum Scalper strategy on real data."""
-        try:
-            df = self.loader.fetch_indicator_bars(
-                underlying_label=underlying_label,
-                timeframe_seconds=300,  # 5min bars
-                days_back=20,
-            )
+        """Backtest Put Momentum Scalper strategy on real data.
 
-            if df.empty:
-                return {"total_trades": 0, "total_pnl": 0, "win_rate": 0}
+        See ``backtest_ema20`` for the surface-failures rationale (PR #283
+        codex P2).
+        """
+        df = self.loader.fetch_indicator_bars(
+            underlying_label=underlying_label,
+            timeframe_seconds=300,  # 5min bars
+            days_back=20,
+        )
 
-            metrics = self._simulate_put_momentum(df, params)
-            return metrics
-
-        except Exception as e:
-            logger.error(f"Error backtesting Put Momentum on {underlying_label}: {e}")
+        if df.empty:
             return {"total_trades": 0, "total_pnl": 0, "win_rate": 0}
+
+        return self._simulate_put_momentum(df, params)
 
     @staticmethod
     def _simulate_ema20(df: pd.DataFrame, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -288,8 +309,13 @@ class RealDataBacktester:
         import numpy as np
 
         ema_period = params.get("ema_period", 20)
-        sl_pct = params.get("sl_pct", 0.30)
-        tp_pct = params.get("tp_pct", 0.30)
+        # PR #283 codex P1: ``sl_pct`` / ``tp_pct`` are FRACTIONS in the
+        # live EMA20 strategy (0.30 ⇒ 30%). Convert to percent here so
+        # the comparison against the percent-scaled ``pnl_pct`` below
+        # matches the live exit semantics — without this, a 0.30 input
+        # exited at 0.30% (100× tighter than LIVE).
+        sl_pct_threshold = params.get("sl_pct", 0.30) * 100.0
+        tp_pct_threshold = params.get("tp_pct", 0.30) * 100.0
         min_atr = params.get("min_atr", 0.1)
 
         # Calculate EMA
@@ -299,7 +325,6 @@ class RealDataBacktester:
         trades = []
         in_trade = False
         entry_price = 0
-        entry_idx = -1
 
         for i in range(ema_period, len(df)):
             if not in_trade:
@@ -307,14 +332,17 @@ class RealDataBacktester:
                 if df["close"].iloc[i] < df["ema"].iloc[i] and df["atr"].iloc[i] >= min_atr:
                     in_trade = True
                     entry_price = df["close"].iloc[i]
-                    entry_idx = i
 
             else:
-                # Exit conditions
+                # Exit conditions. ``pnl_pct`` is a percentage (× 100).
                 current_price = df["close"].iloc[i]
                 pnl_pct = ((entry_price - current_price) / entry_price) * 100
 
-                if pnl_pct <= -sl_pct or pnl_pct >= tp_pct or i == len(df) - 1:
+                if (
+                    pnl_pct <= -sl_pct_threshold
+                    or pnl_pct >= tp_pct_threshold
+                    or i == len(df) - 1
+                ):
                     in_trade = False
                     trades.append({
                         "entry": entry_price,
@@ -341,11 +369,16 @@ class RealDataBacktester:
         """Simulate Exclusive Nifty CE Buy strategy."""
         import numpy as np
 
-        # Key parameters for Exclusive Nifty CE
+        # Key parameters for Exclusive Nifty CE.
+        # NOTE: a future volume-filter knob (``vol_threshold``) is not
+        # plumbed yet because the indicator_bars baseline schema (see
+        # migrations/000_indicator_bars.sql) has no volume column.
         rsi_threshold = params.get("rsi_threshold", 50)
-        vol_threshold = params.get("vol_threshold", 1.2)
-        sl_pct = params.get("sl_pct", 0.15)
-        tp_pct = params.get("tp_pct", 0.30)
+        # PR #283 codex P1: ``sl_pct`` / ``tp_pct`` are fractions in the
+        # live strategy; convert to percent for comparison against the
+        # percent-scaled ``pnl_pct``.
+        sl_pct_threshold = params.get("sl_pct", 0.15) * 100.0
+        tp_pct_threshold = params.get("tp_pct", 0.30) * 100.0
 
         # Simple simulation
         trades = []
@@ -361,7 +394,11 @@ class RealDataBacktester:
                 current_price = df["close"].iloc[i]
                 pnl_pct = ((current_price - entry_price) / entry_price) * 100
 
-                if pnl_pct <= -sl_pct or pnl_pct >= tp_pct or i == len(df) - 1:
+                if (
+                    pnl_pct <= -sl_pct_threshold
+                    or pnl_pct >= tp_pct_threshold
+                    or i == len(df) - 1
+                ):
                     in_trade = False
                     trades.append({"entry": entry_price, "exit": current_price, "pnl_pct": pnl_pct})
 
@@ -387,8 +424,10 @@ class RealDataBacktester:
         # Key parameters for Put Momentum Scalper
         rsi_min = params.get("rsi_min", 25)
         rsi_max = params.get("rsi_max", 45)
-        sl_pct = params.get("sl_pct", 0.25)
-        tp_pct = params.get("tp_pct", 0.40)
+        # PR #283 codex P1: ``sl_pct`` / ``tp_pct`` are fractions; convert
+        # to percent for the percent-scaled ``pnl_pct`` comparison.
+        sl_pct_threshold = params.get("sl_pct", 0.25) * 100.0
+        tp_pct_threshold = params.get("tp_pct", 0.40) * 100.0
 
         trades = []
         in_trade = False
@@ -403,7 +442,11 @@ class RealDataBacktester:
                 current_price = df["close"].iloc[i]
                 pnl_pct = ((entry_price - current_price) / entry_price) * 100
 
-                if pnl_pct <= -sl_pct or pnl_pct >= tp_pct or i == len(df) - 1:
+                if (
+                    pnl_pct <= -sl_pct_threshold
+                    or pnl_pct >= tp_pct_threshold
+                    or i == len(df) - 1
+                ):
                     in_trade = False
                     trades.append({"entry": entry_price, "exit": current_price, "pnl_pct": pnl_pct})
 
