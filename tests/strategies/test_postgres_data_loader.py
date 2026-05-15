@@ -456,7 +456,7 @@ def test_exclusive_nifty_ce_backtest_uses_configurable_timeframe():
     captured = {}
 
     class _CaptureLoader:
-        def fetch_indicator_bars(self, *, underlying_label, timeframe_seconds, days_back):
+        def fetch_indicator_bars(self, *, underlying_label, timeframe_seconds, days_back, end_date=None):
             captured["timeframe_seconds"] = timeframe_seconds
             return pd.DataFrame()
 
@@ -1033,7 +1033,6 @@ def test_synthetic_ema20_backtester_requires_three_bar_strictly_falling_rsi():
         "Strictly rising RSI must not produce any three-bar falling "
         "window, so require_rsi_falling rejects every entry"
     )
-
 
 
 # ---------------------------------------------------------------------------
@@ -2010,3 +2009,53 @@ def test_ema20_simulator_starts_at_bar_zero_when_persisted_ema_loaded():
     # The loop start must depend on whether the persisted column is used.
     assert "ema_is_persisted" in src
     assert "start_idx = 0 if ema_is_persisted else ema_period" in src
+# PR #288 codex round-1 P2: ``lookback_days`` must reach the loader so the
+# candidate writer's ``backtest_window`` reflects the data actually loaded.
+# ---------------------------------------------------------------------------
+
+
+def test_real_data_backtester_threads_lookback_days_to_loader():
+    """All three backtest_* methods must call fetch_indicator_bars with
+    the configured lookback. Previously hardcoded to 20, which made the
+    candidate writer's backtest_window misleading whenever the operator
+    set --lookback-days to anything else."""
+    captured: list[int] = []
+
+    class _CaptureLoader:
+        def fetch_indicator_bars(self, *, underlying_label, timeframe_seconds, days_back, end_date=None):
+            captured.append(days_back)
+            return pd.DataFrame()
+
+    backtester = RealDataBacktester(loader=_CaptureLoader(), lookback_days=37)  # type: ignore[arg-type]
+    backtester.backtest_ema20({"signal_timeframe": 300}, "NIFTY_IDX")
+    backtester.backtest_exclusive_nifty_ce({}, "NIFTY_IDX")
+    backtester.backtest_put_momentum({}, "NIFTY_IDX")
+
+    assert captured == [37, 37, 37], (
+        f"all backtest_* methods must use lookback_days=37; got {captured}"
+    )
+
+
+def test_real_data_backtester_lookback_days_clamps_to_at_least_one():
+    """Zero or negative lookback is nonsensical; constructor clamps to 1."""
+
+    class _StubLoader:
+        def fetch_indicator_bars(self, **kwargs):
+            return pd.DataFrame()
+
+    bt = RealDataBacktester(loader=_StubLoader(), lookback_days=0)  # type: ignore[arg-type]
+    assert bt.lookback_days == 1
+    bt_neg = RealDataBacktester(loader=_StubLoader(), lookback_days=-5)  # type: ignore[arg-type]
+    assert bt_neg.lookback_days == 1
+
+
+def test_real_data_backtester_default_lookback_remains_20_for_back_compat():
+    """Constructor default must remain 20 so callers not using the new
+    keyword keep the prior behaviour."""
+
+    class _StubLoader:
+        def fetch_indicator_bars(self, **kwargs):
+            return pd.DataFrame()
+
+    bt = RealDataBacktester(loader=_StubLoader())  # type: ignore[arg-type]
+    assert bt.lookback_days == 20

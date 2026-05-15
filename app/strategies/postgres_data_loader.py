@@ -384,10 +384,36 @@ class PostgresIndicatorLoader:
 
 
 class RealDataBacktester:
-    """Backtest strategies on real PostgreSQL data instead of synthetic."""
+    """Backtest strategies on real PostgreSQL data instead of synthetic.
 
-    def __init__(self, loader: PostgresIndicatorLoader):
+    PR #288 codex round-1 P2: ``lookback_days`` is configurable at
+    construction so the multi-strategy CLI's ``--lookback-days`` flag (and
+    the candidate-writer's ``backtest_window``) reflects the data actually
+    loaded — previously the backtester hardcoded ``days_back=20`` while
+    the candidate writer recorded whatever the CLI specified, so promoted
+    candidates were non-reproducible when ``--lookback-days != 20``.
+
+    PR #288 codex round-5 P2: ``end_date`` is configurable at construction
+    so every ``fetch_indicator_bars`` call uses the SAME end date instead
+    of re-evaluating ``datetime.now(IST).date()`` per query. Without this,
+    a run spanning IST midnight queries different windows for different
+    candidates while the writer records a single ``backtest_window`` from
+    the start-of-run date.
+    """
+
+    def __init__(
+        self,
+        loader: PostgresIndicatorLoader,
+        *,
+        lookback_days: int = 20,
+        end_date: Optional[Any] = None,
+    ):
         self.loader = loader
+        self.lookback_days = max(1, int(lookback_days))
+        # ``end_date`` may be ``None`` (caller hasn't captured one — the
+        # loader will fall back to ``datetime.now(IST).date()`` per query
+        # as before) or a ``datetime.date`` value (the captured date).
+        self.end_date = end_date
 
     def backtest_ema20(self, params: Dict[str, Any], underlying_label: str) -> Dict[str, Any]:
         """Backtest EMA20 strategy on real data.
@@ -415,7 +441,8 @@ class RealDataBacktester:
         df = self.loader.fetch_indicator_bars(
             underlying_label=underlying_label,
             timeframe_seconds=merged_params.get("signal_timeframe", 300),
-            days_back=20,
+            days_back=self.lookback_days,
+            end_date=self.end_date,
         )
 
         if df.empty:
@@ -484,7 +511,8 @@ class RealDataBacktester:
         df = self.loader.fetch_indicator_bars(
             underlying_label=underlying_label,
             timeframe_seconds=int(merged_params.get("timeframe_seconds", 30)),
-            days_back=20,
+            days_back=self.lookback_days,
+            end_date=self.end_date,
         )
 
         if df.empty:
@@ -554,7 +582,8 @@ class RealDataBacktester:
         df = self.loader.fetch_indicator_bars(
             underlying_label=underlying_label,
             timeframe_seconds=300,  # live PM uses 5m as primary signal TF
-            days_back=20,
+            days_back=self.lookback_days,
+            end_date=self.end_date,
         )
 
         if df.empty:
