@@ -183,10 +183,15 @@ class Ema20Backtester:
         """Run backtest with given parameters."""
         df = self.ohlc_data.copy()
 
-        # Extract parameters with defaults
+        # Extract parameters with defaults.
+        # PR #283 codex round-2 P2: ``sl_pct`` / ``tp_pct`` are FRACTIONS in
+        # the live EMA20 strategy (0.30 ⇒ 30%). Convert to percent up front
+        # so the comparisons against the percent-scaled ``pnl_pct`` below
+        # match LIVE — the original code treated a 0.30 input as 0.30%,
+        # 100× tighter than the live strategy.
         ema_period = params.get('ema_period', 20)
-        sl_pct = params.get('sl_pct', 0.30)
-        tp_pct = params.get('tp_pct', 0.30)
+        sl_pct_threshold = params.get('sl_pct', 0.30) * 100.0
+        tp_pct_threshold = params.get('tp_pct', 0.30) * 100.0
         min_atr = params.get('min_atr', 0.1)
         require_rsi_falling = params.get('require_rsi_falling', True)
 
@@ -226,9 +231,9 @@ class Ema20Backtester:
 
                 # Exit conditions
                 exit = False
-                if pnl_pct <= -sl_pct:  # Stop loss
+                if pnl_pct <= -sl_pct_threshold:  # Stop loss
                     exit = True
-                elif pnl_pct >= tp_pct:  # Take profit
+                elif pnl_pct >= tp_pct_threshold:  # Take profit
                     exit = True
 
                 if exit or i == len(df) - 1:

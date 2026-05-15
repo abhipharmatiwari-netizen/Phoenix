@@ -228,3 +228,200 @@ def test_redact_dsn_returns_safe_fallback_on_parse_failure():
         side_effect=RuntimeError("parse boom"),
     ):
         assert _redact_dsn("postgresql://x@y/z") == "<dsn-redacted>"
+
+
+# ---------------------------------------------------------------------------
+# PR #283 codex round-2: simulator parameter contracts must match LIVE.
+#
+# Every parameter the optimizer samples and emits must be a key the
+# corresponding live strategy actually reads. Otherwise approved
+# candidates have no effect at runtime. These tests pin the contract.
+# ---------------------------------------------------------------------------
+
+
+def test_exclusive_nifty_ce_simulator_uses_live_keys_only():
+    """ECN sim must read sl_atr/tp_atr/rsi_min/rsi_max/macd_hist_min/
+    ema_atr_buffer/min_adx/min_di_spread/ema_fail_bars — NOT sl_pct/tp_pct
+    /rsi_threshold/vol_threshold (the old broken contract)."""
+    from app.strategies.strategy_optimizers import ExclusiveNiftyCeParameterOptimizer
+
+    spaces = {s.name for s in ExclusiveNiftyCeParameterOptimizer.get_parameter_spaces()}
+    formatted_keys = set(
+        ExclusiveNiftyCeParameterOptimizer.format_params({
+            "timeframe_seconds": 30,
+            "rsi_min": 58.0,
+            "rsi_max": 72.0,
+            "macd_hist_min": 0.30,
+            "ema_atr_buffer": 0.05,
+            "min_adx": 20.0,
+            "min_di_spread": 5.0,
+            "sl_atr": 2.2,
+            "tp_atr": 2.5,
+            "ema_fail_bars": 3,
+        }).keys()
+    )
+
+    # Must include the live config keys.
+    live_required = {
+        "sl_atr", "tp_atr", "rsi_min", "rsi_max",
+        "macd_hist_min", "ema_atr_buffer", "min_adx", "min_di_spread",
+        "ema_fail_bars", "timeframe_seconds",
+    }
+    assert live_required.issubset(spaces), (
+        f"ECN param spaces missing live keys: {live_required - spaces}"
+    )
+    assert live_required.issubset(formatted_keys), (
+        f"ECN format_params missing live keys: {live_required - formatted_keys}"
+    )
+
+    # Must NOT include legacy keys that the live strategy doesn't read.
+    legacy_dead = {"sl_pct", "tp_pct", "rsi_threshold", "vol_threshold", "ema_crossover_threshold"}
+    leaked = legacy_dead & spaces
+    assert not leaked, f"ECN param spaces leak legacy keys: {leaked}"
+    leaked_fmt = legacy_dead & formatted_keys
+    assert not leaked_fmt, f"ECN format_params emits legacy keys: {leaked_fmt}"
+
+
+def test_put_momentum_simulator_uses_live_keys_only():
+    """PM sim must read option_sl_pct/partial_tp_r/final_tp_r and the rest
+    of PutMomentumScalperConfig — NOT sl_pct/tp_pct/trend_ema_period."""
+    from app.strategies.strategy_optimizers import PutMomentumParameterOptimizer
+
+    spaces = {s.name for s in PutMomentumParameterOptimizer.get_parameter_spaces()}
+    formatted_keys = set(
+        PutMomentumParameterOptimizer.format_params({
+            "rsi_min": 25.0,
+            "rsi_max": 45.0,
+            "min_atr_ratio": 0.0015,
+            "option_sl_pct": 0.25,
+            "partial_tp_r": 1.0,
+            "final_tp_r": 1.5,
+            "rsi_falling_bars_required": 2,
+            "lookback_breakdown_bars": 10,
+            "max_bars_in_trade": 8,
+        }).keys()
+    )
+
+    live_required = {
+        "option_sl_pct", "partial_tp_r", "final_tp_r",
+        "rsi_min", "rsi_max", "min_atr_ratio",
+        "rsi_falling_bars_required", "lookback_breakdown_bars",
+        "max_bars_in_trade",
+    }
+    assert live_required.issubset(spaces), (
+        f"PM param spaces missing live keys: {live_required - spaces}"
+    )
+    assert live_required.issubset(formatted_keys), (
+        f"PM format_params missing live keys: {live_required - formatted_keys}"
+    )
+
+    legacy_dead = {"sl_pct", "tp_pct", "trend_ema_period"}
+    leaked = legacy_dead & spaces
+    assert not leaked, f"PM param spaces leak legacy keys: {leaked}"
+    leaked_fmt = legacy_dead & formatted_keys
+    assert not leaked_fmt, f"PM format_params emits legacy keys: {leaked_fmt}"
+
+
+def test_exclusive_nifty_ce_strategy_actually_reads_optimizer_keys():
+    """The live ExclusiveNiftyCeBuyStrategy must accept every key the
+    optimizer emits. If a key is renamed in live and the optimizer is not
+    updated in lockstep, this test fails."""
+    import importlib
+
+    live_mod = importlib.import_module("app.strategies.exclusive_nifty_ce_buy")
+    src = live_mod.__loader__.get_source(live_mod.__name__)
+
+    from app.strategies.strategy_optimizers import ExclusiveNiftyCeParameterOptimizer
+
+    formatted = ExclusiveNiftyCeParameterOptimizer.format_params({
+        "timeframe_seconds": 30,
+        "rsi_min": 58.0,
+        "rsi_max": 72.0,
+        "macd_hist_min": 0.30,
+        "ema_atr_buffer": 0.05,
+        "min_adx": 20.0,
+        "min_di_spread": 5.0,
+        "sl_atr": 2.2,
+        "tp_atr": 2.5,
+        "ema_fail_bars": 3,
+    })
+    for key in formatted:
+        # Live code references each key via cfg.get("name") in __init__.
+        # Loose substring check is acceptable here — the alternative
+        # (importing the strategy with a real config) requires the full
+        # broker/runtime stack.
+        assert f'"{key}"' in src or f"'{key}'" in src, (
+            f"ECN optimizer emits {key!r} but live ExclusiveNiftyCeBuyStrategy "
+            "source does not reference it. Optimizer/live drift — fix "
+            "strategy_optimizers.py to match the live config keys."
+        )
+
+
+def test_put_momentum_strategy_actually_reads_optimizer_keys():
+    """Same contract for PutMomentumScalper — every emitted key must be
+    referenced in the live strategy module."""
+    import importlib
+
+    live_mod = importlib.import_module("app.strategies.put_momentum_scalper")
+    src = live_mod.__loader__.get_source(live_mod.__name__)
+
+    from app.strategies.strategy_optimizers import PutMomentumParameterOptimizer
+
+    formatted = PutMomentumParameterOptimizer.format_params({
+        "rsi_min": 25.0,
+        "rsi_max": 45.0,
+        "min_atr_ratio": 0.0015,
+        "option_sl_pct": 0.25,
+        "partial_tp_r": 1.0,
+        "final_tp_r": 1.5,
+        "rsi_falling_bars_required": 2,
+        "lookback_breakdown_bars": 10,
+        "max_bars_in_trade": 8,
+    })
+    for key in formatted:
+        assert key in src, (
+            f"PM optimizer emits {key!r} but live PutMomentumScalperStrategy "
+            "source does not reference it. Optimizer/live drift — fix "
+            "strategy_optimizers.py to match PutMomentumScalperConfig keys."
+        )
+
+
+def test_multi_strategy_runner_uses_indicator_bars_labels():
+    """Default underlyings must be the labels actually stored in
+    indicator_bars (``*_IDX`` for indexes, ``NG_FUT`` for natgas)."""
+    from app.strategies.strategy_optimizers import StrategyOptimizationRunner
+
+    runner = StrategyOptimizationRunner()
+    for strategy_name, cfg in runner.get_strategies().items():
+        for underlying in cfg["underlyings"]:
+            assert underlying in {"NIFTY_IDX", "BANKNIFTY_IDX", "NG_FUT"}, (
+                f"Strategy {strategy_name!r} lists unsupported underlying "
+                f"{underlying!r}; indicator_bars uses *_IDX / NG_FUT labels."
+            )
+        # No bare NIFTY / BANKNIFTY / NATURALGAS — those return empty data.
+        assert "NIFTY" not in cfg["underlyings"]
+        assert "BANKNIFTY" not in cfg["underlyings"]
+        assert "NATURALGAS" not in cfg["underlyings"]
+
+
+def test_exclusive_nifty_ce_backtest_uses_configurable_timeframe():
+    """ECN must query indicator_bars at the timeframe the live strategy
+    actually streams (30s by default), and the timeframe knob must be
+    honoured."""
+    captured = {}
+
+    class _CaptureLoader:
+        def fetch_indicator_bars(self, *, underlying_label, timeframe_seconds, days_back):
+            captured["timeframe_seconds"] = timeframe_seconds
+            return pd.DataFrame()
+
+    backtester = RealDataBacktester(loader=_CaptureLoader())  # type: ignore[arg-type]
+    # Default timeframe should be 30s (live default).
+    backtester.backtest_exclusive_nifty_ce({}, "NIFTY_IDX")
+    assert captured["timeframe_seconds"] == 30, (
+        "ECN backtest must default to 30s (live default); got "
+        f"{captured['timeframe_seconds']}s"
+    )
+    # Explicit override must be honoured.
+    backtester.backtest_exclusive_nifty_ce({"timeframe_seconds": 60}, "NIFTY_IDX")
+    assert captured["timeframe_seconds"] == 60

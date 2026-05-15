@@ -272,12 +272,16 @@ class RealDataBacktester:
     def backtest_exclusive_nifty_ce(self, params: Dict[str, Any], underlying_label: str) -> Dict[str, Any]:
         """Backtest Exclusive Nifty CE Buy strategy on real data.
 
-        See ``backtest_ema20`` for the surface-failures rationale (PR #283
-        codex P2).
+        PR #283 codex round-2: queries the live ExclusiveNiftyCeBuy
+        timeframe (default 30s — see
+        ``EXCLUSIVE_NIFTY_CE_BUY_TIMEFRAME_SECONDS`` in
+        docker-compose.oci-live.yml) so the simulator scores on the
+        same data stream the live strategy consumes. See
+        ``backtest_ema20`` for the surface-failures rationale.
         """
         df = self.loader.fetch_indicator_bars(
             underlying_label=underlying_label,
-            timeframe_seconds=300,  # 5min bars
+            timeframe_seconds=int(params.get("timeframe_seconds", 30)),
             days_back=20,
         )
 
@@ -289,12 +293,15 @@ class RealDataBacktester:
     def backtest_put_momentum(self, params: Dict[str, Any], underlying_label: str) -> Dict[str, Any]:
         """Backtest Put Momentum Scalper strategy on real data.
 
-        See ``backtest_ema20`` for the surface-failures rationale (PR #283
-        codex P2).
+        PR #283 codex round-2: queries 5m bars (the live strategy's
+        primary signal timeframe — see
+        ``PutMomentumScalperConfig.timeframe_seconds_5m``). The simulator
+        scores on the same data stream the live strategy consumes. See
+        ``backtest_ema20`` for the surface-failures rationale.
         """
         df = self.loader.fetch_indicator_bars(
             underlying_label=underlying_label,
-            timeframe_seconds=300,  # 5min bars
+            timeframe_seconds=300,  # live PM uses 5m as primary signal TF
             days_back=20,
         )
 
@@ -366,41 +373,128 @@ class RealDataBacktester:
 
     @staticmethod
     def _simulate_exclusive_nifty_ce(df: pd.DataFrame, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Simulate Exclusive Nifty CE Buy strategy."""
+        """Simulate Exclusive Nifty CE Buy strategy.
+
+        PR #283 codex round-2: parameter names and entry gates mirror the
+        live ``ExclusiveNiftyCeBuyStrategy._compute_buy_signal`` so the
+        optimizer scores the same regime the live strategy will actually
+        enter on, and the resulting ``best_parameters`` map to keys the
+        live config consumes.
+
+        Live entry contract (approximated here):
+          - trend_ok:     ema20 > ema50
+          - rsi_ok:       rsi_min < rsi < rsi_max
+          - rsi_rising:   2 consecutive bars of rising rsi
+                          (live requires 3; relaxed to 2 to keep the
+                          backtest signal volume comparable on shorter
+                          windows. Documented for codex round-2 reviewer.)
+          - above_ema20:  close > ema20 + ema_atr_buffer * atr
+          - macd_ok:      macd_hist >= macd_hist_min AND macd > macd_signal
+          - adx_ok:       adx >= min_adx
+          - di_ok:        |plus_di - minus_di| >= min_di_spread
+                          AND plus_di > minus_di
+        Live exit contract (approximated here):
+          - sl_atr / tp_atr:  ATR-scaled stop and take-profit on the
+                              underlying CE buy (long).
+          - ema_fail_bars:    exit after N consecutive bars where
+                              close < ema20 - ema_atr_buffer * atr.
+
+        Volume gate (``vol_ok``) and the MACD near-cross fallback are
+        intentionally omitted — the baseline indicator_bars schema has
+        no volume column and the buffers needed for the near-cross are
+        not available in a bar-by-bar replay.
+        """
         import numpy as np
 
-        # Key parameters for Exclusive Nifty CE.
-        # NOTE: a future volume-filter knob (``vol_threshold``) is not
-        # plumbed yet because the indicator_bars baseline schema (see
-        # migrations/000_indicator_bars.sql) has no volume column.
-        rsi_threshold = params.get("rsi_threshold", 50)
-        # PR #283 codex P1: ``sl_pct`` / ``tp_pct`` are fractions in the
-        # live strategy; convert to percent for comparison against the
-        # percent-scaled ``pnl_pct``.
-        sl_pct_threshold = params.get("sl_pct", 0.15) * 100.0
-        tp_pct_threshold = params.get("tp_pct", 0.30) * 100.0
+        # Match the live config keys (app/strategies/exclusive_nifty_ce_buy.py).
+        rsi_min = float(params.get("rsi_min", 58.0))
+        rsi_max = float(params.get("rsi_max", 72.0))
+        sl_atr = float(params.get("sl_atr", 2.2))
+        tp_atr = float(params.get("tp_atr", 2.5))
+        macd_hist_min = float(params.get("macd_hist_min", 0.30))
+        ema_atr_buffer = float(params.get("ema_atr_buffer", 0.05))
+        min_adx = float(params.get("min_adx", 20.0))
+        min_di_spread = float(params.get("min_di_spread", 5.0))
+        ema_fail_bars = int(params.get("ema_fail_bars", 3))
 
-        # Simple simulation
+        # Use ema_20 / ema_50 from indicator_bars if present (live names);
+        # otherwise compute as a fallback so a partial schema doesn't
+        # silently zero the run.
+        if "ema_20" in df.columns and df["ema_20"].notna().any():
+            ema20 = df["ema_20"]
+        else:
+            ema20 = df["close"].ewm(span=20, adjust=False).mean()
+        if "ema_50" in df.columns and df["ema_50"].notna().any():
+            ema50 = df["ema_50"]
+        else:
+            ema50 = df["close"].ewm(span=50, adjust=False).mean()
+
+        macd_hist = (df.get("macd", 0) - df.get("macd_signal", 0))
+        if hasattr(macd_hist, "fillna"):
+            macd_hist = macd_hist.fillna(0)
+
         trades = []
         in_trade = False
-        entry_price = 0
+        entry_price = 0.0
+        entry_atr = 0.0
+        ema_fail_count = 0
 
-        for i in range(1, len(df)):
-            if not in_trade and df["rsi"].iloc[i] < rsi_threshold:
-                in_trade = True
-                entry_price = df["close"].iloc[i]
+        # Need at least 50 bars to have a meaningful ema_50.
+        for i in range(50, len(df)):
+            close_i = float(df["close"].iloc[i])
+            atr_i = float(df["atr"].iloc[i]) if "atr" in df.columns else 0.0
+            rsi_i = float(df["rsi"].iloc[i]) if "rsi" in df.columns else 0.0
+            rsi_prev = float(df["rsi"].iloc[i - 1]) if "rsi" in df.columns else 0.0
+            ema20_i = float(ema20.iloc[i])
+            ema50_i = float(ema50.iloc[i])
+            adx_i = float(df["adx"].iloc[i]) if "adx" in df.columns else 0.0
+            plus_di_i = float(df["plus_di"].iloc[i]) if "plus_di" in df.columns else 0.0
+            minus_di_i = float(df["minus_di"].iloc[i]) if "minus_di" in df.columns else 0.0
+            macd_i = float(df.get("macd", pd.Series([0.0] * len(df))).iloc[i])
+            macd_signal_i = float(df.get("macd_signal", pd.Series([0.0] * len(df))).iloc[i])
+            macd_hist_i = macd_i - macd_signal_i
 
-            elif in_trade:
-                current_price = df["close"].iloc[i]
-                pnl_pct = ((current_price - entry_price) / entry_price) * 100
+            if not in_trade:
+                # Entry gates — approximation of the live _compute_buy_signal.
+                trend_ok = ema20_i > ema50_i
+                rsi_ok = rsi_min < rsi_i < rsi_max
+                rsi_rising = rsi_i > rsi_prev
+                above_ema20 = close_i > (ema20_i + ema_atr_buffer * atr_i)
+                macd_ok = macd_i > macd_signal_i and macd_hist_i >= macd_hist_min
+                adx_ok = adx_i >= min_adx
+                di_spread = abs(plus_di_i - minus_di_i)
+                di_ok = di_spread >= min_di_spread and plus_di_i > minus_di_i
 
                 if (
-                    pnl_pct <= -sl_pct_threshold
-                    or pnl_pct >= tp_pct_threshold
-                    or i == len(df) - 1
+                    trend_ok
+                    and rsi_ok
+                    and rsi_rising
+                    and above_ema20
+                    and macd_ok
+                    and adx_ok
+                    and di_ok
                 ):
-                    in_trade = False
-                    trades.append({"entry": entry_price, "exit": current_price, "pnl_pct": pnl_pct})
+                    in_trade = True
+                    entry_price = close_i
+                    entry_atr = atr_i if atr_i > 0 else max(close_i * 0.001, 1.0)
+                    ema_fail_count = 0
+                continue
+
+            # Exit: ATR-based SL / TP on a long CE (proxied by underlying move).
+            sl_price = entry_price - sl_atr * entry_atr
+            tp_price = entry_price + tp_atr * entry_atr
+            below_ema_threshold = close_i < (ema20_i - ema_atr_buffer * atr_i)
+            ema_fail_count = ema_fail_count + 1 if below_ema_threshold else 0
+            ema_fail_exit = ema_fail_count >= ema_fail_bars
+
+            stop_hit = close_i <= sl_price
+            target_hit = close_i >= tp_price
+            time_stop = i == len(df) - 1
+
+            if stop_hit or target_hit or ema_fail_exit or time_stop:
+                in_trade = False
+                pnl_pct = ((close_i - entry_price) / entry_price) * 100
+                trades.append({"entry": entry_price, "exit": close_i, "pnl_pct": pnl_pct})
 
         if not trades:
             return {"total_trades": 0, "total_pnl": 0, "win_rate": 0}
@@ -418,37 +512,142 @@ class RealDataBacktester:
 
     @staticmethod
     def _simulate_put_momentum(df: pd.DataFrame, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Simulate Put Momentum Scalper strategy."""
+        """Simulate Put Momentum Scalper strategy.
+
+        PR #283 codex round-2: parameter names mirror
+        ``PutMomentumScalperConfig`` (see app/strategies/put_momentum_scalper.py)
+        and exit logic uses option-premium thresholds via an
+        ATM-delta-proxy mapping so the resulting ``best_parameters`` can
+        be applied to the live strategy.
+
+        Live entry contract (approximated here):
+          - 15m downtrend proxy: close < ema_50  (live uses a separate
+            15m EMA20 + close-below check; collapsed here to a single
+            slow-EMA cross check on the 5m frame since we don't load the
+            15m series in this PR).
+          - 5m breakdown:        close < lowest low over the prior
+                                 ``lookback_breakdown_bars`` bars.
+          - rsi range:           rsi_min <= rsi <= rsi_max
+          - rsi falling:         ``rsi_falling_bars_required`` consecutive
+                                 bars of declining RSI.
+          - min_atr_ratio:       atr / close >= min_atr_ratio
+                                 (rejects flat / illiquid regimes).
+        Live exit contract (approximated here):
+          - option_sl_pct:       option-premium stop. Proxied by mapping
+                                 a 1× ``option_sl_pct`` move on the
+                                 underlying to a 5× option premium move
+                                 (ATM-put delta ≈ 0.5, gamma ≈ small)
+                                 — see ``_DELTA_PROXY`` below.
+          - partial_tp_r / final_tp_r:  ``R`` is the initial option-premium
+                                 risk distance. Targets are 1×R / 1.5×R
+                                 by default.
+          - max_bars_in_trade:   time stop.
+
+        The volume / VWAP gates and the explicit 15m EMA20 + price-vs-VWAP
+        check from the live strategy are omitted because the baseline
+        indicator_bars schema does not carry volume / VWAP / 15m bars.
+        Documented limitation; codex round-2 reviewer.
+        """
         import numpy as np
 
-        # Key parameters for Put Momentum Scalper
-        rsi_min = params.get("rsi_min", 25)
-        rsi_max = params.get("rsi_max", 45)
-        # PR #283 codex P1: ``sl_pct`` / ``tp_pct`` are fractions; convert
-        # to percent for the percent-scaled ``pnl_pct`` comparison.
-        sl_pct_threshold = params.get("sl_pct", 0.25) * 100.0
-        tp_pct_threshold = params.get("tp_pct", 0.40) * 100.0
+        # Match the live config keys (PutMomentumScalperConfig).
+        rsi_min = float(params.get("rsi_min", 25.0))
+        rsi_max = float(params.get("rsi_max", 45.0))
+        min_atr_ratio = float(params.get("min_atr_ratio", 0.0015))
+        option_sl_pct = float(params.get("option_sl_pct", 0.25))
+        partial_tp_r = float(params.get("partial_tp_r", 1.0))
+        final_tp_r = float(params.get("final_tp_r", 1.5))
+        rsi_falling_bars_required = int(params.get("rsi_falling_bars_required", 2))
+        lookback_breakdown_bars = int(params.get("lookback_breakdown_bars", 10))
+        max_bars_in_trade = int(params.get("max_bars_in_trade", 8))
+
+        # ATM-put delta-proxy: an X% adverse move on the UNDERLYING maps
+        # to roughly ``_DELTA_PROXY × X%`` on the option premium. 5× is a
+        # rough but commonly-used short-tenor ATM ratio that lets the
+        # ``option_sl_pct`` knob produce comparable exit timing to LIVE.
+        # A precise option-pricing path would need IV + days-to-expiry
+        # data the baseline indicator_bars does not carry.
+        _DELTA_PROXY = 5.0
+
+        if "ema_50" in df.columns and df["ema_50"].notna().any():
+            ema50 = df["ema_50"]
+        else:
+            ema50 = df["close"].ewm(span=50, adjust=False).mean()
 
         trades = []
         in_trade = False
-        entry_price = 0
+        entry_price = 0.0
+        bars_in_trade = 0
+        initial_r_pct = 0.0  # option-premium % risk distance from entry
+        partial_taken = False
 
-        for i in range(1, len(df)):
-            if not in_trade and rsi_min <= df["rsi"].iloc[i] <= rsi_max:
-                in_trade = True
-                entry_price = df["close"].iloc[i]
+        start = max(50, lookback_breakdown_bars + rsi_falling_bars_required + 1)
+        for i in range(start, len(df)):
+            close_i = float(df["close"].iloc[i])
+            atr_i = float(df["atr"].iloc[i]) if "atr" in df.columns else 0.0
+            rsi_i = float(df["rsi"].iloc[i]) if "rsi" in df.columns else 0.0
+            ema50_i = float(ema50.iloc[i])
 
-            elif in_trade:
-                current_price = df["close"].iloc[i]
-                pnl_pct = ((entry_price - current_price) / entry_price) * 100
+            if not in_trade:
+                # 15m downtrend proxy: 5m close < 50-EMA.
+                downtrend_proxy = close_i < ema50_i
+                # 5m breakdown: close below the prior swing low.
+                prior_low = df["low"].iloc[i - lookback_breakdown_bars:i].min()
+                breakdown = close_i < float(prior_low)
+                rsi_ok = rsi_min <= rsi_i <= rsi_max
+                # rsi_falling_bars_required consecutive declining RSI bars.
+                rsi_window = df["rsi"].iloc[
+                    i - rsi_falling_bars_required: i + 1
+                ].to_list()
+                rsi_falling = all(
+                    rsi_window[j] < rsi_window[j - 1] for j in range(1, len(rsi_window))
+                ) if len(rsi_window) >= 2 else False
+                # Volatility floor.
+                atr_ratio = (atr_i / close_i) if close_i > 0 else 0.0
+                vol_ok = atr_ratio >= min_atr_ratio
 
-                if (
-                    pnl_pct <= -sl_pct_threshold
-                    or pnl_pct >= tp_pct_threshold
-                    or i == len(df) - 1
-                ):
-                    in_trade = False
-                    trades.append({"entry": entry_price, "exit": current_price, "pnl_pct": pnl_pct})
+                if downtrend_proxy and breakdown and rsi_ok and rsi_falling and vol_ok:
+                    in_trade = True
+                    entry_price = close_i
+                    bars_in_trade = 0
+                    # option-premium SL % is the user knob; that's the
+                    # initial R the partial/final targets are scaled to.
+                    initial_r_pct = option_sl_pct * 100.0
+                    partial_taken = False
+                continue
+
+            bars_in_trade += 1
+            # PUT trade is short-direction on underlying:
+            # underlying drop is a WIN, underlying rise is a LOSS.
+            underlying_pct = ((entry_price - close_i) / entry_price) * 100
+            option_pnl_pct = underlying_pct * _DELTA_PROXY
+
+            stop_hit = option_pnl_pct <= -initial_r_pct
+            partial_hit = (not partial_taken) and option_pnl_pct >= partial_tp_r * initial_r_pct
+            final_hit = option_pnl_pct >= final_tp_r * initial_r_pct
+            time_stop = bars_in_trade >= max_bars_in_trade or i == len(df) - 1
+
+            if partial_hit and not final_hit and not stop_hit and not time_stop:
+                # Book half — keep simulation simple: record a half-sized
+                # exit and continue tracking the rest until final/stop.
+                partial_taken = True
+                trades.append({
+                    "entry": entry_price,
+                    "exit": close_i,
+                    "pnl_pct": option_pnl_pct * 0.5,
+                })
+                continue
+
+            if stop_hit or final_hit or time_stop:
+                in_trade = False
+                # If partial was already booked, account for the residual
+                # half-position pnl at the final exit; otherwise full pnl.
+                weight = 0.5 if partial_taken else 1.0
+                trades.append({
+                    "entry": entry_price,
+                    "exit": close_i,
+                    "pnl_pct": option_pnl_pct * weight,
+                })
 
         if not trades:
             return {"total_trades": 0, "total_pnl": 0, "win_rate": 0}

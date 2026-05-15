@@ -299,7 +299,9 @@ def main():
     parser.add_argument(
         "--underlyings",
         nargs="+",
-        choices=["NIFTY", "BANKNIFTY", "NATURALGAS"],
+        # PR #283 codex round-2 P1: match indicator_bars.label values
+        # (``*_IDX`` for NSE indexes, ``NG_FUT`` for natural-gas future).
+        choices=["NIFTY_IDX", "BANKNIFTY_IDX", "NG_FUT"],
         help="Underlyings to optimize (default: all)"
     )
     parser.add_argument(
