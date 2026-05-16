@@ -230,10 +230,25 @@ class CandidateWriter:
             # not exist`` deep inside psycopg, which is harder to
             # connect back to "run the migration step".
             self._assert_schema_ready(conn)
-            strategy_config_id = self._lookup_strategy_config_id(conn, strategy_id)
+            strategy_config_id = self._lookup_strategy_config_id(
+                conn,
+                strategy_id,
+                underlying_label=batch.underlying_label,
+            )
             for candidate in to_write:
-                params = candidate.get("params") or {}
-                metrics = candidate.get("metrics") or {}
+                # PR #288 codex round-8 P2: previously
+                # ``candidate.get("params") or {}`` would silently
+                # coerce a falsey non-mapping payload (e.g.
+                # ``params=[]``, ``params=0``) to ``{}``, letting an
+                # empty candidate insert succeed instead of surfacing
+                # the malformed optimizer/ad-hoc payload. Now use
+                # ``is None`` so genuinely missing keys still default
+                # to an empty mapping while non-mapping types fall
+                # through to the Mapping-type check below.
+                params_raw = candidate.get("params")
+                metrics_raw = candidate.get("metrics")
+                params = {} if params_raw is None else params_raw
+                metrics = {} if metrics_raw is None else metrics_raw
                 if not isinstance(params, Mapping):
                     raise CandidateWriterError(
                         f"candidate.params must be a mapping, got {type(params).__name__}"
@@ -318,19 +333,20 @@ class CandidateWriter:
             ``migrations/020_strategy_config_candidates.sql`` (from
             PR #281) before --promote-to-candidate.
         """
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT to_regclass('public.strategy_config_candidates')"
-                )
-                row = cur.fetchone()
-        except Exception as exc:
-            # If we can't even probe to_regclass, the DB is genuinely
-            # unreachable — let it propagate up to the round-4 P2
-            # ``propagate unexpected failures`` path.
-            raise CandidateWriterError(
-                f"failed to probe strategy_config_candidates: {exc}"
-            ) from exc
+        # PR #288 codex round-8 P1: if the probe itself fails (DB
+        # unreachable, role can't execute ``to_regclass``, connection
+        # drops mid-query), let the ORIGINAL exception propagate.
+        # Previously we wrapped it in ``CandidateWriterError``, but the
+        # orchestrator's ``except CandidateWriterError`` handler then
+        # logged it as a per-pair misconfig and continued. An
+        # infrastructure failure must surface as a non-zero exit, the
+        # same fail-fast behaviour the round-4 P2 spec requires for
+        # generic loader/SQL errors.
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT to_regclass('public.strategy_config_candidates')"
+            )
+            row = cur.fetchone()
         if not row or row[0] is None:
             # PR #288 codex round-7 P1: raise the SchemaNotReadyError
             # subclass so the orchestrator can let it escape instead of
@@ -341,7 +357,13 @@ class CandidateWriter:
                 "(from PR #281, epic #270) before --promote-to-candidate."
             )
 
-    def _lookup_strategy_config_id(self, conn: Any, strategy_id: str) -> str:
+    def _lookup_strategy_config_id(
+        self,
+        conn: Any,
+        strategy_id: str,
+        *,
+        underlying_label: Optional[str] = None,
+    ) -> str:
         """Resolve strategy_config_id for the configured tenant+account+strategy.
 
         PR #288 codex round-3 P2: prefers ``enabled = TRUE`` rows over
@@ -352,9 +374,20 @@ class CandidateWriter:
         mutate a config the hub-routing layer skips while the actual
         live route remained untouched.
 
+        PR #288 codex round-8 P2: when ``underlying_label`` is supplied
+        AND any row's ``params->>'underlying_label'`` matches, the
+        match is restricted to that subset. This prevents an EMA20
+        candidate scored on ``NIFTY_IDX`` from being attached to a
+        ``BANKNIFTY_IDX``-tagged strategy_configs row in
+        multi-underlying tenants. Rows without an
+        ``underlying_label`` in params (legacy / single-underlying
+        tenants) are still matched when no per-underlying row exists,
+        so existing deployments aren't broken.
+
         Order:
-          1. enabled rows ordered by ``strategy_config_id``
-          2. disabled rows ordered by ``strategy_config_id``
+          1. enabled per-underlying rows ordered by ``strategy_config_id``
+          2. enabled untagged rows ordered by ``strategy_config_id``
+          3. disabled rows ordered by ``strategy_config_id``
 
         Raises ``CandidateWriterError`` if no row matches. If multiple
         ENABLED rows match (which shouldn't happen but is not enforced
@@ -363,9 +396,12 @@ class CandidateWriter:
         """
         # ORDER BY ``enabled DESC`` puts TRUE before FALSE (Postgres
         # boolean ordering); within each group sort by strategy_config_id
-        # for determinism.
+        # for determinism. Also project ``params->>'underlying_label'``
+        # so the Python layer can filter for per-underlying matches.
         sql = (
-            "SELECT strategy_config_id, enabled FROM public.strategy_configs "
+            "SELECT strategy_config_id, enabled, "
+            "       params->>'underlying_label' AS cfg_underlying "
+            "FROM public.strategy_configs "
             "WHERE tenant_id = %(tenant_id)s "
             "  AND broker_account_id = %(broker_account_id)s "
             "  AND strategy_id = %(strategy_id)s "
@@ -386,17 +422,38 @@ class CandidateWriter:
                 f"strategy_id={strategy_id!r}"
             )
         enabled_rows = [r for r in rows if r[1]]
+        # PR #288 codex round-8 P2: when the caller knows which
+        # underlying the candidate was scored on AND at least one
+        # enabled row is tagged with the same underlying, restrict to
+        # that subset so multi-underlying tenants don't get the wrong
+        # config attached. Untagged enabled rows (no
+        # ``params->>'underlying_label'``) remain valid when no tagged
+        # row exists, preserving backwards-compat for single-underlying
+        # tenants.
+        if enabled_rows and underlying_label:
+            # Defensive: existing fixtures and the round-3 schema may
+            # return 2-tuples ``(id, enabled)`` without the projected
+            # ``cfg_underlying`` column. Treat a missing third element
+            # as untagged.
+            def _row_underlying(r):
+                return r[2] if len(r) > 2 else None
+
+            tagged = [r for r in enabled_rows if _row_underlying(r) == underlying_label]
+            if tagged:
+                enabled_rows = tagged
         if enabled_rows:
             chosen = enabled_rows[0][0]
             if len(enabled_rows) > 1:
                 logger.warning(
                     "candidate_writer: %d ENABLED strategy_configs rows match "
-                    "(tenant=%s, broker=%s, strategy_id=%s); using first "
-                    "(strategy_config_id=%s). Deduplicate the registry.",
+                    "(tenant=%s, broker=%s, strategy_id=%s, underlying=%s); "
+                    "using first (strategy_config_id=%s). Deduplicate the "
+                    "registry.",
                     len(enabled_rows),
                     self._tenant_id,
                     self._broker_account_id,
                     strategy_id,
+                    underlying_label or "<any>",
                     chosen,
                 )
             return chosen
