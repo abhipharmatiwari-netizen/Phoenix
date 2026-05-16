@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _read(rel_path: str) -> str:
     return (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+
+
+def _oci_compose() -> dict:
+    return yaml.safe_load(_read("docker-compose.oci-live.yml"))
 
 
 def test_start_phoenix_preflights_backend_and_nginx_images_before_compose() -> None:
@@ -47,6 +53,34 @@ def test_backend_watchdog_is_observe_only_without_docker_socket_or_actions() -> 
     assert "relying on LB drain" in watchdog
 
 
+def test_optimizer_service_is_profile_only_one_shot_using_backend_image() -> None:
+    compose = _oci_compose()
+    services = compose["services"]
+    optimizer = services["optimizer"]
+
+    assert optimizer["profiles"] == ["optimizer"]
+    assert optimizer["restart"] == "no"
+    assert optimizer["image"].endswith("/phoenix-prod/backend:${IMAGE_TAG:?Set IMAGE_TAG to a specific git SHA - never deploy latest}")
+    assert optimizer["depends_on"]["db-preflight"]["condition"] == "service_completed_successfully"
+    assert "ports" not in optimizer
+    assert optimizer["entrypoint"] == [
+        "docker-entrypoint.sh",
+        "python",
+        "-m",
+        "app.strategies.run_multi_strategy_optimizer",
+    ]
+    assert "--promote-to-candidate" in optimizer["command"]
+    assert "--output=/app/optimizer_output/latest-results.json" in optimizer["command"]
+    assert "control_plane_pg_password" in optimizer["secrets"]
+    assert any(
+        "/opt/phoenix/optimizer/output" in volume
+        and ":/app/optimizer_output" in volume
+        for volume in optimizer["volumes"]
+    )
+    assert optimizer["mem_limit"] == "1500m"
+    assert optimizer["cap_drop"] == ["ALL"]
+
+
 def test_oci_build_scripts_build_backend_and_nginx_image_pair() -> None:
     for rel_path in (
         "scripts/ops/build_and_push_image.sh",
@@ -76,3 +110,7 @@ def test_oci_runbook_documents_image_pair_and_observe_only_watchdog() -> None:
     assert "backend and nginx images are a release pair" in runbook
     assert "refuses to run `docker compose up` if either image is missing" in runbook
     assert "backend-watchdog` service is observe-only" in runbook
+    assert "Nightly Optimizer One-Shot" in runbook
+    assert "/opt/phoenix/optimizer/output" in runbook
+    assert "--profile optimizer" in runbook
+    assert "run --rm optimizer --help" in runbook

@@ -371,6 +371,47 @@ services:
               exit 1
             }
 
+  optimizer:
+    image: "${OCIR_REGION:-ap-mumbai-1}.ocir.io/${OCIR_NAMESPACE:?Set OCIR_NAMESPACE}/phoenix-prod/backend:${IMAGE_TAG:?Set IMAGE_TAG to a specific git SHA - never deploy latest}"
+    container_name: phoenix-oci-optimizer
+    profiles: ["optimizer"]
+    restart: "no"
+    depends_on:
+      db-preflight:
+        condition: service_completed_successfully
+    environment:
+      <<: *db-env
+      TZ: "Asia/Kolkata"
+      OPTIMIZER_TENANT_ID: "${HUB_DEFAULT_TENANT_ID:?Set HUB_DEFAULT_TENANT_ID to production tenant UUID}"
+      OPTIMIZER_BROKER_ACCOUNT_ID: "${HUB_DEFAULT_BROKER_ACCOUNT_ID:?Set HUB_DEFAULT_BROKER_ACCOUNT_ID}"
+      OPTIMIZER_ITERATIONS: "${OPTIMIZER_ITERATIONS:-100}"
+      OPTIMIZER_LOOKBACK_DAYS: "${OPTIMIZER_LOOKBACK_DAYS:-30}"
+    secrets:
+      - control_plane_pg_password
+    volumes:
+      - "${PHOENIX_OPTIMIZER_OUTPUT_PATH:-/opt/phoenix/optimizer/output}:/app/optimizer_output"
+      - "${PHOENIX_CERTS_HOST_PATH:-/opt/phoenix/certs}:/app/certs:ro"
+    entrypoint:
+      - docker-entrypoint.sh
+      - python
+      - -m
+      - app.strategies.run_multi_strategy_optimizer
+    command:
+      - --promote-to-candidate
+      - --output=/app/optimizer_output/latest-results.json
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: "1500m"
+    memswap_limit: "1500m"
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   backend:
     image: "${OCIR_REGION:-ap-mumbai-1}.ocir.io/${OCIR_NAMESPACE:?Set OCIR_NAMESPACE}/phoenix-prod/backend:${IMAGE_TAG:?Set IMAGE_TAG to a specific git SHA â€” never deploy latest}"
     container_name: phoenix-oci-backend

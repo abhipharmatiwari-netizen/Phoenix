@@ -166,6 +166,43 @@ Scheduled starts fail fast before any compose start/recreate action if the pinne
 
 The `backend-watchdog` service is observe-only. It logs backend health transitions but does not start or stop nginx; backend-down traffic draining is handled by nginx `/readyz` and the OCI load balancer health check.
 
+## Nightly Optimizer One-Shot
+
+The optimizer is a profile-only service in `docker-compose.oci-live.yml`. It reuses the pinned backend image and does not start during the normal `docker compose up -d backend nginx` flow.
+
+Prepare the host output directory before the first run:
+
+```bash
+sudo mkdir -p /opt/phoenix/optimizer/output
+sudo chown 1000:1000 /opt/phoenix/optimizer/output
+```
+
+Verify the profile wiring without starting live containers:
+
+```bash
+CONTROL_PLANE_PG_PASSWORD_HOST="$(sudo cat /run/secrets/control_plane_pg_password)" \
+docker compose \
+  -f docker-compose.oci-live.yml \
+  -f /opt/phoenix/phoenix-override.yml \
+  --env-file /opt/phoenix/phoenix-deploy.env \
+  --profile optimizer \
+  run --rm optimizer --help
+```
+
+Manual one-shot run:
+
+```bash
+CONTROL_PLANE_PG_PASSWORD_HOST="$(sudo cat /run/secrets/control_plane_pg_password)" \
+docker compose \
+  -f docker-compose.oci-live.yml \
+  -f /opt/phoenix/phoenix-override.yml \
+  --env-file /opt/phoenix/phoenix-deploy.env \
+  --profile optimizer \
+  run --rm optimizer
+```
+
+The default output file is `/opt/phoenix/optimizer/output/latest-results.json`. The optimizer writes only pending rows to `strategy_config_candidates`; live `strategy_configs.params` changes require the separate admin approval path.
+
 ## Validation
 
 Container state:
