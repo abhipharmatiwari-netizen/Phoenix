@@ -17,6 +17,7 @@ from app.strategies.candidate_writer import (
     CandidateBatch,
     CandidateWriter,
     CandidateWriterError,
+    SchemaNotReadyError,
 )
 from app.strategies.ml_param_optimizer import (
     ParameterSet,
@@ -676,6 +677,15 @@ def _promote_top_candidates(
                     batch, candidates_per_strategy=candidates_per_strategy
                 )
                 total_inserted += len(inserted)
+            except SchemaNotReadyError:
+                # PR #288 codex round-7 P1: missing migration 020 is an
+                # INFRASTRUCTURE error (operator failed to run
+                # ``migrations/020_strategy_config_candidates.sql``),
+                # not a per-pair misconfig. Re-raise so the CLI exits
+                # non-zero and the nightly cron / CI surfaces the
+                # failure instead of logging "0 rows inserted" success
+                # for every pair.
+                raise
             except CandidateWriterError as exc:
                 # Expected per-(strategy, underlying) misconfig — log and
                 # continue. Missing strategy_configs row, disabled

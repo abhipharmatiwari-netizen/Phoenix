@@ -85,6 +85,17 @@ class CandidateWriterError(RuntimeError):
     """Raised when the writer cannot persist candidates (resolution / SQL)."""
 
 
+class SchemaNotReadyError(CandidateWriterError):
+    """Raised when migration 020 has not been applied to the target DB.
+
+    PR #288 codex round-7 P1: a missing ``strategy_config_candidates``
+    table is an INFRASTRUCTURE failure (operator didn't run the
+    migration), not a per-(strategy, underlying) misconfig. The
+    promotion orchestrator must let this propagate instead of looping
+    over every pair and logging "0 rows inserted" success.
+    """
+
+
 def _normalize_for_json(value: Any) -> Any:
     """Convert NumPy / pandas scalars to native Python types so
     ``json.dumps`` writes real JSON booleans / numbers instead of
@@ -321,7 +332,10 @@ class CandidateWriter:
                 f"failed to probe strategy_config_candidates: {exc}"
             ) from exc
         if not row or row[0] is None:
-            raise CandidateWriterError(
+            # PR #288 codex round-7 P1: raise the SchemaNotReadyError
+            # subclass so the orchestrator can let it escape instead of
+            # absorbing it into the per-(strategy, underlying) handler.
+            raise SchemaNotReadyError(
                 "public.strategy_config_candidates is missing. Apply "
                 "migration migrations/020_strategy_config_candidates.sql "
                 "(from PR #281, epic #270) before --promote-to-candidate."
