@@ -115,6 +115,7 @@ jobs:
           exit-code: '1'
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          limit-severities-for-sarif: true
 
       - name: Scan nginx image with trivy
         uses: aquasecurity/trivy-action@master
@@ -125,6 +126,7 @@ jobs:
           exit-code: '1'
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          limit-severities-for-sarif: true
 
       - name: Upload trivy SARIF results
         if: always() && hashFiles('trivy-backend.sarif') != ''
