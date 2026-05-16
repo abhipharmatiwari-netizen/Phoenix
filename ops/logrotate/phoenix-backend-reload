@@ -1,0 +1,8 @@
+/opt/phoenix/logs/backend-reload.log {
+    daily
+    rotate 14
+    compress
+    missingok
+    notifempty
+    copytruncate
+}

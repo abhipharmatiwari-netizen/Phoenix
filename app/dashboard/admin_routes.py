@@ -19,6 +19,12 @@ from app.config.settings import get_settings
 from app.core.audit_log import emit_audit_event, list_audit_events as query_audit_events
 from app.core.rate_limit_middleware import check_rate_limit
 from app.dashboard.auth import AdminContext, AdminRole, get_admin_context
+from app.dashboard.strategy_candidates import (
+    approve_strategy_candidate,
+    get_strategy_candidate,
+    list_strategy_candidates,
+    reject_strategy_candidate,
+)
 from app.core.identifiers import BrokerAccountId, StrategyId, TenantId
 from app.hub.hub import pick_active_subscription
 from app.hub.exit_engines import PositionExitPlan, build_position_exit_plan
@@ -149,6 +155,15 @@ class ClearPositionRecordRequest(BaseModel):
 class AuditEventListResponse(BaseModel):
     count: int
     events: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class StrategyCandidateListResponse(BaseModel):
+    count: int
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class StrategyCandidateReviewRequest(BaseModel):
+    reason: Optional[str] = None
 
 
 def _request_id_from_request(request: Request) -> str | None:
@@ -353,6 +368,67 @@ def list_audit_log(
         resource_id=resource_id,
     )
     return AuditEventListResponse(count=len(events), events=events)
+
+
+@router.get("/strategy-candidates", response_model=StrategyCandidateListResponse)
+def list_strategy_candidate_reviews(
+    request: Request,
+    candidate_status: Optional[str] = Query(default="pending", alias="status"),
+    limit: int = Query(default=50, ge=1, le=200),
+    ctx: AdminContext = Depends(get_admin_context),
+) -> StrategyCandidateListResponse:
+    ctx.require_role(AdminRole.READONLY)
+    check_rate_limit(request)
+    payload = list_strategy_candidates(
+        candidate_status=candidate_status,
+        limit=limit,
+    )
+    return StrategyCandidateListResponse(**payload)
+
+
+@router.get("/strategy-candidates/{candidate_id}")
+def get_strategy_candidate_review(
+    request: Request,
+    candidate_id: str,
+    ctx: AdminContext = Depends(get_admin_context),
+) -> dict[str, Any]:
+    ctx.require_role(AdminRole.READONLY)
+    check_rate_limit(request)
+    return get_strategy_candidate(candidate_id)
+
+
+@router.post("/strategy-candidates/{candidate_id}/approve")
+def approve_strategy_candidate_review(
+    request: Request,
+    candidate_id: str,
+    req: StrategyCandidateReviewRequest,
+    ctx: AdminContext = Depends(get_admin_context),
+) -> dict[str, Any]:
+    ctx.require_role(AdminRole.ADMIN)
+    check_rate_limit(request)
+    return approve_strategy_candidate(
+        candidate_id=candidate_id,
+        actor=ctx.caller,
+        reason=req.reason,
+        request_id=_request_id_from_request(request),
+    )
+
+
+@router.post("/strategy-candidates/{candidate_id}/reject")
+def reject_strategy_candidate_review(
+    request: Request,
+    candidate_id: str,
+    req: StrategyCandidateReviewRequest,
+    ctx: AdminContext = Depends(get_admin_context),
+) -> dict[str, Any]:
+    ctx.require_role(AdminRole.ADMIN)
+    check_rate_limit(request)
+    return reject_strategy_candidate(
+        candidate_id=candidate_id,
+        actor=ctx.caller,
+        reason=req.reason,
+        request_id=_request_id_from_request(request),
+    )
 
 
 # Create or update a tenant record.

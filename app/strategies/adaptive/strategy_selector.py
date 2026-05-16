@@ -70,6 +70,29 @@ def _underlying_aliases(underlying: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(aliases))
 
 
+def _parse_underlying_list(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        values = [part.strip() for part in value.split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        values = [str(part).strip() for part in value]
+    else:
+        values = [str(value).strip()]
+    return tuple(dict.fromkeys(part.upper() for part in values if part))
+
+
+_DIRECTIONAL_TREND_REGIMES = {Regime.TRENDING_UP, Regime.TRENDING_DOWN}
+
+
+def _is_directional_trend_flip(previous: Regime, current: Regime) -> bool:
+    return (
+        previous in _DIRECTIONAL_TREND_REGIMES
+        and current in _DIRECTIONAL_TREND_REGIMES
+        and previous != current
+    )
+
+
 def _ist_date(dt: datetime) -> date:
     return _to_utc(dt).astimezone(_IST).date()
 
@@ -88,11 +111,10 @@ class StrategySelectorConfig:
     max_active_per_underlying: int = 1
     min_hold_seconds: float = 300.0
     mapping: dict[str, dict[Regime, tuple[str, ...]]] = field(default_factory=dict)
-    # Authority rule (EMA20-5): when True, ema20_strategy bypasses selector gating
-    # and is governed exclusively by its own dynamic policy. This prevents the selector's
-    # NO_TRADE→[] mapping from silently suppressing EMA20 when EMA20's NO_TRADE profile
-    # has disable_entries=false. Other strategies are unaffected.
+    # Legacy migration flag. When true and no explicit allow-list is supplied,
+    # the EMA20 selector bypass is limited to NIFTY_IDX instead of every underlying.
     ema20_is_authoritative: bool = False
+    ema20_authoritative_underlyings: tuple[str, ...] = ()
 
     @classmethod
     def from_raw(
@@ -152,6 +174,18 @@ class StrategySelectorConfig:
         ema20_is_authoritative = _parse_bool(
             payload.get("ema20_is_authoritative"), default=False
         )
+        raw_ema20_authoritative_underlyings = payload.get(
+            "ema20_authoritative_underlyings"
+        )
+        if raw_ema20_authoritative_underlyings is None:
+            raw_ema20_authoritative_underlyings = payload.get(
+                "ema20_selector_bypass_underlyings"
+            )
+        ema20_authoritative_underlyings = _parse_underlying_list(
+            raw_ema20_authoritative_underlyings
+        )
+        if raw_ema20_authoritative_underlyings is None and ema20_is_authoritative:
+            ema20_authoritative_underlyings = ("NIFTY_IDX",)
 
         return cls(
             enabled=enabled,
@@ -159,7 +193,16 @@ class StrategySelectorConfig:
             min_hold_seconds=min_hold_seconds,
             mapping=mapping,
             ema20_is_authoritative=ema20_is_authoritative,
+            ema20_authoritative_underlyings=ema20_authoritative_underlyings,
         )
+
+    def ema20_bypasses_selector_for(self, underlying: str) -> bool:
+        if not self.ema20_authoritative_underlyings:
+            return False
+        configured_aliases: set[str] = set()
+        for configured in self.ema20_authoritative_underlyings:
+            configured_aliases.update(_underlying_aliases(configured))
+        return bool(configured_aliases.intersection(_underlying_aliases(underlying)))
 
 
 @dataclass(frozen=True)
@@ -235,6 +278,8 @@ class StrategySelector:
         force_switch = (
             regime == Regime.NO_TRADE
             or not self._selection_is_allowed(state.selected, allowed)
+            or not desired
+            or _is_directional_trend_flip(state.regime, regime)
         )
         hold_active = bool(state.hold_until and now_utc < state.hold_until)
 

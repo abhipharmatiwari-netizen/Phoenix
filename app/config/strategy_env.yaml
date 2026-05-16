@@ -810,21 +810,19 @@ strategy_selection:
   enabled: true
   max_active_per_underlying: 3
   min_hold_seconds: 180
-  # Authority rule (EMA20-5): EMA20 dynamic policy is the authoritative layer for
-  # EMA20 entry permissibility. When ema20_is_authoritative=true, ema20_strategy
-  # bypasses selector regime gating and is governed solely by its own per-regime
-  # dynamic profiles (disable_entries flag). This resolves the design conflict where
-  # selector NO_TRADE->[] suppressed EMA20 even when EMA20's NO_TRADE profile had
-  # disable_entries=false (incident: NIFTY/BANKNIFTY March 13, 2026).
-  # To reintroduce selector control over EMA20, set this to false AND align the
-  # selector mapping NO_TRADE entry with EMA20's dynamic profile before LIVE use.
+  # Authority rule (EMA20-5): EMA20 dynamic policy may bypass selector gating only
+  # for the underlyings listed below. The legacy boolean remains true for migration,
+  # but the parser maps it to NIFTY_IDX only when this allow-list is absent.
+  # BANKNIFTY_IDX and NG_FUT must follow their selector mappings so empty bullish
+  # mappings remain true no-trade signals instead of leaking through the EMA20 bypass.
   ema20_is_authoritative: true
+  ema20_authoritative_underlyings: ["NIFTY_IDX"]
   mapping:
     NIFTY_IDX:
       # Notes on this mapping (revised after Codex review on PR #211):
       #
       # 1. `ema20_strategy` is OMITTED from every regime list. With
-      #    ema20_is_authoritative=true (above), ema20 receives bars via
+      #    ema20_authoritative_underlyings=["NIFTY_IDX"] (above), ema20 receives bars via
       #    the bypass at multi_instrument_stream._is_strategy_selected
       #    regardless of whether it appears here. Listing it here would
       #    consume one of the slots under

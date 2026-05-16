@@ -166,6 +166,112 @@ Scheduled starts fail fast before any compose start/recreate action if the pinne
 
 The `backend-watchdog` service is observe-only. It logs backend health transitions but does not start or stop nginx; backend-down traffic draining is handled by nginx `/readyz` and the OCI load balancer health check.
 
+## Nightly Optimizer One-Shot
+
+The optimizer is a profile-only service in `docker-compose.oci-live.yml`. It reuses the pinned backend image and does not start during the normal `docker compose up -d backend nginx` flow.
+
+Prepare the host output directory before the first run:
+
+```bash
+sudo mkdir -p /opt/phoenix/optimizer/output
+sudo chown 100:100 /opt/phoenix/optimizer/output
+```
+
+Verify the profile wiring without starting live containers:
+
+```bash
+CONTROL_PLANE_PG_PASSWORD_HOST="$(sudo cat /run/secrets/control_plane_pg_password)" \
+docker compose \
+  -f docker-compose.oci-live.yml \
+  -f /opt/phoenix/phoenix-override.yml \
+  --env-file /opt/phoenix/phoenix-deploy.env \
+  --profile optimizer \
+  run --rm optimizer --help
+```
+
+Manual one-shot run:
+
+```bash
+CONTROL_PLANE_PG_PASSWORD_HOST="$(sudo cat /run/secrets/control_plane_pg_password)" \
+docker compose \
+  -f docker-compose.oci-live.yml \
+  -f /opt/phoenix/phoenix-override.yml \
+  --env-file /opt/phoenix/phoenix-deploy.env \
+  --profile optimizer \
+  run --rm optimizer
+```
+
+The default output file is `/opt/phoenix/optimizer/output/latest-results.json`. The optimizer writes only pending rows to `strategy_config_candidates`; live `strategy_configs.params` changes require the separate admin approval path.
+
+### Install the Nightly Optimizer Timer
+
+The repo tracks the host units under `ops/systemd/` and the logrotate policy under `ops/logrotate/`. Install them from the deployed checkout:
+
+```bash
+cd /opt/phoenix/app
+sudo scripts/install-optimizer-systemd.sh
+```
+
+Expected evidence:
+
+```bash
+systemctl status phoenix-optimizer.timer
+systemctl list-timers phoenix-optimizer.timer
+```
+
+The next run must be `23:45:00 Asia/Kolkata`. The service writes combined stdout/stderr to `/opt/phoenix/logs/optimizer.log`, rotated by `/etc/logrotate.d/phoenix-optimizer`.
+
+Operational commands:
+
+```bash
+# Disable scheduled optimizer runs.
+sudo systemctl disable --now phoenix-optimizer.timer
+
+# Force one run after checking the market-hours guard.
+sudo systemctl start phoenix-optimizer.service
+
+# Read the last optimizer result and logs.
+sudo tail -n 200 /opt/phoenix/logs/optimizer.log
+sudo ls -lh /opt/phoenix/optimizer/output/
+```
+
+`scripts/optimizer-precheck.sh` fails the service before the compose run if the current IST time is in the 09:00-15:35 NSE guard window, if the optimizer lock is already held, or if the backend logs contain a recent order placement marker.
+
+### Conditional Backend Reload After Approval
+
+Approved optimizer candidates update `strategy_configs.params`, but the live backend only consumes those params after a backend reload. The repo tracks a separate 09:00 IST timer that reloads only when the prior IST day produced at least one `strategy_config_candidates.status = 'promoted'` row.
+
+Install the reload timer from the deployed checkout:
+
+```bash
+cd /opt/phoenix/app
+sudo scripts/install-backend-reload-systemd.sh
+```
+
+Expected evidence:
+
+```bash
+systemctl status phoenix-backend-reload.timer
+systemctl list-timers phoenix-backend-reload.timer
+```
+
+The service writes combined stdout/stderr to `/opt/phoenix/logs/backend-reload.log`, rotated by `/etc/logrotate.d/phoenix-backend-reload`.
+
+Operational commands:
+
+```bash
+# Disable scheduled reloads.
+sudo systemctl disable --now phoenix-backend-reload.timer
+
+# Force one guarded reload check.
+sudo systemctl start phoenix-backend-reload.service
+
+# Read reload decisions and health evidence.
+sudo tail -n 200 /opt/phoenix/logs/backend-reload.log
+```
+
+`scripts/backend-reload-if-needed.sh` fails closed if `phoenix-oci-backend` is not running, if it cannot query promoted candidates, if the admin API key is unavailable inside the backend container, if any broker account reports a non-zero position, if any broker account reports a non-terminal order, or if the backend does not return to healthy within 60 seconds after restart. Set `OPTIMIZER_BACKEND_RELOAD_DISABLED=true` in `/opt/phoenix/phoenix-deploy.env` to skip reload checks without removing the timer.
+
 ## Validation
 
 Container state:

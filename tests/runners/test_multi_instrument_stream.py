@@ -983,6 +983,7 @@ def test_build_strategy_runtime_startup_snapshot_redacts_sensitive_env_and_persi
             max_active_per_underlying=2,
             min_hold_seconds=180.0,
             ema20_is_authoritative=True,
+            ema20_authoritative_underlyings=("NIFTY_IDX",),
             mapping={"NIFTY_IDX": {}},
         ),
         selector_state={
@@ -1018,6 +1019,7 @@ def test_build_strategy_runtime_startup_snapshot_redacts_sensitive_env_and_persi
     assert snapshot["indicator_plan"]["ema_periods_by_timeframe"]["300"] == [20, 50]
     assert snapshot["indicator_seed_summary"]["seed_source"] == "csv"
     assert snapshot["indicator_seed_summary"]["per_series"][0]["label"] == "NIFTY_IDX"
+    assert snapshot["selector"]["ema20_authoritative_underlyings"] == ["NIFTY_IDX"]
 
     snapshot_path = mis._persist_strategy_runtime_startup_snapshot(
         snapshot=snapshot,

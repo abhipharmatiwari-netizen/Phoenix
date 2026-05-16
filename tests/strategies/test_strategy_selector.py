@@ -141,6 +141,74 @@ def test_strategy_selector_honors_hold_window_before_switching():
     assert switched.changed is True
 
 
+def test_strategy_selector_empty_direction_mapping_cuts_through_hold_window():
+    cfg = StrategySelectorConfig.from_raw(
+        {
+            "enabled": True,
+            "max_active_per_underlying": 1,
+            "min_hold_seconds": 300,
+            "mapping": {
+                "NG_FUT": {
+                    "TRENDING_DOWN": ["ema20_strategy"],
+                    "TRENDING_UP": [],
+                }
+            },
+        }
+    )
+    selector = StrategySelector(cfg)
+
+    selector.select(
+        underlying="NG_FUT",
+        regime=Regime.TRENDING_DOWN,
+        allowed_strategies=["ema20_strategy"],
+        now=_ts(0),
+    )
+    cleared = selector.select(
+        underlying="NG_FUT",
+        regime=Regime.TRENDING_UP,
+        allowed_strategies=["ema20_strategy"],
+        now=_ts(60),
+    )
+
+    assert cleared.selected_strategies == ()
+    assert cleared.changed is True
+    assert cleared.reason == "mapping_empty_after_allowed_filter"
+
+
+def test_strategy_selector_direction_flip_to_non_empty_mapping_cuts_through_hold_window():
+    cfg = StrategySelectorConfig.from_raw(
+        {
+            "enabled": True,
+            "max_active_per_underlying": 1,
+            "min_hold_seconds": 300,
+            "mapping": {
+                "NG_FUT": {
+                    "TRENDING_UP": [],
+                    "TRENDING_DOWN": ["ema20_strategy"],
+                }
+            },
+        }
+    )
+    selector = StrategySelector(cfg)
+
+    selector.select(
+        underlying="NG_FUT",
+        regime=Regime.TRENDING_UP,
+        allowed_strategies=["ema20_strategy"],
+        now=_ts(0),
+    )
+    bearish = selector.select(
+        underlying="NG_FUT",
+        regime=Regime.TRENDING_DOWN,
+        allowed_strategies=["ema20_strategy"],
+        now=_ts(60),
+    )
+
+    assert bearish.selected_strategies == ("ema20_strategy",)
+    assert bearish.changed is True
+    assert bearish.reason == "mapping"
+
+
 def test_no_trade_explicit_mapping_is_honoured():
     """
     Strategies listed explicitly in a NO_TRADE mapping are selected and receive bar
@@ -258,14 +326,19 @@ def test_selector_config_ema20_is_authoritative_default_false():
     """ema20_is_authoritative defaults to False for backward compatibility."""
     cfg = StrategySelectorConfig.from_raw({"enabled": True})
     assert cfg.ema20_is_authoritative is False
+    assert cfg.ema20_authoritative_underlyings == ()
 
 
 def test_selector_config_ema20_is_authoritative_parsed_true():
-    """ema20_is_authoritative=true is correctly parsed from raw config."""
+    """Legacy ema20_is_authoritative=true migrates to a NIFTY-only bypass."""
     cfg = StrategySelectorConfig.from_raw(
         {"enabled": True, "ema20_is_authoritative": True}
     )
     assert cfg.ema20_is_authoritative is True
+    assert cfg.ema20_authoritative_underlyings == ("NIFTY_IDX",)
+    assert cfg.ema20_bypasses_selector_for("NIFTY_IDX") is True
+    assert cfg.ema20_bypasses_selector_for("BANKNIFTY_IDX") is False
+    assert cfg.ema20_bypasses_selector_for("NG_FUT") is False
 
 
 def test_selector_config_ema20_is_authoritative_parsed_false_explicit():
@@ -274,6 +347,26 @@ def test_selector_config_ema20_is_authoritative_parsed_false_explicit():
         {"enabled": True, "ema20_is_authoritative": False}
     )
     assert cfg.ema20_is_authoritative is False
+    assert cfg.ema20_authoritative_underlyings == ()
+
+
+def test_selector_config_parses_explicit_ema20_authoritative_underlyings():
+    cfg = StrategySelectorConfig.from_raw(
+        {
+            "enabled": True,
+            "ema20_authoritative_underlyings": ["nifty", "NIFTY_IDX", "banknifty_idx"],
+        }
+    )
+
+    assert cfg.ema20_is_authoritative is False
+    assert cfg.ema20_authoritative_underlyings == (
+        "NIFTY",
+        "NIFTY_IDX",
+        "BANKNIFTY_IDX",
+    )
+    assert cfg.ema20_bypasses_selector_for("NIFTY_IDX") is True
+    assert cfg.ema20_bypasses_selector_for("BANKNIFTY") is True
+    assert cfg.ema20_bypasses_selector_for("NG_FUT") is False
 
 
 def test_selector_no_trade_still_suppresses_non_ema20():
@@ -351,8 +444,8 @@ def test_selector_no_trade_returns_ema20_inactive_at_selector_level():
 # ---------------------------------------------------------------------------
 # EMA20-5: incident replay simulation
 # Simulates the March 13, 2026 NO_TRADE regime that suppressed NIFTY EMA20.
-# Verifies that _is_strategy_selected bypass logic (tested via config flag) is
-# correctly wired: ema20_is_authoritative=True means the caller should allow EMA20.
+# Verifies that _is_strategy_selected bypass logic is scoped to the configured
+# EMA20 authoritative underlyings.
 # ---------------------------------------------------------------------------
 
 
@@ -365,9 +458,11 @@ def _simulate_is_strategy_selected(
     """Mirrors the _is_strategy_selected logic from multi_instrument_stream.py."""
     from app.strategies.naming import canonicalize_strategy_name
 
-    if cfg.ema20_is_authoritative and canonicalize_strategy_name(
-        strategy_name, source="test_bypass"
-    ) == "ema20_strategy":
+    if (
+        cfg.ema20_bypasses_selector_for(underlying_label)
+        and canonicalize_strategy_name(strategy_name, source="test_bypass")
+        == "ema20_strategy"
+    ):
         return True
     return selector.is_strategy_active(
         underlying=underlying_label.upper(),
@@ -425,11 +520,40 @@ def test_incident_replay_nifty_no_trade_ema20_authoritative_bypasses_selector():
     ) is False, "ce_orb must remain suppressed in NO_TRADE"
 
 
-def test_incident_replay_banknifty_no_trade_ema20_authoritative_bypasses_selector():
+def test_nifty_authoritative_allow_list_bypasses_when_ema20_absent_from_mapping():
+    cfg = StrategySelectorConfig.from_raw(
+        {
+            "enabled": True,
+            "max_active_per_underlying": 1,
+            "min_hold_seconds": 0,
+            "ema20_authoritative_underlyings": ["NIFTY_IDX"],
+            "mapping": {
+                "NIFTY_IDX": {
+                    "TRENDING_UP": ["exclusive_nifty_ce_buy"],
+                }
+            },
+        }
+    )
+    selector = StrategySelector(cfg)
+
+    decision = selector.select(
+        underlying="NIFTY_IDX",
+        regime=Regime.TRENDING_UP,
+        allowed_strategies=["ema20_strategy", "exclusive_nifty_ce_buy"],
+        now=_ts(0),
+    )
+
+    assert decision.selected_strategies == ("exclusive_nifty_ce_buy",)
+    assert _simulate_is_strategy_selected(
+        selector, cfg, "NIFTY_IDX", "ema20_strategy"
+    ) is True
+
+
+def test_incident_replay_banknifty_no_trade_ema20_authoritative_is_not_global():
     """
     Incident replay: BANKNIFTY_IDX in NO_TRADE regime on March 13, 2026 (13:55 bar).
 
-    With ema20_is_authoritative=True, EMA20 must not be suppressed by selector.
+    Legacy ema20_is_authoritative=True only migrates NIFTY to the EMA20 bypass.
     """
     cfg = StrategySelectorConfig.from_raw(
         {
@@ -449,6 +573,7 @@ def test_incident_replay_banknifty_no_trade_ema20_authoritative_bypasses_selecto
         }
     )
     selector = StrategySelector(cfg)
+    assert cfg.ema20_authoritative_underlyings == ("NIFTY_IDX",)
 
     selector.select(
         underlying="BANKNIFTY_IDX",
@@ -459,7 +584,7 @@ def test_incident_replay_banknifty_no_trade_ema20_authoritative_bypasses_selecto
 
     assert _simulate_is_strategy_selected(
         selector, cfg, "BANKNIFTY_IDX", "ema20_strategy"
-    ) is True, "EMA20 must pass through for BANKNIFTY when ema20_is_authoritative=True"
+    ) is False, "Legacy ema20_is_authoritative must not bypass BANKNIFTY selector state"
 
     assert _simulate_is_strategy_selected(
         selector, cfg, "BANKNIFTY_IDX", "put_momentum_scalper"
@@ -524,7 +649,7 @@ def test_ema20_bypass_accepts_alias_names():
 
 
 def test_ng_fut_selector_behavior_unchanged():
-    """NG_FUT selector behavior is unaffected by the EMA20 authority rule."""
+    """NG_FUT remains governed by its selector mapping when legacy EMA20 authority is true."""
     cfg = StrategySelectorConfig.from_raw(
         {
             "enabled": True,
@@ -534,6 +659,7 @@ def test_ng_fut_selector_behavior_unchanged():
             "mapping": {
                 "NG_FUT": {
                     "TRENDING": ["ema20_strategy"],
+                    "TRENDING_UP": [],
                     "NORMAL": ["ema20_strategy"],
                     "NO_TRADE": [],
                 }
@@ -541,18 +667,16 @@ def test_ng_fut_selector_behavior_unchanged():
         }
     )
     selector = StrategySelector(cfg)
-    # NG was always in the NO_TRADE->[] mapping but EMA20 had a NO_TRADE: [] profile
-    # too, so bypass applies consistently for NG as well.
     selector.select(
         underlying="NG_FUT",
-        regime=Regime.NO_TRADE,
+        regime=Regime.TRENDING_UP,
         allowed_strategies=["ema20_strategy"],
         now=_ts(0),
     )
-    # EMA20 bypasses for NG_FUT the same way (authoritative applies globally to ema20)
+
     assert _simulate_is_strategy_selected(
         selector, cfg, "NG_FUT", "ema20_strategy"
-    ) is True
+    ) is False
 
 
 # ---------------------------------------------------------------------------

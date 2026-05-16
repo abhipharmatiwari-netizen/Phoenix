@@ -531,6 +531,9 @@ def _selector_config_snapshot(selector_config: Any) -> Dict[str, Any]:
         "ema20_is_authoritative": bool(
             getattr(selector_config, "ema20_is_authoritative", False)
         ),
+        "ema20_authoritative_underlyings": list(
+            getattr(selector_config, "ema20_authoritative_underlyings", ()) or ()
+        ),
         "mapping": mapping,
     }
 
@@ -3425,13 +3428,14 @@ def stream_multi_instruments(
     def _is_strategy_selected(underlying_label: str, strategy_name: str) -> bool:
         if strategy_selector is None:
             return True
-        # EMA20-5: EMA20 dynamic policy is authoritative for EMA20 entry decisions.
-        # When ema20_is_authoritative=True, bypass selector gating for ema20_strategy
-        # so regime-based suppression (e.g. NO_TRADE->[]) cannot override EMA20's own
-        # per-regime disable_entries flag. Other strategies are unaffected.
-        if selector_config.ema20_is_authoritative and canonicalize_strategy_name(
-            str(strategy_name or ""), source="selector_bypass"
-        ) == "ema20_strategy":
+        # EMA20 dynamic-policy authority is scoped by underlying so selector
+        # bypasses cannot leak into unrelated instruments.
+        if (
+            selector_config.ema20_bypasses_selector_for(underlying_label)
+            and canonicalize_strategy_name(
+                str(strategy_name or ""), source="selector_bypass"
+            ) == "ema20_strategy"
+        ):
             return True
         return strategy_selector.is_strategy_active(
             underlying=str(underlying_label or "").strip().upper(),
