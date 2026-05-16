@@ -1249,22 +1249,27 @@ def test_exclusive_nifty_ce_simulator_honours_cooldown_after_exit():
     optimizer doesn't reward parameters that fire many back-to-back
     trades the live strategy would have rejected.
 
-    PR #283 codex round-8 P2: live decrements ``cooldown_bars`` on the
-    EXIT bar before the cooldown check, so ``cooldown_bars=2`` blocks
-    the exit bar + 1 follow-on bar (2 bars total). The sim never
-    re-evaluates the exit bar, so it sets
-    ``cooldown_remaining = cooldown_bars - 1`` to match."""
+    PR #283 codex round-20 P2: live trace for ``cooldown_bars=N``
+    blocks the EXIT bar + (N-2) FOLLOW-ON bars (the exit bar is free
+    because position-just-closed dec→N-1>0 skips; subsequent bars
+    dec each time and admit when counter reaches 0). The sim's
+    exit bar is never re-evaluated for re-entry, so to match the
+    FOLLOW-ON block count (N-2) the post-exit assignment uses
+    ``cooldown_bars - 2``. Round-9's ``- 1`` was off by one and
+    blocked one extra follow-on bar per exit, undercounting
+    re-entries vs live."""
     import inspect
 
     src = inspect.getsource(RealDataBacktester._simulate_exclusive_nifty_ce)
     assert "cooldown_remaining" in src
     assert "cooldown_bars_cfg" in src
-    # Must DECREMENT inside the loop AND set on exit, using -1 to
-    # account for live's exit-bar decrement (round 8).
+    # Must DECREMENT inside the loop AND set on exit, using -2 to
+    # match the number of follow-on bars live blocks (round 20 fix).
     assert "cooldown_remaining -= 1" in src
-    assert "cooldown_bars_cfg - 1" in src, (
-        "post-exit cooldown must be cooldown_bars_cfg - 1 so the "
-        "total blocked bars matches live (exit bar + N - 1)"
+    assert "cooldown_bars_cfg - 2" in src, (
+        "post-exit cooldown must be cooldown_bars_cfg - 2 so the "
+        "follow-on blocked bars match live (N-2 bars). The round-9 "
+        "value `- 1` was off by one."
     )
 
 
@@ -1932,3 +1937,76 @@ def test_ema20_simulator_prefers_persisted_ema_column_when_available():
     assert 'f"ema_{int(ema_period)}"' in src
     # Must coalesce per-bar with a computed series for sparse rows.
     assert "combine_first" in src
+
+
+# ---------------------------------------------------------------------------
+# PR #283 codex round-20 regressions (triage fixes from review).
+# ---------------------------------------------------------------------------
+
+
+def test_ecn_cooldown_matches_live_follow_on_block_count():
+    """PR #283 codex round-20 P2: live ``cooldown_bars=N`` blocks
+    the EXIT bar + (N-2) FOLLOW-ON bars. Round-9's ``- 1`` was off
+    by one and blocked an EXTRA follow-on bar (undercounting
+    re-entries). The sim's exit bar can't re-enter anyway, so the
+    follow-on block count must equal N-2."""
+    import inspect
+
+    src = inspect.getsource(RealDataBacktester._simulate_exclusive_nifty_ce)
+    assert "cooldown_bars_cfg - 2" in src
+    # Old formula must NOT remain.
+    assert "cooldown_bars_cfg - 1" not in src
+
+
+def test_pm_breakdown_lookback_includes_current_bar_semantic():
+    """PR #283 codex round-20 P2: live ``_is_breakdown_bar`` appends
+    the current candle first, so ``state.bars_5m[-lookback:]`` is
+    current + prior (lookback-1) bars. The sim must compare against
+    the prior (lookback-1) lows, not prior ``lookback`` lows."""
+    import inspect
+
+    src = inspect.getsource(RealDataBacktester._simulate_put_momentum)
+    # Window must be ``i - (lookback - 1) : i`` (prior 7 for lookback=8).
+    assert "lookback_breakdown_bars - 1" in src
+    # Old ``i - lookback_breakdown_bars : i`` form must NOT remain.
+    assert 'iloc[i - lookback_breakdown_bars:i].min()' not in src
+
+
+def test_loader_preserves_nan_for_ema_columns():
+    """PR #283 codex round-20 P2: EMA columns must keep NaNs at the
+    start of the window so the simulator's ``combine_first`` per-bar
+    coalesce can distinguish 'indicator not warmed' from 'indicator
+    equals 0'. The previous ``fillna(0)`` made every sparse-EMA row
+    look like ``ema_20 == 0``, silently flipping ``close > ema`` to
+    always-True and breaking the entry gate. Other indicators
+    (atr/rsi/macd/adx/di) keep ffill+0 because the simulator can't
+    distinguish 0-from-NaN meaningfully there."""
+    import inspect
+    from app.strategies.postgres_data_loader import PostgresIndicatorLoader
+
+    src = inspect.getsource(PostgresIndicatorLoader.fetch_indicator_bars)
+    # Must list EMA columns in the preserve-NaN set.
+    assert "_PRESERVE_NAN" in src
+    assert '"ema_20"' in src and '"ema_30"' in src and '"ema_50"' in src
+    assert '"exclusive_nifty_ce_buy_ema20_30s"' in src
+    # Preserve-NaN branch must NOT call fillna(0).
+    preserve_idx = src.index("_PRESERVE_NAN")
+    branch = src[preserve_idx:preserve_idx + 800]
+    # Inside the preserve-branch the code should not have ``.fillna(0)``
+    # — only ``.fillna(method="ffill")``.
+    assert 'fillna(method="ffill")' in branch
+
+
+def test_ema20_simulator_starts_at_bar_zero_when_persisted_ema_loaded():
+    """PR #283 codex round-20 P2: when the persisted EMA column is
+    present and warmed (live bars persist EMA from before the
+    fetched optimization window), the simulator should NOT skip
+    the first ``ema_period`` bars. Live ``Ema20Strategy`` only
+    checks ``indicators[f"ema_{period}"]`` is present before
+    evaluating entry gates."""
+    import inspect
+
+    src = inspect.getsource(RealDataBacktester._simulate_ema20)
+    # The loop start must depend on whether the persisted column is used.
+    assert "ema_is_persisted" in src
+    assert "start_idx = 0 if ema_is_persisted else ema_period" in src

@@ -1,6 +1,57 @@
 """
 PostgreSQL data loader for real OHLC + indicator data.
 Fetches historical bar data from indicator_bars table for strategy optimization.
+
+PR #283 — formally documented deferred simulator-fidelity limitations
+(not bugs in the current code; gaps that require schema, plumbing, or
+architecture changes outside the optimizer code path):
+
+* PM 15m downtrend gate. Live ``PutMomentumScalper._handle_5m_bar``
+  short-circuits unless ``state.trend_15m_down`` is true, which the
+  separate 15m bar handler sets. The simulator only fetches 5m bars
+  so it substitutes ``close < EMA50 AND close < EMA20``. Closing this
+  gap requires a parallel 15m bar fetch + 15m EMA20/close-below check
+  threaded through ``backtest_put_momentum``.
+
+* PM VWAP gate. Live ``PutMomentumScalper`` rejects entries when
+  ``close >= session_vwap_proxy`` (computed from cumulative session
+  closes). The baseline ``indicator_bars`` schema has no VWAP column,
+  so the simulator can't replay the gate exactly. A cumulative-close
+  proxy could be computed in the simulator at the cost of a per-bar
+  scan; deferred until a follow-up PR re-evaluates whether the
+  added complexity is worth the fidelity gain.
+
+* ECN entry-at-next-bar-open / pending-entry queue. Live ECN sets
+  ``pending_entry_at = candle.end_ts`` after the buy signal and
+  fills the order at the FIRST underlying tick at or after that
+  time. The simulator enters at the signal bar's close. Closing this
+  requires a per-bar pending-entry state machine + next-bar OPEN
+  fill price. Deferred because the OHLC schema does not capture
+  intra-bar tick sequence — the cleanest emulation would use bar
+  OPEN of the next row, but that still differs from live ticks.
+
+* EMA20 ``min_atr`` scale auto-detection. Deployed NIFTY EMA20 uses
+  ``min_atr: 25.0`` (absolute index points) while NG_FUT uses
+  ``min_atr: 1.2``. The optimizer samples 0.05-0.50 which is the
+  ratio scale, not the absolute scale. Per-underlying parameter
+  spaces (or auto-scaling the sample by indicator-bars ATR
+  distribution) is required to fix this cleanly.
+
+* ECN / EMA20 dynamic-policy gates. Live strategies refresh
+  effective parameters via a regime-classifier adapter
+  (``policy_id``, ``profiles``, ``disable_entries`` in yaml). The
+  simulator scores against static sampled params. Closing this
+  requires importing the regime classifier and emitting profile
+  overrides per-bar.
+
+* ``ema_period=8`` scope. The shared EMA20 parameter space includes
+  ``8`` (NG_FUT's deployed value), but only NG_FUT's live strategy
+  uses it. NIFTY/BANKNIFTY runs that sample 8 fall back to the in-
+  memory computed EMA which diverges from what live would do.
+  Cleanest fix is a per-underlying parameter space; documented here
+  as a follow-up rather than fixed inline because it requires
+  refactoring ``StrategyOptimizationRunner.get_parameter_spaces``
+  to take an underlying argument.
 """
 
 from __future__ import annotations
@@ -251,10 +302,37 @@ class PostgresIndicatorLoader:
             # Ensure timestamp is datetime
             df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-            # Fill NaN indicators with forward fill
-            for col in ["atr", "rsi", "macd", "macd_signal", "ema_20", "ema_30", "ema_50", "adx", "plus_di", "minus_di"]:
+            # Fill NaN indicators with forward fill.
+            # PR #283 codex round-20 P2: EMA columns must KEEP their
+            # NaNs at the start of the window so the simulator's
+            # ``combine_first`` per-bar coalesce can distinguish
+            # "indicator not yet warmed" from "indicator says 0".
+            # Filling NaN→0 made every sparse-EMA row look like
+            # ``ema_20 == 0`` (i.e. ``close > ema_20`` always true),
+            # silently flipping every entry gate. The ECN private
+            # overlay column has the same property. Other indicators
+            # (atr, rsi, macd, adx, di) keep the ffill+0 behaviour
+            # because the simulator can't distinguish 0-from-NaN
+            # meaningfully for those.
+            _PRESERVE_NAN = {
+                "ema_20",
+                "ema_30",
+                "ema_50",
+                "exclusive_nifty_ce_buy_ema20_30s",
+            }
+            for col in [
+                "atr", "rsi", "macd", "macd_signal",
+                "ema_20", "ema_30", "ema_50", "adx", "plus_di", "minus_di",
+                "exclusive_nifty_ce_buy_ema20_30s",
+            ]:
                 if col in df.columns:
-                    df[col] = df[col].fillna(method="ffill").fillna(0)
+                    if col in _PRESERVE_NAN:
+                        # Forward-fill warmed values from earlier in
+                        # the window, but DO NOT mask remaining NaNs
+                        # with 0.
+                        df[col] = df[col].fillna(method="ffill")
+                    else:
+                        df[col] = df[col].fillna(method="ffill").fillna(0)
 
             logger.info(
                 f"Loaded {len(df)} bars for {underlying_label} @ {timeframe_seconds}s "
@@ -605,7 +683,10 @@ class RealDataBacktester:
         # uses ``ema_period: 8`` in yaml which isn't persisted, so
         # the fallback computation matches what live would do too.
         persisted_col = f"ema_{int(ema_period)}"
-        if persisted_col in df.columns and df[persisted_col].notna().any():
+        ema_is_persisted = (
+            persisted_col in df.columns and df[persisted_col].notna().any()
+        )
+        if ema_is_persisted:
             # Coalesce any sparse rows with a computed series to avoid
             # leaking NaN through the signal-loop comparisons.
             computed = df["close"].ewm(span=ema_period, adjust=False).mean()
@@ -618,7 +699,15 @@ class RealDataBacktester:
         in_trade = False
         entry_price = 0
 
-        for i in range(ema_period, len(df)):
+        # PR #283 codex round-20 P2: when ``ema_period`` matches a
+        # persisted column the values are already warmed by bars from
+        # BEFORE the fetched window, so we don't need to skip the
+        # first ``ema_period`` bars before evaluating signals (live
+        # only checks that ``indicators[f"ema_{period}"]`` is present
+        # before the entry gates). For the computed-fallback path the
+        # in-memory EMA still needs the period-bar warmup window.
+        start_idx = 0 if ema_is_persisted else ema_period
+        for i in range(start_idx, len(df)):
             if not in_trade:
                 if not _within_entry_window(i):
                     continue
@@ -1190,17 +1279,22 @@ class RealDataBacktester:
                 trades.append(
                     {"entry": entry_price, "exit": exit_price, "pnl_pct": pnl_pct}
                 )
-                # PR #283 codex round-8 P2: live ``_manage_position_on_bar``
-                # decrements ``state.cooldown_bars`` on the EXIT bar
-                # itself (before any cooldown check), so a config of
-                # ``cooldown_bars=2`` blocks the exit bar + 1 follow-on
-                # bar (2 bars total). Here the exit bar is never
-                # re-evaluated for re-entry, so setting
-                # ``cooldown_remaining = cooldown_bars`` would block
-                # the exit bar PLUS 2 follow-on bars (3 bars total) —
-                # one too many. Using ``cooldown_bars - 1`` aligns the
-                # total blocked bars with live (clamped to >= 0).
-                cooldown_remaining = max(0, cooldown_bars_cfg - 1)
+                # PR #283 codex round-20 P2: live cooldown trace for
+                # ``cooldown_bars=N`` (per
+                # ``exclusive_nifty_ce_buy.py:1290`` and ``:1651``):
+                #   Exit bar:  set=N, dec→N-1, check N-1>0 → skip.
+                #   Bar exit+1: dec N-1→N-2, check N-2>0 → skip iff N>=3.
+                #   ...
+                #   Bar exit+(N-1): dec→0, check 0>0 false → ALLOW.
+                # So live blocks the exit bar + (N-2) follow-on bars
+                # = (N-1) bars total. The simulator's exit bar is
+                # never re-evaluated for re-entry (so the live "exit-
+                # bar block" is free), and the per-bar gate is the
+                # entry-side decrement-then-check. To match the
+                # number of FOLLOW-ON blocked bars (= N-2), set
+                # ``cooldown_remaining = N - 2``. Round-9's ``N - 1``
+                # was off by one (blocked one extra bar per exit).
+                cooldown_remaining = max(0, cooldown_bars_cfg - 2)
                 # PR #283 codex round-8 P2: count the entry against the
                 # day's quota so subsequent entries on the same calendar
                 # day are blocked by ``max_trades_per_day``.
@@ -1412,7 +1506,19 @@ class RealDataBacktester:
                 # candles live would reject when the close was below
                 # the prior low but the wick ratio exceeded 0.30
                 # (large reversal candles). The OR is removed.
-                prior_low = float(df["low"].iloc[i - lookback_breakdown_bars:i].min())
+                # PR #283 codex round-20 P2: live ``_is_breakdown_bar``
+                # appends the CURRENT candle to ``state.bars_5m`` first
+                # and then evaluates ``state.bars_5m[-lookback:]`` —
+                # so ``lookback=8`` compares the current low against
+                # the current + prior 7 lows. The previous window
+                # ``[i - lookback : i]`` looked at the prior 8 bars
+                # exclusive of the current bar — one bar too far back.
+                # Use ``i - (lookback - 1) : i`` so the comparison
+                # covers prior 7 bars; ``low_i <= min(prior_7)``
+                # together with ``low_i <= low_i`` (trivially true on
+                # current) gives the same predicate as live.
+                window_start = max(0, i - (lookback_breakdown_bars - 1))
+                prior_low = float(df["low"].iloc[window_start:i].min())
                 low_i = float(df["low"].iloc[i])
                 high_i = float(df["high"].iloc[i])
                 bar_range = high_i - low_i
