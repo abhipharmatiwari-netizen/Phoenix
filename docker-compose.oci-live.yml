@@ -376,9 +376,6 @@ services:
     container_name: phoenix-oci-optimizer
     profiles: ["optimizer"]
     restart: "no"
-    depends_on:
-      db-preflight:
-        condition: service_completed_successfully
     environment:
       <<: *db-env
       TZ: "Asia/Kolkata"

@@ -203,6 +203,40 @@ docker compose \
 
 The default output file is `/opt/phoenix/optimizer/output/latest-results.json`. The optimizer writes only pending rows to `strategy_config_candidates`; live `strategy_configs.params` changes require the separate admin approval path.
 
+### Install the Nightly Optimizer Timer
+
+The repo tracks the host units under `ops/systemd/` and the logrotate policy under `ops/logrotate/`. Install them from the deployed checkout:
+
+```bash
+cd /opt/phoenix/app
+sudo scripts/install-optimizer-systemd.sh
+```
+
+Expected evidence:
+
+```bash
+systemctl status phoenix-optimizer.timer
+systemctl list-timers phoenix-optimizer.timer
+```
+
+The next run must be `23:45:00 Asia/Kolkata`. The service writes combined stdout/stderr to `/opt/phoenix/logs/optimizer.log`, rotated by `/etc/logrotate.d/phoenix-optimizer`.
+
+Operational commands:
+
+```bash
+# Disable scheduled optimizer runs.
+sudo systemctl disable --now phoenix-optimizer.timer
+
+# Force one run after checking the market-hours guard.
+sudo systemctl start phoenix-optimizer.service
+
+# Read the last optimizer result and logs.
+sudo tail -n 200 /opt/phoenix/logs/optimizer.log
+sudo ls -lh /opt/phoenix/optimizer/output/
+```
+
+`scripts/optimizer-precheck.sh` fails the service before the compose run if the current IST time is in the 09:00-15:35 NSE guard window, if the optimizer lock is already held, or if the backend logs contain a recent order placement marker.
+
 ## Validation
 
 Container state:

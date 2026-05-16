@@ -1,0 +1,9 @@
+/opt/phoenix/logs/optimizer.log {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    copytruncate
+    create 0640 root adm
+}

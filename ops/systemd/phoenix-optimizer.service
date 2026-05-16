@@ -1,0 +1,16 @@
+[Unit]
+Description=Phoenix nightly parameter optimizer
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/phoenix/app
+EnvironmentFile=/opt/phoenix/phoenix-deploy.env
+Environment=CONTROL_PLANE_PG_PASSWORD_HOST=dummy
+ExecStartPre=/bin/mkdir -p /opt/phoenix/state /opt/phoenix/logs /opt/phoenix/optimizer/output
+ExecStartPre=/opt/phoenix/app/scripts/optimizer-precheck.sh
+ExecStart=/usr/bin/flock -n /opt/phoenix/state/optimizer.lock /usr/bin/docker compose -f /opt/phoenix/app/docker-compose.oci-live.yml -f /opt/phoenix/phoenix-override.yml --env-file /opt/phoenix/phoenix-deploy.env --profile optimizer run --rm optimizer
+StandardOutput=append:/opt/phoenix/logs/optimizer.log
+StandardError=append:/opt/phoenix/logs/optimizer.log

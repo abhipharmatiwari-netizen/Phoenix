@@ -61,7 +61,7 @@ def test_optimizer_service_is_profile_only_one_shot_using_backend_image() -> Non
     assert optimizer["profiles"] == ["optimizer"]
     assert optimizer["restart"] == "no"
     assert optimizer["image"].endswith("/phoenix-prod/backend:${IMAGE_TAG:?Set IMAGE_TAG to a specific git SHA - never deploy latest}")
-    assert optimizer["depends_on"]["db-preflight"]["condition"] == "service_completed_successfully"
+    assert "depends_on" not in optimizer
     assert "ports" not in optimizer
     assert optimizer["entrypoint"] == [
         "docker-entrypoint.sh",
@@ -79,6 +79,35 @@ def test_optimizer_service_is_profile_only_one_shot_using_backend_image() -> Non
     )
     assert optimizer["mem_limit"] == "1500m"
     assert optimizer["cap_drop"] == ["ALL"]
+
+
+def test_optimizer_systemd_timer_and_service_are_profile_scoped() -> None:
+    service = _read("ops/systemd/phoenix-optimizer.service")
+    timer = _read("ops/systemd/phoenix-optimizer.timer")
+    installer = _read("scripts/install-optimizer-systemd.sh")
+    logrotate = _read("ops/logrotate/phoenix-optimizer")
+
+    assert "ExecStartPre=/opt/phoenix/app/scripts/optimizer-precheck.sh" in service
+    assert "/usr/bin/flock -n /opt/phoenix/state/optimizer.lock" in service
+    assert "--profile optimizer run --rm optimizer" in service
+    assert "Environment=CONTROL_PLANE_PG_PASSWORD_HOST=dummy" in service
+    assert "StandardOutput=append:/opt/phoenix/logs/optimizer.log" in service
+    assert "OnCalendar=*-*-* 23:45:00 Asia/Kolkata" in timer
+    assert "Persistent=true" in timer
+    assert "systemctl enable --now phoenix-optimizer.timer" in installer
+    assert "ln -sfn \"$APP_DIR/ops/systemd/phoenix-optimizer.service\"" in installer
+    assert "/opt/phoenix/logs/optimizer.log" in logrotate
+    assert "copytruncate" in logrotate
+
+
+def test_optimizer_precheck_fails_closed_for_market_hours_orders_and_lock() -> None:
+    script = _read("scripts/optimizer-precheck.sh")
+
+    assert "09:00-15:35 IST" in script
+    assert "flock -n \"$LOCK_FILE\" true" in script
+    assert "docker logs --since 5m phoenix-oci-backend" in script
+    assert "order_placed|ORDER_PLACED" in script
+    assert "optimizer blocked" in script
 
 
 def test_oci_build_scripts_build_backend_and_nginx_image_pair() -> None:
@@ -114,3 +143,7 @@ def test_oci_runbook_documents_image_pair_and_observe_only_watchdog() -> None:
     assert "/opt/phoenix/optimizer/output" in runbook
     assert "--profile optimizer" in runbook
     assert "run --rm optimizer --help" in runbook
+    assert "install-optimizer-systemd.sh" in runbook
+    assert "systemctl disable --now phoenix-optimizer.timer" in runbook
+    assert "systemctl start phoenix-optimizer.service" in runbook
+    assert "/opt/phoenix/logs/optimizer.log" in runbook

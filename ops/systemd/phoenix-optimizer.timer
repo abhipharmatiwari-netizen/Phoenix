@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Phoenix nightly parameter optimizer
+
+[Timer]
+OnCalendar=*-*-* 23:45:00 Asia/Kolkata
+Persistent=true
+Unit=phoenix-optimizer.service
+
+[Install]
+WantedBy=timers.target
