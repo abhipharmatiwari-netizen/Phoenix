@@ -946,3 +946,150 @@ def test_writer_proceeds_when_schema_probe_returns_table_name():
     )
     inserted = writer.write_batch(batch, candidates_per_strategy=1)
     assert len(inserted) == 1
+
+
+# ---------------------------------------------------------------------------
+# PR #288 codex round-8 regressions.
+# ---------------------------------------------------------------------------
+
+
+def test_schema_probe_infrastructure_failure_propagates_unwrapped():
+    """PR #288 codex round-8 P1: when the ``to_regclass`` probe itself
+    fails (DB unreachable, role lacks privileges, connection drops
+    mid-query), the ORIGINAL exception must escape ``write_batch``.
+    Previously the probe wrapped any exception in
+    ``CandidateWriterError``, but the orchestrator's
+    ``except CandidateWriterError`` then logged it as a per-pair
+    misconfig and continued — turning an infrastructure failure into
+    silent "0 rows inserted" success."""
+
+    class _BoomConnection:
+        def cursor(self):
+            raise OSError("connection reset by peer")
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    writer = CandidateWriter(
+        tenant_id="t",
+        broker_account_id="a",
+        optimizer_version="v1",
+        connect_fn=lambda *a, **kw: _BoomConnection(),
+    )
+    batch = CandidateBatch(
+        strategy_name="ema20",
+        underlying_label="NIFTY_IDX",
+        top_candidates=[{"params": {"k": 1}, "metrics": {}}],
+        backtest_window=(date(2026, 5, 1), date(2026, 5, 14)),
+    )
+    with pytest.raises(Exception) as exc:
+        writer.write_batch(batch, candidates_per_strategy=1)
+    assert not isinstance(exc.value, CandidateWriterError), (
+        "infrastructure probe failures must NOT be wrapped in "
+        "CandidateWriterError — the orchestrator swallows that subclass"
+    )
+
+
+def test_candidate_with_falsey_non_mapping_params_raises():
+    """PR #288 codex round-8 P2: ``params=[]`` is falsey AND not a
+    Mapping. The previous ``candidate.get("params") or {}`` silently
+    coerced this to ``{}`` so an empty insert succeeded, hiding the
+    malformed optimizer payload from the operator."""
+    conn = _FakeConnection()
+    conn.next_fetchone.append(("public.strategy_config_candidates",))
+    conn.next_fetch.append([("cfg-1", True, None)])
+    writer = CandidateWriter(
+        tenant_id="t",
+        broker_account_id="a",
+        optimizer_version="v1",
+        connect_fn=_connect_fn_returning(conn),
+    )
+    batch = CandidateBatch(
+        strategy_name="ema20",
+        underlying_label="NIFTY_IDX",
+        top_candidates=[{"params": [], "metrics": {}}],  # falsey non-mapping
+        backtest_window=(date(2026, 5, 1), date(2026, 5, 14)),
+    )
+    with pytest.raises(CandidateWriterError, match="params must be a mapping"):
+        writer.write_batch(batch, candidates_per_strategy=1)
+
+
+def test_strategy_configs_lookup_filters_by_underlying_when_tagged():
+    """PR #288 codex round-8 P2: multi-underlying tenants may carry
+    multiple enabled ``strategy_configs`` rows for the same
+    ``strategy_id`` — one per underlying with
+    ``params->>'underlying_label'`` set. The lookup must restrict to
+    the row whose tag matches the candidate's underlying, not the
+    lexicographically first."""
+    conn = _FakeConnection()
+    conn.next_fetchone.append(("public.strategy_config_candidates",))
+    # Two enabled rows: one tagged NIFTY_IDX, one tagged BANKNIFTY_IDX.
+    # Without the underlying filter, "cfg-banknifty" (lex < cfg-nifty)
+    # would win incorrectly.
+    conn.next_fetch.append([
+        ("cfg-banknifty", True, "BANKNIFTY_IDX"),
+        ("cfg-nifty", True, "NIFTY_IDX"),
+    ])
+    conn.next_rowcount.append(0)
+    writer = CandidateWriter(
+        tenant_id="t",
+        broker_account_id="a",
+        optimizer_version="v1",
+        connect_fn=_connect_fn_returning(conn),
+    )
+    batch = CandidateBatch(
+        strategy_name="ema20",
+        underlying_label="NIFTY_IDX",
+        top_candidates=[{"params": {"k": 1}, "metrics": {}}],
+        backtest_window=(date(2026, 5, 1), date(2026, 5, 14)),
+    )
+    writer.write_batch(batch, candidates_per_strategy=1)
+    insert_executions = [
+        (sql, p)
+        for sql, p in conn.executed
+        if sql.startswith("INSERT INTO public.strategy_config_candidates")
+    ]
+    assert len(insert_executions) == 1
+    _, params = insert_executions[0]
+    assert params.get("strategy_config_id") == "cfg-nifty", (
+        f"lookup must pick the underlying-tagged row; got "
+        f"strategy_config_id={params.get('strategy_config_id')!r}"
+    )
+
+
+def test_strategy_configs_lookup_falls_back_when_no_tagged_row_matches():
+    """When no enabled row carries an ``underlying_label`` tag
+    matching the candidate, the lookup must fall back to the untagged
+    rows so single-underlying tenants (the typical deployment) keep
+    working."""
+    conn = _FakeConnection()
+    conn.next_fetchone.append(("public.strategy_config_candidates",))
+    conn.next_fetch.append([("cfg-shared", True, None)])
+    conn.next_rowcount.append(0)
+    writer = CandidateWriter(
+        tenant_id="t",
+        broker_account_id="a",
+        optimizer_version="v1",
+        connect_fn=_connect_fn_returning(conn),
+    )
+    batch = CandidateBatch(
+        strategy_name="ema20",
+        underlying_label="NIFTY_IDX",
+        top_candidates=[{"params": {"k": 1}, "metrics": {}}],
+        backtest_window=(date(2026, 5, 1), date(2026, 5, 14)),
+    )
+    writer.write_batch(batch, candidates_per_strategy=1)
+    insert_executions = [
+        (sql, p)
+        for sql, p in conn.executed
+        if sql.startswith("INSERT INTO public.strategy_config_candidates")
+    ]
+    assert len(insert_executions) == 1
+    _, params = insert_executions[0]
+    assert params.get("strategy_config_id") == "cfg-shared"
