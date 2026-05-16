@@ -24,6 +24,56 @@ LOG_TAG="start-phoenix"
 
 log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') [$LOG_TAG] $*"; }
 
+read_env_value() {
+    key="$1"
+    [ -f "$ENV_FILE" ] || return 1
+    sed -n "s/^[[:space:]]*$key[[:space:]]*=[[:space:]]*//p" "$ENV_FILE" \
+        | tail -n 1 \
+        | sed "s/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//; s/^['\"]//; s/['\"]$//"
+}
+
+resolve_image_refs() {
+    BACKEND_IMAGE=$(read_env_value PHOENIX_BACKEND_IMAGE || true)
+    NGINX_IMAGE=$(read_env_value PHOENIX_NGINX_IMAGE || true)
+
+    if [ -n "$BACKEND_IMAGE" ] && [ -n "$NGINX_IMAGE" ]; then
+        return
+    fi
+
+    case "$IMAGE_TAG" in
+        local-*)
+            BACKEND_IMAGE="${BACKEND_IMAGE:-phoenix-local-backend:${IMAGE_TAG}}"
+            NGINX_IMAGE="${NGINX_IMAGE:-phoenix-local-nginx:${IMAGE_TAG}}"
+            ;;
+        *)
+            OCIR_NAMESPACE=$(read_env_value OCIR_NAMESPACE || true)
+            OCIR_REGION=$(read_env_value OCIR_REGION || true)
+            OCIR_REGION="${OCIR_REGION:-ap-mumbai-1}"
+            if [ -z "${OCIR_NAMESPACE:-}" ] || [ "$OCIR_NAMESPACE" = "CHANGE_ME" ]; then
+                log "FATAL: OCIR_NAMESPACE not set in $ENV_FILE and IMAGE_TAG is not local-*."
+                log "       Set OCIR_NAMESPACE for OCIR images or PHOENIX_BACKEND_IMAGE/PHOENIX_NGINX_IMAGE for an explicit image pair."
+                exit 1
+            fi
+            IMAGE_BASE="${OCIR_REGION}.ocir.io/${OCIR_NAMESPACE}/phoenix-prod"
+            BACKEND_IMAGE="${BACKEND_IMAGE:-${IMAGE_BASE}/backend:${IMAGE_TAG}}"
+            NGINX_IMAGE="${NGINX_IMAGE:-${IMAGE_BASE}/nginx:${IMAGE_TAG}}"
+            ;;
+    esac
+}
+
+require_local_image() {
+    service="$1"
+    image="$2"
+    if ! docker image inspect "$image" >/dev/null 2>&1; then
+        log "FATAL: $service image '$image' not present locally."
+        log "       Backend and nginx images must both be built or pulled for IMAGE_TAG=$IMAGE_TAG before scheduled start."
+        log "       OCIR flow: run scripts/ops/build_push_ip.sh or build_and_push_image.sh, then scripts/ops/redeploy_backend.sh."
+        log "       Local flow: docker build -t phoenix-local-backend:${IMAGE_TAG} -f Dockerfile ."
+        log "                   docker build -t phoenix-local-nginx:${IMAGE_TAG} -f nginx/Dockerfile ."
+        exit 1
+    fi
+}
+
 # Current IST date (UTC + 5:30).
 # Python used for reliable IST date calculation; falls back to date if unavailable.
 if command -v python3 >/dev/null 2>&1; then
@@ -51,7 +101,17 @@ if [ -f "$HOLIDAYS_FILE" ]; then
     done < "$HOLIDAYS_FILE"
 fi
 
-# Ensure nginx is running — it may have been stopped during a holiday full-shutdown.
+# Validate pinned images before any compose start path.
+IMAGE_TAG=$(read_env_value IMAGE_TAG || true)
+if [ -z "${IMAGE_TAG:-}" ] || [ "$IMAGE_TAG" = "CHANGE_ME" ]; then
+    log "FATAL: IMAGE_TAG not set to a deployable value in $ENV_FILE."
+    exit 1
+fi
+resolve_image_refs
+require_local_image "backend" "$BACKEND_IMAGE"
+require_local_image "nginx" "$NGINX_IMAGE"
+
+# Ensure nginx is running; it may have been stopped during a holiday full-shutdown.
 if ! docker ps --filter name=phoenix-oci-web --filter status=running -q | grep -q .; then
     log "nginx not running — starting it before backend (post-holiday recovery)."
     CONTROL_PLANE_PG_PASSWORD_HOST=dummy \

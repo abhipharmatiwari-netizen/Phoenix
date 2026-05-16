@@ -66,7 +66,13 @@ if [ "$IS_HOLIDAY" = "1" ]; then
         stop nginx
     log "Full shutdown complete. All Phoenix containers stopped for the holiday."
 else
-    log "Next trading day ($TODAY_IST) is a working day — nginx remains up."
+    log "Next trading day ($TODAY_IST) is a working day - nginx should remain up."
+    sleep 30
+    if docker ps --filter name=phoenix-oci-web --filter status=running -q | grep -q .; then
+        log "Verified: nginx still running."
+    else
+        log "ALERT: nginx is NOT running after backend stop. Investigate watchdog/sidecars."
+    fi
 fi
 
 log "Container status:"

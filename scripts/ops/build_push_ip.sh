@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build and push an OCIR backend image using OCI instance-principal auth.
+# Build and push OCIR backend and nginx images using OCI instance-principal auth.
 #
 # Required env vars:
 #   OCIR_NAMESPACE        OCI tenancy namespace
@@ -27,12 +27,14 @@ OCIR_USERNAME="${OCIR_USERNAME:?Set OCIR_USERNAME from the ops secrets store}"
 APP_DIR="/opt/phoenix/app"
 
 GIT_SHA=$(git -C "$APP_DIR" rev-parse HEAD)
-IMAGE_BASE="${OCIR_REGISTRY}/${OCIR_NAMESPACE}/phoenix-prod/backend"
-IMAGE_TAG_FULL="${IMAGE_BASE}:${GIT_SHA}"
+IMAGE_BASE="${OCIR_REGISTRY}/${OCIR_NAMESPACE}/phoenix-prod"
+BACKEND_IMAGE_TAG="${IMAGE_BASE}/backend:${GIT_SHA}"
+NGINX_IMAGE_TAG="${IMAGE_BASE}/nginx:${GIT_SHA}"
 
 echo "=== Build config ==="
 echo "SHA:    $GIT_SHA"
-echo "Image:  $IMAGE_TAG_FULL"
+echo "Backend image: $BACKEND_IMAGE_TAG"
+echo "nginx image:   $NGINX_IMAGE_TAG"
 
 echo
 echo "=== Verify instance principal connectivity ==="
@@ -79,17 +81,30 @@ echo "$OCIR_AUTH_TOKEN" | docker login "$OCIR_REGISTRY" \
   -u "$OCIR_USERNAME" --password-stdin
 
 echo
-echo "=== Build image (amd64) ==="
+echo "=== Build backend image (amd64) ==="
 docker buildx build \
     --platform linux/amd64 \
-    -t "$IMAGE_TAG_FULL" \
+    -t "$BACKEND_IMAGE_TAG" \
     -f "${APP_DIR}/Dockerfile" \
     --load \
     "${APP_DIR}"
 
 echo
-echo "=== Push to OCIR ==="
-docker push "$IMAGE_TAG_FULL"
+echo "=== Build nginx image (amd64) ==="
+docker buildx build \
+    --platform linux/amd64 \
+    -t "$NGINX_IMAGE_TAG" \
+    -f "${APP_DIR}/nginx/Dockerfile" \
+    --load \
+    "${APP_DIR}"
+
+echo
+echo "=== Push backend to OCIR ==="
+docker push "$BACKEND_IMAGE_TAG"
+
+echo
+echo "=== Push nginx to OCIR ==="
+docker push "$NGINX_IMAGE_TAG"
 
 echo
 echo "=== Update IMAGE_TAG in phoenix-deploy.env ==="
@@ -98,4 +113,4 @@ grep "IMAGE_TAG" /opt/phoenix/phoenix-deploy.env
 
 echo
 echo "Build and push complete. SHA: $GIT_SHA"
-echo "Run the redeploy script next to deploy this image."
+echo "Run the redeploy script next to deploy these images."
