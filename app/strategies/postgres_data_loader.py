@@ -310,10 +310,21 @@ class RealDataBacktester:
         Empty result sets remain a soft no-op (returns zero metrics) so
         a strategy with no matching bars during the window is not
         treated as a failure.
+
+        PR #283 codex round-14 P2: per-underlying EMA20 defaults (live
+        ``app/config/strategy_env.yaml``) — NG_FUT trades on a much
+        longer session (square-off 23:30, ATR scale O(1)), so applying
+        NIFTY/BANKNIFTY's 15:00 squareoff and the same min_atr range
+        would either force-exit NG_FUT trades mid-session or compare
+        sampled ``min_atr`` ratios against a totally different live
+        scale. The defaults are merged BEFORE the caller's ``params``,
+        so an explicit override (or an optimizer sample) still wins.
         """
+        merged_params = dict(self._ema20_defaults_for(underlying_label))
+        merged_params.update(params)
         df = self.loader.fetch_indicator_bars(
             underlying_label=underlying_label,
-            timeframe_seconds=params.get("signal_timeframe", 300),
+            timeframe_seconds=merged_params.get("signal_timeframe", 300),
             days_back=20,
         )
 
@@ -327,7 +338,37 @@ class RealDataBacktester:
                 "max_drawdown": 0,
             }
 
-        return self._simulate_ema20(df, params)
+        return self._simulate_ema20(df, merged_params)
+
+    @staticmethod
+    def _ema20_defaults_for(underlying_label: str) -> Dict[str, Any]:
+        """Return the live yaml-deployed EMA20 defaults for a given
+        underlying. PR #283 codex round-14 P2 — without these, the
+        simulator and parameter samples are scored against the wrong
+        intraday window and the wrong ATR scale for non-NIFTY runs
+        (NG_FUT: 09:00-23:30, atr ~ 1.0 absolute; NIFTY: 09:30-15:00,
+        atr ~ 25 absolute; BANKNIFTY: no first_entry override).
+
+        Source: ``app/config/strategy_env.yaml`` (defaults that the
+        strategy class reads via ``cfg.get`` at runtime). Only the
+        keys the simulator actually consumes are listed."""
+        per_underlying = {
+            "NIFTY_IDX": {
+                "first_entry_time": "9:30",
+                "square_off_time": "15:00",
+            },
+            "BANKNIFTY_IDX": {
+                # No first_entry override in deployed yaml.
+                "first_entry_time": "00:00",
+                "square_off_time": "15:00",
+            },
+            "NG_FUT": {
+                # Natural-gas future trades 09:00 - 23:30 IST.
+                "first_entry_time": "9:00",
+                "square_off_time": "23:30",
+            },
+        }
+        return dict(per_underlying.get(underlying_label, {}))
 
     def backtest_exclusive_nifty_ce(self, params: Dict[str, Any], underlying_label: str) -> Dict[str, Any]:
         """Backtest Exclusive Nifty CE Buy strategy on real data.
@@ -338,17 +379,44 @@ class RealDataBacktester:
         docker-compose.oci-live.yml) so the simulator scores on the
         same data stream the live strategy consumes. See
         ``backtest_ema20`` for the surface-failures rationale.
+
+        PR #283 codex round-14 P2: ECN is enabled on NIFTY only in the
+        deployed yaml; ``_ecn_defaults_for`` returns the right
+        session/late-start/last-entry/squareoff defaults for that
+        config so the simulator scores the candidate on the same
+        intraday window the live strategy uses. Caller ``params``
+        still take precedence.
         """
+        merged_params = dict(self._ecn_defaults_for(underlying_label))
+        merged_params.update(params)
         df = self.loader.fetch_indicator_bars(
             underlying_label=underlying_label,
-            timeframe_seconds=int(params.get("timeframe_seconds", 30)),
+            timeframe_seconds=int(merged_params.get("timeframe_seconds", 30)),
             days_back=20,
         )
 
         if df.empty:
             return {"total_trades": 0, "total_pnl": 0, "win_rate": 0}
 
-        return self._simulate_exclusive_nifty_ce(df, params)
+        return self._simulate_exclusive_nifty_ce(df, merged_params)
+
+    @staticmethod
+    def _ecn_defaults_for(underlying_label: str) -> Dict[str, Any]:
+        """Live ECN deployed config (``app/config/strategy_env.yaml``)
+        is enabled for NIFTY_IDX only. The defaults below mirror the
+        yaml's ``session_start``, ``last_entry_time``,
+        ``square_off_time``, ``late_start``, and
+        ``max_trades_per_day`` so the simulator scores candidates
+        against the same intraday window the live strategy uses."""
+        if underlying_label == "NIFTY_IDX":
+            return {
+                "session_start": "10:15",
+                "last_entry_time": "14:45",
+                "square_off_time": "15:15",
+                "late_start": "14:45",
+                "max_trades_per_day": 1,
+            }
+        return {}
 
     def backtest_put_momentum(self, params: Dict[str, Any], underlying_label: str) -> Dict[str, Any]:
         """Backtest Put Momentum Scalper strategy on real data.
@@ -358,7 +426,15 @@ class RealDataBacktester:
         ``PutMomentumScalperConfig.timeframe_seconds_5m``). The simulator
         scores on the same data stream the live strategy consumes. See
         ``backtest_ema20`` for the surface-failures rationale.
+
+        PR #283 codex round-14 P2: ``_pm_defaults_for`` returns the
+        deployed yaml's per-underlying ``entry_start`` / ``entry_end``
+        single-window keys so the simulator scores the candidate
+        against the live entry window for that underlying. Caller
+        ``params`` still take precedence.
         """
+        merged_params = dict(self._pm_defaults_for(underlying_label))
+        merged_params.update(params)
         df = self.loader.fetch_indicator_bars(
             underlying_label=underlying_label,
             timeframe_seconds=300,  # live PM uses 5m as primary signal TF
@@ -368,7 +444,23 @@ class RealDataBacktester:
         if df.empty:
             return {"total_trades": 0, "total_pnl": 0, "win_rate": 0}
 
-        return self._simulate_put_momentum(df, params)
+        return self._simulate_put_momentum(df, merged_params)
+
+    @staticmethod
+    def _pm_defaults_for(underlying_label: str) -> Dict[str, Any]:
+        """Live PM deployed config (``app/config/strategy_env.yaml``)
+        is enabled for index instruments only, with per-instrument
+        ``entry_start`` / ``entry_end`` keys (NIFTY/BANKNIFTY both
+        09:20-14:45). Returning these defaults ensures the simulator
+        scores candidates against the same single-window the live
+        strategy uses, rather than the morning/afternoon-split
+        fallback path."""
+        if underlying_label in ("NIFTY_IDX", "BANKNIFTY_IDX"):
+            return {
+                "entry_start": "09:20",
+                "entry_end": "14:45",
+            }
+        return {}
 
     @staticmethod
     def _simulate_ema20(df: pd.DataFrame, params: Dict[str, Any]) -> Dict[str, Any]:

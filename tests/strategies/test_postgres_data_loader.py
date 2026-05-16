@@ -1622,3 +1622,64 @@ def test_pm_format_params_threads_deployed_yaml_entry_window():
     })
     assert formatted.get("entry_start") == "10:00"
     assert formatted.get("entry_end") == "13:30"
+
+
+# ---------------------------------------------------------------------------
+# PR #283 codex round-14 regressions (per-underlying yaml defaults).
+# ---------------------------------------------------------------------------
+
+
+def test_backtest_ema20_threads_per_underlying_defaults():
+    """PR #283 codex round-14 P2: NIFTY_IDX yaml uses
+    ``first_entry_time: 9:30`` and ``square_off_time: 15:00``,
+    BANKNIFTY_IDX has no first_entry override (so the entry window
+    opens at session start), and NG_FUT runs 09:00-23:30. The
+    backtester must thread the right defaults for each underlying
+    so an optimizer run scores the candidate against the deployed
+    intraday window."""
+    nifty = RealDataBacktester._ema20_defaults_for("NIFTY_IDX")
+    assert nifty == {"first_entry_time": "9:30", "square_off_time": "15:00"}
+
+    banknifty = RealDataBacktester._ema20_defaults_for("BANKNIFTY_IDX")
+    assert banknifty["first_entry_time"] == "00:00"
+    assert banknifty["square_off_time"] == "15:00"
+
+    nat_gas = RealDataBacktester._ema20_defaults_for("NG_FUT")
+    assert nat_gas["square_off_time"] == "23:30", (
+        "NG_FUT yaml runs 09:00-23:30 — the simulator must NOT apply "
+        "NIFTY's 15:00 squareoff which would force-exit every NG_FUT "
+        "trade mid-session"
+    )
+
+    # Unknown underlying returns empty (no override, simulator falls
+    # back to its own internal defaults).
+    assert RealDataBacktester._ema20_defaults_for("UNKNOWN") == {}
+
+
+def test_backtest_ecn_threads_per_underlying_defaults():
+    """Live ECN deployed config is NIFTY_IDX only with
+    ``session_start: 10:15``, ``last_entry_time: 14:45``,
+    ``square_off_time: 15:15``, ``late_start: 14:45``,
+    ``max_trades_per_day: 1``."""
+    nifty = RealDataBacktester._ecn_defaults_for("NIFTY_IDX")
+    assert nifty["session_start"] == "10:15"
+    assert nifty["last_entry_time"] == "14:45"
+    assert nifty["square_off_time"] == "15:15"
+    assert nifty["late_start"] == "14:45"
+    assert nifty["max_trades_per_day"] == 1
+    # Other underlyings: ECN is not enabled in deployed yaml, so no
+    # overrides. The simulator's class-level defaults still apply.
+    assert RealDataBacktester._ecn_defaults_for("BANKNIFTY_IDX") == {}
+    assert RealDataBacktester._ecn_defaults_for("NG_FUT") == {}
+
+
+def test_backtest_pm_threads_per_underlying_defaults():
+    """Live PM deployed config is enabled on NIFTY_IDX and
+    BANKNIFTY_IDX with the single-window ``entry_start: 09:20`` /
+    ``entry_end: 14:45``. NG_FUT is not enabled (PM allowlist
+    excludes it)."""
+    for ul in ("NIFTY_IDX", "BANKNIFTY_IDX"):
+        d = RealDataBacktester._pm_defaults_for(ul)
+        assert d.get("entry_start") == "09:20"
+        assert d.get("entry_end") == "14:45"
+    assert RealDataBacktester._pm_defaults_for("NG_FUT") == {}
