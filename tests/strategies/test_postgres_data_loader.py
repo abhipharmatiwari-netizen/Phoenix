@@ -1516,3 +1516,31 @@ def test_ema20_simulator_honors_intraday_entry_and_squareoff_windows():
     assert "square_off_time" in src
     assert "_within_entry_window" in src
     assert "_past_squareoff" in src or "squareoff_hit" in src
+
+
+# ---------------------------------------------------------------------------
+# PR #283 codex round-12 regressions.
+# ---------------------------------------------------------------------------
+
+
+def test_ecn_simulator_includes_trailing_ema_exit():
+    """Live ECN ``_manage_position_on_bar`` exits via ``TRAIL_EMA20``
+    when the bar high has reached ``trail_active_level`` AND the bar
+    low has wicked below ``ema20 - trail_cushion * atr``. The
+    simulator must model this since it fires BEFORE the EMA-fail
+    counter increments — without it the optimizer rewards parameter
+    sets that ride a trailing reversal live would have cut."""
+    import inspect
+
+    src = inspect.getsource(RealDataBacktester._simulate_exclusive_nifty_ce)
+    # Must read the trail config knobs (with late-session variants).
+    assert "trail_active_atr" in src
+    assert "trail_cushion_atr" in src
+    assert "late_trail_active_atr" in src
+    assert "late_trail_cushion" in src
+    # The exit logic must arm on bar-high crossing the active level
+    # AND fire when the bar-low pierces the trail level.
+    assert "trail_armed" in src
+    assert "trail_exit" in src
+    assert "trail_active_level" in src
+    assert "trail_level" in src

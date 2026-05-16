@@ -592,6 +592,18 @@ class RealDataBacktester:
         # post-late-start TP cap and the post-exit cooldown.
         cooldown_bars_cfg = int(params.get("cooldown_bars", 2))
         late_tp_cap_atr = float(params.get("late_tp_cap_atr", 2.6))
+        # PR #283 codex round-12 P2: live ECN trailing-EMA exit
+        # (TRAIL_EMA20). Once underlying has moved at least
+        # ``trail_active_atr * entry_atr`` in favor, an intra-bar dip
+        # below ``ema20 - trail_cushion_atr * atr`` exits the trade
+        # before the regular EMA-fail count triggers. Late session
+        # tightens both knobs.
+        trail_active_atr_cfg = float(params.get("trail_active_atr", 0.8))
+        trail_cushion_atr_cfg = float(params.get("trail_cushion_atr", 0.16))
+        late_trail_active_atr_cfg = float(
+            params.get("late_trail_active_atr", 0.6)
+        )
+        late_trail_cushion_cfg = float(params.get("late_trail_cushion", 0.08))
 
         # Use ema_20 / ema_50 from indicator_bars if present (live names);
         # otherwise compute as a fallback so a partial schema doesn't
@@ -937,11 +949,26 @@ class RealDataBacktester:
             # ceiling on the target (default 2.6 × ATR). Without the cap
             # candidates with very large ``tp_atr`` looked profitable in
             # the simulator on bars that live would have closed earlier.
-            effective_tp_atr = (
-                min(tp_atr, late_tp_cap_atr) if _ecn_is_late(i) else tp_atr
+            late_now = _ecn_is_late(i)
+            effective_tp_atr = min(tp_atr, late_tp_cap_atr) if late_now else tp_atr
+            # PR #283 codex round-12 P2: late-session also tightens the
+            # trailing-EMA knobs (``late_trail_active_atr`` and
+            # ``late_trail_cushion``).
+            eff_trail_active_atr = (
+                late_trail_active_atr_cfg if late_now else trail_active_atr_cfg
+            )
+            eff_trail_cushion = (
+                late_trail_cushion_cfg if late_now else trail_cushion_atr_cfg
             )
             sl_price = entry_price - sl_atr * entry_atr
             tp_price = entry_price + effective_tp_atr * entry_atr
+            # Trailing-EMA exit (TRAIL_EMA20): fires only AFTER the
+            # underlying has moved at least ``trail_active_atr * entry_atr``
+            # in favor AND the bar's low pierces ``ema20 - cushion * atr``.
+            trail_active_level = entry_price + eff_trail_active_atr * entry_atr
+            trail_level = ema20_i - eff_trail_cushion * atr_i
+            trail_armed = high_i >= trail_active_level
+            trail_exit = trail_armed and low_i < trail_level
             below_ema_threshold = close_i < (ema20_i - ema_fail_buffer_atr * atr_i)
             ema_fail_count = ema_fail_count + 1 if below_ema_threshold else 0
             ema_fail_exit = ema_fail_count >= ema_fail_bars
@@ -954,16 +981,25 @@ class RealDataBacktester:
             squareoff_exit = _ecn_past_squareoff(i)
             time_stop = i == len(df) - 1
 
-            if stop_hit or target_hit or ema_fail_exit or squareoff_exit or time_stop:
+            if (
+                stop_hit
+                or target_hit
+                or trail_exit
+                or ema_fail_exit
+                or squareoff_exit
+                or time_stop
+            ):
                 in_trade = False
-                # When both stop and target trip on the same bar we can't
-                # tell from OHLC which one fired first; conservatively
-                # mark the stop (the live strategy assumes ATR stop
-                # priority on ambiguous bars).
+                # When multiple exits trigger on the same bar we can't
+                # tell from OHLC which fired first; live priority is
+                # SL → TP → TRAIL_EMA20 → EMA_FAIL → squareoff. Mark the
+                # exit price at the live-priority level.
                 if stop_hit:
                     exit_price = sl_price
                 elif target_hit:
                     exit_price = tp_price
+                elif trail_exit:
+                    exit_price = trail_level
                 else:
                     exit_price = close_i
                 pnl_pct = ((exit_price - entry_price) / entry_price) * 100
