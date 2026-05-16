@@ -216,11 +216,48 @@ class MultiStrategyOptimizer:
         logger.info("MULTI-STRATEGY OPTIMIZATION ON POSTGRESQL DATA")
         logger.info("="*80)
 
+        # PR #283 codex round-5 P2: ``--iterations`` low enough to round
+        # every stage budget (``int(n * 0.5)`` for Bayesian,
+        # ``int(n * 0.3)`` for GA) to zero produces an empty
+        # ``evaluated`` list and a result dict with ``best_score=-inf``,
+        # ``best_parameters=None``, and an empty ``top_5`` — JSON
+        # serialization then emits the non-standard ``-Infinity`` token.
+        # Fail loudly the same way the standalone runner does
+        # (``run_ml_param_optimizer.run_optimization``) so an operator
+        # sees the actionable message instead of unusable JSON.
+        if int(n_iterations * 0.5) < 1:
+            raise SystemExit(
+                f"--iterations={n_iterations} is too small for the "
+                f"multi-strategy optimizer: each stage's budget "
+                f"(Bayesian 50%%, GA 30%%) rounds to zero. Use "
+                f"--iterations >= 10 for any useful run."
+            )
+
         strategies = strategies or list(self.runner.get_strategies().keys())
         self.results = {}
 
         for strategy in strategies:
-            strategy_underlyings = underlyings or self.runner.get_underlyings_for_strategy(strategy)
+            allowed_for_strategy = self.runner.get_underlyings_for_strategy(strategy)
+            if underlyings:
+                # PR #283 codex round-5 P2: intersect the user's
+                # ``--underlyings`` request with each strategy's
+                # allowlist. Without this, e.g.
+                # ``--strategies exclusive_nifty_ce --underlyings NG_FUT``
+                # would score the NIFTY-only CE strategy on natgas bars
+                # (if any exist), producing recommendations for a
+                # strategy/instrument combination the runner declares
+                # unsupported.
+                strategy_underlyings = [u for u in underlyings if u in allowed_for_strategy]
+                if not strategy_underlyings:
+                    logger.warning(
+                        "No requested --underlyings are supported for strategy=%s "
+                        "(supported: %s; requested: %s) — skipping.",
+                        strategy,
+                        allowed_for_strategy,
+                        list(underlyings),
+                    )
+            else:
+                strategy_underlyings = allowed_for_strategy
 
             self.results[strategy] = {}
 

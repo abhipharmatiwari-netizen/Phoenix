@@ -82,19 +82,15 @@ def get_ema20_parameter_spaces() -> list[ParameterSpace]:
         # exposes ADX-gating via ``Ema20ParameterOptimizer`` and the
         # ``RealDataBacktester._simulate_ema20`` simulator that DOES
         # honour ``use_adx_filter`` / ``min_adx`` (PR #283 round 3).
-        # Advanced exits
-        ParameterSpace(
-            name="trail_buffer_pct",
-            param_type="float",
-            min_value=0.0,
-            max_value=0.30,
-        ),
-        ParameterSpace(
-            name="tp1_pct",
-            param_type="float",
-            min_value=0.05,
-            max_value=0.40,
-        ),
+        #
+        # PR #283 codex round-5 P2: ``trail_buffer_pct`` and
+        # ``tp1_pct`` were also dropped here for the same reason —
+        # ``Ema20Backtester.backtest()`` (the synthetic standalone
+        # path) reads only ``ema_period`` / ``sl_pct`` / ``tp_pct`` /
+        # ``min_atr`` / ``require_rsi_falling`` (see
+        # app/strategies/ml_param_optimizer.py:182-211), so any
+        # reported "best" trail-buffer / tp1 value here is noise that
+        # could mislead operators copying it into live config.
     ]
 
 

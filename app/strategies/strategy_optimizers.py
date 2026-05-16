@@ -225,18 +225,24 @@ class PutMomentumParameterOptimizer:
                 max_value=0.0050,
             ),
 
-            # Option-level exits (live: option_sl_pct, partial_tp_r, final_tp_r).
+            # Option-level exits (live: option_sl_pct, final_tp_r).
+            #
+            # PR #283 codex round-5 P2: ``partial_tp_r`` was dropped
+            # from this param space because the simulator (and live
+            # ``on_tick``) does NOT exit on the partial-target level —
+            # only stop / final / EOD. Sampling and exporting
+            # ``partial_tp_r`` here would produce arbitrary noise with
+            # no effect on the backtest score and could mislead
+            # operators copying the "best" partial value into live
+            # config. The live ``PutMomentumScalperConfig`` still
+            # accepts the field (as carryover state in
+            # ``OptionPosition.partial_tp``); set it directly in
+            # config if/when the live exit path starts honouring it.
             ParameterSpace(
                 name="option_sl_pct",
                 param_type="float",
                 min_value=0.15,
                 max_value=0.40,
-            ),
-            ParameterSpace(
-                name="partial_tp_r",
-                param_type="float",
-                min_value=0.5,
-                max_value=2.0,
             ),
             ParameterSpace(
                 name="final_tp_r",
@@ -279,7 +285,9 @@ class PutMomentumParameterOptimizer:
             "rsi_max": float(params.get("rsi_max", 45.0)),
             "min_atr_ratio": float(params.get("min_atr_ratio", 0.0015)),
             "option_sl_pct": float(params.get("option_sl_pct", 0.25)),
-            "partial_tp_r": float(params.get("partial_tp_r", 1.0)),
+            # PR #283 codex round-5 P2: ``partial_tp_r`` not emitted —
+            # the live exit path doesn't honour it (only stop / final /
+            # EOD), so a tuned value is noise. See get_parameter_spaces.
             "final_tp_r": float(params.get("final_tp_r", 1.5)),
             "rsi_falling_bars_required": int(params.get("rsi_falling_bars_required", 2)),
             "lookback_breakdown_bars": int(params.get("lookback_breakdown_bars", 10)),

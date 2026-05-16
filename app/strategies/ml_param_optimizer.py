@@ -233,10 +233,27 @@ class Ema20Backtester:
             if i == 0:
                 continue
 
-            # Entry condition: price < EMA and ATR sufficient
+            # Entry condition: price < EMA and ATR sufficient.
+            # PR #283 codex round-5 P2: ``require_rsi_falling`` requires
+            # THREE consecutive strictly falling RSI bars (matching the
+            # live EMA20 gate in app/strategies/ema20_strategy.py:
+            # 1290-1303 and the real-data simulator in
+            # ``RealDataBacktester._simulate_ema20``). The previous
+            # single-bar downtick admitted entries the live strategy
+            # rejects, biasing reported "best" parameters by non-live
+            # trades.
             close_below_ema = df['close'].iloc[i] < df['ema'].iloc[i]
             atr_ok = df['atr'].iloc[i] >= min_atr if min_atr > 0 else True
-            rsi_falling = (df['rsi'].iloc[i] < df['rsi'].iloc[i-1]) if require_rsi_falling else True
+            if require_rsi_falling and i >= 2:
+                rsi_falling = (
+                    df['rsi'].iloc[i - 2]
+                    > df['rsi'].iloc[i - 1]
+                    > df['rsi'].iloc[i]
+                )
+            elif require_rsi_falling:
+                rsi_falling = False
+            else:
+                rsi_falling = True
 
             if close_below_ema and atr_ok and rsi_falling:
                 df.loc[i, 'signal'] = 1

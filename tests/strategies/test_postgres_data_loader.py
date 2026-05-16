@@ -300,8 +300,14 @@ def test_exclusive_nifty_ce_simulator_uses_live_keys_only():
 
 
 def test_put_momentum_simulator_uses_live_keys_only():
-    """PM sim must read option_sl_pct/partial_tp_r/final_tp_r and the rest
-    of PutMomentumScalperConfig — NOT sl_pct/tp_pct/trend_ema_period."""
+    """PM sim must read option_sl_pct/final_tp_r and the rest of
+    ``PutMomentumScalperConfig`` — NOT sl_pct/tp_pct/trend_ema_period.
+
+    PR #283 codex round-5 P2: ``partial_tp_r`` was dropped from the
+    param space (live ``on_tick`` doesn't exit on it), so it MUST NOT
+    appear in the spaces or format_params output even though
+    ``PutMomentumScalperConfig`` still accepts it as carryover state.
+    """
     from app.strategies.strategy_optimizers import PutMomentumParameterOptimizer
 
     spaces = {s.name for s in PutMomentumParameterOptimizer.get_parameter_spaces()}
@@ -311,7 +317,6 @@ def test_put_momentum_simulator_uses_live_keys_only():
             "rsi_max": 45.0,
             "min_atr_ratio": 0.0015,
             "option_sl_pct": 0.25,
-            "partial_tp_r": 1.0,
             "final_tp_r": 1.5,
             "rsi_falling_bars_required": 2,
             "lookback_breakdown_bars": 10,
@@ -320,7 +325,7 @@ def test_put_momentum_simulator_uses_live_keys_only():
     )
 
     live_required = {
-        "option_sl_pct", "partial_tp_r", "final_tp_r",
+        "option_sl_pct", "final_tp_r",
         "rsi_min", "rsi_max", "min_atr_ratio",
         "rsi_falling_bars_required", "lookback_breakdown_bars",
         "max_bars_in_trade",
@@ -331,6 +336,15 @@ def test_put_momentum_simulator_uses_live_keys_only():
     assert live_required.issubset(formatted_keys), (
         f"PM format_params missing live keys: {live_required - formatted_keys}"
     )
+
+    # ``partial_tp_r`` is part of the live config but the simulator
+    # does not exit on it — see codex round-5 P2 note. Confirm it's
+    # gone from BOTH spaces and format_params output.
+    assert "partial_tp_r" not in spaces, (
+        "partial_tp_r was removed from the PM param space; reintroducing "
+        "it would surface a no-op knob (live exits don't honour it)."
+    )
+    assert "partial_tp_r" not in formatted_keys
 
     legacy_dead = {"sl_pct", "tp_pct", "trend_ema_period"}
     leaked = legacy_dead & spaces
@@ -882,3 +896,126 @@ def test_run_ml_param_optimizer_raises_systemexit_on_too_few_iterations():
     with pytest.raises(SystemExit, match="zero configurations|too small"):
         # 2 iterations × 0.2 = 0 → bayesian gets 0, GA 0, refinement 0.
         run_optimization(n_iterations=2, output_file="/tmp/__pytest_smoke__.json")
+
+
+# ---------------------------------------------------------------------------
+# PR #283 codex round-5 regressions.
+# ---------------------------------------------------------------------------
+
+
+def test_multi_strategy_optimize_all_intersects_underlyings_with_per_strategy_allowlist():
+    """``--underlyings`` must be intersected with each strategy's
+    allowlist so e.g. ``--strategies exclusive_nifty_ce --underlyings NG_FUT``
+    doesn't optimize the NIFTY-only CE strategy on natural-gas bars."""
+    from app.strategies.run_multi_strategy_optimizer import MultiStrategyOptimizer
+
+    optimizer = MultiStrategyOptimizer.__new__(MultiStrategyOptimizer)
+    # Patch the runner so we can introspect what optimize_strategy gets
+    # called with, without spinning up a real loader.
+    optimizer.results = {}
+    calls: list[tuple] = []
+
+    class _StubRunner:
+        def get_strategies(self):
+            return {
+                "ema20": {"underlyings": ["NIFTY_IDX", "BANKNIFTY_IDX", "NG_FUT"]},
+                "exclusive_nifty_ce": {"underlyings": ["NIFTY_IDX"]},
+            }
+
+        def get_underlyings_for_strategy(self, strategy):
+            return self.get_strategies()[strategy]["underlyings"]
+
+    optimizer.runner = _StubRunner()
+    optimizer.optimize_strategy = (
+        lambda s, u, n_iterations: calls.append((s, u)) or {"top_5": []}
+    )
+
+    optimizer.optimize_all(
+        n_iterations=100,
+        strategies=["exclusive_nifty_ce"],
+        underlyings=["NG_FUT"],  # not in ECN's allowlist
+    )
+    assert calls == [], (
+        "exclusive_nifty_ce must not be optimized on NG_FUT — it's not "
+        "in the strategy's allowlist; got calls=" + repr(calls)
+    )
+
+
+def test_multi_strategy_optimize_all_raises_systemexit_on_tiny_iteration_budget():
+    """``--iterations`` so small that ``int(n * 0.5)`` rounds to zero
+    must fail loudly the same way the standalone runner does — not
+    silently emit ``-Infinity`` / ``null`` JSON."""
+    from app.strategies.run_multi_strategy_optimizer import MultiStrategyOptimizer
+
+    optimizer = MultiStrategyOptimizer.__new__(MultiStrategyOptimizer)
+    optimizer.results = {}
+    optimizer.runner = type("_Stub", (), {
+        "get_strategies": lambda self: {},
+        "get_underlyings_for_strategy": lambda self, s: [],
+    })()
+    optimizer.optimize_strategy = lambda *a, **kw: {"top_5": []}
+
+    with pytest.raises(SystemExit, match="too small|zero"):
+        optimizer.optimize_all(n_iterations=1)
+
+
+def test_put_momentum_optimizer_no_longer_emits_partial_tp_r():
+    """``partial_tp_r`` was removed from the PM param space — sampling
+    a value the simulator and live ``on_tick`` don't honour produces
+    noise. Reintroducing it would be a regression."""
+    from app.strategies.strategy_optimizers import PutMomentumParameterOptimizer
+
+    spaces = {s.name for s in PutMomentumParameterOptimizer.get_parameter_spaces()}
+    assert "partial_tp_r" not in spaces
+
+
+def test_standalone_ema20_param_space_drops_unused_advanced_exits():
+    """``trail_buffer_pct`` and ``tp1_pct`` were sampled in the standalone
+    ``run_ml_param_optimizer.get_ema20_parameter_spaces`` but the
+    synthetic ``Ema20Backtester`` never read them. Reintroducing either
+    would surface noise as "best advanced exit"."""
+    from app.strategies.run_ml_param_optimizer import get_ema20_parameter_spaces
+
+    names = {s.name for s in get_ema20_parameter_spaces()}
+    for unused in ("trail_buffer_pct", "tp1_pct", "use_adx_filter", "min_adx"):
+        assert unused not in names, (
+            f"{unused!r} reintroduced into standalone EMA20 param space "
+            "but Ema20Backtester.backtest does not read it"
+        )
+
+
+def test_synthetic_ema20_backtester_requires_three_bar_strictly_falling_rsi():
+    """The synthetic ``Ema20Backtester`` must use the same three-bar
+    strictly-falling-RSI gate as the real-data simulator and live
+    strategy. Single-bar downticks must NOT pass."""
+    import pandas as pd
+
+    from app.strategies.ml_param_optimizer import Ema20Backtester, BacktestMetrics
+
+    n = 100
+    # Strictly RISING RSI: no three-bar falling window can exist.
+    rsi = [40.0 + 0.1 * i for i in range(n)]
+    closes = [100.0 - 0.05 * i for i in range(n)]  # below EMA, candidates for entry
+    df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="5min"),
+        "open": closes,
+        "high": [c + 0.5 for c in closes],
+        "low": [c - 0.5 for c in closes],
+        "close": closes,
+        "volume": [1000] * n,
+        "atr": [1.0] * n,
+        "rsi": rsi,
+    })
+    bt = Ema20Backtester(ohlc_data=df)
+    metrics = bt.backtest({
+        "ema_period": 20,
+        "sl_pct": 0.30,
+        "tp_pct": 0.30,
+        "min_atr": 0.0,
+        "require_rsi_falling": True,
+    })
+    assert isinstance(metrics, BacktestMetrics)
+    assert metrics.total_trades == 0, (
+        "Strictly rising RSI must not produce any three-bar falling "
+        "window, so require_rsi_falling rejects every entry"
+    )
