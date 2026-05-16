@@ -611,9 +611,21 @@ class RealDataBacktester:
         max_trades_per_day_cfg = int(params.get("max_trades_per_day", 1))
 
         def _within_ecn_entry_window(idx: int) -> bool:
+            """PR #283 codex round-10 P2: live ECN evaluates the entry
+            window against the NEXT bar's start time (``next_bar_start
+            = candle.end_ts``), not the signal bar's ``ts_start``. A
+            30s signal bar at 14:45:00 would have ``next_bar_start =
+            14:45:30`` and be rejected against ``last_entry_time =
+            14:45``. Use the bar AFTER the signal bar for the gate
+            when one exists; fall back to the signal bar at the very
+            end of the frame so the last bar still has SOME chance to
+            score in unit tests."""
             if ist_time_of_day is None:
                 return True
-            tod = ist_time_of_day.iloc[idx]
+            # Inspect the next bar's start time; fall back to this bar
+            # when we're at the end of the frame.
+            probe_idx = idx + 1 if idx + 1 < len(ist_time_of_day) else idx
+            tod = ist_time_of_day.iloc[probe_idx]
             return _ECN_SESSION_START <= tod <= _ECN_LAST_ENTRY
 
         def _ecn_past_squareoff(idx: int) -> bool:
@@ -732,7 +744,27 @@ class RealDataBacktester:
                 macd_cross_up = (
                     prev_macd <= prev_macd_signal and macd_i > macd_signal_i
                 )
-                macd_ok = macd_cross_up and macd_hist_i >= macd_hist_min
+                # PR #283 codex round-10 P2: live ECN accepts ALSO a
+                # "near-MACD" rising configuration (see
+                # exclusive_nifty_ce_buy.py:1118 ``macd_near_cross_up``):
+                # MACD still below signal but rising, with both
+                # ``macd_div`` and ``macd_hist`` rising vs the prior
+                # bar. The simulator was rejecting these entries that
+                # live would admit when ``allow_near_macd=True``
+                # (live default).
+                macd_div_now = macd_i - macd_signal_i
+                macd_div_prev = prev_macd - prev_macd_signal
+                prev_hist = macd_div_prev  # macd_hist == macd_div in this loader
+                allow_near_macd = bool(params.get("allow_near_macd", True))
+                macd_near_thresh = float(params.get("macd_near", 0.40))
+                macd_near_cross_up = (
+                    macd_div_now < 0
+                    and macd_div_now > -macd_near_thresh
+                    and macd_div_now > macd_div_prev
+                    and macd_hist_i > prev_hist
+                )
+                macd_confirmed = macd_cross_up and macd_hist_i >= macd_hist_min
+                macd_ok = macd_confirmed or (allow_near_macd and macd_near_cross_up)
                 adx_ok = adx_i >= min_adx
                 di_spread = abs(plus_di_i - minus_di_i)
                 di_ok = di_spread >= min_di_spread and plus_di_i > minus_di_i

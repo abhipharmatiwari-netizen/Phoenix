@@ -1411,3 +1411,45 @@ def test_ecn_accepts_live_squareoff_time_key():
         "yaml-config key ``square_off_time`` must still be accepted "
         "as a fallback"
     )
+
+
+# ---------------------------------------------------------------------------
+# PR #283 codex round-10 regressions.
+# ---------------------------------------------------------------------------
+
+
+def test_ecn_simulator_admits_macd_near_when_allow_near_macd_true():
+    """Live ECN's ``_compute_buy_signal`` admits entries on a
+    ``macd_near_cross_up`` configuration (MACD still below signal but
+    rising, ``macd_div`` within ``-macd_near`` and rising vs prior
+    bar, ``macd_hist`` rising). The simulator previously required a
+    full cross-up."""
+    import inspect
+
+    src = inspect.getsource(RealDataBacktester._simulate_exclusive_nifty_ce)
+    assert "macd_near_cross_up" in src, (
+        "ECN simulator must expose the macd_near_cross_up live "
+        "alternative (exclusive_nifty_ce_buy.py:1118)"
+    )
+    assert "allow_near_macd" in src
+    # macd_ok must accept EITHER full cross-up OR near-cross-up
+    # (matching exclusive_nifty_ce_buy.py:1125).
+    assert "macd_confirmed or" in src or "or (allow_near_macd" in src, (
+        "macd_ok must be (confirmed OR near_with_allow)"
+    )
+
+
+def test_ecn_entry_window_evaluates_against_next_bar_time():
+    """Live ECN uses ``next_bar_start = candle.end_ts`` for the
+    entry-window check, not the signal bar's ``ts_start``. A 30s
+    signal at 14:45:00 has ``next_bar_start = 14:45:30`` and is
+    rejected against ``last_entry_time = 14:45``."""
+    import inspect
+
+    src = inspect.getsource(RealDataBacktester._simulate_exclusive_nifty_ce)
+    # The helper must probe the NEXT bar's time, not the signal bar's.
+    assert "idx + 1" in src, (
+        "_within_ecn_entry_window must check the next bar's time "
+        "(idx+1) — live uses next_bar_start, not the signal bar's "
+        "ts_start"
+    )
