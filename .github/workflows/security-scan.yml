@@ -127,14 +127,14 @@ jobs:
           ignore-unfixed: true
 
       - name: Upload trivy SARIF results
-        if: always()
+        if: always() && hashFiles('trivy-backend.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-backend.sarif
           category: trivy-backend
 
       - name: Upload trivy nginx SARIF
-        if: always()
+        if: always() && hashFiles('trivy-nginx.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-nginx.sarif
