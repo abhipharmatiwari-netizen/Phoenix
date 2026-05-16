@@ -421,78 +421,130 @@ class CandidateWriter:
                 f"broker_account={self._broker_account_id!r} "
                 f"strategy_id={strategy_id!r}"
             )
-        enabled_rows = [r for r in rows if r[1]]
-        # PR #288 codex round-8 P2: when the caller knows which
-        # underlying the candidate was scored on AND at least one
-        # enabled row is tagged with the same underlying, restrict to
-        # that subset so multi-underlying tenants don't get the wrong
-        # config attached. Untagged enabled rows (no
-        # ``params->>'underlying_label'``) remain valid when no tagged
-        # row exists, preserving backwards-compat for single-underlying
-        # tenants.
-        if enabled_rows and underlying_label:
-            # Defensive: existing fixtures and the round-3 schema may
-            # return 2-tuples ``(id, enabled)`` without the projected
-            # ``cfg_underlying`` column. Treat a missing third element
-            # as untagged.
-            def _row_underlying(r):
-                return r[2] if len(r) > 2 else None
 
-            matching_tagged = [
+        # Defensive: existing fixtures and the round-3 schema may
+        # return 2-tuples ``(id, enabled)`` without the projected
+        # ``cfg_underlying`` column. Treat a missing third element
+        # as untagged.
+        def _row_underlying(r):
+            return r[2] if len(r) > 2 else None
+
+        enabled_rows = [r for r in rows if r[1]]
+        disabled_rows = [r for r in rows if not r[1]]
+
+        # PR #288 codex round-8/9/10 P2: priority order for picking
+        # the strategy_config_id when ``underlying_label`` is known:
+        #   1. enabled rows tagged with the candidate's underlying
+        #   2. enabled rows with no underlying tag (legacy / generic)
+        #   3. disabled rows tagged with the candidate's underlying
+        #      (warn loudly — operator must re-enable to promote)
+        #   4. disabled untagged rows (legacy generic, warn loudly)
+        #   5. otherwise raise — only wrong-underlying rows exist
+        #
+        # When ``underlying_label`` is None (round-3 callers, untagged
+        # tenants) the lookup is enabled-first then disabled-first
+        # across the full set, preserving prior behaviour.
+        if underlying_label:
+            matching_enabled = [
                 r for r in enabled_rows if _row_underlying(r) == underlying_label
             ]
-            if matching_tagged:
-                enabled_rows = matching_tagged
-            else:
-                # PR #288 codex round-9 P2: when SOME enabled rows are
-                # tagged with OTHER underlyings (none matching this
-                # candidate's) and others are untagged, restrict the
-                # fallback to UNTAGGED rows only. Without this filter,
-                # the lex-first match could pick a wrong-underlying
-                # tagged row instead of a generic untagged one.
-                untagged = [r for r in enabled_rows if _row_underlying(r) is None]
-                tagged_others = [
-                    r for r in enabled_rows
-                    if _row_underlying(r) not in (None, underlying_label)
-                ]
-                if untagged and tagged_others:
-                    enabled_rows = untagged
-                elif tagged_others and not untagged:
-                    # ALL enabled rows are tagged with different
-                    # underlyings — none is a valid match. Fail loudly
-                    # rather than silently attaching the candidate to
-                    # the wrong underlying's config.
-                    other_tags = sorted({
-                        _row_underlying(r) for r in tagged_others
-                    } - {None})
-                    raise CandidateWriterError(
-                        f"no enabled strategy_configs row matches "
-                        f"underlying={underlying_label!r}; tenant has "
-                        f"per-underlying rows tagged "
-                        f"{other_tags} but none for this candidate. "
-                        "Add a strategy_configs row for the candidate's "
-                        "underlying or set params->>'underlying_label' "
-                        "to NULL on a generic row."
+            untagged_enabled = [
+                r for r in enabled_rows if _row_underlying(r) is None
+            ]
+            matching_disabled = [
+                r for r in disabled_rows if _row_underlying(r) == underlying_label
+            ]
+            untagged_disabled = [
+                r for r in disabled_rows if _row_underlying(r) is None
+            ]
+            other_enabled = [
+                r for r in enabled_rows
+                if _row_underlying(r) not in (None, underlying_label)
+            ]
+            other_disabled = [
+                r for r in disabled_rows
+                if _row_underlying(r) not in (None, underlying_label)
+            ]
+
+            chosen_row = None
+            chosen_set: List = []
+            used_disabled = False
+            if matching_enabled:
+                chosen_set = matching_enabled
+            elif untagged_enabled:
+                chosen_set = untagged_enabled
+            elif matching_disabled:
+                chosen_set = matching_disabled
+                used_disabled = True
+            elif untagged_disabled:
+                chosen_set = untagged_disabled
+                used_disabled = True
+            if chosen_set:
+                chosen_row = chosen_set[0]
+                if len(chosen_set) > 1:
+                    logger.warning(
+                        "candidate_writer: %d strategy_configs rows match "
+                        "(tenant=%s, broker=%s, strategy_id=%s, "
+                        "underlying=%s); using first (strategy_config_id=%s). "
+                        "Deduplicate the registry.",
+                        len(chosen_set),
+                        self._tenant_id,
+                        self._broker_account_id,
+                        strategy_id,
+                        underlying_label,
+                        chosen_row[0],
                     )
+            else:
+                # PR #288 codex round-10 P2: only wrong-underlying
+                # rows exist (enabled or disabled). Silent attachment
+                # to the wrong underlying's config row would mutate
+                # live trading behaviour on approval.
+                other_tags = sorted({
+                    _row_underlying(r)
+                    for r in (other_enabled + other_disabled)
+                    if _row_underlying(r)
+                })
+                raise CandidateWriterError(
+                    f"no strategy_configs row matches "
+                    f"underlying={underlying_label!r}; tenant has "
+                    f"per-underlying rows tagged {other_tags} but none "
+                    f"for this candidate. Add a strategy_configs row "
+                    "for the candidate's underlying or set "
+                    "params->>'underlying_label' to NULL on a generic row."
+                )
+            assert chosen_row is not None
+            chosen = chosen_row[0]
+            if used_disabled:
+                logger.warning(
+                    "candidate_writer: only disabled strategy_configs rows "
+                    "match (tenant=%s, broker=%s, strategy_id=%s, "
+                    "underlying=%s); attaching candidate to disabled "
+                    "strategy_config_id=%s. Re-enable the config "
+                    "before approval or the promotion will have no "
+                    "live effect.",
+                    self._tenant_id,
+                    self._broker_account_id,
+                    strategy_id,
+                    underlying_label,
+                    chosen,
+                )
+            return chosen
+
+        # No ``underlying_label`` — preserve the round-3 contract.
         if enabled_rows:
             chosen = enabled_rows[0][0]
             if len(enabled_rows) > 1:
                 logger.warning(
                     "candidate_writer: %d ENABLED strategy_configs rows match "
-                    "(tenant=%s, broker=%s, strategy_id=%s, underlying=%s); "
-                    "using first (strategy_config_id=%s). Deduplicate the "
-                    "registry.",
+                    "(tenant=%s, broker=%s, strategy_id=%s); using first "
+                    "(strategy_config_id=%s). Deduplicate the registry.",
                     len(enabled_rows),
                     self._tenant_id,
                     self._broker_account_id,
                     strategy_id,
-                    underlying_label or "<any>",
                     chosen,
                 )
             return chosen
-        # Only disabled rows match — fall back but warn loudly. The
-        # operator can still approve later via the admin API once they
-        # re-enable the row, but most of the time this is a misconfig.
         chosen = rows[0][0]
         logger.warning(
             "candidate_writer: only disabled strategy_configs rows match "
