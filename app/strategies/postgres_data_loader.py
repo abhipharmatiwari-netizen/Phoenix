@@ -375,8 +375,10 @@ class RealDataBacktester:
                 "square_off_time": "15:00",
             },
             "NG_FUT": {
-                # Natural-gas future trades 09:00 - 23:30 IST.
-                "first_entry_time": "9:00",
+                # Natural-gas future yaml: first_entry 09:30, square-off 23:30.
+                # PR #283 codex round-17 P2: was 09:00 in round 16; corrected
+                # to match the deployed yaml exactly.
+                "first_entry_time": "09:30",
                 "square_off_time": "23:30",
             },
         }
@@ -415,18 +417,42 @@ class RealDataBacktester:
     @staticmethod
     def _ecn_defaults_for(underlying_label: str) -> Dict[str, Any]:
         """Live ECN deployed config (``app/config/strategy_env.yaml``)
-        is enabled for NIFTY_IDX only. The defaults below mirror the
-        yaml's ``session_start``, ``last_entry_time``,
-        ``square_off_time``, ``late_start``, and
-        ``max_trades_per_day`` so the simulator scores candidates
-        against the same intraday window the live strategy uses."""
+        is enabled for NIFTY_IDX only. The defaults below mirror EVERY
+        key the simulator consumes so partial / empty caller params
+        don't silently fall back to the strategy class fallbacks
+        (which differ from the deployed yaml in several places —
+        ``min_adx``, ``min_di_spread``, ``ema_atr_buffer``,
+        ``macd_hist_min``, etc.). Caller params still take precedence.
+        PR #283 codex round-17 P2."""
         if underlying_label == "NIFTY_IDX":
             return {
+                # Entry-gate thresholds.
+                "rsi_min": 52.0,
+                "rsi_max": 72.0,
+                "ema_atr_buffer": 0.05,
+                "macd_hist_min": 0.0,
+                "allow_near_macd": True,
+                "macd_near": 0.0,
+                "min_adx": 14.0,
+                "min_di_spread": 0.0,
+                # Exit knobs (ATR-based).
+                "sl_atr": 2.0,
+                "tp_atr": 2.5,
+                "ema_fail_bars": 3,
+                "ema_fail_buffer_atr": 0.10,
+                "trail_active_atr": 0.8,
+                "trail_cushion_atr": 0.16,
+                "late_tp_cap_atr": 2.6,
+                "late_trail_active_atr": 0.6,
+                "late_trail_cushion": 0.08,
+                # Daily limits + cooldown.
+                "max_trades_per_day": 1,
+                "cooldown_bars": 2,
+                # Time-of-day gates.
                 "session_start": "10:15",
                 "last_entry_time": "14:45",
                 "square_off_time": "15:15",
                 "late_start": "14:45",
-                "max_trades_per_day": 1,
             }
         return {}
 
@@ -461,16 +487,36 @@ class RealDataBacktester:
     @staticmethod
     def _pm_defaults_for(underlying_label: str) -> Dict[str, Any]:
         """Live PM deployed config (``app/config/strategy_env.yaml``)
-        is enabled for index instruments only, with per-instrument
-        ``entry_start`` / ``entry_end`` keys (NIFTY/BANKNIFTY both
-        09:20-14:45). Returning these defaults ensures the simulator
-        scores candidates against the same single-window the live
-        strategy uses, rather than the morning/afternoon-split
-        fallback path."""
+        is enabled for index instruments only. The defaults below
+        mirror EVERY key the simulator consumes so partial / empty
+        caller params don't silently fall back to the strategy class
+        fallbacks (which differ from the deployed yaml on several
+        knobs: ``rsi_min: 20`` vs class 25, ``rsi_falling_bars_required: 1``
+        vs class 2, ``lookback_breakdown_bars: 8`` vs class 10). Caller
+        params still take precedence. PR #283 codex round-17 P2."""
         if underlying_label in ("NIFTY_IDX", "BANKNIFTY_IDX"):
             return {
+                # Single-window entry gate (overrides morning/afternoon
+                # split — see _within_entry_window).
                 "entry_start": "09:20",
                 "entry_end": "14:45",
+                # Entry-gate thresholds (yaml-optimized values).
+                "rsi_min": 20.0,
+                "rsi_max": 45.0,
+                "min_atr_ratio": 0.0008,
+                "rsi_falling_bars_required": 1,
+                "lookback_breakdown_bars": 8,
+                # Exit knobs.
+                "option_sl_pct": 0.25,
+                "final_tp_r": 1.5,
+                "max_bars_in_trade": 14,
+                # Morning/afternoon fallback windows (only used when
+                # entry_start/entry_end are NOT supplied; yaml still
+                # documents these for the fallback path).
+                "morning_start": "09:20",
+                "morning_end": "11:00",
+                "afternoon_start": "13:30",
+                "afternoon_end": "14:45",
             }
         return {}
 
@@ -709,17 +755,30 @@ class RealDataBacktester:
         )
         late_trail_cushion_cfg = float(params.get("late_trail_cushion", 0.08))
 
-        # PR #283 codex round-14 P2: live ECN replaces ``ema_20`` with
-        # its PRIVATE 20-period EMA overlay
+        # PR #283 codex round-14/17 P2: live ECN replaces ``ema_20``
+        # with its PRIVATE 20-period EMA overlay
         # (``exclusive_nifty_ce_buy_ema20_30s``) when the overlay is
-        # present in the bar — see ``_on_signal`` in
-        # ``exclusive_nifty_ce_buy.py``. The simulator now matches:
-        # prefer the private column, fall back to the generic
-        # ``ema_20``, fall back to computing if neither is available.
+        # present FOR THAT BAR — see ``_on_signal`` in
+        # ``exclusive_nifty_ce_buy.py``. Live decides per-bar based on
+        # ``row.private_ema20 is not None``, so the simulator must
+        # coalesce per-bar too: prefer the private value, fall back to
+        # the generic ``ema_20`` for rows where the private column is
+        # NULL, fall back to a computed EMA if neither column has any
+        # value at all. The previous "pick the series with ANY values"
+        # forced sparse-private bars to flow NaN through every
+        # ``float(ema20.iloc[i])`` cast — silently zeroing or crashing
+        # the simulator.
         private_col = "exclusive_nifty_ce_buy_ema20_30s"
-        if private_col in df.columns and df[private_col].notna().any():
-            ema20 = df[private_col]
-        elif "ema_20" in df.columns and df["ema_20"].notna().any():
+        has_private = private_col in df.columns and df[private_col].notna().any()
+        has_generic = "ema_20" in df.columns and df["ema_20"].notna().any()
+        if has_private and has_generic:
+            ema20 = df[private_col].combine_first(df["ema_20"])
+        elif has_private:
+            # No generic ema_20 column at all — fill remaining gaps
+            # with the computed fallback so per-bar NaNs don't leak.
+            computed = df["close"].ewm(span=20, adjust=False).mean()
+            ema20 = df[private_col].combine_first(computed)
+        elif has_generic:
             ema20 = df["ema_20"]
         else:
             ema20 = df["close"].ewm(span=20, adjust=False).mean()

@@ -1734,12 +1734,88 @@ def test_ecn_simulator_prefers_private_ema_column_when_present():
     import inspect
 
     src = inspect.getsource(RealDataBacktester._simulate_exclusive_nifty_ce)
-    # Must check the private column FIRST.
+    # Must reference the private column.
     assert "exclusive_nifty_ce_buy_ema20_30s" in src
-    private_idx = src.index("exclusive_nifty_ce_buy_ema20_30s")
-    # The generic ema_20 fallback must come AFTER the private check.
-    fallback_idx = src.index('elif "ema_20"')
-    assert private_idx < fallback_idx, (
-        "private ECN EMA must be checked BEFORE the generic ema_20 "
-        "so live overlay parity is preserved"
+    # Must coalesce per-bar (round-18 fix) — sparse private rows
+    # fall back to the generic ``ema_20`` for that bar, not for the
+    # whole frame.
+    assert "combine_first" in src, (
+        "private ECN EMA must coalesce per-bar with the generic "
+        "ema_20 — picking a single sparse series leaks NaN into "
+        "the simulator loop"
     )
+
+
+# ---------------------------------------------------------------------------
+# PR #283 codex round-17 regressions.
+# ---------------------------------------------------------------------------
+
+
+def test_ecn_defaults_include_all_simulator_consumed_keys():
+    """PR #283 codex round-17 P2: the round-16 ``_ecn_defaults_for``
+    only set window keys; entry/exit/limit thresholds fell back to
+    the simulator class fallbacks instead of the deployed yaml. The
+    extended defaults must cover EVERY key the simulator reads."""
+    nifty = RealDataBacktester._ecn_defaults_for("NIFTY_IDX")
+    # Entry gates.
+    assert nifty["rsi_min"] == 52.0
+    assert nifty["rsi_max"] == 72.0
+    assert nifty["ema_atr_buffer"] == 0.05
+    assert nifty["macd_hist_min"] == 0.0
+    assert nifty["allow_near_macd"] is True
+    assert nifty["macd_near"] == 0.0
+    assert nifty["min_adx"] == 14.0
+    assert nifty["min_di_spread"] == 0.0
+    # Exit knobs.
+    assert nifty["sl_atr"] == 2.0
+    assert nifty["tp_atr"] == 2.5
+    assert nifty["ema_fail_bars"] == 3
+    assert nifty["ema_fail_buffer_atr"] == 0.10
+    assert nifty["trail_active_atr"] == 0.8
+    assert nifty["trail_cushion_atr"] == 0.16
+    assert nifty["late_tp_cap_atr"] == 2.6
+    assert nifty["late_trail_active_atr"] == 0.6
+    assert nifty["late_trail_cushion"] == 0.08
+    # Daily limits + cooldown.
+    assert nifty["max_trades_per_day"] == 1
+    assert nifty["cooldown_bars"] == 2
+    # Time-of-day gates.
+    assert nifty["session_start"] == "10:15"
+    assert nifty["last_entry_time"] == "14:45"
+    assert nifty["square_off_time"] == "15:15"
+    assert nifty["late_start"] == "14:45"
+
+
+def test_pm_defaults_include_all_simulator_consumed_keys():
+    """PR #283 codex round-17 P2: PM yaml-optimized values
+    (``rsi_min: 20``, ``rsi_falling_bars_required: 1``,
+    ``lookback_breakdown_bars: 8``) materially differ from the class
+    fallbacks. Without including them in ``_pm_defaults_for``, the
+    simulator was scoring candidates against the wrong thresholds
+    whenever the caller omitted these keys."""
+    for ul in ("NIFTY_IDX", "BANKNIFTY_IDX"):
+        d = RealDataBacktester._pm_defaults_for(ul)
+        # Yaml-optimized values.
+        assert d["rsi_min"] == 20.0
+        assert d["rsi_max"] == 45.0
+        assert d["min_atr_ratio"] == 0.0008
+        assert d["rsi_falling_bars_required"] == 1
+        assert d["lookback_breakdown_bars"] == 8
+        assert d["max_bars_in_trade"] == 14
+        # Exit knobs.
+        assert d["option_sl_pct"] == 0.25
+        assert d["final_tp_r"] == 1.5
+        # Entry windows still threaded for the simulator's
+        # single-window path.
+        assert d["entry_start"] == "09:20"
+        assert d["entry_end"] == "14:45"
+
+
+def test_ema20_ng_fut_first_entry_matches_yaml():
+    """PR #283 codex round-17 P2: NG_FUT yaml sets
+    ``first_entry_time: 09:30``, NOT 09:00 (the round-16
+    approximation). Must match the deployed value exactly so
+    pre-09:30 entries aren't admitted."""
+    nat_gas = RealDataBacktester._ema20_defaults_for("NG_FUT")
+    assert nat_gas["first_entry_time"] == "09:30"
+    assert nat_gas["square_off_time"] == "23:30"
