@@ -11,7 +11,7 @@ import logging
 import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.strategies.candidate_writer import (
     CandidateBatch,
@@ -29,6 +29,30 @@ from app.strategies.postgres_data_loader import (
     RealDataBacktester,
 )
 from app.strategies.strategy_optimizers import StrategyOptimizationRunner
+from app.strategies.walk_forward_validator import (
+    WalkForwardConfig,
+    WalkForwardValidator,
+)
+
+
+# (strategy_name, params) → simulator call. Used by the walk-forward
+# gate and any other code that needs to score a candidate on an
+# arbitrary df slice. Keeps the mapping in one place so the gate stays
+# in sync with the live ``MultiStrategyOptimizer.backtest_func`` dispatch.
+_STRATEGY_TO_SIMULATOR = {
+    "ema20": RealDataBacktester._simulate_ema20,
+    "exclusive_nifty_ce": RealDataBacktester._simulate_exclusive_nifty_ce,
+    "put_momentum": RealDataBacktester._simulate_put_momentum,
+}
+
+
+# Timeframe used by each strategy when fetching ``indicator_bars`` for
+# the walk-forward gate. Mirrors ``RealDataBacktester.backtest_*``.
+_STRATEGY_TIMEFRAMES = {
+    "ema20": 300,
+    "exclusive_nifty_ce": 30,
+    "put_momentum": 300,
+}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,6 +79,23 @@ def _env_int_default(env_name: str, fallback: int) -> int:
     except (TypeError, ValueError):
         logger.warning(
             "Ignoring invalid %s=%r; using fallback %d",
+            env_name,
+            raw,
+            fallback,
+        )
+        return fallback
+
+
+def _env_float_default(env_name: str, fallback: float) -> float:
+    """Read an env-var as float with safe fallback (see _env_int_default)."""
+    raw = os.getenv(env_name, "")
+    if raw == "":
+        return fallback
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Ignoring invalid %s=%r; using fallback %.4f",
             env_name,
             raw,
             fallback,
@@ -502,6 +543,55 @@ def main():
             "different databases (env: OPTIMIZER_CANDIDATE_WRITER_DSN)."
         ),
     )
+    # Issue #273: walk-forward + OOS gate before candidate insert.
+    parser.add_argument(
+        "--disable-walk-forward-gate",
+        action="store_true",
+        default=os.getenv("OPTIMIZER_DISABLE_WALK_FORWARD_GATE", "").lower()
+        in ("1", "true", "yes"),
+        help=(
+            "Bypass the walk-forward + OOS holdout filter and insert every "
+            "top-N candidate into the review queue regardless of stability. "
+            "Off by default -- the gate is ALWAYS ON for --promote-to-candidate "
+            "in production runs so unstable parameters cannot surface for "
+            "approval without an explicit override."
+        ),
+    )
+    parser.add_argument(
+        "--walk-forward-folds",
+        type=int,
+        default=_env_int_default("OPTIMIZER_WALK_FORWARD_FOLDS", 4),
+        help="Number of in-sample folds for the walk-forward gate (default: 4).",
+    )
+    parser.add_argument(
+        "--oos-holdout-pct",
+        type=float,
+        default=_env_float_default("OPTIMIZER_OOS_HOLDOUT_PCT", 0.20),
+        help=(
+            "Fraction of the trailing data reserved as the out-of-sample "
+            "holdout for the walk-forward gate (default: 0.20)."
+        ),
+    )
+    parser.add_argument(
+        "--min-trades-per-fold",
+        type=int,
+        default=_env_int_default("OPTIMIZER_MIN_TRADES_PER_FOLD", 5),
+        help=(
+            "Minimum trade count per fold for a candidate to pass the gate. "
+            "Folds with fewer than this many trades are not statistically "
+            "meaningful (default: 5)."
+        ),
+    )
+    parser.add_argument(
+        "--max-in-sample-degradation-pct",
+        type=float,
+        default=_env_float_default("OPTIMIZER_MAX_DEGRADATION_PCT", 0.30),
+        help=(
+            "Maximum allowed drop from in-sample score to median fold score "
+            "before the gate rejects (default: 0.30; folds must score "
+            "within 70%% of in-sample)."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -540,12 +630,29 @@ def main():
         logger.info(f"Report exported to: {report_path.absolute()}")
 
         if args.promote_to_candidate:
-            # PR #288 codex round-5 P2: split-DB support — when set,
+            # PR #288 codex round-5 P2: split-DB support -- when set,
             # ``--candidate-writer-dsn`` overrides ``--dsn`` for the
             # writer's ``strategy_configs`` / ``strategy_config_candidates``
             # connection. Defaults to ``--dsn`` so the typical single-DB
             # case keeps working.
             writer_dsn = args.candidate_writer_dsn or args.dsn
+
+            # Issue #273: walk-forward + OOS gate.
+            walk_forward_config: Optional[WalkForwardConfig]
+            if args.disable_walk_forward_gate:
+                walk_forward_config = None
+                logger.warning(
+                    "Walk-forward gate DISABLED via --disable-walk-forward-gate; "
+                    "every top-N candidate will reach the review queue without "
+                    "stability validation."
+                )
+            else:
+                walk_forward_config = WalkForwardConfig(
+                    folds=args.walk_forward_folds,
+                    oos_holdout_pct=args.oos_holdout_pct,
+                    min_trades_per_fold=args.min_trades_per_fold,
+                    max_in_sample_degradation_pct=args.max_in_sample_degradation_pct,
+                )
             _promote_top_candidates(
                 results=results,
                 tenant_id=args.tenant_id,
@@ -553,7 +660,14 @@ def main():
                 lookback_days=args.lookback_days,
                 candidates_per_strategy=args.candidates_per_strategy,
                 dsn=writer_dsn,
+                # PR #289 codex round-2 P2: pass the INDICATOR DSN
+                # separately so the walk-forward gate's
+                # ``PostgresIndicatorLoader`` queries the indicator DB
+                # even in a split-DB setup where ``writer_dsn`` points
+                # at the control-plane DB.
+                indicator_dsn=args.dsn,
                 loader_end_date=loader_end_date,
+                walk_forward_config=walk_forward_config,
             )
 
     except Exception as e:
@@ -569,7 +683,9 @@ def _promote_top_candidates(
     lookback_days: int,
     candidates_per_strategy: int,
     dsn: Optional[str],
+    indicator_dsn: Optional[str] = None,
     loader_end_date: Optional[date] = None,
+    walk_forward_config: Optional[WalkForwardConfig] = None,
 ) -> None:
     """Insert top-N candidates per (strategy, underlying) into the review queue.
 
@@ -591,6 +707,16 @@ def _promote_top_candidates(
     loader earlier in the run pass the same date the loader used; this
     keeps the recorded ``backtest_window`` aligned with the data even
     when the run spans IST midnight.
+
+    Issue #273: when ``walk_forward_config`` is provided, each top-N
+    candidate is replayed via the same simulator against K in-sample
+    folds + an OOS holdout slice of the loaded indicator bars. Only
+    candidates that pass the stability checks are handed to the writer;
+    failing candidates are dropped with a structured log line and never
+    reach the review queue. The augmented walk-forward metrics
+    (``fold_scores``, ``oos_holdout_score``, etc.) are merged into each
+    surviving candidate's ``metrics`` JSONB so reviewers can see why
+    the gate accepted it.
     """
     if not tenant_id or not broker_account_id:
         raise SystemExit(
@@ -622,15 +748,33 @@ def _promote_top_candidates(
         broker_account_id=broker_account_id,
         dsn=dsn,
     )
+    validator = (
+        WalkForwardValidator(walk_forward_config)
+        if walk_forward_config is not None
+        else None
+    )
+    # Loader for the gate. We share one instance across all (strategy,
+    # underlying) pairs so the connection is reused. PR #289 codex
+    # round-2 P2: prefer the explicit ``indicator_dsn`` over ``dsn``
+    # (which may be the writer's control-plane DSN in a split-DB
+    # setup). Falls back to ``dsn`` for the typical single-DB case.
+    gate_loader = (
+        PostgresIndicatorLoader(dsn=indicator_dsn or dsn)
+        if validator is not None
+        else None
+    )
     logger.info(
         "Promoting top-%d candidates per (strategy, underlying) "
-        "into strategy_config_candidates (optimizer_version=%s, window=%s..%s)",
+        "into strategy_config_candidates (optimizer_version=%s, window=%s..%s, "
+        "walk_forward=%s)",
         candidates_per_strategy,
         writer.optimizer_version,
         window[0],
         window[1],
+        "ON" if validator else "OFF",
     )
     total_inserted = 0
+    total_dropped_by_gate = 0
     for strategy_name, by_underlying in (results or {}).items():
         for underlying_label, result in (by_underlying or {}).items():
             if not isinstance(result, dict) or "error" in result:
@@ -647,6 +791,37 @@ def _promote_top_candidates(
                     "Skipping %s/%s — empty top_5", strategy_name, underlying_label
                 )
                 continue
+
+            # Issue #273 Stage 5: walk-forward gate. Drop unstable
+            # candidates BEFORE handing them to the writer.
+            if validator is not None and gate_loader is not None:
+                gated_top, dropped_count = _apply_walk_forward_gate(
+                    strategy_name=strategy_name,
+                    underlying_label=underlying_label,
+                    candidates=list(top),
+                    candidates_per_strategy=candidates_per_strategy,
+                    lookback_days=lookback_days,
+                    validator=validator,
+                    loader=gate_loader,
+                    # PR #289 codex round-1 P2: thread the captured
+                    # ``loader_end_date`` into the gate's fetch so the
+                    # walk-forward validation queries the same window
+                    # ``top_5`` was originally scored on — even across
+                    # IST midnight.
+                    loader_end_date=loader_end_date,
+                )
+                total_dropped_by_gate += dropped_count
+                if not gated_top:
+                    logger.warning(
+                        "Skipping %s/%s — every candidate failed the "
+                        "walk-forward gate (%d dropped).",
+                        strategy_name,
+                        underlying_label,
+                        dropped_count,
+                    )
+                    continue
+                top = gated_top
+
             try:
                 batch = CandidateBatch(
                     strategy_name=strategy_name,
@@ -673,11 +848,148 @@ def _promote_top_candidates(
             # SQL error, broken connection mid-batch) propagates out.
             # An infrastructure failure must not be silently absorbed
             # into a "0 rows inserted" success log.
+    if gate_loader is not None:
+        try:
+            gate_loader.disconnect()
+        except Exception:
+            logger.debug("gate_loader disconnect raised", exc_info=True)
     logger.info(
-        "Candidate promotion complete: %d rows inserted across all "
-        "(strategy, underlying) pairs.",
+        "Candidate promotion complete: %d rows inserted, %d dropped by "
+        "walk-forward gate, across all (strategy, underlying) pairs.",
         total_inserted,
+        total_dropped_by_gate,
     )
+
+
+def _apply_walk_forward_gate(
+    *,
+    strategy_name: str,
+    underlying_label: str,
+    candidates: List[Dict[str, Any]],
+    candidates_per_strategy: int,
+    lookback_days: int,
+    validator: WalkForwardValidator,
+    loader: PostgresIndicatorLoader,
+    loader_end_date: Optional[date] = None,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Replay each candidate via the walk-forward validator and return
+    the survivors + the count dropped. Survivors carry the augmented
+    walk-forward metrics in ``candidate["metrics"]``.
+
+    Loader fetch happens at most once per (strategy, underlying) so the
+    K+1 simulator calls per candidate share the same dataframe.
+
+    PR #289 codex round-1 P2: ``loader_end_date`` is the IST date the
+    optimizer captured at run start. Passing it here ensures the gate's
+    validation frame is anchored on the SAME window the optimizer's
+    ``top_5`` was scored on — across IST midnight the loader's default
+    ``datetime.now(IST).date()`` would otherwise drift forward a day
+    and the gate would validate/reject candidates against the next
+    day's window.
+    """
+    score_fn = _STRATEGY_TO_SIMULATOR.get(strategy_name)
+    if score_fn is None:
+        logger.warning(
+            "walk_forward: no simulator wired for strategy=%s; "
+            "bypassing gate for %s/%s",
+            strategy_name,
+            strategy_name,
+            underlying_label,
+        )
+        return candidates[:candidates_per_strategy], 0
+    # PR #289 codex round-2 P2: per-candidate timeframe lookup so a
+    # candidate optimized on a non-default ``signal_timeframe`` /
+    # ``timeframe_seconds`` is replayed against the SAME bar stream
+    # that produced its ``top_5`` score. Cache fetches by timeframe so
+    # candidates with identical timeframes share one query.
+    default_timeframe = _STRATEGY_TIMEFRAMES.get(strategy_name, 300)
+    df_cache: Dict[int, Any] = {}
+
+    def _fetch_for_timeframe(timeframe: int):
+        if timeframe in df_cache:
+            return df_cache[timeframe]
+        # PR #289 codex round-2 P2: fail-CLOSED on loader exceptions.
+        # The previous handler logged and bypassed the gate, which let
+        # a transient DB blip silently promote unvalidated parameters.
+        # Now the exception propagates so the outer
+        # ``_promote_top_candidates`` (which catches ``CandidateWriterError``
+        # but not arbitrary exceptions per round-4 P2) aborts the run.
+        df_local = loader.fetch_indicator_bars(
+            underlying_label=underlying_label,
+            timeframe_seconds=timeframe,
+            days_back=lookback_days,
+            end_date=loader_end_date,
+        )
+        df_cache[timeframe] = df_local
+        return df_local
+
+    # Pre-fetch the strategy's default timeframe to detect "no bars at
+    # all" early. If even the default returns empty, the gate has
+    # nothing to validate against — keep the existing
+    # bypass-with-warning behaviour for that benign case (matches
+    # ``backtest_*`` empty-df handling in ``RealDataBacktester``).
+    df_default = _fetch_for_timeframe(default_timeframe)
+    if df_default is None or df_default.empty:
+        logger.warning(
+            "walk_forward: empty indicator_bars for %s/%s @ %ds — bypassing gate "
+            "(no data to validate against)",
+            strategy_name,
+            underlying_label,
+            default_timeframe,
+        )
+        return candidates[:candidates_per_strategy], 0
+
+    survivors: List[Dict[str, Any]] = []
+    dropped = 0
+    # PR #289 codex round-2 P3: validate ALL ranked candidates if we
+    # don't yet have ``candidates_per_strategy`` survivors. Previously
+    # the slice ``[: 2 * candidates_per_strategy]`` could exclude valid
+    # later candidates when the first ones failed the gate.
+    for candidate in candidates:
+        if len(survivors) >= candidates_per_strategy:
+            break
+        params = candidate.get("params") or {}
+        # PR #289 codex round-2 P2: per-candidate timeframe.
+        candidate_tf = int(
+            params.get(
+                "signal_timeframe" if strategy_name == "ema20" else "timeframe_seconds",
+                default_timeframe,
+            )
+        )
+        df = _fetch_for_timeframe(candidate_tf)
+        if df is None or df.empty:
+            logger.warning(
+                "walk_forward: empty indicator_bars for %s/%s @ %ds — "
+                "skipping candidate (no data to validate against)",
+                strategy_name,
+                underlying_label,
+                candidate_tf,
+            )
+            dropped += 1
+            continue
+        result = validator.validate(df, params, score_fn)
+        if not result.passed:
+            logger.info(
+                "walk_forward: dropped %s/%s candidate — reasons=%s "
+                "(in_sample=%.2f, median_fold=%.2f, oos=%.2f, min_fold_trades=%d)",
+                strategy_name,
+                underlying_label,
+                result.failure_reasons,
+                result.in_sample_score,
+                result.median_fold_score,
+                result.oos_holdout_score,
+                result.min_fold_trades,
+            )
+            dropped += 1
+            continue
+        augmented = dict(candidate)
+        augmented_metrics = dict(candidate.get("metrics") or {})
+        augmented_metrics.update(result.to_metrics_dict())
+        augmented["metrics"] = augmented_metrics
+        survivors.append(augmented)
+        if len(survivors) >= candidates_per_strategy:
+            break
+    return survivors, dropped
 
 
 if __name__ == "__main__":
