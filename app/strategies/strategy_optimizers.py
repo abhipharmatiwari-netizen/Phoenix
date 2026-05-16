@@ -68,6 +68,17 @@ class Ema20ParameterOptimizer:
                 min_value=15.0,
                 max_value=35.0,
             ),
+            # PR #283 codex round-12 P2: live ``_passes_adx_filter``
+            # also enforces ``min_di_spread`` when ADX is on. Sample
+            # it independently so the optimizer can find the right
+            # DI-spread threshold for each underlying instead of
+            # leaving it at a single hard-coded default.
+            ParameterSpace(
+                name="min_di_spread",
+                param_type="float",
+                min_value=0.0,
+                max_value=15.0,
+            ),
         ]
 
     @staticmethod
@@ -82,6 +93,7 @@ class Ema20ParameterOptimizer:
             "require_rsi_falling": bool(params.get("require_rsi_falling", True)),
             "use_adx_filter": bool(params.get("use_adx_filter", False)),
             "min_adx": float(params.get("min_adx", 18.0)),
+            "min_di_spread": float(params.get("min_di_spread", 0.0)),
         }
 
 

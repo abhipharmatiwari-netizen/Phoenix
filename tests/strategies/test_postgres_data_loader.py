@@ -1544,3 +1544,52 @@ def test_ecn_simulator_includes_trailing_ema_exit():
     assert "trail_exit" in src
     assert "trail_active_level" in src
     assert "trail_level" in src
+
+
+def test_pm_simulator_honours_entry_start_entry_end_single_window():
+    """PR #283 codex round-12 P2: live PM ``_within_entry_window``
+    uses ``entry_start`` / ``entry_end`` as a SINGLE window when
+    both are configured (deployed yaml: 09:20-14:45 for NIFTY /
+    BANKNIFTY), and only falls back to the morning/afternoon split
+    when those are absent. The simulator was hard-coding the split
+    and admitting 11:30-13:30 bars that live would reject."""
+    import inspect
+
+    src = inspect.getsource(RealDataBacktester._simulate_put_momentum)
+    assert "entry_start" in src and "entry_end" in src
+    assert "_SINGLE_WINDOW" in src
+    # The single-window branch must be tried BEFORE the
+    # morning/afternoon split, matching live priority.
+    single_idx = src.index("_SINGLE_WINDOW is not None")
+    split_idx = src.index("_MORNING_START <= tod <= _MORNING_END")
+    assert single_idx < split_idx, (
+        "single-window branch must be evaluated BEFORE the morning/"
+        "afternoon split, matching live ``_within_entry_window`` "
+        "priority (put_momentum_scalper.py:790)"
+    )
+
+
+def test_ema20_param_space_samples_min_di_spread():
+    """PR #283 codex round-12 P2: now that the EMA20 simulator
+    enforces ``min_di_spread`` when ADX is on, the optimizer must
+    sample it so candidates discover the right DI-spread threshold
+    instead of being scored against the single hard-coded default."""
+    from app.strategies.strategy_optimizers import Ema20ParameterOptimizer
+
+    spaces = {s.name for s in Ema20ParameterOptimizer.get_parameter_spaces()}
+    assert "min_di_spread" in spaces, (
+        "EMA20 param space must include min_di_spread now that the "
+        "real-data simulator reads it"
+    )
+    formatted = Ema20ParameterOptimizer.format_params({
+        "ema_period": 20,
+        "signal_timeframe": 300,
+        "sl_pct": 0.10,
+        "tp_pct": 0.30,
+        "min_atr": 1.0,
+        "use_adx_filter": True,
+        "min_adx": 20.0,
+        "min_di_spread": 5.5,
+    })
+    assert "min_di_spread" in formatted
+    assert formatted["min_di_spread"] == 5.5

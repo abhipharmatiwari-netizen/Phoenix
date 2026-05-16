@@ -1136,16 +1136,51 @@ class RealDataBacktester:
                 ist_time_of_day = None
 
         from datetime import time as _time
-        _MORNING_START = _time(9, 20)
-        _MORNING_END = _time(11, 30)
-        _AFTERNOON_START = _time(13, 30)
-        _AFTERNOON_END = _time(15, 0)
-        _EOD = _time(15, 20)
+
+        def _parse_hhmm_pm(s, default):
+            try:
+                hh, mm = s.split(":")
+                return _time(int(hh), int(mm))
+            except Exception:
+                return default
+
+        # PR #283 codex round-12 P2: live PM ``_within_entry_window``
+        # (put_momentum_scalper.py:790) checks ``entry_start`` /
+        # ``entry_end`` FIRST and only falls back to the
+        # morning/afternoon split when those are NOT configured. The
+        # deployed yaml for NIFTY / BANKNIFTY uses the single-window
+        # path with ``09:20`` / ``14:45``. The previous hard-coded
+        # split was admitting bars between 11:30 and 13:30 IST that
+        # live would reject.
+        entry_start_str = params.get("entry_start")
+        entry_end_str = params.get("entry_end")
+        if entry_start_str and entry_end_str:
+            _SINGLE_WINDOW = (
+                _parse_hhmm_pm(str(entry_start_str), _time(9, 20)),
+                _parse_hhmm_pm(str(entry_end_str), _time(14, 45)),
+            )
+        else:
+            _SINGLE_WINDOW = None
+        _MORNING_START = _parse_hhmm_pm(
+            str(params.get("morning_start", "09:20")), _time(9, 20)
+        )
+        _MORNING_END = _parse_hhmm_pm(
+            str(params.get("morning_end", "11:30")), _time(11, 30)
+        )
+        _AFTERNOON_START = _parse_hhmm_pm(
+            str(params.get("afternoon_start", "13:30")), _time(13, 30)
+        )
+        _AFTERNOON_END = _parse_hhmm_pm(
+            str(params.get("afternoon_end", "15:00")), _time(15, 0)
+        )
+        _EOD = _parse_hhmm_pm(str(params.get("eod", "15:20")), _time(15, 20))
 
         def _within_entry_window(idx: int) -> bool:
             if ist_time_of_day is None:
                 return True  # synthetic / unparseable timestamps — skip gate
             tod = ist_time_of_day.iloc[idx]
+            if _SINGLE_WINDOW is not None:
+                return _SINGLE_WINDOW[0] <= tod <= _SINGLE_WINDOW[1]
             return (
                 _MORNING_START <= tod <= _MORNING_END
                 or _AFTERNOON_START <= tod <= _AFTERNOON_END
