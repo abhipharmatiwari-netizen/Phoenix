@@ -174,7 +174,7 @@ Prepare the host output directory before the first run:
 
 ```bash
 sudo mkdir -p /opt/phoenix/optimizer/output
-sudo chown 1000:1000 /opt/phoenix/optimizer/output
+sudo chown 100:100 /opt/phoenix/optimizer/output
 ```
 
 Verify the profile wiring without starting live containers:
@@ -236,6 +236,41 @@ sudo ls -lh /opt/phoenix/optimizer/output/
 ```
 
 `scripts/optimizer-precheck.sh` fails the service before the compose run if the current IST time is in the 09:00-15:35 NSE guard window, if the optimizer lock is already held, or if the backend logs contain a recent order placement marker.
+
+### Conditional Backend Reload After Approval
+
+Approved optimizer candidates update `strategy_configs.params`, but the live backend only consumes those params after a backend reload. The repo tracks a separate 09:00 IST timer that reloads only when the prior IST day produced at least one `strategy_config_candidates.status = 'promoted'` row.
+
+Install the reload timer from the deployed checkout:
+
+```bash
+cd /opt/phoenix/app
+sudo scripts/install-backend-reload-systemd.sh
+```
+
+Expected evidence:
+
+```bash
+systemctl status phoenix-backend-reload.timer
+systemctl list-timers phoenix-backend-reload.timer
+```
+
+The service writes combined stdout/stderr to `/opt/phoenix/logs/backend-reload.log`, rotated by `/etc/logrotate.d/phoenix-backend-reload`.
+
+Operational commands:
+
+```bash
+# Disable scheduled reloads.
+sudo systemctl disable --now phoenix-backend-reload.timer
+
+# Force one guarded reload check.
+sudo systemctl start phoenix-backend-reload.service
+
+# Read reload decisions and health evidence.
+sudo tail -n 200 /opt/phoenix/logs/backend-reload.log
+```
+
+`scripts/backend-reload-if-needed.sh` fails closed if `phoenix-oci-backend` is not running, if it cannot query promoted candidates, if the admin API key is unavailable inside the backend container, if any broker account reports a non-zero position, if any broker account reports a non-terminal order, or if the backend does not return to healthy within 60 seconds after restart. Set `OPTIMIZER_BACKEND_RELOAD_DISABLED=true` in `/opt/phoenix/phoenix-deploy.env` to skip reload checks without removing the timer.
 
 ## Validation
 

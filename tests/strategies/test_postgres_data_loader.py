@@ -1991,9 +1991,10 @@ def test_loader_preserves_nan_for_ema_columns():
     # Preserve-NaN branch must NOT call fillna(0).
     preserve_idx = src.index("_PRESERVE_NAN")
     branch = src[preserve_idx:preserve_idx + 800]
-    # Inside the preserve-branch the code should not have ``.fillna(0)``
-    # — only ``.fillna(method="ffill")``.
-    assert 'fillna(method="ffill")' in branch
+    # Inside the preserve-branch the code should not have ``.fillna(0)``.
+    # Use ``.ffill()`` instead of ``fillna(method="ffill")`` so the loader
+    # works on the dataframe stack deployed to the OCI VM.
+    assert ".ffill()" in branch
 
 
 def test_ema20_simulator_starts_at_bar_zero_when_persisted_ema_loaded():

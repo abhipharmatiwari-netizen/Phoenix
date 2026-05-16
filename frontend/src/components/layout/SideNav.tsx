@@ -10,6 +10,7 @@ import {
   BarChart2,
   DollarSign,
   Settings,
+  GitPullRequest,
   Heart,
 } from 'react-feather';
 import './SideNav.css';
@@ -70,6 +71,12 @@ const SideNav: React.FC = () => {
           <NavLink to="/control-tower">
             <Settings className="nav-icon" />
             Control Tower
+          </NavLink>
+        </li>
+        <li>
+          <NavLink to="/admin/strategy-candidates">
+            <GitPullRequest className="nav-icon" />
+            Candidates
           </NavLink>
         </li>
         <li>

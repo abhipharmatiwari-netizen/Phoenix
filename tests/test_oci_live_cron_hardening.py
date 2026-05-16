@@ -95,6 +95,7 @@ def test_optimizer_systemd_timer_and_service_are_profile_scoped() -> None:
     assert "OnCalendar=*-*-* 23:45:00 Asia/Kolkata" in timer
     assert "Persistent=true" in timer
     assert "systemctl enable --now phoenix-optimizer.timer" in installer
+    assert "chown 100:100 /opt/phoenix/optimizer/output" in installer
     assert "ln -sfn \"$APP_DIR/ops/systemd/phoenix-optimizer.service\"" in installer
     assert "/opt/phoenix/logs/optimizer.log" in logrotate
     assert "copytruncate" in logrotate
@@ -108,6 +109,39 @@ def test_optimizer_precheck_fails_closed_for_market_hours_orders_and_lock() -> N
     assert "docker logs --since 5m phoenix-oci-backend" in script
     assert "order_placed|ORDER_PLACED" in script
     assert "optimizer blocked" in script
+
+
+def test_backend_reload_timer_is_conditional_and_fail_closed() -> None:
+    script = _read("scripts/backend-reload-if-needed.sh")
+    service = _read("ops/systemd/phoenix-backend-reload.service")
+    timer = _read("ops/systemd/phoenix-backend-reload.timer")
+    installer = _read("scripts/install-backend-reload-systemd.sh")
+    logrotate = _read("ops/logrotate/phoenix-backend-reload")
+
+    assert "OPTIMIZER_BACKEND_RELOAD_DISABLED=true" in script
+    assert "status = 'promoted'" in script
+    assert "Asia/Kolkata" in script
+    assert "BACKEND_RELOAD_LOCK_HELD=true flock -n \"$LOCK_FILE\" \"$0\" \"$@\"" in script
+    assert "no promoted candidates from the previous IST day; backend reload skipped" in script
+    assert 'request_json("/admin/broker-accounts")' in script
+    assert "/tenant/me/accounts/{account_path}/positions" in script
+    assert "/tenant/me/accounts/{account_path}/orders" in script
+    assert "TERMINAL_ORDER_STATUSES" in script
+    assert "open positions or orders detected; refusing backend reload" in script
+    assert "restart backend" in script
+    assert "within 60s after reload" in script
+    assert "docker inspect -f" in script
+
+    assert "/usr/bin/flock -n /opt/phoenix/state/backend-reload.lock" in service
+    assert "Environment=CONTROL_PLANE_PG_PASSWORD_HOST=dummy" in service
+    assert "Environment=BACKEND_RELOAD_LOCK_HELD=true" in service
+    assert "StandardOutput=append:/opt/phoenix/logs/backend-reload.log" in service
+    assert "OnCalendar=*-*-* 09:00:00 Asia/Kolkata" in timer
+    assert "Persistent=true" in timer
+    assert "systemctl enable --now phoenix-backend-reload.timer" in installer
+    assert "ln -sfn \"$APP_DIR/ops/systemd/phoenix-backend-reload.service\"" in installer
+    assert "/opt/phoenix/logs/backend-reload.log" in logrotate
+    assert "copytruncate" in logrotate
 
 
 def test_oci_build_scripts_build_backend_and_nginx_image_pair() -> None:
@@ -147,3 +181,9 @@ def test_oci_runbook_documents_image_pair_and_observe_only_watchdog() -> None:
     assert "systemctl disable --now phoenix-optimizer.timer" in runbook
     assert "systemctl start phoenix-optimizer.service" in runbook
     assert "/opt/phoenix/logs/optimizer.log" in runbook
+    assert "Conditional Backend Reload After Approval" in runbook
+    assert "install-backend-reload-systemd.sh" in runbook
+    assert "systemctl disable --now phoenix-backend-reload.timer" in runbook
+    assert "systemctl start phoenix-backend-reload.service" in runbook
+    assert "/opt/phoenix/logs/backend-reload.log" in runbook
+    assert "OPTIMIZER_BACKEND_RELOAD_DISABLED=true" in runbook

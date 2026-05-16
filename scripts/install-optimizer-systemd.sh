@@ -18,6 +18,7 @@ fi
 }
 
 install -d /opt/phoenix/state /opt/phoenix/logs /opt/phoenix/optimizer/output
+chown 100:100 /opt/phoenix/optimizer/output
 chmod +x "$APP_DIR/scripts/optimizer-precheck.sh"
 
 ln -sfn "$APP_DIR/ops/systemd/phoenix-optimizer.service" \

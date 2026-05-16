@@ -330,9 +330,9 @@ class PostgresIndicatorLoader:
                         # Forward-fill warmed values from earlier in
                         # the window, but DO NOT mask remaining NaNs
                         # with 0.
-                        df[col] = df[col].fillna(method="ffill")
+                        df[col] = df[col].ffill()
                     else:
-                        df[col] = df[col].fillna(method="ffill").fillna(0)
+                        df[col] = df[col].ffill().fillna(0)
 
             logger.info(
                 f"Loaded {len(df)} bars for {underlying_label} @ {timeframe_seconds}s "

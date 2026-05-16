@@ -110,6 +110,36 @@ interface ControlTowerTogglePayload {
   enabled: boolean;
 }
 
+export interface StrategyCandidateDiff {
+  current: unknown;
+  candidate: unknown;
+}
+
+export interface StrategyCandidate {
+  candidate_id: string;
+  strategy_config_id: string;
+  tenant_id: string;
+  broker_account_id: string;
+  strategy_id: string;
+  enabled: boolean;
+  status: 'pending' | 'approved' | 'rejected' | 'promoted' | 'superseded' | string;
+  params: Record<string, unknown>;
+  current_params: Record<string, unknown>;
+  param_diff: Record<string, StrategyCandidateDiff>;
+  metrics: Record<string, unknown>;
+  backtest_window: unknown;
+  optimizer_version: string;
+  created_at: string;
+  reviewed_at: string | null;
+  reviewed_by: string | null;
+  strategy_updated_at: string | null;
+}
+
+export interface StrategyCandidateListResponse {
+  count: number;
+  candidates: StrategyCandidate[];
+}
+
 interface RequestOptions {
   path: string;
   method?: 'GET' | 'POST';
@@ -659,6 +689,40 @@ export const ControlTowerService = {
       path: bffPath('/api/control_tower/toggle'),
       method: 'POST',
       body: payload,
+    });
+  },
+};
+
+export const StrategyCandidateService = {
+  list(params?: {
+    status?: string;
+    limit?: number;
+  }): Promise<StrategyCandidateListResponse> {
+    return request<StrategyCandidateListResponse>({
+      path: bffPath('/admin/strategy-candidates'),
+      query: params as Record<string, string | number | boolean | undefined>,
+    });
+  },
+
+  get(candidateId: string): Promise<StrategyCandidate> {
+    return request<StrategyCandidate>({
+      path: bffPath(`/admin/strategy-candidates/${candidateId}`),
+    });
+  },
+
+  approve(candidateId: string, reason?: string): Promise<StrategyCandidate> {
+    return request<StrategyCandidate>({
+      path: bffPath(`/admin/strategy-candidates/${candidateId}/approve`),
+      method: 'POST',
+      body: { reason: reason || null },
+    });
+  },
+
+  reject(candidateId: string, reason?: string): Promise<StrategyCandidate> {
+    return request<StrategyCandidate>({
+      path: bffPath(`/admin/strategy-candidates/${candidateId}/reject`),
+      method: 'POST',
+      body: { reason: reason || null },
     });
   },
 };

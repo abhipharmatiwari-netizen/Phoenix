@@ -11,6 +11,7 @@ import Trades from './pages/Trades';
 import Pnl from './pages/Pnl';
 import ControlTower from './pages/ControlTower';
 import Safety from './pages/Safety';
+import StrategyCandidates from './pages/StrategyCandidates';
 import Login from './pages/Login';
 import NotFound from './pages/NotFound';
 import { AuthProvider } from './auth/AuthContext';
@@ -34,6 +35,7 @@ function App() {
               <Route path="/trades" element={<Trades />} />
               <Route path="/pnl" element={<Pnl />} />
               <Route path="/control-tower" element={<ControlTower />} />
+              <Route path="/admin/strategy-candidates" element={<StrategyCandidates />} />
               <Route path="/safety" element={<Safety />} />
             </Route>
           </Route>

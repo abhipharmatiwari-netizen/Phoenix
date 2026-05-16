@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Phoenix conditional backend reload after optimizer promotion
+
+[Timer]
+OnCalendar=*-*-* 09:00:00 Asia/Kolkata
+Persistent=true
+Unit=phoenix-backend-reload.service
+
+[Install]
+WantedBy=timers.target

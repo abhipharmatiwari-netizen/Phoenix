@@ -1,0 +1,17 @@
+[Unit]
+Description=Conditionally reload Phoenix backend after optimizer promotion
+Requires=docker.service
+After=docker.service network-online.target phoenix-optimizer.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/phoenix/app
+EnvironmentFile=/opt/phoenix/phoenix-deploy.env
+Environment=CONTROL_PLANE_PG_PASSWORD_HOST=dummy
+Environment=BACKEND_RELOAD_LOCK_HELD=true
+ExecStartPre=/bin/mkdir -p /opt/phoenix/state /opt/phoenix/logs
+ExecStart=/usr/bin/flock -n /opt/phoenix/state/backend-reload.lock /opt/phoenix/app/scripts/backend-reload-if-needed.sh
+StandardOutput=append:/opt/phoenix/logs/backend-reload.log
+StandardError=append:/opt/phoenix/logs/backend-reload.log
+TimeoutStartSec=180
