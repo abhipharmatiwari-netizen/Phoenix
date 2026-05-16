@@ -1,5 +1,5 @@
 #!/bin/sh
-# Pull the image pinned in phoenix-deploy.env and restart the backend container.
+# Pull the images pinned in phoenix-deploy.env and restart the web stack.
 # Run this after build_and_push_image.sh or build_push_ip.sh has pushed a new image.
 #
 # Usage: sh scripts/ops/redeploy_backend.sh
@@ -30,13 +30,13 @@ if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
 fi
 
 echo
-echo "=== Pull new image ==="
+echo "=== Pull new image pair ==="
 CONTROL_PLANE_PG_PASSWORD_HOST=dummy \
   docker compose \
     -f "$COMPOSE_FILE" \
     -f "$OVERRIDE_FILE" \
     --env-file "$ENV_FILE" \
-    pull backend
+    pull backend nginx
 
 echo
 echo "=== Restart backend ==="
@@ -45,7 +45,7 @@ CONTROL_PLANE_PG_PASSWORD_HOST=dummy \
     -f "$COMPOSE_FILE" \
     -f "$OVERRIDE_FILE" \
     --env-file "$ENV_FILE" \
-    up -d --no-deps --no-build backend
+    up -d --no-deps --no-build --force-recreate backend
 
 echo
 echo "=== Wait for /readyz (up to ${HEALTH_TIMEOUT}s) ==="
@@ -68,9 +68,19 @@ if [ "$STATUS" != "200" ]; then
 fi
 
 echo
+echo "=== Recreate nginx on the same IMAGE_TAG ==="
+CONTROL_PLANE_PG_PASSWORD_HOST=dummy \
+  docker compose \
+    -f "$COMPOSE_FILE" \
+    -f "$OVERRIDE_FILE" \
+    --env-file "$ENV_FILE" \
+    up -d --no-deps --no-build --force-recreate nginx
+
+echo
 echo "=== Running container image ==="
 docker inspect phoenix-oci-backend --format "{{.Config.Image}}"
-docker ps --filter name=phoenix-oci-backend --format "table {{.Names}}\t{{.Status}}"
+docker inspect phoenix-oci-web --format "{{.Config.Image}}"
+docker ps --filter name=phoenix-oci --format "table {{.Names}}\t{{.Status}}"
 
 echo
 echo "Redeploy complete."

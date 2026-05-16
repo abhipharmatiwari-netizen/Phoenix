@@ -459,8 +459,6 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
     security_opt:
       - no-new-privileges:true
     mem_limit: "64m"
@@ -471,31 +469,22 @@ services:
       - -c
       - |
           FAILS=0
-          STOPPED=0
-          RECOVER=0
-          echo "[watchdog] started — polling http://backend:8080/health every 10s"
+          DOWN=0
+          echo "[watchdog] started - observe-only polling http://backend:8080/health every 10s"
           while true; do
             if wget -q -O /dev/null --timeout=5 http://backend:8080/health 2>/dev/null; then
-              FAILS=0
-              if [ "$$STOPPED" = "1" ]; then
-                RECOVER=$$((RECOVER+1))
-                echo "[watchdog] backend healthy (recover $$RECOVER/2)"
-                if [ "$$RECOVER" -ge 2 ]; then
-                  echo "[watchdog] backend recovered — starting nginx"
-                  docker start phoenix-oci-web || true
-                  STOPPED=0
-                  RECOVER=0
-                fi
+              if [ "$$DOWN" = "1" ]; then
+                echo "[watchdog] backend recovered - nginx action skipped (observe-only)"
               fi
+              FAILS=0
+              DOWN=0
             else
-              RECOVER=0
-              if [ "$$STOPPED" = "0" ]; then
+              if [ "$$DOWN" = "0" ]; then
                 FAILS=$$((FAILS+1))
                 echo "[watchdog] backend fail $$FAILS/3"
                 if [ "$$FAILS" -ge 3 ]; then
-                  echo "[watchdog] backend down — stopping nginx"
-                  docker stop phoenix-oci-web || true
-                  STOPPED=1
+                  echo "[watchdog] backend down - relying on LB drain (observe-only; no container action)"
+                  DOWN=1
                   FAILS=0
                 fi
               fi

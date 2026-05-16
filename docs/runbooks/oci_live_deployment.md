@@ -24,6 +24,7 @@ It does not approve Cloud Run, Firestore authority, repo-stored secrets, local e
 
 - OCI VM can pull from OCIR.
 - `IMAGE_TAG` is a specific git SHA, not `latest`.
+- The VM has both backend and nginx images for `IMAGE_TAG` locally before any scheduled start. `scripts/start-phoenix.sh` refuses to run `docker compose up` if either image is missing.
 - Postgres endpoint is reachable from the backend and migrator containers.
 - `CONTROL_PLANE_PG_SSLMODE=require` for remote Postgres. Do not set `LIVE_PG_SSL_SKIP_CHECK=true` on remote/cloud Postgres.
 - `/run/secrets/` contains non-empty `admin_api_key`, `auth_token_secret`, `control_plane_pg_password`, and `angel_postback_token`.
@@ -80,9 +81,11 @@ OCIR_NAMESPACE=<ns> OCIR_USERNAME=<ns>/<domain>/<user> \
 
 Both scripts:
 - Verify pre-conditions before building
-- Build a `linux/amd64` image tagged with the current git SHA
-- Push to OCIR and update `IMAGE_TAG` in `phoenix-deploy.env`
-- Print the SHA on completion — they do **not** restart the container
+- Build the backend and nginx `linux/amd64` images tagged with the same current git SHA
+- Push both images to OCIR and update `IMAGE_TAG` in `phoenix-deploy.env`
+- Print the SHA on completion; they do **not** restart containers
+
+Do not update `IMAGE_TAG` after building only one service image. The backend and nginx images are a release pair; splitting the build can leave the next scheduled start unable to recreate nginx.
 
 After push, **separately** run:
 
@@ -90,8 +93,7 @@ After push, **separately** run:
 sh /opt/phoenix/app/scripts/ops/redeploy_backend.sh
 ```
 
-`redeploy_backend.sh` prompts for confirmation, pulls the image pinned in `phoenix-deploy.env`,
-restarts the backend, and polls `/readyz` with a 120-second timeout before returning.
+`redeploy_backend.sh` prompts for confirmation, pulls the backend and nginx images pinned in `phoenix-deploy.env`, restarts the backend, polls `/readyz` with a 120-second timeout, then recreates nginx on the same `IMAGE_TAG`.
 
 ---
 
@@ -159,6 +161,10 @@ For scheduled starts and stops, install the repo-tracked scripts as VM cron jobs
 sudo /opt/phoenix/start-phoenix.sh
 sudo /opt/phoenix/stop-phoenix.sh
 ```
+
+Scheduled starts fail fast before any compose start/recreate action if the pinned backend or nginx image is not already present locally. For OCIR deployments, `redeploy_backend.sh` performs the pull. For local-only recovery tags such as `local-<sha>`, build both `phoenix-local-backend:<tag>` and `phoenix-local-nginx:<tag>` before the next cron start.
+
+The `backend-watchdog` service is observe-only. It logs backend health transitions but does not start or stop nginx; backend-down traffic draining is handled by nginx `/readyz` and the OCI load balancer health check.
 
 ## Validation
 

@@ -1,6 +1,6 @@
 #!/bin/sh
-# Build a new OCIR backend image on the VM and push it.
-# This script only builds and pushes — it does NOT redeploy.
+# Build new OCIR backend and nginx images on the VM and push them.
+# This script only builds and pushes; it does NOT redeploy.
 # To deploy after pushing, run: sh scripts/ops/redeploy_backend.sh
 #
 # Required env vars:
@@ -17,7 +17,10 @@ APP_DIR="/opt/phoenix/app"
 
 # Extract namespace from the running image so it does not need to be hard-coded.
 RUNNING_IMAGE=$(docker inspect phoenix-oci-backend --format "{{.Config.Image}}" 2>/dev/null | sed 's|:.*||')
-OCIR_NAMESPACE=$(echo "$RUNNING_IMAGE" | awk -F/ '{print $2}')
+OCIR_NAMESPACE="${OCIR_NAMESPACE:-}"
+if [ -z "$OCIR_NAMESPACE" ]; then
+  OCIR_NAMESPACE=$(echo "$RUNNING_IMAGE" | awk -F/ '{print $2}')
+fi
 if [ -z "${OCIR_NAMESPACE:-}" ]; then
   echo "ERROR: Cannot determine OCIR namespace from running container."
   echo "  Set OCIR_NAMESPACE env var explicitly, or ensure phoenix-oci-backend is running."
@@ -25,12 +28,14 @@ if [ -z "${OCIR_NAMESPACE:-}" ]; then
 fi
 
 GIT_SHA=$(git -C "$APP_DIR" rev-parse HEAD)
-IMAGE_BASE="${OCIR_REGISTRY}/${OCIR_NAMESPACE}/phoenix-prod/backend"
-IMAGE_TAG="${IMAGE_BASE}:${GIT_SHA}"
+IMAGE_BASE="${OCIR_REGISTRY}/${OCIR_NAMESPACE}/phoenix-prod"
+BACKEND_IMAGE_TAG="${IMAGE_BASE}/backend:${GIT_SHA}"
+NGINX_IMAGE_TAG="${IMAGE_BASE}/nginx:${GIT_SHA}"
 
 echo "=== Build config ==="
 echo "SHA:    $GIT_SHA"
-echo "Image:  $IMAGE_TAG"
+echo "Backend image: $BACKEND_IMAGE_TAG"
+echo "nginx image:   $NGINX_IMAGE_TAG"
 echo "OCIR:   $OCIR_REGISTRY"
 echo "ns:     $OCIR_NAMESPACE"
 
@@ -55,8 +60,17 @@ echo
 echo "=== Build and push backend image ==="
 docker buildx build \
     --platform linux/amd64 \
-    -t "${IMAGE_TAG}" \
+    -t "${BACKEND_IMAGE_TAG}" \
     -f "${APP_DIR}/Dockerfile" \
+    --push \
+    "${APP_DIR}"
+
+echo
+echo "=== Build and push nginx image ==="
+docker buildx build \
+    --platform linux/amd64 \
+    -t "${NGINX_IMAGE_TAG}" \
+    -f "${APP_DIR}/nginx/Dockerfile" \
     --push \
     "${APP_DIR}"
 
@@ -67,4 +81,4 @@ grep "IMAGE_TAG" /opt/phoenix/phoenix-deploy.env
 
 echo
 echo "Build and push complete. SHA: $GIT_SHA"
-echo "Image is in OCIR. Run 'sh scripts/ops/redeploy_backend.sh' to deploy."
+echo "Backend and nginx images are in OCIR. Run 'sh scripts/ops/redeploy_backend.sh' to deploy."
