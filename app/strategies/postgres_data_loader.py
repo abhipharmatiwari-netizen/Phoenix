@@ -487,8 +487,17 @@ class RealDataBacktester:
         Live exit contract (approximated here):
           - sl_atr / tp_atr:  ATR-scaled stop and take-profit on the
                               underlying CE buy (long).
-          - ema_fail_bars:    exit after N consecutive bars where
-                              close < ema20 - ema_atr_buffer * atr.
+          - ema_fail_bars + ema_fail_buffer_atr:  exit after N
+                              consecutive bars where
+                              close < ema20 - ema_fail_buffer_atr * atr.
+                              PR #283 codex round-6 P2: the EXIT
+                              buffer is a separate live config field
+                              (``ema_fail_buffer_atr``); previously
+                              the simulator reused the entry buffer
+                              (``ema_atr_buffer``) for the exit,
+                              tying two independently-tunable knobs
+                              together and ranking candidates with
+                              the wrong fail threshold.
 
         Volume gate (``vol_ok``) and the MACD near-cross fallback are
         intentionally omitted — the baseline indicator_bars schema has
@@ -503,6 +512,11 @@ class RealDataBacktester:
         tp_atr = float(params.get("tp_atr", 2.5))
         macd_hist_min = float(params.get("macd_hist_min", 0.30))
         ema_atr_buffer = float(params.get("ema_atr_buffer", 0.05))
+        # PR #283 codex round-6 P2: live ECN exit uses a separate
+        # ``ema_fail_buffer_atr``. Default mirrors the live config's
+        # 0.10 so a candidate that doesn't tune this field continues
+        # to score on the same threshold the live strategy would.
+        ema_fail_buffer_atr = float(params.get("ema_fail_buffer_atr", 0.10))
         min_adx = float(params.get("min_adx", 20.0))
         min_di_spread = float(params.get("min_di_spread", 5.0))
         ema_fail_bars = int(params.get("ema_fail_bars", 3))
@@ -636,7 +650,7 @@ class RealDataBacktester:
             # Exit: ATR-based SL / TP on a long CE (proxied by underlying move).
             sl_price = entry_price - sl_atr * entry_atr
             tp_price = entry_price + tp_atr * entry_atr
-            below_ema_threshold = close_i < (ema20_i - ema_atr_buffer * atr_i)
+            below_ema_threshold = close_i < (ema20_i - ema_fail_buffer_atr * atr_i)
             ema_fail_count = ema_fail_count + 1 if below_ema_threshold else 0
             ema_fail_exit = ema_fail_count >= ema_fail_bars
 
@@ -748,6 +762,12 @@ class RealDataBacktester:
         entry_price = 0.0
         bars_in_trade = 0
         initial_r_pct = 0.0  # option-premium % risk distance from entry
+        # PR #283 codex round-6 P2: track the breakdown high at entry so
+        # ``_maybe_invalidate`` can fire if the underlying reverses back
+        # above it OR back above EMA20 — both are live exit triggers
+        # (``put_momentum_scalper.py``) that arrive BEFORE the SL /
+        # final / time-stop checks.
+        breakdown_high_at_entry = 0.0
 
         start = max(50, lookback_breakdown_bars + rsi_falling_bars_required + 1)
         for i in range(start, len(df)):
@@ -808,6 +828,13 @@ class RealDataBacktester:
                     # option-premium SL % is the user knob; that's the
                     # initial R the final TP target is scaled to.
                     initial_r_pct = option_sl_pct * 100.0
+                    # PR #283 codex round-6 P2: live ``OptionPosition``
+                    # captures the breakdown-high (swing high BEFORE
+                    # the breakdown bar). Used by ``_maybe_invalidate``
+                    # below.
+                    breakdown_high_at_entry = float(
+                        df["high"].iloc[i - lookback_breakdown_bars:i].max()
+                    )
                 continue
 
             bars_in_trade += 1
@@ -816,19 +843,27 @@ class RealDataBacktester:
             underlying_pct = ((entry_price - close_i) / entry_price) * 100
             option_pnl_pct = underlying_pct * _DELTA_PROXY
 
+            # PR #283 codex round-6 P2: live ``_maybe_invalidate`` exits
+            # before SL / final / time stops when the underlying reverses
+            # back above the breakdown high OR back above EMA20.
+            invalidation = (
+                close_i > breakdown_high_at_entry
+                or close_i > ema20_i
+            )
             stop_hit = option_pnl_pct <= -initial_r_pct
             final_hit = option_pnl_pct >= final_tp_r * initial_r_pct
             time_stop = bars_in_trade >= max_bars_in_trade or i == len(df) - 1
 
             # PR #283 codex round-4 P2: live ``on_tick`` only exits on
-            # stop / final_tp / EOD. Partial-tp tagging never closes a
-            # position in live trading, so booking a half-sized partial
-            # exit here inflated trade counts and PnL for parameter sets
-            # that frequently tagged ``partial_tp_r``. Reference unused
+            # stop / final_tp / EOD (plus the round-6 invalidation
+            # above). Partial-tp tagging never closes a position in
+            # live trading, so booking a half-sized partial exit here
+            # inflated trade counts and PnL for parameter sets that
+            # frequently tagged ``partial_tp_r``. Reference unused
             # locals to keep linters quiet without altering behaviour.
             _ = partial_tp_r
 
-            if stop_hit or final_hit or time_stop:
+            if invalidation or stop_hit or final_hit or time_stop:
                 in_trade = False
                 trades.append({
                     "entry": entry_price,

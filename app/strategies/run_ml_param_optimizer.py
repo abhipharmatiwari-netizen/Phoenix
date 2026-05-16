@@ -39,11 +39,12 @@ def get_ema20_parameter_spaces() -> list[ParameterSpace]:
             min_value=10,
             max_value=50,
         ),
-        ParameterSpace(
-            name="signal_timeframe",
-            param_type="categorical",
-            categories=[60, 300, 600],  # 1min, 5min, 10min
-        ),
+        # PR #283 codex round-6 P2: ``signal_timeframe`` was also dropped
+        # from the standalone synthetic param space — ``Ema20Backtester.
+        # backtest()`` never reads it (runs over its fixed OHLC frame),
+        # so a "best timeframe" reported by this script would have been
+        # arbitrary noise. The multi-strategy real-data optimizer keeps
+        # the knob (its loader honours ``signal_timeframe``).
 
         # Risk/reward
         ParameterSpace(

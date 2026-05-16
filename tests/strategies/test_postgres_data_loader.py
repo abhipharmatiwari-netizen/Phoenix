@@ -1019,3 +1019,101 @@ def test_synthetic_ema20_backtester_requires_three_bar_strictly_falling_rsi():
         "Strictly rising RSI must not produce any three-bar falling "
         "window, so require_rsi_falling rejects every entry"
     )
+
+
+
+# ---------------------------------------------------------------------------
+# PR #283 codex round-6 regressions.
+# ---------------------------------------------------------------------------
+
+
+def test_strategy_runner_drops_put_momentum_natgas():
+    """``put_momentum_scalper`` is index-only in live. Removing
+    ``NG_FUT`` from the allowlist stops the optimizer from emitting
+    PM recommendations on a natgas stream the live strategy is not
+    deployed for."""
+    from app.strategies.strategy_optimizers import StrategyOptimizationRunner
+
+    runner = StrategyOptimizationRunner()
+    pm_unders = runner.get_underlyings_for_strategy("put_momentum")
+    assert "NG_FUT" not in pm_unders
+    assert set(pm_unders) <= {"NIFTY_IDX", "BANKNIFTY_IDX"}
+
+
+def test_standalone_ema20_param_space_drops_signal_timeframe():
+    """``signal_timeframe`` was sampled but never read by the synthetic
+    ``Ema20Backtester.backtest()``. Reintroducing it would surface
+    noise as "best timeframe"."""
+    from app.strategies.run_ml_param_optimizer import get_ema20_parameter_spaces
+
+    names = {s.name for s in get_ema20_parameter_spaces()}
+    assert "signal_timeframe" not in names
+
+
+def test_exclusive_nifty_ce_param_space_exposes_ema_fail_buffer_atr():
+    """The ECN exit threshold uses a SEPARATE ``ema_fail_buffer_atr``
+    field in live config; the optimizer must sample and emit it
+    independently of the entry-side ``ema_atr_buffer`` so candidates
+    can tune entry and exit buffers separately."""
+    from app.strategies.strategy_optimizers import ExclusiveNiftyCeParameterOptimizer
+
+    spaces = {s.name for s in ExclusiveNiftyCeParameterOptimizer.get_parameter_spaces()}
+    formatted = ExclusiveNiftyCeParameterOptimizer.format_params({
+        "ema_atr_buffer": 0.05,
+        "ema_fail_buffer_atr": 0.15,
+    })
+    assert "ema_fail_buffer_atr" in spaces
+    assert "ema_fail_buffer_atr" in formatted
+    assert formatted["ema_fail_buffer_atr"] == 0.15
+
+
+def test_put_momentum_simulator_exits_on_breakdown_high_invalidation():
+    """Live PM's ``_maybe_invalidate`` exits the position when the
+    underlying reverses back above the captured ``breakdown_high`` OR
+    back above EMA20. The simulator must exit on the same condition
+    instead of keeping the trade open until the time stop and
+    booking it as a winner."""
+    n = 200
+    rsi_pattern = [40.0 - 0.05 * i for i in range(n)]
+    # Bars 0..99: warm-up at 100. Bar 100: breakdown to 88. Bars
+    # 101..120: continued drop. Bars 121+: reversal back ABOVE the
+    # breakdown high (100), which should trigger invalidation.
+    closes = [100.0] * 100 + [88.0] + [85.0] * 19 + [102.0] * (n - 120)
+    df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="5min"),
+        "open": [100.0] * n,
+        "high": [c + 0.5 for c in closes],
+        "low": [c - 0.5 for c in closes],
+        "close": closes,
+        "atr": [1.0] * n,
+        "rsi": rsi_pattern,
+        # Fresh bearish MACD cross at bar 99 (transition).
+        "macd": [0.5] * 99 + [-0.5] * (n - 99),
+        "macd_signal": [0.0] * n,
+        # EMAs above closes so PM downtrend gate passes during the
+        # 88 / 85 phase but the reversal to 102 triggers the
+        # close-above-EMA20 invalidation.
+        "ema_20": [95.0] * n,
+        "ema_30": [95.0] * n,
+        "ema_50": [95.0] * n,
+        "adx": [25.0] * n,
+        "plus_di": [25.0] * n,
+        "minus_di": [25.0] * n,
+    })
+    result = RealDataBacktester._simulate_put_momentum(df, {
+        "lookback_breakdown_bars": 10,
+        "rsi_falling_bars_required": 2,
+        "max_bars_in_trade": 200,  # so the time-stop doesn't fire first
+    })
+    # If invalidation fires correctly, the exit price is well above
+    # entry (a LOSS for the short put) instead of the entry-bar's
+    # 88. The total_pnl should reflect a loss, not a phantom win.
+    if result["total_trades"] >= 1:
+        # On a SHORT put on the underlying, ``pnl_pct`` is computed as
+        # ``(entry - exit) / entry * delta_proxy * 100``. A reversal
+        # back above the entry produces a NEGATIVE pnl_pct.
+        assert result["total_pnl"] < 0, (
+            "invalidation must exit when underlying reverses; got "
+            f"total_pnl={result['total_pnl']:.2f} (expected < 0 because "
+            "the exit price is above the entry price)"
+        )

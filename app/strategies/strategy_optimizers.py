@@ -164,7 +164,18 @@ class ExclusiveNiftyCeParameterOptimizer:
                 max_value=4.0,
             ),
 
-            # EMA-failure exit (live: close < ema20 - buffer*atr for N bars).
+            # EMA-failure exit. PR #283 codex round-6 P2: live ECN uses
+            # a SEPARATE ``ema_fail_buffer_atr`` config field for the
+            # exit threshold (``close < ema20 - ema_fail_buffer_atr * atr``
+            # for N bars), distinct from the entry ``ema_atr_buffer``.
+            # Sampling and exporting them independently lets candidates
+            # tune entry and exit buffers separately, matching live.
+            ParameterSpace(
+                name="ema_fail_buffer_atr",
+                param_type="float",
+                min_value=0.0,
+                max_value=0.50,
+            ),
             ParameterSpace(
                 name="ema_fail_bars",
                 param_type="int",
@@ -186,6 +197,7 @@ class ExclusiveNiftyCeParameterOptimizer:
             "min_di_spread": float(params.get("min_di_spread", 5.0)),
             "sl_atr": float(params.get("sl_atr", 2.2)),
             "tp_atr": float(params.get("tp_atr", 2.5)),
+            "ema_fail_buffer_atr": float(params.get("ema_fail_buffer_atr", 0.10)),
             "ema_fail_bars": int(params.get("ema_fail_bars", 3)),
         }
 
@@ -317,7 +329,14 @@ class StrategyOptimizationRunner:
             },
             "put_momentum": {
                 "optimizer": PutMomentumParameterOptimizer,
-                "underlyings": ["NIFTY_IDX", "BANKNIFTY_IDX", "NG_FUT"],
+                # PR #283 codex round-6 P2: ``put_momentum_scalper`` is
+                # configured for index PE instruments (NIFTY / BANKNIFTY).
+                # ``NG_FUT`` is the natural-gas futures stream used by
+                # EMA20; the live PM strategy is not deployed for it.
+                # Leaving it in the allowlist would have surfaced PM
+                # recommendations on natgas bars that no live route can
+                # consume.
+                "underlyings": ["NIFTY_IDX", "BANKNIFTY_IDX"],
             },
         }
 
