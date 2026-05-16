@@ -22,17 +22,22 @@ class Ema20ParameterOptimizer:
         return [
             # Core trend detection
             ParameterSpace(
-                # PR #283 codex round-18 P2: limit ema_period to the
-                # EMA columns ACTUALLY emitted in ``indicator_bars``
-                # (``ema_20``, ``ema_30``, ``ema_50`` — see
-                # ``migrations/000_indicator_bars.sql``). Sampling a
-                # continuous range admitted candidates whose
-                # ``ema_period`` had no matching column, forcing the
-                # simulator to fall back to an in-memory computed EMA
-                # that diverged from what the live strategy reads.
+                # PR #283 codex round-18/19 P2: sample EMA periods
+                # that match LIVE strategy values. The categorical
+                # restriction (vs. continuous int) prevents the
+                # optimizer from emitting a period the simulator
+                # would have to compute against arbitrary in-memory
+                # data that diverges from what live persists.
+                # Includes:
+                #   - 8: NG_FUT yaml-deployed value (computed
+                #     in-memory by live since no persistent column
+                #     exists, so the simulator does the same).
+                #   - 20 / 30 / 50: persisted columns in
+                #     ``indicator_bars`` consumed by live for
+                #     NIFTY / BANKNIFTY strategies.
                 name="ema_period",
                 param_type="categorical",
-                categories=[20, 30, 50],
+                categories=[8, 20, 30, 50],
             ),
             ParameterSpace(
                 name="signal_timeframe",

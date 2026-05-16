@@ -78,7 +78,14 @@ def test_fetch_indicator_bars_query_does_not_reference_volume_column():
 
 
 def _make_bar_df(closes, indicator_default=20.0):
-    """Tiny OHLC + indicator frame for simulator unit tests."""
+    """Tiny OHLC + indicator frame for simulator unit tests.
+
+    PR #283 codex round-19 P2: EMA columns left as NaN so the
+    simulator's persisted-column-then-fallback path exercises the
+    computed-EMA fallback (which the unit tests below rely on).
+    Tests that need a populated persisted column build their own
+    frame.
+    """
     n = len(closes)
     return pd.DataFrame({
         "timestamp": pd.date_range("2026-01-01", periods=n, freq="5min"),
@@ -90,9 +97,9 @@ def _make_bar_df(closes, indicator_default=20.0):
         "rsi": [indicator_default + 30] * n,
         "macd": [0.0] * n,
         "macd_signal": [0.0] * n,
-        "ema_20": closes,
-        "ema_30": closes,
-        "ema_50": closes,
+        "ema_20": [float("nan")] * n,
+        "ema_30": [float("nan")] * n,
+        "ema_50": [float("nan")] * n,
         "adx": [25.0] * n,
         "plus_di": [25.0] * n,
         "minus_di": [25.0] * n,
@@ -1889,22 +1896,39 @@ def test_pm_format_params_uses_yaml_optimized_defaults():
     assert out["max_bars_in_trade"] == 14
 
 
-def test_ema20_period_sampled_only_from_emitted_columns():
-    """PR #283 codex round-18 P2: indicator_bars persists only
-    ``ema_20``, ``ema_30``, ``ema_50`` (see
-    ``migrations/000_indicator_bars.sql``). Sampling a continuous
-    range admits candidates whose ``ema_period`` has no matching
-    column, forcing the simulator to fall back to an in-memory
-    EMA that diverges from what the live strategy reads."""
+def test_ema20_period_sampled_from_live_values():
+    """PR #283 codex round-18/19 P2: ``ema_period`` is categorical
+    over the set of LIVE-strategy values, not a continuous int.
+    Includes:
+      - 8 (NG_FUT yaml-deployed, computed in-memory by live)
+      - 20 / 30 / 50 (persisted ema_20/30/50 columns)
+    Sampling a continuous int range admits candidates whose period
+    has no matching live behaviour."""
     from app.strategies.strategy_optimizers import Ema20ParameterOptimizer
 
     spaces = {s.name: s for s in Ema20ParameterOptimizer.get_parameter_spaces()}
     period_space = spaces["ema_period"]
     assert period_space.param_type == "categorical", (
         "ema_period must be categorical so the optimizer only samples "
-        "values that match emitted indicator columns"
+        "values that match live-strategy behaviour"
     )
-    assert set(period_space.categories) == {20, 30, 50}, (
-        f"ema_period categories must match emitted ema_20/30/50; "
-        f"got {period_space.categories}"
+    assert set(period_space.categories) == {8, 20, 30, 50}, (
+        f"ema_period categories must include NG_FUT's 8 plus persisted "
+        f"20/30/50; got {period_space.categories}"
     )
+
+
+def test_ema20_simulator_prefers_persisted_ema_column_when_available():
+    """PR #283 codex round-19 P2: when the sampled ``ema_period``
+    matches a persisted column (``ema_20``/``ema_30``/``ema_50``)
+    the simulator must read that column instead of recomputing the
+    EMA in-memory. Live strategies read these columns from the
+    streamed indicator pipeline, and recomputing from only the
+    fetched window produces a different warmup tail than live."""
+    import inspect
+
+    src = inspect.getsource(RealDataBacktester._simulate_ema20)
+    # Must reference ``ema_{period}`` lookup against the dataframe.
+    assert 'f"ema_{int(ema_period)}"' in src
+    # Must coalesce per-bar with a computed series for sparse rows.
+    assert "combine_first" in src

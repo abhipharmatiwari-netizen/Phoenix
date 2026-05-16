@@ -596,8 +596,22 @@ class RealDataBacktester:
                 return False
             return ist_tod.iloc[idx] >= square_off_t
 
-        # Calculate EMA
-        df["ema"] = df["close"].ewm(span=ema_period, adjust=False).mean()
+        # PR #283 codex round-19 P2: prefer the PERSISTED EMA column
+        # from ``indicator_bars`` when one matches the sampled
+        # ``ema_period`` (live strategy reads ``ema_20`` / ``ema_30`` /
+        # ``ema_50`` from the same column). Computing in-memory over
+        # only the fetched window produces a different warmup tail
+        # than live (which has bars from before the window). NG_FUT
+        # uses ``ema_period: 8`` in yaml which isn't persisted, so
+        # the fallback computation matches what live would do too.
+        persisted_col = f"ema_{int(ema_period)}"
+        if persisted_col in df.columns and df[persisted_col].notna().any():
+            # Coalesce any sparse rows with a computed series to avoid
+            # leaking NaN through the signal-loop comparisons.
+            computed = df["close"].ewm(span=ema_period, adjust=False).mean()
+            df["ema"] = df[persisted_col].combine_first(computed)
+        else:
+            df["ema"] = df["close"].ewm(span=ema_period, adjust=False).mean()
 
         # Generate signals
         trades = []
