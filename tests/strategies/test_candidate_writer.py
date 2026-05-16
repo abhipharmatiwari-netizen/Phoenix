@@ -1093,3 +1093,83 @@ def test_strategy_configs_lookup_falls_back_when_no_tagged_row_matches():
     assert len(insert_executions) == 1
     _, params = insert_executions[0]
     assert params.get("strategy_config_id") == "cfg-shared"
+
+
+# ---------------------------------------------------------------------------
+# PR #288 codex round-9 regressions.
+# ---------------------------------------------------------------------------
+
+
+def test_lookup_falls_back_to_untagged_when_no_matching_tag():
+    """PR #288 codex round-9 P2: when some enabled rows carry an
+    ``underlying_label`` tag for OTHER underlyings AND others are
+    untagged, the lookup must prefer the untagged rows over the
+    wrong-underlying-tagged ones. Without this, the lex-first match
+    could attach a NIFTY_IDX candidate to a BANKNIFTY_IDX-tagged
+    row when a generic untagged row also exists."""
+    conn = _FakeConnection()
+    conn.next_fetchone.append(("public.strategy_config_candidates",))
+    # Three enabled rows: BANKNIFTY-tagged (lex-first), NATGAS-tagged,
+    # and an untagged generic row.
+    conn.next_fetch.append([
+        ("cfg-banknifty", True, "BANKNIFTY_IDX"),
+        ("cfg-generic", True, None),
+        ("cfg-natgas", True, "NG_FUT"),
+    ])
+    conn.next_rowcount.append(0)
+    writer = CandidateWriter(
+        tenant_id="t",
+        broker_account_id="a",
+        optimizer_version="v1",
+        connect_fn=_connect_fn_returning(conn),
+    )
+    batch = CandidateBatch(
+        strategy_name="ema20",
+        underlying_label="NIFTY_IDX",  # no row tagged with this
+        top_candidates=[{"params": {"k": 1}, "metrics": {}}],
+        backtest_window=(date(2026, 5, 1), date(2026, 5, 14)),
+    )
+    writer.write_batch(batch, candidates_per_strategy=1)
+    insert_executions = [
+        (sql, p) for sql, p in conn.executed
+        if sql.startswith("INSERT INTO public.strategy_config_candidates")
+    ]
+    assert len(insert_executions) == 1
+    _, params = insert_executions[0]
+    assert params.get("strategy_config_id") == "cfg-generic", (
+        f"lookup must prefer the untagged generic row over the "
+        f"wrong-underlying-tagged ones; got "
+        f"strategy_config_id={params.get('strategy_config_id')!r}"
+    )
+
+
+def test_lookup_raises_when_all_enabled_rows_are_wrong_underlying():
+    """When ALL enabled rows are tagged with underlyings that do NOT
+    match the candidate's, and no untagged row exists, the lookup
+    must FAIL LOUDLY rather than silently attaching the candidate to
+    the wrong underlying's config row."""
+    conn = _FakeConnection()
+    conn.next_fetchone.append(("public.strategy_config_candidates",))
+    conn.next_fetch.append([
+        ("cfg-banknifty", True, "BANKNIFTY_IDX"),
+        ("cfg-natgas", True, "NG_FUT"),
+    ])
+    writer = CandidateWriter(
+        tenant_id="t",
+        broker_account_id="a",
+        optimizer_version="v1",
+        connect_fn=_connect_fn_returning(conn),
+    )
+    batch = CandidateBatch(
+        strategy_name="ema20",
+        underlying_label="NIFTY_IDX",
+        top_candidates=[{"params": {"k": 1}, "metrics": {}}],
+        backtest_window=(date(2026, 5, 1), date(2026, 5, 14)),
+    )
+    with pytest.raises(CandidateWriterError, match="no enabled strategy_configs"):
+        writer.write_batch(batch, candidates_per_strategy=1)
+    # No INSERT should have been attempted.
+    assert not any(
+        sql.startswith("INSERT INTO public.strategy_config_candidates")
+        for sql, _ in conn.executed
+    )

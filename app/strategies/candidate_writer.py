@@ -438,9 +438,42 @@ class CandidateWriter:
             def _row_underlying(r):
                 return r[2] if len(r) > 2 else None
 
-            tagged = [r for r in enabled_rows if _row_underlying(r) == underlying_label]
-            if tagged:
-                enabled_rows = tagged
+            matching_tagged = [
+                r for r in enabled_rows if _row_underlying(r) == underlying_label
+            ]
+            if matching_tagged:
+                enabled_rows = matching_tagged
+            else:
+                # PR #288 codex round-9 P2: when SOME enabled rows are
+                # tagged with OTHER underlyings (none matching this
+                # candidate's) and others are untagged, restrict the
+                # fallback to UNTAGGED rows only. Without this filter,
+                # the lex-first match could pick a wrong-underlying
+                # tagged row instead of a generic untagged one.
+                untagged = [r for r in enabled_rows if _row_underlying(r) is None]
+                tagged_others = [
+                    r for r in enabled_rows
+                    if _row_underlying(r) not in (None, underlying_label)
+                ]
+                if untagged and tagged_others:
+                    enabled_rows = untagged
+                elif tagged_others and not untagged:
+                    # ALL enabled rows are tagged with different
+                    # underlyings — none is a valid match. Fail loudly
+                    # rather than silently attaching the candidate to
+                    # the wrong underlying's config.
+                    other_tags = sorted({
+                        _row_underlying(r) for r in tagged_others
+                    } - {None})
+                    raise CandidateWriterError(
+                        f"no enabled strategy_configs row matches "
+                        f"underlying={underlying_label!r}; tenant has "
+                        f"per-underlying rows tagged "
+                        f"{other_tags} but none for this candidate. "
+                        "Add a strategy_configs row for the candidate's "
+                        "underlying or set params->>'underlying_label' "
+                        "to NULL on a generic row."
+                    )
         if enabled_rows:
             chosen = enabled_rows[0][0]
             if len(enabled_rows) > 1:
