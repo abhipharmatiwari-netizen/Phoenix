@@ -582,9 +582,16 @@ class RealDataBacktester:
         last_entry_hh, last_entry_mm = _parse_hhmm(
             str(params.get("last_entry_time", "14:45")), (14, 45)
         )
-        squareoff_hh, squareoff_mm = _parse_hhmm(
-            str(params.get("square_off_time", "15:15")), (15, 15)
-        )
+        # PR #283 codex round-9 P2: live ``ExclusiveNiftyCeBuyStrategy``
+        # reads the key ``squareoff_time`` (one word) — see
+        # ``app/strategies/exclusive_nifty_ce_buy.py`` and the enabled
+        # yaml ``square_off_time`` (two words). Accept BOTH spellings so
+        # candidates persisted under either name score against the
+        # correct exit time.
+        squareoff_raw = params.get("squareoff_time")
+        if squareoff_raw is None:
+            squareoff_raw = params.get("square_off_time", "15:15")
+        squareoff_hh, squareoff_mm = _parse_hhmm(str(squareoff_raw), (15, 15))
         _ECN_SESSION_START = _time(session_hh, session_mm)
         _ECN_LATE_START = _time(late_hh, late_mm)
         _ECN_LAST_ENTRY = _time(last_entry_hh, last_entry_mm)
@@ -595,6 +602,12 @@ class RealDataBacktester:
         # The simulator must enforce the same cap so an optimizer can't
         # rank a parameter set on multi-entry sessions production
         # would never have placed.
+        #
+        # PR #283 codex round-9 P2: live ECN treats ``max_trades_per_day=0``
+        # as UNLIMITED (the explicit comment in
+        # ``exclusive_nifty_ce_buy.py`` notes "0 = unlimited"). The
+        # previous ``trades_today >= 0`` test blocked every entry for
+        # the entire backtest. ``<= 0`` now means "no cap".
         max_trades_per_day_cfg = int(params.get("max_trades_per_day", 1))
 
         def _within_ecn_entry_window(idx: int) -> bool:
@@ -654,11 +667,19 @@ class RealDataBacktester:
             # PR #283 codex round-8 P2: daily trade-count reset on IST
             # day boundary so ``max_trades_per_day`` is enforced against
             # the same calendar day live uses.
+            #
+            # PR #283 codex round-9 P2: tz-naive timestamps need the
+            # same UTC-localize-then-IST-convert path used to build
+            # ``ist_time_of_day`` above. Calling ``tz_convert`` on a
+            # tz-naive value raises ``TypeError`` and the previous
+            # broad except left ``trades_today`` stuck across days in
+            # multi-day synthetic / unit-test fixtures.
             if ist_time_of_day is not None:
                 try:
-                    bar_date = pd.to_datetime(df["timestamp"].iloc[i]).tz_convert(
-                        "Asia/Kolkata"
-                    ).date()
+                    ts_raw = pd.to_datetime(df["timestamp"].iloc[i])
+                    if getattr(ts_raw, "tzinfo", None) is None:
+                        ts_raw = ts_raw.tz_localize("UTC")
+                    bar_date = ts_raw.tz_convert("Asia/Kolkata").date()
                 except Exception:
                     bar_date = None
                 if bar_date is not None and bar_date != last_seen_date:
@@ -676,7 +697,10 @@ class RealDataBacktester:
                 # (live ECN default 1). Without this the simulator
                 # books a second entry on days with multiple signals
                 # that production would never have placed.
-                if trades_today >= max_trades_per_day_cfg:
+                # PR #283 codex round-9 P2: ``max_trades_per_day <= 0``
+                # is the live "unlimited" sentinel; skip the cap check
+                # entirely in that case.
+                if max_trades_per_day_cfg > 0 and trades_today >= max_trades_per_day_cfg:
                     continue
                 # PR #283 codex round-7 P2: entry session window
                 # (between session_start and last_entry_time).

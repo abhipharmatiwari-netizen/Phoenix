@@ -1351,3 +1351,63 @@ def test_put_momentum_breakdown_bar_matches_live_predicate():
     # The single live predicate: ``low <= prior_low AND wick <= 0.30``.
     assert "low_i <= prior_low" in src
     assert "lower_wick_ratio <= 0.30" in src
+
+
+# ---------------------------------------------------------------------------
+# PR #283 codex round-9 regressions.
+# ---------------------------------------------------------------------------
+
+
+def test_ecn_max_trades_per_day_zero_means_unlimited():
+    """Live ECN's ``max_trades_per_day=0`` is the explicit
+    "unlimited" sentinel (see comment in
+    ``app/strategies/exclusive_nifty_ce_buy.py``). The simulator
+    must NOT treat 0 as "block every entry" — otherwise an operator
+    who sets 0 to disable the daily cap gets zero trades the live
+    strategy would have taken."""
+    import inspect
+
+    src = inspect.getsource(RealDataBacktester._simulate_exclusive_nifty_ce)
+    # The cap check must include a ``> 0`` guard so zero falls
+    # through to the unlimited path.
+    assert "max_trades_per_day_cfg > 0" in src, (
+        "max_trades_per_day=0 must be honored as 'unlimited' — wrap "
+        "the comparison in `if max_trades_per_day_cfg > 0` so the cap "
+        "is skipped entirely"
+    )
+
+
+def test_ecn_daily_reset_handles_tz_naive_timestamps():
+    """Live ECN simulator must reset the daily trade count even when
+    ``df['timestamp']`` is tz-naive. The previous ``tz_convert``-only
+    path raised on naive timestamps and left ``trades_today`` stuck
+    across days in multi-day synthetic / unit-test fixtures."""
+    import inspect
+
+    src = inspect.getsource(RealDataBacktester._simulate_exclusive_nifty_ce)
+    # Must localize tz-naive timestamps to UTC before converting,
+    # matching the ``ist_time_of_day`` setup.
+    assert "ts_raw.tz_localize" in src or 'tz_localize("UTC")' in src, (
+        "tz-naive timestamps must be localized to UTC before "
+        "tz_convert('Asia/Kolkata') — otherwise trades_today never "
+        "resets on naive-timestamp fixtures"
+    )
+
+
+def test_ecn_accepts_live_squareoff_time_key():
+    """The live ``ExclusiveNiftyCeBuyStrategy`` reads the key
+    ``squareoff_time`` (one word, no underscore). The simulator must
+    accept that spelling so candidates persisted under the live key
+    are scored against the right exit time. The yaml-config spelling
+    ``square_off_time`` remains accepted as a fallback."""
+    import inspect
+
+    src = inspect.getsource(RealDataBacktester._simulate_exclusive_nifty_ce)
+    # Both spellings must be recognized.
+    assert "squareoff_time" in src, (
+        "live strategy key ``squareoff_time`` must be accepted"
+    )
+    assert "square_off_time" in src, (
+        "yaml-config key ``square_off_time`` must still be accepted "
+        "as a fallback"
+    )
