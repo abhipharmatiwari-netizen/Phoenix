@@ -303,6 +303,14 @@ class PutMomentumParameterOptimizer:
         Keys match ``PutMomentumScalperConfig`` field names so that
         approving a candidate writes parameters the live strategy will
         actually read.
+
+        PR #283 codex round-13 P2: ``entry_start`` / ``entry_end`` are
+        threaded through with the deployed yaml defaults
+        (NIFTY/BANKNIFTY: 09:20 / 14:45 — see
+        ``app/config/strategy_env.yaml``). Without these, the
+        simulator's ``_within_entry_window`` falls back to the
+        morning/afternoon split path even though the deployed live
+        config uses the single-window path.
         """
         return {
             "rsi_min": float(params.get("rsi_min", 25.0)),
@@ -316,6 +324,13 @@ class PutMomentumParameterOptimizer:
             "rsi_falling_bars_required": int(params.get("rsi_falling_bars_required", 2)),
             "lookback_breakdown_bars": int(params.get("lookback_breakdown_bars", 10)),
             "max_bars_in_trade": int(params.get("max_bars_in_trade", 8)),
+            # PR #283 codex round-13 P2: deployed PM single-window
+            # defaults so the simulator's ``_within_entry_window`` uses
+            # the live yaml path, not the fallback morning/afternoon
+            # split. Sample-time overrides via ``params`` (e.g. an
+            # optimizer that sweeps the window) take precedence.
+            "entry_start": str(params.get("entry_start", "09:20")),
+            "entry_end": str(params.get("entry_end", "14:45")),
         }
 
 

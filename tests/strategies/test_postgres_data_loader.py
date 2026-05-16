@@ -1593,3 +1593,32 @@ def test_ema20_param_space_samples_min_di_spread():
     })
     assert "min_di_spread" in formatted
     assert formatted["min_di_spread"] == 5.5
+
+
+def test_pm_format_params_threads_deployed_yaml_entry_window():
+    """PR #283 codex round-13 P2: round-14 added single-window
+    handling to the simulator, but ``PutMomentumParameterOptimizer.
+    format_params`` never emitted ``entry_start`` / ``entry_end``,
+    so the simulator's ``_within_entry_window`` fell back to the
+    morning/afternoon split path. Now the format step threads the
+    deployed yaml defaults (09:20 / 14:45) through unless the
+    optimizer is sweeping the window."""
+    from app.strategies.strategy_optimizers import PutMomentumParameterOptimizer
+
+    # Default flow: no overrides → deployed-yaml defaults.
+    formatted = PutMomentumParameterOptimizer.format_params({})
+    assert formatted.get("entry_start") == "09:20", (
+        "format_params must default entry_start to the deployed yaml "
+        "value 09:20"
+    )
+    assert formatted.get("entry_end") == "14:45", (
+        "format_params must default entry_end to the deployed yaml "
+        "value 14:45"
+    )
+    # Override flow: an optimizer-sampled value passes through.
+    formatted = PutMomentumParameterOptimizer.format_params({
+        "entry_start": "10:00",
+        "entry_end": "13:30",
+    })
+    assert formatted.get("entry_start") == "10:00"
+    assert formatted.get("entry_end") == "13:30"
