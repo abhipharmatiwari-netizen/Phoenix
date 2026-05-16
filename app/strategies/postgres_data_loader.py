@@ -520,6 +520,10 @@ class RealDataBacktester:
         min_adx = float(params.get("min_adx", 20.0))
         min_di_spread = float(params.get("min_di_spread", 5.0))
         ema_fail_bars = int(params.get("ema_fail_bars", 3))
+        # PR #283 codex round-7 P2: live ECN config fields for the
+        # post-late-start TP cap and the post-exit cooldown.
+        cooldown_bars_cfg = int(params.get("cooldown_bars", 2))
+        late_tp_cap_atr = float(params.get("late_tp_cap_atr", 2.6))
 
         # Use ema_20 / ema_50 from indicator_bars if present (live names);
         # otherwise compute as a fallback so a partial schema doesn't
@@ -537,15 +541,59 @@ class RealDataBacktester:
         if hasattr(macd_hist, "fillna"):
             macd_hist = macd_hist.fillna(0)
 
+        # PR #283 codex round-7 P2: convert ``df["timestamp"]`` to IST
+        # so ECN entries are gated by session window and exits at
+        # squareoff time. Same infra as the PM simulator.
+        ist_time_of_day = None
+        if "timestamp" in df.columns:
+            try:
+                ts = pd.to_datetime(df["timestamp"])
+                if ts.dt.tz is None:
+                    ts = ts.dt.tz_localize("UTC")
+                ts = ts.dt.tz_convert("Asia/Kolkata")
+                ist_time_of_day = ts.dt.time
+            except Exception:
+                ist_time_of_day = None
+
+        from datetime import time as _time
+        _ECN_SESSION_START = _time(9, 16)
+        _ECN_LATE_START = _time(14, 0)
+        _ECN_LAST_ENTRY = _time(14, 45)
+        _ECN_SQUAREOFF = _time(15, 15)
+
+        def _within_ecn_entry_window(idx: int) -> bool:
+            if ist_time_of_day is None:
+                return True
+            tod = ist_time_of_day.iloc[idx]
+            return _ECN_SESSION_START <= tod <= _ECN_LAST_ENTRY
+
+        def _ecn_past_squareoff(idx: int) -> bool:
+            if ist_time_of_day is None:
+                return False
+            return ist_time_of_day.iloc[idx] >= _ECN_SQUAREOFF
+
+        def _ecn_is_late(idx: int) -> bool:
+            if ist_time_of_day is None:
+                return False
+            return ist_time_of_day.iloc[idx] >= _ECN_LATE_START
+
         trades = []
         in_trade = False
         entry_price = 0.0
         entry_atr = 0.0
         ema_fail_count = 0
+        # PR #283 codex round-7 P2: track cooldown bars between exits
+        # (matches live ``state.cooldown_bars``).
+        cooldown_remaining = 0
 
         # Need at least 50 bars to have a meaningful ema_50.
         for i in range(50, len(df)):
             close_i = float(df["close"].iloc[i])
+            # PR #283 codex round-7 P2: live ``_manage_position_on_bar``
+            # exits on ``candle.low <= sl_level`` / ``candle.high >= tp_level``
+            # (intra-bar extremes), not on the bar close.
+            high_i = float(df["high"].iloc[i]) if "high" in df.columns else close_i
+            low_i = float(df["low"].iloc[i]) if "low" in df.columns else close_i
             atr_i = float(df["atr"].iloc[i]) if "atr" in df.columns else 0.0
             rsi_i = float(df["rsi"].iloc[i]) if "rsi" in df.columns else 0.0
             rsi_prev = float(df["rsi"].iloc[i - 1]) if "rsi" in df.columns else 0.0
@@ -559,6 +607,16 @@ class RealDataBacktester:
             macd_hist_i = macd_i - macd_signal_i
 
             if not in_trade:
+                # PR #283 codex round-7 P2: post-exit cooldown matches
+                # live ``state.cooldown_bars``. While positive, all
+                # signal evaluation is skipped.
+                if cooldown_remaining > 0:
+                    cooldown_remaining -= 1
+                    continue
+                # PR #283 codex round-7 P2: entry session window
+                # (between session_start and last_entry_time).
+                if not _within_ecn_entry_window(i):
+                    continue
                 # Entry gates — approximation of the live _compute_buy_signal.
                 trend_ok = ema20_i > ema50_i
                 rsi_ok = rsi_min < rsi_i < rsi_max
@@ -648,20 +706,47 @@ class RealDataBacktester:
                 continue
 
             # Exit: ATR-based SL / TP on a long CE (proxied by underlying move).
+            # PR #283 codex round-7 P2: when ``ist_time_of_day >= 14:00``
+            # the live strategy applies a tighter ``late_tp_cap_atr``
+            # ceiling on the target (default 2.6 × ATR). Without the cap
+            # candidates with very large ``tp_atr`` looked profitable in
+            # the simulator on bars that live would have closed earlier.
+            effective_tp_atr = (
+                min(tp_atr, late_tp_cap_atr) if _ecn_is_late(i) else tp_atr
+            )
             sl_price = entry_price - sl_atr * entry_atr
-            tp_price = entry_price + tp_atr * entry_atr
+            tp_price = entry_price + effective_tp_atr * entry_atr
             below_ema_threshold = close_i < (ema20_i - ema_fail_buffer_atr * atr_i)
             ema_fail_count = ema_fail_count + 1 if below_ema_threshold else 0
             ema_fail_exit = ema_fail_count >= ema_fail_bars
 
-            stop_hit = close_i <= sl_price
-            target_hit = close_i >= tp_price
+            # PR #283 codex round-7 P2: live exits on intra-bar extremes,
+            # not close — see app/strategies/exclusive_nifty_ce_buy.py
+            # ``_manage_position_on_bar``.
+            stop_hit = low_i <= sl_price
+            target_hit = high_i >= tp_price
+            squareoff_exit = _ecn_past_squareoff(i)
             time_stop = i == len(df) - 1
 
-            if stop_hit or target_hit or ema_fail_exit or time_stop:
+            if stop_hit or target_hit or ema_fail_exit or squareoff_exit or time_stop:
                 in_trade = False
-                pnl_pct = ((close_i - entry_price) / entry_price) * 100
-                trades.append({"entry": entry_price, "exit": close_i, "pnl_pct": pnl_pct})
+                # When both stop and target trip on the same bar we can't
+                # tell from OHLC which one fired first; conservatively
+                # mark the stop (the live strategy assumes ATR stop
+                # priority on ambiguous bars).
+                if stop_hit:
+                    exit_price = sl_price
+                elif target_hit:
+                    exit_price = tp_price
+                else:
+                    exit_price = close_i
+                pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+                trades.append(
+                    {"entry": entry_price, "exit": exit_price, "pnl_pct": pnl_pct}
+                )
+                # PR #283 codex round-7 P2: match live cooldown bars
+                # behaviour — block re-entry for ``cooldown_bars`` bars.
+                cooldown_remaining = cooldown_bars_cfg
 
         return _trade_stats(trades)
 
@@ -757,6 +842,46 @@ class RealDataBacktester:
         else:
             ema20 = df["close"].ewm(span=20, adjust=False).mean()
 
+        # PR #283 codex round-7 P2: convert ``df["timestamp"]`` to IST
+        # time-of-day so the simulator can honour live PM's entry
+        # windows (morning 09:20-11:30 IST + afternoon 13:30-15:00
+        # IST) AND the EOD 15:20 IST exit. Without these the
+        # simulator can open / hold trades during lunch, late
+        # afternoon, or even overnight — none of which live ``on_tick``
+        # would permit.
+        ist_time_of_day = None
+        if "timestamp" in df.columns:
+            try:
+                ts = pd.to_datetime(df["timestamp"])
+                # Localise tz-naive timestamps to UTC, then convert to IST.
+                if ts.dt.tz is None:
+                    ts = ts.dt.tz_localize("UTC")
+                ts = ts.dt.tz_convert("Asia/Kolkata")
+                ist_time_of_day = ts.dt.time
+            except Exception:
+                ist_time_of_day = None
+
+        from datetime import time as _time
+        _MORNING_START = _time(9, 20)
+        _MORNING_END = _time(11, 30)
+        _AFTERNOON_START = _time(13, 30)
+        _AFTERNOON_END = _time(15, 0)
+        _EOD = _time(15, 20)
+
+        def _within_entry_window(idx: int) -> bool:
+            if ist_time_of_day is None:
+                return True  # synthetic / unparseable timestamps — skip gate
+            tod = ist_time_of_day.iloc[idx]
+            return (
+                _MORNING_START <= tod <= _MORNING_END
+                or _AFTERNOON_START <= tod <= _AFTERNOON_END
+            )
+
+        def _past_eod(idx: int) -> bool:
+            if ist_time_of_day is None:
+                return False
+            return ist_time_of_day.iloc[idx] >= _EOD
+
         trades = []
         in_trade = False
         entry_price = 0.0
@@ -778,11 +903,32 @@ class RealDataBacktester:
             ema20_i = float(ema20.iloc[i])
 
             if not in_trade:
+                # PR #283 codex round-7 P2: only enter inside the
+                # configured morning / afternoon windows. Live
+                # ``_within_entry_window`` rejects lunch / pre-session
+                # / post-15:00 bars before any signal evaluation.
+                if not _within_entry_window(i):
+                    continue
                 # 15m downtrend proxy: 5m close < EMA50 AND close < EMA20.
                 downtrend_proxy = close_i < ema50_i and close_i < ema20_i
-                # 5m breakdown: close below the prior swing low.
-                prior_low = df["low"].iloc[i - lookback_breakdown_bars:i].min()
-                breakdown = close_i < float(prior_low)
+                # PR #283 codex round-7 P2: live ``_is_breakdown_bar``
+                # accepts a candle when its LOW takes out the prior
+                # swing low AND the close sits near that low
+                # (``lower_wick_ratio <= 0.30``). The previous
+                # ``close < prior_low`` was strictly tighter and
+                # skipped breakdown candles that closed slightly above
+                # the low but still inside the lower 30% of the range.
+                prior_low = float(df["low"].iloc[i - lookback_breakdown_bars:i].min())
+                low_i = float(df["low"].iloc[i])
+                high_i = float(df["high"].iloc[i])
+                breakdown_close = close_i < prior_low
+                bar_range = high_i - low_i
+                # Avoid divide-by-zero on doji bars; treat as no wick.
+                lower_wick_ratio = (
+                    (close_i - low_i) / bar_range if bar_range > 0 else 0.0
+                )
+                breakdown_wick = low_i < prior_low and lower_wick_ratio <= 0.30
+                breakdown = breakdown_close or breakdown_wick
                 rsi_ok = rsi_min <= rsi_i <= rsi_max
                 # rsi_falling_bars_required consecutive declining RSI bars.
                 rsi_window = df["rsi"].iloc[
@@ -829,12 +975,15 @@ class RealDataBacktester:
                     # initial R the final TP target is scaled to.
                     initial_r_pct = option_sl_pct * 100.0
                     # PR #283 codex round-6 P2: live ``OptionPosition``
-                    # captures the breakdown-high (swing high BEFORE
-                    # the breakdown bar). Used by ``_maybe_invalidate``
-                    # below.
-                    breakdown_high_at_entry = float(
-                        df["high"].iloc[i - lookback_breakdown_bars:i].max()
-                    )
+                    # PR #283 codex round-7 P2: live PM's
+                    # ``_enter_position`` captures ``candle.h`` — the
+                    # BREAKDOWN CANDLE's own high — not the lookback
+                    # window's max. The previous lookback-max made the
+                    # invalidation threshold too high (could only fire
+                    # if the underlying rose above the multi-day swing
+                    # high), so reversals that live would catch were
+                    # left open here.
+                    breakdown_high_at_entry = float(df["high"].iloc[i])
                 continue
 
             bars_in_trade += 1
@@ -852,7 +1001,17 @@ class RealDataBacktester:
             )
             stop_hit = option_pnl_pct <= -initial_r_pct
             final_hit = option_pnl_pct >= final_tp_r * initial_r_pct
-            time_stop = bars_in_trade >= max_bars_in_trade or i == len(df) - 1
+            # PR #283 codex round-7 P2: live ``on_tick`` exits any open
+            # PM position at 15:20 IST (EOD square-off). Without this
+            # the simulator could carry late-session trades into
+            # overnight / next-day bars and book PnL live would never
+            # have realized.
+            eod_exit = _past_eod(i)
+            time_stop = (
+                bars_in_trade >= max_bars_in_trade
+                or i == len(df) - 1
+                or eod_exit
+            )
 
             # PR #283 codex round-4 P2: live ``on_tick`` only exits on
             # stop / final_tp / EOD (plus the round-6 invalidation
