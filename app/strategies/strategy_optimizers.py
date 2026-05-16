@@ -22,10 +22,17 @@ class Ema20ParameterOptimizer:
         return [
             # Core trend detection
             ParameterSpace(
+                # PR #283 codex round-18 P2: limit ema_period to the
+                # EMA columns ACTUALLY emitted in ``indicator_bars``
+                # (``ema_20``, ``ema_30``, ``ema_50`` — see
+                # ``migrations/000_indicator_bars.sql``). Sampling a
+                # continuous range admitted candidates whose
+                # ``ema_period`` had no matching column, forcing the
+                # simulator to fall back to an in-memory computed EMA
+                # that diverged from what the live strategy reads.
                 name="ema_period",
-                param_type="int",
-                min_value=10,
-                max_value=50,
+                param_type="categorical",
+                categories=[20, 30, 50],
             ),
             ParameterSpace(
                 name="signal_timeframe",
@@ -198,19 +205,52 @@ class ExclusiveNiftyCeParameterOptimizer:
 
     @staticmethod
     def format_params(params: Dict[str, Any]) -> Dict[str, Any]:
-        """Format parameters for Exclusive Nifty CE strategy."""
+        """Format parameters for Exclusive Nifty CE strategy.
+
+        PR #283 codex round-18 P2: defaults now mirror the deployed
+        yaml (``app/config/strategy_env.yaml``) instead of the class-
+        fallback values. Without this, partial caller params silently
+        fell back to thresholds that differ from production (e.g.
+        ``rsi_min: 52`` deployed vs ``58`` class fallback,
+        ``min_adx: 14`` deployed vs ``20`` class fallback,
+        ``macd_hist_min: 0.0`` deployed vs ``0.30`` class fallback,
+        ``sl_atr: 2.0`` deployed vs ``2.2`` class fallback). Caller
+        params still take precedence.
+        """
         return {
             "timeframe_seconds": int(params.get("timeframe_seconds", 30)),
-            "rsi_min": float(params.get("rsi_min", 58.0)),
+            "rsi_min": float(params.get("rsi_min", 52.0)),
             "rsi_max": float(params.get("rsi_max", 72.0)),
-            "macd_hist_min": float(params.get("macd_hist_min", 0.30)),
+            "macd_hist_min": float(params.get("macd_hist_min", 0.0)),
+            "allow_near_macd": bool(params.get("allow_near_macd", True)),
+            "macd_near": float(params.get("macd_near", 0.0)),
             "ema_atr_buffer": float(params.get("ema_atr_buffer", 0.05)),
-            "min_adx": float(params.get("min_adx", 20.0)),
-            "min_di_spread": float(params.get("min_di_spread", 5.0)),
-            "sl_atr": float(params.get("sl_atr", 2.2)),
+            "min_adx": float(params.get("min_adx", 14.0)),
+            "min_di_spread": float(params.get("min_di_spread", 0.0)),
+            "sl_atr": float(params.get("sl_atr", 2.0)),
             "tp_atr": float(params.get("tp_atr", 2.5)),
             "ema_fail_buffer_atr": float(params.get("ema_fail_buffer_atr", 0.10)),
             "ema_fail_bars": int(params.get("ema_fail_bars", 3)),
+            # Session and limits — deployed-yaml values so partial
+            # formatter calls don't fall back to the class defaults.
+            # PR #283 codex round-18: emit the LIVE key
+            # ``squareoff_time`` (one word, what
+            # ``ExclusiveNiftyCeBuyStrategy.__init__`` reads at line
+            # 157) — NOT the yaml's ``square_off_time`` (two words),
+            # which is unused by the live strategy class.
+            "session_start": str(params.get("session_start", "10:15")),
+            "last_entry_time": str(params.get("last_entry_time", "14:45")),
+            "squareoff_time": str(
+                params.get("squareoff_time", params.get("square_off_time", "15:15"))
+            ),
+            "late_start": str(params.get("late_start", "14:45")),
+            "max_trades_per_day": int(params.get("max_trades_per_day", 1)),
+            "cooldown_bars": int(params.get("cooldown_bars", 2)),
+            "late_tp_cap_atr": float(params.get("late_tp_cap_atr", 2.6)),
+            "trail_active_atr": float(params.get("trail_active_atr", 0.8)),
+            "trail_cushion_atr": float(params.get("trail_cushion_atr", 0.16)),
+            "late_trail_active_atr": float(params.get("late_trail_active_atr", 0.6)),
+            "late_trail_cushion": float(params.get("late_trail_cushion", 0.08)),
         }
 
 
@@ -311,19 +351,29 @@ class PutMomentumParameterOptimizer:
         simulator's ``_within_entry_window`` falls back to the
         morning/afternoon split path even though the deployed live
         config uses the single-window path.
+
+        PR #283 codex round-18 P2: defaults now mirror the yaml
+        OPTIMIZED values instead of the class-fallback values. Many
+        deployed params materially differ from the class defaults
+        (``rsi_min: 20`` deployed vs ``25`` class, ``rsi_max: 45``
+        same, ``rsi_falling_bars_required: 1`` deployed vs ``2``
+        class, ``lookback_breakdown_bars: 8`` deployed vs ``10``
+        class, ``max_bars_in_trade: 14`` deployed vs ``8`` class,
+        ``min_atr_ratio: 0.0008`` deployed vs ``0.0015`` class).
+        Caller params still take precedence.
         """
         return {
-            "rsi_min": float(params.get("rsi_min", 25.0)),
+            "rsi_min": float(params.get("rsi_min", 20.0)),
             "rsi_max": float(params.get("rsi_max", 45.0)),
-            "min_atr_ratio": float(params.get("min_atr_ratio", 0.0015)),
+            "min_atr_ratio": float(params.get("min_atr_ratio", 0.0008)),
             "option_sl_pct": float(params.get("option_sl_pct", 0.25)),
             # PR #283 codex round-5 P2: ``partial_tp_r`` not emitted —
             # the live exit path doesn't honour it (only stop / final /
             # EOD), so a tuned value is noise. See get_parameter_spaces.
             "final_tp_r": float(params.get("final_tp_r", 1.5)),
-            "rsi_falling_bars_required": int(params.get("rsi_falling_bars_required", 2)),
-            "lookback_breakdown_bars": int(params.get("lookback_breakdown_bars", 10)),
-            "max_bars_in_trade": int(params.get("max_bars_in_trade", 8)),
+            "rsi_falling_bars_required": int(params.get("rsi_falling_bars_required", 1)),
+            "lookback_breakdown_bars": int(params.get("lookback_breakdown_bars", 8)),
+            "max_bars_in_trade": int(params.get("max_bars_in_trade", 14)),
             # PR #283 codex round-13 P2: deployed PM single-window
             # defaults so the simulator's ``_within_entry_window`` uses
             # the live yaml path, not the fallback morning/afternoon

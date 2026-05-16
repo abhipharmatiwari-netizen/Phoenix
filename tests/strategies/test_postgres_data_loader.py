@@ -1819,3 +1819,92 @@ def test_ema20_ng_fut_first_entry_matches_yaml():
     nat_gas = RealDataBacktester._ema20_defaults_for("NG_FUT")
     assert nat_gas["first_entry_time"] == "09:30"
     assert nat_gas["square_off_time"] == "23:30"
+
+
+# ---------------------------------------------------------------------------
+# PR #283 codex round-18 regressions.
+# ---------------------------------------------------------------------------
+
+
+def test_ecn_format_params_emits_deployed_yaml_defaults():
+    """PR #283 codex round-18 P2: ECN ``format_params`` defaults
+    now mirror the deployed yaml (``app/config/strategy_env.yaml``)
+    instead of the class fallbacks. Partial caller params should
+    NOT silently downgrade to thresholds that don't match
+    production."""
+    from app.strategies.strategy_optimizers import ExclusiveNiftyCeParameterOptimizer
+
+    out = ExclusiveNiftyCeParameterOptimizer.format_params({})
+    # yaml-deployed thresholds.
+    assert out["rsi_min"] == 52.0
+    assert out["macd_hist_min"] == 0.0
+    assert out["min_adx"] == 14.0
+    assert out["min_di_spread"] == 0.0
+    assert out["sl_atr"] == 2.0
+    # yaml-deployed exit knobs.
+    assert out["max_trades_per_day"] == 1
+    assert out["cooldown_bars"] == 2
+    assert out["session_start"] == "10:15"
+    assert out["last_entry_time"] == "14:45"
+    assert out["late_start"] == "14:45"
+    # PR #283 round-18: emit LIVE key ``squareoff_time`` (one word).
+    assert "squareoff_time" in out
+    assert out["squareoff_time"] == "15:15"
+    # Trail knobs included so the simulator scores against live values.
+    assert out["trail_active_atr"] == 0.8
+    assert out["trail_cushion_atr"] == 0.16
+    assert out["late_trail_active_atr"] == 0.6
+    assert out["late_trail_cushion"] == 0.08
+
+
+def test_ecn_format_params_accepts_legacy_square_off_time_key():
+    """``square_off_time`` (yaml two-word spelling) must still be
+    accepted as a fallback for ``squareoff_time`` (live key) so
+    older fixtures or operator-set values continue to work."""
+    from app.strategies.strategy_optimizers import ExclusiveNiftyCeParameterOptimizer
+
+    out = ExclusiveNiftyCeParameterOptimizer.format_params({
+        "square_off_time": "15:25",
+    })
+    assert out["squareoff_time"] == "15:25"
+
+
+def test_pm_format_params_uses_yaml_optimized_defaults():
+    """PR #283 codex round-18 P2: PM format_params defaults now
+    mirror the yaml-OPTIMIZED values, not the class fallbacks.
+    Several deployed knobs differ materially:
+      rsi_min: 20 (yaml) vs 25 (class)
+      min_atr_ratio: 0.0008 (yaml) vs 0.0015 (class)
+      rsi_falling_bars_required: 1 (yaml) vs 2 (class)
+      lookback_breakdown_bars: 8 (yaml) vs 10 (class)
+      max_bars_in_trade: 14 (yaml) vs 8 (class)
+    """
+    from app.strategies.strategy_optimizers import PutMomentumParameterOptimizer
+
+    out = PutMomentumParameterOptimizer.format_params({})
+    assert out["rsi_min"] == 20.0
+    assert out["min_atr_ratio"] == 0.0008
+    assert out["rsi_falling_bars_required"] == 1
+    assert out["lookback_breakdown_bars"] == 8
+    assert out["max_bars_in_trade"] == 14
+
+
+def test_ema20_period_sampled_only_from_emitted_columns():
+    """PR #283 codex round-18 P2: indicator_bars persists only
+    ``ema_20``, ``ema_30``, ``ema_50`` (see
+    ``migrations/000_indicator_bars.sql``). Sampling a continuous
+    range admits candidates whose ``ema_period`` has no matching
+    column, forcing the simulator to fall back to an in-memory
+    EMA that diverges from what the live strategy reads."""
+    from app.strategies.strategy_optimizers import Ema20ParameterOptimizer
+
+    spaces = {s.name: s for s in Ema20ParameterOptimizer.get_parameter_spaces()}
+    period_space = spaces["ema_period"]
+    assert period_space.param_type == "categorical", (
+        "ema_period must be categorical so the optimizer only samples "
+        "values that match emitted indicator columns"
+    )
+    assert set(period_space.categories) == {20, 30, 50}, (
+        f"ema_period categories must match emitted ema_20/30/50; "
+        f"got {period_space.categories}"
+    )
