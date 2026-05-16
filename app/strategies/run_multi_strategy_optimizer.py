@@ -316,6 +316,19 @@ class MultiStrategyOptimizer:
                 }
                 for p in sorted(evaluated, key=lambda x: x.score(), reverse=True)[:5]
             ],
+            # PR #289 codex round-3 P2: also export the full ranked
+            # candidate list so the walk-forward gate can validate
+            # beyond the legacy ``top_5`` when many of the top-ranked
+            # ones fail. Without this, ``--candidates-per-strategy=3``
+            # could leave the review queue short even when valid
+            # candidates exist further down the ranking.
+            "ranked_candidates": [
+                {
+                    "params": p.params,
+                    "metrics": p.metrics.to_dict(),
+                }
+                for p in sorted(evaluated, key=lambda x: x.score(), reverse=True)
+            ],
             "pareto_frontier": [
                 {
                     "params": next(p for p in evaluated if p.params == params).params,
@@ -774,11 +787,18 @@ def _promote_top_candidates(
     )
     # Loader for the gate. We share one instance across all (strategy,
     # underlying) pairs so the connection is reused. PR #289 codex
-    # round-2 P2: prefer the explicit ``indicator_dsn`` over ``dsn``
-    # (which may be the writer's control-plane DSN in a split-DB
-    # setup). Falls back to ``dsn`` for the typical single-DB case.
+    # round-3 P2: pass the EXPLICIT ``indicator_dsn`` only — DO NOT
+    # fall back to ``dsn`` (writer / control-plane). In a split-DB
+    # deployment the writer DSN points at a database that has
+    # ``strategy_configs`` but no ``indicator_bars``, so falling back
+    # would either fail the gate or silently query the wrong source.
+    # When ``indicator_dsn`` is ``None``, the loader honours its own
+    # default discovery (``PG_INDICATORS_DSN`` env / settings), which
+    # is the same source the optimizer's loader uses by default —
+    # keeping the gate's validation frame consistent with the
+    # optimizer's scoring frame.
     gate_loader = (
-        PostgresIndicatorLoader(dsn=indicator_dsn or dsn)
+        PostgresIndicatorLoader(dsn=indicator_dsn)
         if validator is not None
         else None
     )
@@ -810,6 +830,12 @@ def _promote_top_candidates(
                     "Skipping %s/%s — empty top_5", strategy_name, underlying_label
                 )
                 continue
+            # PR #289 codex round-3 P2: the gate validates the FULL
+            # ranked list when available so it can backfill survivors
+            # past position 5 if the leaders fail. ``top_5`` remains
+            # the writer's input contract (final survivors are sliced
+            # to ``candidates_per_strategy``).
+            ranked = result.get("ranked_candidates") or top
 
             # Issue #273 Stage 5: walk-forward gate. Drop unstable
             # candidates BEFORE handing them to the writer.
@@ -817,7 +843,7 @@ def _promote_top_candidates(
                 gated_top, dropped_count = _apply_walk_forward_gate(
                     strategy_name=strategy_name,
                     underlying_label=underlying_label,
-                    candidates=list(top),
+                    candidates=list(ranked),
                     candidates_per_strategy=candidates_per_strategy,
                     lookback_days=lookback_days,
                     validator=validator,
@@ -951,21 +977,13 @@ def _apply_walk_forward_gate(
         df_cache[timeframe] = df_local
         return df_local
 
-    # Pre-fetch the strategy's default timeframe to detect "no bars at
-    # all" early. If even the default returns empty, the gate has
-    # nothing to validate against — keep the existing
-    # bypass-with-warning behaviour for that benign case (matches
-    # ``backtest_*`` empty-df handling in ``RealDataBacktester``).
-    df_default = _fetch_for_timeframe(default_timeframe)
-    if df_default is None or df_default.empty:
-        logger.warning(
-            "walk_forward: empty indicator_bars for %s/%s @ %ds — bypassing gate "
-            "(no data to validate against)",
-            strategy_name,
-            underlying_label,
-            default_timeframe,
-        )
-        return candidates[:candidates_per_strategy], 0
+    # PR #289 codex round-3 P2: previously a default-timeframe probe
+    # bypassed the gate when only the default stream was empty. That
+    # silently promoted unvalidated candidates whose optimized
+    # timeframe (e.g. EMA20 60s / 600s, ECN 60s) had data even though
+    # 300s did not. The probe is removed; the per-candidate loop below
+    # already handles the per-timeframe empty-df case by dropping that
+    # candidate with a warning rather than bypassing the whole gate.
 
     survivors: List[Dict[str, Any]] = []
     dropped = 0
