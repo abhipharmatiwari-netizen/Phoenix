@@ -849,7 +849,15 @@ def test_writer_raises_clean_error_when_candidates_table_missing():
     """When migration 020 (PR #281) has not been applied yet, the
     writer must fail FAST with a clean ``CandidateWriterError`` that
     names the missing migration -- not a raw psycopg
-    ``relation "..." does not exist``."""
+    ``relation "..." does not exist``.
+
+    PR #288 codex round-7 P1: the error must be the
+    ``SchemaNotReadyError`` SUBCLASS (still a ``CandidateWriterError``
+    so existing callers compile) so the orchestrator can distinguish
+    infrastructure failure from per-pair misconfig and re-raise it.
+    """
+    from app.strategies.candidate_writer import SchemaNotReadyError
+
     conn = _FakeConnection()
     # to_regclass returns NULL when the table does not exist.
     conn.next_fetchone.append((None,))
@@ -865,8 +873,11 @@ def test_writer_raises_clean_error_when_candidates_table_missing():
         top_candidates=[{"params": {"k": 1}, "metrics": {}}],
         backtest_window=(date(2026, 5, 1), date(2026, 5, 14)),
     )
-    with pytest.raises(CandidateWriterError) as exc:
+    with pytest.raises(SchemaNotReadyError) as exc:
         writer.write_batch(batch, candidates_per_strategy=1)
+    # Must still satisfy ``isinstance(exc, CandidateWriterError)`` so
+    # existing handlers that catch the parent class continue to work.
+    assert isinstance(exc.value, CandidateWriterError)
     msg = str(exc.value)
     assert "strategy_config_candidates" in msg
     assert "migration" in msg.lower()
@@ -875,6 +886,41 @@ def test_writer_raises_clean_error_when_candidates_table_missing():
         sql.startswith("INSERT INTO public.strategy_config_candidates")
         for sql, _ in conn.executed
     )
+
+
+def test_promote_orchestrator_lets_schema_not_ready_escape():
+    """PR #288 codex round-7 P1: the per-(strategy, underlying) loop
+    in ``_promote_top_candidates`` swallows generic
+    ``CandidateWriterError`` (missing strategy_configs row, etc.) and
+    continues to the next pair. But a ``SchemaNotReadyError`` is an
+    INFRASTRUCTURE failure — operator forgot to run migration 020 —
+    and must propagate so the CLI exits non-zero. Otherwise a nightly
+    cron would log "0 rows inserted" success for every pair while the
+    review queue stays empty."""
+    import inspect
+    from app.strategies import run_multi_strategy_optimizer as rmso
+    from app.strategies.candidate_writer import SchemaNotReadyError as _SNRE
+
+    # The module must import the subclass.
+    assert _SNRE.__name__ == "SchemaNotReadyError"
+    src = inspect.getsource(rmso._promote_top_candidates)
+    # The handler must catch SchemaNotReadyError BEFORE the generic
+    # CandidateWriterError handler and re-raise (no logging/swallowing).
+    assert "except SchemaNotReadyError" in src
+    # And the generic CandidateWriterError handler must still exist
+    # for per-pair misconfig.
+    assert "except CandidateWriterError" in src
+    # The SchemaNotReadyError clause must use bare ``raise`` to
+    # propagate, not a swallowing ``logger.error(...)`` body.
+    snre_idx = src.index("except SchemaNotReadyError")
+    cwe_idx = src.index("except CandidateWriterError")
+    assert snre_idx < cwe_idx, (
+        "SchemaNotReadyError clause must come BEFORE the generic "
+        "CandidateWriterError handler so it is matched first"
+    )
+    body = src[snre_idx:cwe_idx]
+    assert "raise" in body
+    assert "logger.error" not in body
 
 
 def test_writer_proceeds_when_schema_probe_returns_table_name():
