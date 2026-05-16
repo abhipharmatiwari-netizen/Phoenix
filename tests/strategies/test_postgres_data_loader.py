@@ -1233,28 +1233,67 @@ def test_exclusive_nifty_ce_simulator_honours_cooldown_after_exit():
     """Live ECN strategy sets ``state.cooldown_bars`` after each exit
     to block re-entry. The simulator must reproduce this so the
     optimizer doesn't reward parameters that fire many back-to-back
-    trades the live strategy would have rejected."""
+    trades the live strategy would have rejected.
+
+    PR #283 codex round-8 P2: live decrements ``cooldown_bars`` on the
+    EXIT bar before the cooldown check, so ``cooldown_bars=2`` blocks
+    the exit bar + 1 follow-on bar (2 bars total). The sim never
+    re-evaluates the exit bar, so it sets
+    ``cooldown_remaining = cooldown_bars - 1`` to match."""
     import inspect
 
     src = inspect.getsource(RealDataBacktester._simulate_exclusive_nifty_ce)
     assert "cooldown_remaining" in src
     assert "cooldown_bars_cfg" in src
-    # Must DECREMENT inside the loop AND set on exit.
+    # Must DECREMENT inside the loop AND set on exit, using -1 to
+    # account for live's exit-bar decrement (round 8).
     assert "cooldown_remaining -= 1" in src
-    assert "cooldown_remaining = cooldown_bars_cfg" in src
+    assert "cooldown_bars_cfg - 1" in src, (
+        "post-exit cooldown must be cooldown_bars_cfg - 1 so the "
+        "total blocked bars matches live (exit bar + N - 1)"
+    )
 
 
 def test_exclusive_nifty_ce_simulator_entry_window_gate():
-    """Live ECN strategy rejects entries outside ``[session_start,
-    last_entry_time]`` (09:16 - 14:45 IST). The simulator must reject
-    them too."""
+    """Live ECN config (app/config/strategy_env.yaml) sets
+    ``session_start: 10:15``, ``last_entry_time: 14:45``. The
+    simulator must use the same defaults (overridable via params)."""
     import inspect
 
     src = inspect.getsource(RealDataBacktester._simulate_exclusive_nifty_ce)
     assert "_within_ecn_entry_window" in src
-    # Window constants must match the live config defaults.
-    assert "_time(9, 16)" in src or "_time(9,16)" in src
-    assert "_time(14, 45)" in src or "_time(14,45)" in src
+    # Window defaults must match the live yaml config.
+    assert "10:15" in src, "session_start default must be 10:15 (live config)"
+    assert "14:45" in src, "last_entry_time default must be 14:45 (live config)"
+
+
+def test_exclusive_nifty_ce_simulator_late_start_matches_live_config():
+    """Live ECN config sets ``late_start: 14:45`` (NOT 14:00). The
+    simulator's late_tp_cap_atr must trip at 14:45, not 14:00 — which
+    would apply the late cap 45 minutes too early."""
+    import inspect
+
+    src = inspect.getsource(RealDataBacktester._simulate_exclusive_nifty_ce)
+    # The fallback / default must read 14:45 from params.
+    assert '"14:45"' in src or "'14:45'" in src
+    # And there must NOT be a hard-coded 14:00 anywhere.
+    assert "_time(14, 0)" not in src
+    assert "_time(14,0)" not in src
+
+
+def test_exclusive_nifty_ce_simulator_enforces_max_trades_per_day():
+    """Live ECN config sets ``max_trades_per_day: 1``. The simulator
+    must enforce the same per-day cap so an optimizer cannot rank
+    parameters on multi-entry sessions live would never have placed."""
+    import inspect
+
+    src = inspect.getsource(RealDataBacktester._simulate_exclusive_nifty_ce)
+    assert "max_trades_per_day" in src
+    assert "trades_today" in src
+    # Reset on calendar-day boundary AND increment on entry.
+    assert "trades_today = 0" in src
+    assert "trades_today += 1" in src
+    assert "trades_today >= max_trades_per_day_cfg" in src
 
 
 def test_put_momentum_simulator_eod_squareoff_at_1520_ist():
@@ -1293,15 +1332,22 @@ def test_put_momentum_breakdown_high_uses_candle_own_high():
     assert "breakdown_high_at_entry = float(df[\"high\"].iloc[i])" in src
 
 
-def test_put_momentum_breakdown_bar_admits_wick_close():
-    """Live ``_is_breakdown_bar`` admits candles where the LOW takes
-    out the prior swing low AND ``lower_wick_ratio <= 0.30`` — even if
-    the close sits above the prior low. The previous strict
-    ``close < prior_low`` rejected these."""
+def test_put_momentum_breakdown_bar_matches_live_predicate():
+    """PR #283 codex round-8 P2: live ``_is_breakdown_bar``
+    (app/strategies/put_momentum_scalper.py:1230) is EXACTLY
+    ``candle.low <= min(prior_lows) AND lower_wick_ratio <= 0.30``.
+    Earlier rounds OR-ed in ``close < prior_low``, which admitted
+    breakdown candles live would reject (close-below candles with
+    large reversal wicks above 30% range). The OR is removed, AND
+    the wick comparison uses ``<=`` to admit equal-low candles
+    live also admits."""
     import inspect
 
     src = inspect.getsource(RealDataBacktester._simulate_put_momentum)
     assert "lower_wick_ratio" in src
-    assert "breakdown_wick" in src
-    # Must combine close-below-low OR wick-below-low.
-    assert "breakdown_close or breakdown_wick" in src
+    # NO OR with close-below-low.
+    assert "breakdown_close or breakdown_wick" not in src
+    assert "breakdown_close" not in src
+    # The single live predicate: ``low <= prior_low AND wick <= 0.30``.
+    assert "low_i <= prior_low" in src
+    assert "lower_wick_ratio <= 0.30" in src

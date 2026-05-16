@@ -556,10 +556,46 @@ class RealDataBacktester:
                 ist_time_of_day = None
 
         from datetime import time as _time
-        _ECN_SESSION_START = _time(9, 16)
-        _ECN_LATE_START = _time(14, 0)
-        _ECN_LAST_ENTRY = _time(14, 45)
-        _ECN_SQUAREOFF = _time(15, 15)
+
+        # PR #283 codex round-8 P2: align with the LIVE ECN config in
+        # ``app/config/strategy_env.yaml`` (session_start=10:15,
+        # late_start=14:45, last_entry_time=14:45, square_off_time=15:15).
+        # The earlier 09:16 / 14:00 defaults were lifted from the
+        # strategy class's hard-coded fallbacks rather than the enabled
+        # production config, so the simulator was admitting entries
+        # 1 hour before live and applying the late-TP cap 45 minutes
+        # too early. Each is overridable via ``params`` so the
+        # optimizer can tune them if needed.
+        def _parse_hhmm(s: str, default: tuple[int, int]) -> "tuple[int, int]":
+            try:
+                hh, mm = s.split(":")
+                return int(hh), int(mm)
+            except Exception:
+                return default
+
+        session_hh, session_mm = _parse_hhmm(
+            str(params.get("session_start", "10:15")), (10, 15)
+        )
+        late_hh, late_mm = _parse_hhmm(
+            str(params.get("late_start", "14:45")), (14, 45)
+        )
+        last_entry_hh, last_entry_mm = _parse_hhmm(
+            str(params.get("last_entry_time", "14:45")), (14, 45)
+        )
+        squareoff_hh, squareoff_mm = _parse_hhmm(
+            str(params.get("square_off_time", "15:15")), (15, 15)
+        )
+        _ECN_SESSION_START = _time(session_hh, session_mm)
+        _ECN_LATE_START = _time(late_hh, late_mm)
+        _ECN_LAST_ENTRY = _time(last_entry_hh, last_entry_mm)
+        _ECN_SQUAREOFF = _time(squareoff_hh, squareoff_mm)
+
+        # PR #283 codex round-8 P2: live ECN config gates entry on
+        # ``state.trades_today < self.max_trades_per_day`` (default 1).
+        # The simulator must enforce the same cap so an optimizer can't
+        # rank a parameter set on multi-entry sessions production
+        # would never have placed.
+        max_trades_per_day_cfg = int(params.get("max_trades_per_day", 1))
 
         def _within_ecn_entry_window(idx: int) -> bool:
             if ist_time_of_day is None:
@@ -583,8 +619,17 @@ class RealDataBacktester:
         entry_atr = 0.0
         ema_fail_count = 0
         # PR #283 codex round-7 P2: track cooldown bars between exits
-        # (matches live ``state.cooldown_bars``).
+        # (matches live ``state.cooldown_bars``). Live decrements the
+        # counter on the EXIT bar (before any re-entry check), so a
+        # ``cooldown_bars=2`` setting blocks the exit bar + 1 follow-on
+        # bar (2 bars total). Here the exit bar is never re-evaluated,
+        # so post-exit we set ``cooldown_remaining = cooldown_bars - 1``
+        # to block the same total of 2 bars rather than 3.
         cooldown_remaining = 0
+        # PR #283 codex round-8 P2: track trades-per-day to enforce
+        # ``max_trades_per_day`` (live default 1 for ECN).
+        trades_today = 0
+        last_seen_date = None
 
         # Need at least 50 bars to have a meaningful ema_50.
         for i in range(50, len(df)):
@@ -606,12 +651,32 @@ class RealDataBacktester:
             macd_signal_i = float(df.get("macd_signal", pd.Series([0.0] * len(df))).iloc[i])
             macd_hist_i = macd_i - macd_signal_i
 
+            # PR #283 codex round-8 P2: daily trade-count reset on IST
+            # day boundary so ``max_trades_per_day`` is enforced against
+            # the same calendar day live uses.
+            if ist_time_of_day is not None:
+                try:
+                    bar_date = pd.to_datetime(df["timestamp"].iloc[i]).tz_convert(
+                        "Asia/Kolkata"
+                    ).date()
+                except Exception:
+                    bar_date = None
+                if bar_date is not None and bar_date != last_seen_date:
+                    last_seen_date = bar_date
+                    trades_today = 0
+
             if not in_trade:
                 # PR #283 codex round-7 P2: post-exit cooldown matches
                 # live ``state.cooldown_bars``. While positive, all
                 # signal evaluation is skipped.
                 if cooldown_remaining > 0:
                     cooldown_remaining -= 1
+                    continue
+                # PR #283 codex round-8 P2: ``max_trades_per_day`` cap
+                # (live ECN default 1). Without this the simulator
+                # books a second entry on days with multiple signals
+                # that production would never have placed.
+                if trades_today >= max_trades_per_day_cfg:
                     continue
                 # PR #283 codex round-7 P2: entry session window
                 # (between session_start and last_entry_time).
@@ -744,9 +809,21 @@ class RealDataBacktester:
                 trades.append(
                     {"entry": entry_price, "exit": exit_price, "pnl_pct": pnl_pct}
                 )
-                # PR #283 codex round-7 P2: match live cooldown bars
-                # behaviour — block re-entry for ``cooldown_bars`` bars.
-                cooldown_remaining = cooldown_bars_cfg
+                # PR #283 codex round-8 P2: live ``_manage_position_on_bar``
+                # decrements ``state.cooldown_bars`` on the EXIT bar
+                # itself (before any cooldown check), so a config of
+                # ``cooldown_bars=2`` blocks the exit bar + 1 follow-on
+                # bar (2 bars total). Here the exit bar is never
+                # re-evaluated for re-entry, so setting
+                # ``cooldown_remaining = cooldown_bars`` would block
+                # the exit bar PLUS 2 follow-on bars (3 bars total) —
+                # one too many. Using ``cooldown_bars - 1`` aligns the
+                # total blocked bars with live (clamped to >= 0).
+                cooldown_remaining = max(0, cooldown_bars_cfg - 1)
+                # PR #283 codex round-8 P2: count the entry against the
+                # day's quota so subsequent entries on the same calendar
+                # day are blocked by ``max_trades_per_day``.
+                trades_today += 1
 
         return _trade_stats(trades)
 
@@ -911,24 +988,27 @@ class RealDataBacktester:
                     continue
                 # 15m downtrend proxy: 5m close < EMA50 AND close < EMA20.
                 downtrend_proxy = close_i < ema50_i and close_i < ema20_i
-                # PR #283 codex round-7 P2: live ``_is_breakdown_bar``
-                # accepts a candle when its LOW takes out the prior
-                # swing low AND the close sits near that low
-                # (``lower_wick_ratio <= 0.30``). The previous
-                # ``close < prior_low`` was strictly tighter and
-                # skipped breakdown candles that closed slightly above
-                # the low but still inside the lower 30% of the range.
+                # PR #283 codex round-8 P2: live ``_is_breakdown_bar``
+                # (app/strategies/put_momentum_scalper.py:1230) uses
+                # ONLY ``candle.low <= min(prior_lows) AND
+                # lower_wick_ratio <= 0.30``. Earlier rounds also OR-ed
+                # in ``close < prior_low``, which admitted breakdown
+                # candles live would reject when the close was below
+                # the prior low but the wick ratio exceeded 0.30
+                # (large reversal candles). The OR is removed.
                 prior_low = float(df["low"].iloc[i - lookback_breakdown_bars:i].min())
                 low_i = float(df["low"].iloc[i])
                 high_i = float(df["high"].iloc[i])
-                breakdown_close = close_i < prior_low
                 bar_range = high_i - low_i
                 # Avoid divide-by-zero on doji bars; treat as no wick.
                 lower_wick_ratio = (
                     (close_i - low_i) / bar_range if bar_range > 0 else 0.0
                 )
-                breakdown_wick = low_i < prior_low and lower_wick_ratio <= 0.30
-                breakdown = breakdown_close or breakdown_wick
+                # PR #283 codex round-8 P2: ``<=`` matches live's
+                # ``candle.low <= min(lows)``. An equal-low wick
+                # candle was previously rejected even though live
+                # admits it.
+                breakdown = low_i <= prior_low and lower_wick_ratio <= 0.30
                 rsi_ok = rsi_min <= rsi_i <= rsi_max
                 # rsi_falling_bars_required consecutive declining RSI bars.
                 rsi_window = df["rsi"].iloc[

@@ -102,8 +102,26 @@ class MultiStrategyOptimizer:
             )
             return metrics
 
+        # PR #283 codex round-8 P2: small budgets like
+        # ``--iterations=1`` make ``int(1 * 0.5) == 0`` and
+        # ``int(1 * 0.3) == 0``, so both stages would skip and
+        # ``evaluated`` would stay empty. The compile block below
+        # then emits ``best_score=-Infinity``, an empty ``top_5``,
+        # and ``ranked_candidates=[]``, none of which the writer or
+        # the gate can use — and ``-Infinity`` is non-standard JSON.
+        # Fail closed with an actionable error so the CLI surface
+        # matches the standalone runner's behaviour.
+        stage1 = int(n_iterations * 0.5)
+        stage2 = int(n_iterations * 0.3)
+        if stage1 + stage2 <= 0:
+            raise SystemExit(
+                f"--iterations={n_iterations} is too small: produced "
+                f"{stage1 + stage2} total configurations to evaluate. "
+                "Use at least --iterations=4 so both stages can run."
+            )
+
         # Run optimization
-        logger.info(f"\n[Stage 1] Bayesian Optimization ({int(n_iterations * 0.5)} iterations)...")
+        logger.info(f"\n[Stage 1] Bayesian Optimization ({stage1} iterations)...")
 
         evaluated = []
         best_score = -float('inf')
@@ -114,7 +132,7 @@ class MultiStrategyOptimizer:
         import numpy as np
         np.random.seed(42)
 
-        for i in range(int(n_iterations * 0.5)):
+        for i in range(stage1):
             params = {}
             for space in param_spaces:
                 rand_val = np.random.uniform(0, 1)
@@ -131,8 +149,8 @@ class MultiStrategyOptimizer:
             if (i + 1) % 10 == 0:
                 logger.info(f"    Iteration {i + 1}: Best score = {best_score:.2f}")
 
-        logger.info(f"\n[Stage 2] Genetic Algorithm ({int(n_iterations * 0.3)} iterations)...")
-        for i in range(int(n_iterations * 0.3)):
+        logger.info(f"\n[Stage 2] Genetic Algorithm ({stage2} iterations)...")
+        for i in range(stage2):
             # Mutate best performer
             child_params = {}
             for space in param_spaces:
