@@ -344,9 +344,16 @@ def test_apply_walk_forward_gate_drops_failing_candidates_and_augments_survivors
     assert captured_loader_calls[0]["days_back"] == 20
 
 
-def test_apply_walk_forward_gate_bypasses_when_loader_returns_empty():
-    """An empty loader response (e.g. fresh DB, no bars) must NOT block
-    the promotion entirely — bypass with a warning instead."""
+def test_apply_walk_forward_gate_drops_candidates_when_per_tf_loader_empty():
+    """PR #289 codex round-3 P2: the gate used to bypass entirely when
+    the strategy's DEFAULT timeframe returned no bars, silently
+    promoting candidates whose own (non-default) timeframe might have
+    had data. The fix removes that wholesale bypass — each candidate's
+    own timeframe is fetched, and only candidates with empty data are
+    dropped (the gate stays ON for the rest of the run).
+
+    Here every candidate maps to a timeframe that returns empty, so
+    every candidate should be DROPPED — not silently promoted."""
     from app.strategies import run_multi_strategy_optimizer as rmso
 
     class _EmptyLoader:
@@ -367,8 +374,10 @@ def test_apply_walk_forward_gate_bypasses_when_loader_returns_empty():
         validator=_UnusedValidator(),  # type: ignore[arg-type]
         loader=_EmptyLoader(),  # type: ignore[arg-type]
     )
-    assert dropped == 0
-    assert survivors == candidates
+    # No candidate was ever validated; per-candidate empty data path
+    # drops each one. The candidate count is preserved as dropped.
+    assert dropped == 1
+    assert survivors == []
 
 
 def test_apply_walk_forward_gate_bypasses_unknown_strategy():
@@ -645,3 +654,153 @@ def test_apply_walk_forward_gate_validates_beyond_2x_candidate_quota():
         "must find at least one passing candidate beyond the 2x slice"
     )
     assert dropped == 2
+
+
+# ---------------------------------------------------------------------------
+# PR #289 codex round-3 regressions.
+# ---------------------------------------------------------------------------
+
+
+def test_promote_does_not_fall_back_indicator_dsn_to_writer_dsn():
+    """In a split-DB deployment the user provides only
+    ``--candidate-writer-dsn`` (writer / control-plane) and lets the
+    optimizer's loader read ``PG_INDICATORS_DSN`` from settings. The
+    walk-forward gate must NOT fall back to the writer DSN — its
+    database has no ``indicator_bars`` table. Pass ``None`` to the
+    loader so it honours the same default the optimizer used."""
+    from app.strategies import run_multi_strategy_optimizer as rmso
+    import inspect
+
+    src = inspect.getsource(rmso._promote_top_candidates)
+    # The fallback ``indicator_dsn or dsn`` must NOT be present any
+    # more; the only acceptable constructor is ``dsn=indicator_dsn``.
+    assert "indicator_dsn or dsn" not in src, (
+        "the gate loader must not fall back to the writer DSN in a "
+        "split-DB setup — found the legacy fallback expression"
+    )
+    assert "PostgresIndicatorLoader(dsn=indicator_dsn)" in src, (
+        "the gate loader must be constructed with the EXPLICIT "
+        "indicator_dsn only — even when None (so the loader uses its "
+        "own settings/env default, the same source the optimizer used)"
+    )
+
+
+def test_apply_walk_forward_gate_no_longer_probes_default_timeframe():
+    """PR #289 codex round-3 P2: the default-timeframe pre-probe is
+    removed. Previously an empty default-timeframe fetch would cause
+    the gate to bypass entirely, silently promoting candidates that
+    optimized on non-default timeframes. The per-candidate loop must
+    handle each candidate's own timeframe."""
+    from app.strategies import run_multi_strategy_optimizer as rmso
+    import inspect
+
+    src = inspect.getsource(rmso._apply_walk_forward_gate)
+    # The previous early-bypass pattern referenced
+    # ``df_default = _fetch_for_timeframe(default_timeframe)`` followed
+    # by ``return candidates[:candidates_per_strategy], 0`` — that
+    # pattern must be gone.
+    assert "df_default = _fetch_for_timeframe" not in src, (
+        "the default-timeframe pre-probe must be removed; the "
+        "per-candidate loop already handles empty data per-timeframe"
+    )
+
+
+def test_apply_walk_forward_gate_validates_non_default_timeframe_when_default_empty(monkeypatch):
+    """Operationally: if the default 300s stream is empty but a
+    candidate optimized on 60s has data, the gate must validate that
+    candidate against 60s instead of silently promoting it."""
+    from app.strategies import run_multi_strategy_optimizer as rmso
+
+    class _PerTfLoader:
+        def __init__(self):
+            self.calls: list = []
+
+        def fetch_indicator_bars(self, **kwargs):
+            self.calls.append(kwargs)
+            tf = kwargs["timeframe_seconds"]
+            if tf == 300:
+                return pd.DataFrame()  # default empty
+            # 60s has bars
+            n = 200
+            return pd.DataFrame({
+                "timestamp": pd.date_range("2026-01-01", periods=n, freq="60s"),
+                "open": [100.0] * n,
+                "high": [100.5] * n,
+                "low": [99.5] * n,
+                "close": [100.0] * n,
+                "atr": [1.0] * n,
+                "rsi": [50.0] * n,
+                "macd": [0.0] * n,
+                "macd_signal": [0.0] * n,
+                "ema_20": [100.0] * n,
+                "ema_30": [100.0] * n,
+                "ema_50": [100.0] * n,
+                "adx": [25.0] * n,
+                "plus_di": [25.0] * n,
+                "minus_di": [25.0] * n,
+            })
+
+    class _PassValidator:
+        def validate(self, df, params, score_fn):
+            return WalkForwardResult(
+                in_sample_score=100.0,
+                fold_scores=[25.0] * 4,
+                fold_trade_counts=[10] * 4,
+                oos_holdout_score=25.0,
+                oos_holdout_trades=5,
+                passed=True,
+                failure_reasons=[],
+                in_sample_bars=80,
+                fold_bar_counts=[20] * 4,
+            )
+
+    loader = _PerTfLoader()
+    candidates = [{"params": {"signal_timeframe": 60}, "metrics": {}}]
+    survivors, dropped = rmso._apply_walk_forward_gate(
+        strategy_name="ema20",
+        underlying_label="NIFTY_IDX",
+        candidates=candidates,
+        candidates_per_strategy=1,
+        lookback_days=20,
+        validator=_PassValidator(),  # type: ignore[arg-type]
+        loader=loader,  # type: ignore[arg-type]
+    )
+    assert len(survivors) == 1, (
+        "candidate with non-default timeframe and real data must be "
+        "validated and promoted, not silently bypassed because the "
+        "default timeframe stream is empty"
+    )
+    assert dropped == 0
+    # The loader must have been hit for the candidate's timeframe (60s).
+    fetched_tfs = {c["timeframe_seconds"] for c in loader.calls}
+    assert 60 in fetched_tfs, (
+        f"loader must fetch the candidate's optimized timeframe; "
+        f"got fetches for {fetched_tfs}"
+    )
+
+
+def test_ranked_candidates_exported_for_gate_backfill():
+    """PR #289 codex round-3 P2: when the optimizer's first five
+    candidates all fail the gate but candidate #6 passes, the gate
+    must still find that survivor. The optimizer therefore exports
+    ``ranked_candidates`` (the full evaluated list, sorted by score)
+    in addition to the legacy ``top_5``."""
+    import inspect
+    from app.strategies import run_multi_strategy_optimizer as rmso
+
+    # The result-compile block must build ranked_candidates from the
+    # full sorted ``evaluated`` list (no ``[:5]`` slice).
+    src = inspect.getsource(rmso.MultiStrategyOptimizer.optimize_strategy)
+    assert "ranked_candidates" in src, (
+        "MultiStrategyOptimizer.optimize_strategy must export "
+        "ranked_candidates so the gate can backfill beyond top_5"
+    )
+
+    # The promote orchestrator must consume ranked_candidates (with
+    # fallback to top_5 for legacy callers / fixtures).
+    promote_src = inspect.getsource(rmso._promote_top_candidates)
+    assert 'result.get("ranked_candidates")' in promote_src, (
+        "_promote_top_candidates must consume ranked_candidates so "
+        "the gate sees all evaluated candidates, not just the legacy "
+        "top_5 slice"
+    )
