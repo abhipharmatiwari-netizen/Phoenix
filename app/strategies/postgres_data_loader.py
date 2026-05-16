@@ -191,6 +191,16 @@ class PostgresIndicatorLoader:
         # caused the query to fail before any rows were returned. Volume
         # is not consumed by the optimizer's simulators, so it is simply
         # omitted from the SELECT.
+        #
+        # PR #283 codex round-14 P2: ECN's live strategy overlays a
+        # private 20-period EMA computed on the 30s bar close
+        # (``exclusive_nifty_ce_buy_ema20_30s``, see
+        # ``migrations/003_exclusive_nifty_ce_buy_private_ema.sql``).
+        # When present, live ``ExclusiveNiftyCeBuyStrategy._on_signal``
+        # replaces ``ema_20`` with this overlay before computing the
+        # entry/exit signals. The SELECT now reads it too — the
+        # simulator picks it preferentially when running ECN on
+        # underlyings that maintain the overlay.
         query = f"""
         SELECT
             ts_start as timestamp,
@@ -207,7 +217,8 @@ class PostgresIndicatorLoader:
             ema_50,
             adx,
             plus_di,
-            minus_di
+            minus_di,
+            exclusive_nifty_ce_buy_ema20_30s
         FROM {self.table_name}
         WHERE label = %s
             AND timeframe_seconds = %s
@@ -232,7 +243,8 @@ class PostgresIndicatorLoader:
             columns = [
                 "timestamp", "open", "high", "low", "close",
                 "atr", "rsi", "macd", "macd_signal", "ema_20", "ema_30",
-                "ema_50", "adx", "plus_di", "minus_di"
+                "ema_50", "adx", "plus_di", "minus_di",
+                "exclusive_nifty_ce_buy_ema20_30s",
             ]
             df = pd.DataFrame(rows, columns=columns)
 
@@ -697,10 +709,17 @@ class RealDataBacktester:
         )
         late_trail_cushion_cfg = float(params.get("late_trail_cushion", 0.08))
 
-        # Use ema_20 / ema_50 from indicator_bars if present (live names);
-        # otherwise compute as a fallback so a partial schema doesn't
-        # silently zero the run.
-        if "ema_20" in df.columns and df["ema_20"].notna().any():
+        # PR #283 codex round-14 P2: live ECN replaces ``ema_20`` with
+        # its PRIVATE 20-period EMA overlay
+        # (``exclusive_nifty_ce_buy_ema20_30s``) when the overlay is
+        # present in the bar — see ``_on_signal`` in
+        # ``exclusive_nifty_ce_buy.py``. The simulator now matches:
+        # prefer the private column, fall back to the generic
+        # ``ema_20``, fall back to computing if neither is available.
+        private_col = "exclusive_nifty_ce_buy_ema20_30s"
+        if private_col in df.columns and df[private_col].notna().any():
+            ema20 = df[private_col]
+        elif "ema_20" in df.columns and df["ema_20"].notna().any():
             ema20 = df["ema_20"]
         else:
             ema20 = df["close"].ewm(span=20, adjust=False).mean()

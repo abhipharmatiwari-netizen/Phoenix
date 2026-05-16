@@ -1683,3 +1683,63 @@ def test_backtest_pm_threads_per_underlying_defaults():
         assert d.get("entry_start") == "09:20"
         assert d.get("entry_end") == "14:45"
     assert RealDataBacktester._pm_defaults_for("NG_FUT") == {}
+
+
+def test_loader_select_includes_ecn_private_ema_column():
+    """PR #283 codex round-14 P2: live ECN reads a PRIVATE 20-period
+    EMA overlay (``exclusive_nifty_ce_buy_ema20_30s`` — added by
+    ``migrations/003_exclusive_nifty_ce_buy_private_ema.sql``).
+    The loader must select this column so the ECN simulator can
+    prefer it over the generic ``ema_20`` when present, matching
+    live ``_on_signal`` behaviour."""
+    captured = {}
+
+    class _FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, query, params=None):
+            captured["query"] = query
+
+        def fetchall(self):
+            return []
+
+    class _FakeConn:
+        def cursor(self):
+            return _FakeCursor()
+
+    loader = PostgresIndicatorLoader(dsn="postgresql://u@h:5432/d")
+    loader._conn = _FakeConn()
+    loader.fetch_indicator_bars(
+        underlying_label="NIFTY_IDX",
+        timeframe_seconds=30,
+        days_back=5,
+    )
+    sql = captured["query"]
+    assert "exclusive_nifty_ce_buy_ema20_30s" in sql, (
+        "loader must select the private ECN EMA column so the "
+        "simulator can prefer it over ema_20 (matches live overlay)"
+    )
+
+
+def test_ecn_simulator_prefers_private_ema_column_when_present():
+    """PR #283 codex round-14 P2: when the bar includes the private
+    20-period EMA overlay, the ECN simulator must use it as ``ema20``
+    rather than the generic ``ema_20``. Live
+    ``ExclusiveNiftyCeBuyStrategy._on_signal`` swaps in this overlay
+    before computing the entry/exit signals."""
+    import inspect
+
+    src = inspect.getsource(RealDataBacktester._simulate_exclusive_nifty_ce)
+    # Must check the private column FIRST.
+    assert "exclusive_nifty_ce_buy_ema20_30s" in src
+    private_idx = src.index("exclusive_nifty_ce_buy_ema20_30s")
+    # The generic ema_20 fallback must come AFTER the private check.
+    fallback_idx = src.index('elif "ema_20"')
+    assert private_idx < fallback_idx, (
+        "private ECN EMA must be checked BEFORE the generic ema_20 "
+        "so live overlay parity is preserved"
+    )
