@@ -16,6 +16,7 @@ from app.strategies.ml_param_optimizer import (
     ParameterSet,
     ParameterEnsemble,
     BacktestMetrics,
+    _compute_profit_factor,
 )
 from app.strategies.postgres_data_loader import (
     PostgresIndicatorLoader,
@@ -71,13 +72,33 @@ class MultiStrategyOptimizer:
             else:
                 result = {}
 
-            # Convert to BacktestMetrics
+            # Convert to BacktestMetrics. PR #283 codex round-3 P2: also
+            # populate winning_trades / losing_trades / profit_factor so
+            # the composite score's ``win_rate * profit_factor`` consistency
+            # term is not zeroed for every real-data run. The simulators
+            # return ``gross_win`` and ``gross_loss`` exactly so we can
+            # reuse ``_compute_profit_factor`` without re-deriving the
+            # per-trade pnls here.
+            winning_trades = int(result.get("winning_trades", 0))
+            losing_trades = int(result.get("losing_trades", 0))
+            gross_win = float(result.get("gross_win", 0.0))
+            gross_loss = float(result.get("gross_loss", 0.0))
+            profit_factor = _compute_profit_factor(
+                # ``_compute_profit_factor`` only looks at sum/len of each
+                # list, so we can hand it singletons that carry the same
+                # sums; this avoids reconstructing the full pnl arrays.
+                [gross_win] if winning_trades else [],
+                [gross_loss] if losing_trades else [],
+            )
             metrics = BacktestMetrics(
                 total_trades=int(result.get("total_trades", 0)),
+                winning_trades=winning_trades,
+                losing_trades=losing_trades,
                 total_pnl=float(result.get("total_pnl", 0)),
                 win_rate=float(result.get("win_rate", 0)),
                 sharpe_ratio=float(result.get("sharpe_ratio", 0)),
                 max_drawdown=float(result.get("max_drawdown", 0)),
+                profit_factor=profit_factor,
             )
             return metrics
 

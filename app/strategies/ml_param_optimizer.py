@@ -15,6 +15,33 @@ import json
 
 logger = logging.getLogger(__name__)
 
+# Cap for the "all wins, no losses" profit-factor case (PR #283 codex
+# round-3 P2). A pure-infinity sentinel breaks JSON serialization and
+# math.isfinite() guards elsewhere; the cap is intentionally large so an
+# all-win run still dominates the win_rate * profit_factor consistency
+# term in BacktestMetrics.score but never produces NaN downstream.
+_PROFIT_FACTOR_NO_LOSS_CAP = 1000.0
+
+
+def _compute_profit_factor(
+    winning: List[float],
+    losing: List[float],
+) -> float:
+    """Profit factor: sum(wins) / |sum(losses)|.
+
+    PR #283 codex round-3 P2: prior implementation returned 0 when there
+    were no losing trades, which zeroed the ``win_rate * profit_factor``
+    term in ``BacktestMetrics.score`` for the most desirable all-win
+    backtests. Now returns a large finite cap so an all-win run still
+    ranks above weaker candidates with one small loss.
+    """
+    if winning and not losing:
+        return _PROFIT_FACTOR_NO_LOSS_CAP
+    loss_sum = abs(sum(losing))
+    if loss_sum == 0:
+        return 0.0
+    return sum(winning) / loss_sum
+
 
 @dataclass
 class ParameterSpace:
@@ -298,7 +325,7 @@ class Ema20Backtester:
             win_rate=len(winning) / len(trades) if trades else 0,
             avg_win=sum(winning) / len(winning) if winning else 0,
             avg_loss=sum(losing) / len(losing) if losing else 0,
-            profit_factor=sum(winning) / abs(sum(losing)) if losing and sum(losing) != 0 else 0,
+            profit_factor=_compute_profit_factor(winning, losing),
             largest_win=max(winning) if winning else 0,
             largest_loss=min(losing) if losing else 0,
         )

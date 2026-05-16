@@ -117,13 +117,30 @@ def test_ema20_sl_pct_treats_input_as_fraction():
         closes.append(entry_price * (1.0 + 0.01 * step))
     df = _make_bar_df(closes)
 
+    # PR #283 codex round-3 P2 added the RSI-falling / ADX gates to
+    # the EMA20 sim; disable them here so this test only exercises the
+    # SL unit-conversion contract.
     tight = RealDataBacktester._simulate_ema20(
         df,
-        {"ema_period": 20, "sl_pct": 0.05, "tp_pct": 5.0, "min_atr": 0.0},
+        {
+            "ema_period": 20,
+            "sl_pct": 0.05,
+            "tp_pct": 5.0,
+            "min_atr": 0.0,
+            "require_rsi_falling": False,
+            "use_adx_filter": False,
+        },
     )
     loose = RealDataBacktester._simulate_ema20(
         df,
-        {"ema_period": 20, "sl_pct": 0.30, "tp_pct": 5.0, "min_atr": 0.0},
+        {
+            "ema_period": 20,
+            "sl_pct": 0.30,
+            "tp_pct": 5.0,
+            "min_atr": 0.0,
+            "require_rsi_falling": False,
+            "use_adx_filter": False,
+        },
     )
 
     # Both runs entered at the same bar but the SL trips at different
@@ -425,3 +442,231 @@ def test_exclusive_nifty_ce_backtest_uses_configurable_timeframe():
     # Explicit override must be honoured.
     backtester.backtest_exclusive_nifty_ce({"timeframe_seconds": 60}, "NIFTY_IDX")
     assert captured["timeframe_seconds"] == 60
+
+
+# ---------------------------------------------------------------------------
+# PR #283 codex round-3 regressions:
+#   - ECN: 3-bar RSI rising + fresh MACD cross
+#   - PM: bearish MACD with fresh negative cross
+#   - EMA20 real-data sim honors require_rsi_falling + ADX
+#   - _trade_stats helper returns winning/losing/gross_win/gross_loss
+# ---------------------------------------------------------------------------
+
+
+def test_trade_stats_returns_winning_losing_and_gross_components():
+    """Simulators must surface winning_trades / losing_trades / gross_win /
+    gross_loss so the orchestrator can compute profit_factor instead of
+    leaving it at zero in the BacktestMetrics composite score."""
+    from app.strategies.postgres_data_loader import _trade_stats
+
+    trades = [
+        {"pnl_pct": 3.0},
+        {"pnl_pct": 2.0},
+        {"pnl_pct": -1.0},
+    ]
+    stats = _trade_stats(trades)
+    assert stats["winning_trades"] == 2
+    assert stats["losing_trades"] == 1
+    assert stats["gross_win"] == 5.0
+    assert stats["gross_loss"] == -1.0
+    assert stats["total_trades"] == 3
+    assert abs(stats["win_rate"] - (2 / 3)) < 1e-9
+
+
+def test_compute_profit_factor_returns_large_cap_for_all_wins():
+    """An all-win run must NOT collapse profit_factor to zero — that
+    silently zeroed the win_rate * profit_factor consistency term in
+    BacktestMetrics.score for the most desirable backtests."""
+    from app.strategies.ml_param_optimizer import (
+        _PROFIT_FACTOR_NO_LOSS_CAP,
+        _compute_profit_factor,
+    )
+
+    assert _compute_profit_factor([3.0, 2.0], []) == _PROFIT_FACTOR_NO_LOSS_CAP
+    assert _compute_profit_factor([], []) == 0.0
+    assert _compute_profit_factor([3.0], [-1.0]) == 3.0
+
+
+def test_ema20_real_data_sim_honors_require_rsi_falling_gate():
+    """When require_rsi_falling=True (live default), bars where RSI is
+    flat or rising must NOT trigger entry. PR #283 codex round-3 P2."""
+    closes = [100.0] * 30 + [95.0] * 30
+    df = _make_bar_df(closes)
+    # rsi flat at 50; with require_rsi_falling=True there should be no
+    # entries and therefore no trades.
+    result = RealDataBacktester._simulate_ema20(
+        df,
+        {
+            "ema_period": 20,
+            "sl_pct": 0.30,
+            "tp_pct": 0.30,
+            "min_atr": 0.0,
+            "require_rsi_falling": True,
+        },
+    )
+    assert result["total_trades"] == 0
+
+    # With the gate off, trades should appear.
+    result_off = RealDataBacktester._simulate_ema20(
+        df,
+        {
+            "ema_period": 20,
+            "sl_pct": 0.30,
+            "tp_pct": 0.30,
+            "min_atr": 0.0,
+            "require_rsi_falling": False,
+        },
+    )
+    assert result_off["total_trades"] >= 1
+
+
+def test_ema20_real_data_sim_honors_use_adx_filter_gate():
+    """When use_adx_filter=True, entries are rejected unless ADX is
+    above the threshold AND -DI > +DI (bearish bias for the short)."""
+    closes = [100.0] * 30 + [95.0] * 30
+    df = _make_bar_df(closes)
+    # Synthetic frame has adx=25, plus_di=25, minus_di=25 (no bearish bias).
+    # With use_adx_filter=True the DI bias check must reject every entry.
+    result = RealDataBacktester._simulate_ema20(
+        df,
+        {
+            "ema_period": 20,
+            "sl_pct": 0.30,
+            "tp_pct": 0.30,
+            "min_atr": 0.0,
+            "require_rsi_falling": False,
+            "use_adx_filter": True,
+            "min_adx": 18.0,
+        },
+    )
+    assert result["total_trades"] == 0
+
+
+def test_exclusive_nifty_ce_sim_requires_three_bar_rsi_rising():
+    """ECN sim must require RSI[-3] < RSI[-2] < RSI[-1] (matching live
+    ``_compute_buy_signal``), not just a two-bar bounce."""
+
+    n = 100
+    # Build bars where every other RSI value drops then rises in a single
+    # bar — a stale one-bar bounce. The live strategy rejects this.
+    rsi_pattern = []
+    for i in range(n):
+        if i % 4 == 0:
+            rsi_pattern.append(50.0)
+        elif i % 4 == 1:
+            rsi_pattern.append(48.0)
+        elif i % 4 == 2:
+            rsi_pattern.append(60.0)  # one-bar bounce above threshold
+        else:
+            rsi_pattern.append(50.0)
+    df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="30s"),
+        "open": [100.0] * n,
+        "high": [101.0] * n,
+        "low": [99.0] * n,
+        "close": [100.0 + 0.1 * i for i in range(n)],
+        "atr": [1.0] * n,
+        "rsi": rsi_pattern,
+        "macd": [0.0] * n,
+        "macd_signal": [0.0] * n,
+        "ema_20": [99.0] * n,
+        "ema_30": [99.0] * n,
+        "ema_50": [98.0] * n,
+        "adx": [30.0] * n,
+        "plus_di": [30.0] * n,
+        "minus_di": [10.0] * n,
+    })
+    result = RealDataBacktester._simulate_exclusive_nifty_ce(df, {})
+    # The pattern has no 3-bar rising window, so even with all other
+    # gates satisfied, no entries should fire.
+    assert result["total_trades"] == 0
+
+
+def test_exclusive_nifty_ce_sim_requires_fresh_macd_cross():
+    """ECN must reject entries where MACD is already bullish across both
+    the current and prior bars (no fresh cross-up). PR #283 codex round-3."""
+    n = 100
+    # MACD bullish AND stale (no fresh cross) on every bar.
+    df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="30s"),
+        "open": [100.0] * n,
+        "high": [101.0] * n,
+        "low": [99.0] * n,
+        "close": [100.0 + 0.1 * i for i in range(n)],
+        "atr": [1.0] * n,
+        # 3-bar rising RSI window.
+        "rsi": [55.0 + 0.5 * (i % 3) for i in range(n)],
+        # MACD permanently bullish — never a fresh cross.
+        "macd": [0.5] * n,
+        "macd_signal": [0.0] * n,
+        "ema_20": [99.0] * n,
+        "ema_30": [99.0] * n,
+        "ema_50": [98.0] * n,
+        "adx": [30.0] * n,
+        "plus_di": [30.0] * n,
+        "minus_di": [10.0] * n,
+    })
+    result = RealDataBacktester._simulate_exclusive_nifty_ce(df, {"rsi_min": 50, "rsi_max": 80})
+    # No fresh cross-up exists in this frame, so all entries are rejected.
+    assert result["total_trades"] == 0
+
+
+def test_put_momentum_sim_requires_bearish_macd_cross():
+    """PM must reject entries where MACD is bullish or stale. PR #283
+    codex round-3 P2 — without this gate the simulator scored breakdown
+    trades the live strategy would skip."""
+    n = 100
+    # MACD permanently bullish — no bearish fresh cross-down.
+    df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="5min"),
+        "open": [100.0] * n,
+        "high": [101.0] * n,
+        # Breakdown setup: prior swing low ~98, current close drops below.
+        "low": [98.0 if i < 80 else 90.0 for i in range(n)],
+        "close": [100.0 if i < 80 else 90.0 for i in range(n)],
+        "atr": [1.0] * n,
+        # Declining RSI to satisfy rsi_falling_bars_required.
+        "rsi": [40.0 - 0.1 * i for i in range(n)],
+        # MACD permanently bullish — never a fresh negative cross.
+        "macd": [0.5] * n,
+        "macd_signal": [0.0] * n,
+        "ema_20": [105.0] * n,
+        "ema_30": [105.0] * n,
+        "ema_50": [105.0] * n,
+        "adx": [25.0] * n,
+        "plus_di": [25.0] * n,
+        "minus_di": [25.0] * n,
+    })
+    result = RealDataBacktester._simulate_put_momentum(df, {})
+    assert result["total_trades"] == 0
+
+
+def test_run_ml_param_optimizer_genetic_stage_handles_single_parent():
+    """The GA stage must not crash with UnboundLocalError when Bayesian
+    search produces a single best performer. PR #283 codex round-3 P2."""
+    from app.strategies.ml_param_optimizer import (
+        BacktestMetrics,
+        ParameterSet,
+        ParameterSpace,
+    )
+    from app.strategies.run_ml_param_optimizer import _genetic_algorithm_stage
+
+    class _FixedBacktester:
+        def backtest(self, params):
+            return BacktestMetrics(total_trades=1, total_pnl=10.0, win_rate=1.0)
+
+    space = ParameterSpace(name="sl_pct", param_type="float", min_value=0.1, max_value=0.5)
+    single_parent = [
+        ParameterSet(
+            params={"sl_pct": 0.30},
+            metrics=BacktestMetrics(total_trades=1, total_pnl=10.0, win_rate=1.0),
+        )
+    ]
+    # Single-parent path: should run to completion without UnboundLocalError.
+    results = _genetic_algorithm_stage(
+        [space],
+        _FixedBacktester(),  # type: ignore[arg-type]
+        best_performers=single_parent,
+        n_iterations=5,
+    )
+    assert len(results) == 5

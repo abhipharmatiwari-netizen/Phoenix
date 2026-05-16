@@ -231,7 +231,13 @@ def _genetic_algorithm_stage(
     results = []
 
     for iteration in range(n_iterations):
-        # Select two random parents from best performers
+        # Select two random parents from best performers. PR #283 codex
+        # round-3 P2: initialise ``parent2`` explicitly so the
+        # single-parent branch cannot raise ``UnboundLocalError`` from
+        # the ``elif parent2`` crossover check below — previously a
+        # ``--iterations`` value small enough to yield a single best
+        # performer crashed nondeterministically in the GA stage.
+        parent2 = None
         if len(best_performers) >= 2:
             parent1 = best_performers[np.random.randint(len(best_performers))]
             parent2 = best_performers[np.random.randint(len(best_performers))]

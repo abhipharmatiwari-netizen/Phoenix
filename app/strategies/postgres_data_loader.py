@@ -21,6 +21,47 @@ logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
+def _trade_stats(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate per-trade ``pnl_pct`` into the metrics dict the
+    ``MultiStrategyOptimizer`` orchestrator consumes.
+
+    PR #283 codex round-3 P2: returns ``winning_trades`` and
+    ``losing_trades`` so the orchestrator can compute and populate
+    ``BacktestMetrics.profit_factor`` instead of leaving it at the
+    default 0.0 — which previously zeroed out the
+    ``win_rate * profit_factor`` consistency term in the composite
+    score for every real-data run.
+    """
+    import numpy as np
+
+    if not trades:
+        return {
+            "total_trades": 0,
+            "total_pnl": 0.0,
+            "win_rate": 0.0,
+            "sharpe_ratio": 0.0,
+            "max_drawdown": 0.0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "gross_win": 0.0,
+            "gross_loss": 0.0,
+        }
+    pnls = [t["pnl_pct"] for t in trades]
+    winning = [p for p in pnls if p > 0]
+    losing = [p for p in pnls if p < 0]
+    return {
+        "total_trades": len(trades),
+        "total_pnl": sum(pnls),
+        "win_rate": len(winning) / len(trades),
+        "sharpe_ratio": np.mean(pnls) / (np.std(pnls) + 1e-6) if len(pnls) > 1 else 0.0,
+        "max_drawdown": min(pnls),
+        "winning_trades": len(winning),
+        "losing_trades": len(losing),
+        "gross_win": sum(winning),
+        "gross_loss": sum(losing),
+    }
+
+
 def _redact_dsn(dsn: Optional[str]) -> str:
     """Return a host/db label safe for logs.
 
@@ -312,9 +353,14 @@ class RealDataBacktester:
 
     @staticmethod
     def _simulate_ema20(df: pd.DataFrame, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Simulate EMA20 strategy logic on OHLC data."""
-        import numpy as np
+        """Simulate EMA20 strategy logic on OHLC data.
 
+        PR #283 codex round-3 P2: honors the ``require_rsi_falling``,
+        ``use_adx_filter``, and ``min_adx`` gates the EMA20 parameter
+        space emits — previously the real-data simulator entered solely
+        on close<EMA + ATR, so the optimizer was ranking trades the
+        live strategy would skip.
+        """
         ema_period = params.get("ema_period", 20)
         # PR #283 codex P1: ``sl_pct`` / ``tp_pct`` are FRACTIONS in the
         # live EMA20 strategy (0.30 ⇒ 30%). Convert to percent here so
@@ -324,6 +370,9 @@ class RealDataBacktester:
         sl_pct_threshold = params.get("sl_pct", 0.30) * 100.0
         tp_pct_threshold = params.get("tp_pct", 0.30) * 100.0
         min_atr = params.get("min_atr", 0.1)
+        require_rsi_falling = bool(params.get("require_rsi_falling", True))
+        use_adx_filter = bool(params.get("use_adx_filter", False))
+        min_adx = float(params.get("min_adx", 18.0))
 
         # Calculate EMA
         df["ema"] = df["close"].ewm(span=ema_period, adjust=False).mean()
@@ -335,8 +384,27 @@ class RealDataBacktester:
 
         for i in range(ema_period, len(df)):
             if not in_trade:
-                # Entry condition: close below EMA + ATR check
-                if df["close"].iloc[i] < df["ema"].iloc[i] and df["atr"].iloc[i] >= min_atr:
+                close_below_ema = df["close"].iloc[i] < df["ema"].iloc[i]
+                atr_ok = df["atr"].iloc[i] >= min_atr if min_atr > 0 else True
+                # PR #283 codex round-3 P2: RSI-falling and ADX/DI gates
+                # mirror the live EMA20 strategy entry filters.
+                if require_rsi_falling and "rsi" in df.columns and i >= 1:
+                    rsi_falling = df["rsi"].iloc[i] < df["rsi"].iloc[i - 1]
+                else:
+                    rsi_falling = True
+                if use_adx_filter:
+                    adx_val = float(df["adx"].iloc[i]) if "adx" in df.columns else 0.0
+                    plus_di_val = float(df["plus_di"].iloc[i]) if "plus_di" in df.columns else 0.0
+                    minus_di_val = float(df["minus_di"].iloc[i]) if "minus_di" in df.columns else 0.0
+                    adx_ok = adx_val >= min_adx
+                    # EMA20 is a short-when-below-EMA strategy; require
+                    # bearish DI bias when the ADX filter is on.
+                    di_ok = minus_di_val > plus_di_val
+                else:
+                    adx_ok = True
+                    di_ok = True
+
+                if close_below_ema and atr_ok and rsi_falling and adx_ok and di_ok:
                     in_trade = True
                     entry_price = df["close"].iloc[i]
 
@@ -357,19 +425,7 @@ class RealDataBacktester:
                         "pnl_pct": pnl_pct,
                     })
 
-        if not trades:
-            return {"total_trades": 0, "total_pnl": 0, "win_rate": 0, "sharpe_ratio": 0, "max_drawdown": 0}
-
-        pnls = [t["pnl_pct"] for t in trades]
-        wins = len([p for p in pnls if p > 0])
-
-        return {
-            "total_trades": len(trades),
-            "total_pnl": sum(pnls),
-            "win_rate": wins / len(trades) if trades else 0,
-            "sharpe_ratio": np.mean(pnls) / (np.std(pnls) + 1e-6) if len(pnls) > 1 else 0,
-            "max_drawdown": min(pnls) if pnls else 0,
-        }
+        return _trade_stats(trades)
 
     @staticmethod
     def _simulate_exclusive_nifty_ce(df: pd.DataFrame, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -384,12 +440,16 @@ class RealDataBacktester:
         Live entry contract (approximated here):
           - trend_ok:     ema20 > ema50
           - rsi_ok:       rsi_min < rsi < rsi_max
-          - rsi_rising:   2 consecutive bars of rising rsi
-                          (live requires 3; relaxed to 2 to keep the
-                          backtest signal volume comparable on shorter
-                          windows. Documented for codex round-2 reviewer.)
+          - rsi_rising:   3 consecutive bars of rising RSI
+                          (matches live _compute_buy_signal exactly;
+                          PR #283 codex round-3 P2).
           - above_ema20:  close > ema20 + ema_atr_buffer * atr
-          - macd_ok:      macd_hist >= macd_hist_min AND macd > macd_signal
+          - macd_ok:      FRESH cross-up
+                          (prev_macd <= prev_macd_signal AND
+                          macd > macd_signal) AND macd_hist >= macd_hist_min.
+                          PR #283 codex round-3 P2 — stale bullish MACD
+                          continuations no longer trigger entry, matching
+                          the live _compute_buy_signal cross check.
           - adx_ok:       adx >= min_adx
           - di_ok:        |plus_di - minus_di| >= min_di_spread
                           AND plus_di > minus_di
@@ -404,7 +464,6 @@ class RealDataBacktester:
         no volume column and the buffers needed for the near-cross are
         not available in a bar-by-bar replay.
         """
-        import numpy as np
 
         # Match the live config keys (app/strategies/exclusive_nifty_ce_buy.py).
         rsi_min = float(params.get("rsi_min", 58.0))
@@ -458,9 +517,30 @@ class RealDataBacktester:
                 # Entry gates — approximation of the live _compute_buy_signal.
                 trend_ok = ema20_i > ema50_i
                 rsi_ok = rsi_min < rsi_i < rsi_max
-                rsi_rising = rsi_i > rsi_prev
+                # PR #283 codex round-3 P2: live requires THREE consecutive
+                # bars of rising RSI (rsi[-1] > rsi[-2] > rsi[-3]). The
+                # earlier two-bar window admitted one-bar bounces after a
+                # decline that live would reject.
+                if i >= 2:
+                    rsi_prev2 = float(df["rsi"].iloc[i - 2]) if "rsi" in df.columns else 0.0
+                    rsi_rising = rsi_i > rsi_prev > rsi_prev2
+                else:
+                    rsi_rising = False
                 above_ema20 = close_i > (ema20_i + ema_atr_buffer * atr_i)
-                macd_ok = macd_i > macd_signal_i and macd_hist_i >= macd_hist_min
+                # PR #283 codex round-3 P2: live requires a FRESH cross-up
+                # (prev_macd <= prev_macd_signal AND current macd > macd_signal),
+                # not just a current bullish state. Stale crossed-up
+                # continuations admitted entries live would reject.
+                prev_macd = float(
+                    df.get("macd", pd.Series([0.0] * len(df))).iloc[i - 1]
+                )
+                prev_macd_signal = float(
+                    df.get("macd_signal", pd.Series([0.0] * len(df))).iloc[i - 1]
+                )
+                macd_cross_up = (
+                    prev_macd <= prev_macd_signal and macd_i > macd_signal_i
+                )
+                macd_ok = macd_cross_up and macd_hist_i >= macd_hist_min
                 adx_ok = adx_i >= min_adx
                 di_spread = abs(plus_di_i - minus_di_i)
                 di_ok = di_spread >= min_di_spread and plus_di_i > minus_di_i
@@ -496,19 +576,7 @@ class RealDataBacktester:
                 pnl_pct = ((close_i - entry_price) / entry_price) * 100
                 trades.append({"entry": entry_price, "exit": close_i, "pnl_pct": pnl_pct})
 
-        if not trades:
-            return {"total_trades": 0, "total_pnl": 0, "win_rate": 0}
-
-        pnls = [t["pnl_pct"] for t in trades]
-        wins = len([p for p in pnls if p > 0])
-
-        return {
-            "total_trades": len(trades),
-            "total_pnl": sum(pnls),
-            "win_rate": wins / len(trades) if trades else 0,
-            "sharpe_ratio": np.mean(pnls) / (np.std(pnls) + 1e-6) if len(pnls) > 1 else 0,
-            "max_drawdown": min(pnls) if pnls else 0,
-        }
+        return _trade_stats(trades)
 
     @staticmethod
     def _simulate_put_momentum(df: pd.DataFrame, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -532,6 +600,13 @@ class RealDataBacktester:
                                  bars of declining RSI.
           - min_atr_ratio:       atr / close >= min_atr_ratio
                                  (rejects flat / illiquid regimes).
+          - macd_bearish:        macd < macd_signal AND a FRESH negative
+                                 cross (prev_macd >= prev_macd_signal AND
+                                 current macd < macd_signal). PR #283
+                                 codex round-3 P2 — without this the
+                                 simulator opened breakdown trades while
+                                 MACD was still bullish or stale-crossed,
+                                 which the live strategy rejects.
         Live exit contract (approximated here):
           - option_sl_pct:       option-premium stop. Proxied by mapping
                                  a 1× ``option_sl_pct`` move on the
@@ -548,7 +623,6 @@ class RealDataBacktester:
         indicator_bars schema does not carry volume / VWAP / 15m bars.
         Documented limitation; codex round-2 reviewer.
         """
-        import numpy as np
 
         # Match the live config keys (PutMomentumScalperConfig).
         rsi_min = float(params.get("rsi_min", 25.0))
@@ -606,7 +680,33 @@ class RealDataBacktester:
                 atr_ratio = (atr_i / close_i) if close_i > 0 else 0.0
                 vol_ok = atr_ratio >= min_atr_ratio
 
-                if downtrend_proxy and breakdown and rsi_ok and rsi_falling and vol_ok:
+                # PR #283 codex round-3 P2: bearish MACD with fresh
+                # negative cross. The live PutMomentumScalperStrategy
+                # only takes entries when MACD has freshly crossed below
+                # its signal line on the entry bar.
+                macd_i = float(df.get("macd", pd.Series([0.0] * len(df))).iloc[i])
+                macd_signal_i = float(
+                    df.get("macd_signal", pd.Series([0.0] * len(df))).iloc[i]
+                )
+                prev_macd = float(
+                    df.get("macd", pd.Series([0.0] * len(df))).iloc[i - 1]
+                )
+                prev_macd_signal = float(
+                    df.get("macd_signal", pd.Series([0.0] * len(df))).iloc[i - 1]
+                )
+                macd_cross_down = (
+                    prev_macd >= prev_macd_signal and macd_i < macd_signal_i
+                )
+                macd_bearish_ok = macd_cross_down and macd_i < macd_signal_i
+
+                if (
+                    downtrend_proxy
+                    and breakdown
+                    and rsi_ok
+                    and rsi_falling
+                    and vol_ok
+                    and macd_bearish_ok
+                ):
                     in_trade = True
                     entry_price = close_i
                     bars_in_trade = 0
@@ -649,16 +749,4 @@ class RealDataBacktester:
                     "pnl_pct": option_pnl_pct * weight,
                 })
 
-        if not trades:
-            return {"total_trades": 0, "total_pnl": 0, "win_rate": 0}
-
-        pnls = [t["pnl_pct"] for t in trades]
-        wins = len([p for p in pnls if p > 0])
-
-        return {
-            "total_trades": len(trades),
-            "total_pnl": sum(pnls),
-            "win_rate": wins / len(trades) if trades else 0,
-            "sharpe_ratio": np.mean(pnls) / (np.std(pnls) + 1e-6) if len(pnls) > 1 else 0,
-            "max_drawdown": min(pnls) if pnls else 0,
-        }
+        return _trade_stats(trades)
