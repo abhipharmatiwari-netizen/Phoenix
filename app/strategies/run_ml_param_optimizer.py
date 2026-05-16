@@ -70,18 +70,19 @@ def get_ema20_parameter_spaces() -> list[ParameterSpace]:
             name="require_rsi_falling",
             param_type="bool",
         ),
-        ParameterSpace(
-            name="use_adx_filter",
-            param_type="bool",
-        ),
-        ParameterSpace(
-            name="min_adx",
-            param_type="float",
-            min_value=15.0,
-            max_value=35.0,
-        ),
-
-        # Advanced
+        # PR #283 codex round-4 P2: ``use_adx_filter`` and ``min_adx``
+        # were sampled and exported here but ``Ema20Backtester.backtest()``
+        # (the standalone synthetic path consumed by this script) never
+        # reads them, so the optimizer would report arbitrary "best" ADX
+        # values that had zero effect on the score. Either the synthetic
+        # backtester learns to honour ADX, or these knobs are removed
+        # from the standalone param space; chose the latter since
+        # synthetic OHLC has no realistic +DI/-DI / ADX data anyway.
+        # The real-data path in ``run_multi_strategy_optimizer.py``
+        # exposes ADX-gating via ``Ema20ParameterOptimizer`` and the
+        # ``RealDataBacktester._simulate_ema20`` simulator that DOES
+        # honour ``use_adx_filter`` / ``min_adx`` (PR #283 round 3).
+        # Advanced exits
         ParameterSpace(
             name="trail_buffer_pct",
             param_type="float",
@@ -159,6 +160,20 @@ def run_optimization(
     # Combine all results
     all_sets = bayesian_sets + ga_sets + refinement_sets
     logger.info(f"\nTotal configurations evaluated: {len(all_sets)}")
+
+    # PR #283 codex round-4 P2: a CLI invocation with very small
+    # ``--iterations`` (e.g. 2 or 3) leaves every stage's per-stage
+    # iteration budget rounded to 0, so ``all_sets`` ends up empty and
+    # the downstream ``max(p.score() for p in all_sets)`` raised
+    # ``ValueError: max() iterable argument is empty``. Fail loudly with
+    # an actionable error instead.
+    if not all_sets:
+        raise SystemExit(
+            f"Optimization produced zero configurations across all stages; "
+            f"--iterations={n_iterations} is too small. Each stage's "
+            f"iteration budget (Bayesian 50%, GA 30%, refinement 20%) "
+            f"rounds to zero. Use --iterations >= 10 for any useful run."
+        )
 
     # Stage 4: Ensemble ranking
     logger.info("\n[Stage 4] Ensemble Ranking & Pareto Analysis...")

@@ -31,6 +31,12 @@ def _trade_stats(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
     default 0.0 — which previously zeroed out the
     ``win_rate * profit_factor`` consistency term in the composite
     score for every real-data run.
+
+    PR #283 codex round-4 P2: ``max_drawdown`` is the worst peak-to-
+    trough excursion of the cumulative equity curve, not just the
+    single worst trade. With pnls like ``[10, -3, -3]`` the previous
+    ``min(pnls) = -3`` underreported the actual equity drawdown of
+    ``-6``, letting riskier parameter sets rank too highly.
     """
     import numpy as np
 
@@ -49,12 +55,25 @@ def _trade_stats(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
     pnls = [t["pnl_pct"] for t in trades]
     winning = [p for p in pnls if p > 0]
     losing = [p for p in pnls if p < 0]
+
+    # Equity-curve drawdown: peak ← max of cumulative pnl so far;
+    # drawdown ← min(cumulative - peak) across the run.
+    cumulative = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for pnl in pnls:
+        cumulative += pnl
+        if cumulative > peak:
+            peak = cumulative
+        if cumulative - peak < max_dd:
+            max_dd = cumulative - peak
+
     return {
         "total_trades": len(trades),
         "total_pnl": sum(pnls),
         "win_rate": len(winning) / len(trades),
         "sharpe_ratio": np.mean(pnls) / (np.std(pnls) + 1e-6) if len(pnls) > 1 else 0.0,
-        "max_drawdown": min(pnls),
+        "max_drawdown": max_dd,
         "winning_trades": len(winning),
         "losing_trades": len(losing),
         "gross_win": sum(winning),
@@ -386,10 +405,22 @@ class RealDataBacktester:
             if not in_trade:
                 close_below_ema = df["close"].iloc[i] < df["ema"].iloc[i]
                 atr_ok = df["atr"].iloc[i] >= min_atr if min_atr > 0 else True
-                # PR #283 codex round-3 P2: RSI-falling and ADX/DI gates
-                # mirror the live EMA20 strategy entry filters.
-                if require_rsi_falling and "rsi" in df.columns and i >= 1:
-                    rsi_falling = df["rsi"].iloc[i] < df["rsi"].iloc[i - 1]
+                # PR #283 codex round-3 P2 + round-4 P2: RSI-falling and
+                # ADX/DI gates mirror the live EMA20 strategy entry
+                # filters. The live path requires the last THREE RSI
+                # values to be strictly falling
+                # (``prev_prev_rsi > prev_rsi > rsi`` —
+                # app/strategies/ema20_strategy.py:1290-1304); the
+                # single-bar downtick used in round 3 admitted entries
+                # live would skip.
+                if require_rsi_falling and "rsi" in df.columns and i >= 2:
+                    rsi_falling = (
+                        df["rsi"].iloc[i - 2]
+                        > df["rsi"].iloc[i - 1]
+                        > df["rsi"].iloc[i]
+                    )
+                elif require_rsi_falling:
+                    rsi_falling = False
                 else:
                     rsi_falling = True
                 if use_adx_filter:
@@ -545,6 +576,46 @@ class RealDataBacktester:
                 di_spread = abs(plus_di_i - minus_di_i)
                 di_ok = di_spread >= min_di_spread and plus_di_i > minus_di_i
 
+                # PR #283 codex round-4 P2: live ``_compute_buy_signal``
+                # also requires ``mom_ok`` (ret_1 > 0 AND ret_5 > 0) and
+                # ``vol_ok`` (recent 20-bar volatility above a dynamic
+                # threshold) — see app/strategies/exclusive_nifty_ce_buy.py:
+                # 1162-1172. Without these, the simulator opens entries
+                # on flat/illiquid regimes that the live strategy would
+                # reject.
+                if i >= 5:
+                    ret_1 = (
+                        (close_i - float(df["close"].iloc[i - 1]))
+                        / float(df["close"].iloc[i - 1])
+                        if float(df["close"].iloc[i - 1]) > 0
+                        else 0.0
+                    )
+                    ret_5 = (
+                        (close_i - float(df["close"].iloc[i - 5]))
+                        / float(df["close"].iloc[i - 5])
+                        if float(df["close"].iloc[i - 5]) > 0
+                        else 0.0
+                    )
+                else:
+                    ret_1 = 0.0
+                    ret_5 = 0.0
+                mom_ok = ret_1 > 0 and ret_5 > 0
+
+                # ``vol_ok`` proxy: 20-bar realised volatility of close
+                # returns must be above a floor proportional to ATR/close.
+                # Live computes a dynamic ``vol_threshold`` from intraday
+                # state; this floor uses the simpler ``atr/close`` ratio
+                # which is non-zero in the same regimes the live gate
+                # considers tradeable.
+                vol_floor = max(0.0005, atr_i / close_i if close_i > 0 else 0.0)
+                if i >= 20:
+                    recent_closes = df["close"].iloc[i - 20: i].astype(float)
+                    recent_returns = recent_closes.pct_change().dropna()
+                    vol_20 = float(recent_returns.std()) if not recent_returns.empty else 0.0
+                else:
+                    vol_20 = 0.0
+                vol_ok = vol_20 >= vol_floor
+
                 if (
                     trend_ok
                     and rsi_ok
@@ -553,6 +624,8 @@ class RealDataBacktester:
                     and macd_ok
                     and adx_ok
                     and di_ok
+                    and mom_ok
+                    and vol_ok
                 ):
                     in_trade = True
                     entry_price = close_i
@@ -613,10 +686,23 @@ class RealDataBacktester:
                                  underlying to a 5× option premium move
                                  (ATM-put delta ≈ 0.5, gamma ≈ small)
                                  — see ``_DELTA_PROXY`` below.
-          - partial_tp_r / final_tp_r:  ``R`` is the initial option-premium
-                                 risk distance. Targets are 1×R / 1.5×R
-                                 by default.
+          - final_tp_r:          ``R`` is the initial option-premium
+                                 risk distance. Final TP is ``final_tp_r``
+                                 × R (default 1.5).
           - max_bars_in_trade:   time stop.
+
+        PR #283 codex round-4 P2: live ``on_tick`` only exits on stop,
+        final_tp, or EOD — it never books a partial exit at
+        ``partial_tp_r``. The previous simulator booked a half-sized
+        partial when ``option_pnl_pct >= partial_tp_r * R``, which
+        inflated trade counts / total_pnl / win_rate for parameter sets
+        that frequently tagged the partial level. The partial-exit
+        branch is removed; ``partial_tp_r`` is still sampled in the
+        parameter space because the live config exposes it (the live
+        strategy carries it forward in ``OptionPosition.partial_tp``
+        even though ``on_tick`` does not exit on it), so the optimizer
+        can tune the value for the day the live exit path is extended
+        to honour it.
 
         The volume / VWAP gates and the explicit 15m EMA20 + price-vs-VWAP
         check from the live strategy are omitted because the baseline
@@ -647,13 +733,21 @@ class RealDataBacktester:
             ema50 = df["ema_50"]
         else:
             ema50 = df["close"].ewm(span=50, adjust=False).mean()
+        # PR #283 codex round-4 P2: live PM 5m gate rejects whenever the
+        # candle closes at or above either EMA20 OR EMA50. Previously
+        # only EMA50 was checked, so the simulator could open trades on
+        # bars where ``close < ema50`` but ``close >= ema20`` — live
+        # would skip them.
+        if "ema_20" in df.columns and df["ema_20"].notna().any():
+            ema20 = df["ema_20"]
+        else:
+            ema20 = df["close"].ewm(span=20, adjust=False).mean()
 
         trades = []
         in_trade = False
         entry_price = 0.0
         bars_in_trade = 0
         initial_r_pct = 0.0  # option-premium % risk distance from entry
-        partial_taken = False
 
         start = max(50, lookback_breakdown_bars + rsi_falling_bars_required + 1)
         for i in range(start, len(df)):
@@ -661,10 +755,11 @@ class RealDataBacktester:
             atr_i = float(df["atr"].iloc[i]) if "atr" in df.columns else 0.0
             rsi_i = float(df["rsi"].iloc[i]) if "rsi" in df.columns else 0.0
             ema50_i = float(ema50.iloc[i])
+            ema20_i = float(ema20.iloc[i])
 
             if not in_trade:
-                # 15m downtrend proxy: 5m close < 50-EMA.
-                downtrend_proxy = close_i < ema50_i
+                # 15m downtrend proxy: 5m close < EMA50 AND close < EMA20.
+                downtrend_proxy = close_i < ema50_i and close_i < ema20_i
                 # 5m breakdown: close below the prior swing low.
                 prior_low = df["low"].iloc[i - lookback_breakdown_bars:i].min()
                 breakdown = close_i < float(prior_low)
@@ -711,9 +806,8 @@ class RealDataBacktester:
                     entry_price = close_i
                     bars_in_trade = 0
                     # option-premium SL % is the user knob; that's the
-                    # initial R the partial/final targets are scaled to.
+                    # initial R the final TP target is scaled to.
                     initial_r_pct = option_sl_pct * 100.0
-                    partial_taken = False
                 continue
 
             bars_in_trade += 1
@@ -723,30 +817,23 @@ class RealDataBacktester:
             option_pnl_pct = underlying_pct * _DELTA_PROXY
 
             stop_hit = option_pnl_pct <= -initial_r_pct
-            partial_hit = (not partial_taken) and option_pnl_pct >= partial_tp_r * initial_r_pct
             final_hit = option_pnl_pct >= final_tp_r * initial_r_pct
             time_stop = bars_in_trade >= max_bars_in_trade or i == len(df) - 1
 
-            if partial_hit and not final_hit and not stop_hit and not time_stop:
-                # Book half — keep simulation simple: record a half-sized
-                # exit and continue tracking the rest until final/stop.
-                partial_taken = True
-                trades.append({
-                    "entry": entry_price,
-                    "exit": close_i,
-                    "pnl_pct": option_pnl_pct * 0.5,
-                })
-                continue
+            # PR #283 codex round-4 P2: live ``on_tick`` only exits on
+            # stop / final_tp / EOD. Partial-tp tagging never closes a
+            # position in live trading, so booking a half-sized partial
+            # exit here inflated trade counts and PnL for parameter sets
+            # that frequently tagged ``partial_tp_r``. Reference unused
+            # locals to keep linters quiet without altering behaviour.
+            _ = partial_tp_r
 
             if stop_hit or final_hit or time_stop:
                 in_trade = False
-                # If partial was already booked, account for the residual
-                # half-position pnl at the final exit; otherwise full pnl.
-                weight = 0.5 if partial_taken else 1.0
                 trades.append({
                     "entry": entry_price,
                     "exit": close_i,
-                    "pnl_pct": option_pnl_pct * weight,
+                    "pnl_pct": option_pnl_pct,
                 })
 
         return _trade_stats(trades)

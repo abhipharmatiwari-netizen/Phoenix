@@ -670,3 +670,215 @@ def test_run_ml_param_optimizer_genetic_stage_handles_single_parent():
         n_iterations=5,
     )
     assert len(results) == 5
+
+
+# ---------------------------------------------------------------------------
+# PR #283 codex round-4 regressions.
+# ---------------------------------------------------------------------------
+
+
+def test_trade_stats_max_drawdown_uses_cumulative_equity_curve():
+    """``max_drawdown`` must reflect the worst peak-to-trough excursion
+    of the equity curve, not just the single worst trade. PnLs
+    ``[10, -3, -3]`` should produce drawdown -6 (cumulative 10 → 7 → 4
+    with peak 10, max trough below peak = -6), NOT -3.
+    """
+    from app.strategies.postgres_data_loader import _trade_stats
+
+    stats = _trade_stats([
+        {"pnl_pct": 10.0},
+        {"pnl_pct": -3.0},
+        {"pnl_pct": -3.0},
+    ])
+    assert stats["max_drawdown"] == -6.0, (
+        f"cumulative drawdown must be -6.0, got {stats['max_drawdown']}"
+    )
+
+
+def test_put_momentum_simulator_no_longer_books_partial_exits():
+    """PR #283 codex round-4 P2: live PM ``on_tick`` only exits on stop,
+    final_tp, or EOD — never on partial_tp_r. The simulator must mirror
+    that contract so trade counts / PnL / win-rate aren't inflated."""
+    # Build a frame that breaks down sharply, then partially recovers
+    # towards the partial_tp_r target without hitting final_tp. A
+    # one-trade simulator output proves no partial-exit booking.
+    n = 200
+    rsi_pattern = [40.0 - 0.05 * i for i in range(n)]
+    # Closes drop below EMAs to satisfy the downtrend proxy, then drop
+    # further to trigger a single entry.
+    closes = [100.0] * 100 + [88.0] * (n - 100)
+    df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="5min"),
+        "open": [100.0] * n,
+        "high": [101.0] * n,
+        "low": [c - 1.0 for c in closes],
+        "close": closes,
+        "atr": [1.0] * n,
+        "rsi": rsi_pattern,
+        # Fresh bearish MACD cross at bar 99 (transition to breakdown).
+        "macd": [0.5] * 99 + [-0.5] * (n - 99),
+        "macd_signal": [0.0] * n,
+        "ema_20": [105.0] * n,
+        "ema_30": [105.0] * n,
+        "ema_50": [105.0] * n,
+        "adx": [25.0] * n,
+        "plus_di": [25.0] * n,
+        "minus_di": [25.0] * n,
+    })
+    result = RealDataBacktester._simulate_put_momentum(df, {
+        "lookback_breakdown_bars": 10,
+        "rsi_falling_bars_required": 2,
+        "max_bars_in_trade": 100,
+    })
+    # If the simulator had still booked a partial exit, we'd see
+    # winning_trades >= 1 from the partial-exit recording branch in
+    # addition to any later exit. Total exit count must equal the
+    # number of distinct trades, not 2x for partial+final pairs.
+    assert result.get("total_trades", 0) <= 1
+
+
+def test_ema20_real_data_sim_requires_three_bar_strictly_falling_rsi():
+    """Without three consecutive strictly-falling RSI bars, the
+    require_rsi_falling gate must reject every entry — matching the
+    live EMA20 strategy contract (prev_prev > prev > rsi).
+    """
+    n = 100
+    # Strictly RISING RSI: no falling window can ever form.
+    rsi_pattern = [40.0 + 0.1 * i for i in range(n)]
+    df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="5min"),
+        "open": [100.0] * n,
+        "high": [101.0] * n,
+        "low": [99.0] * n,
+        "close": [99.0 - 0.1 * i for i in range(n)],  # below EMA so entry candidate
+        "atr": [1.0] * n,
+        "rsi": rsi_pattern,
+        "macd": [0.0] * n,
+        "macd_signal": [0.0] * n,
+        "ema_20": [100.0] * n,
+        "ema_30": [100.0] * n,
+        "ema_50": [100.0] * n,
+        "adx": [25.0] * n,
+        "plus_di": [25.0] * n,
+        "minus_di": [25.0] * n,
+    })
+    result = RealDataBacktester._simulate_ema20(
+        df,
+        {
+            "ema_period": 20,
+            "sl_pct": 0.30,
+            "tp_pct": 0.30,
+            "min_atr": 0.0,
+            "require_rsi_falling": True,
+            "use_adx_filter": False,
+        },
+    )
+    assert result["total_trades"] == 0
+
+
+def test_ema20_real_data_sim_rejects_two_bar_downtick():
+    """Codex round-4 P2 pin: a sequence ending in only ONE downward RSI
+    step (``[..., 40, 45, 44]``) must be rejected because the live
+    contract requires THREE consecutive strictly falling bars.
+    """
+    n = 100
+    # RSI bounces every three bars; no window of three is strictly
+    # falling but there are isolated single-bar dips.
+    rsi_pattern = []
+    for i in range(n):
+        cycle = i % 3
+        rsi_pattern.append({0: 40.0, 1: 45.0, 2: 44.0}[cycle])
+    # The cycle is 40, 45, 44, 40, 45, 44, ... so windows ending at:
+    #   i=2:  (40,45,44)  → 40<45 → fails
+    #   i=3:  (45,44,40)  → 45>44>40 → STRICTLY FALLING. With the buggy
+    #         single-bar check this window also passed (just rsi[3]<rsi[2]),
+    #         but the live three-bar check ALSO passes here.
+    # That means the cycle pattern triggers a real three-bar window
+    # every third bar. We want to PIN that we don't accept the buggy
+    # single-bar acceptance. Build a pattern where ONLY isolated
+    # downticks exist (no three-bar window of falling).
+    rsi_pattern = [40.0 + (i % 2) for i in range(n)]
+    df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="5min"),
+        "open": [100.0] * n,
+        "high": [101.0] * n,
+        "low": [99.0] * n,
+        "close": [99.0 - 0.1 * i for i in range(n)],
+        "atr": [1.0] * n,
+        "rsi": rsi_pattern,
+        "macd": [0.0] * n,
+        "macd_signal": [0.0] * n,
+        "ema_20": [100.0] * n,
+        "ema_30": [100.0] * n,
+        "ema_50": [100.0] * n,
+        "adx": [25.0] * n,
+        "plus_di": [25.0] * n,
+        "minus_di": [25.0] * n,
+    })
+    result = RealDataBacktester._simulate_ema20(
+        df,
+        {
+            "ema_period": 20,
+            "sl_pct": 0.30,
+            "tp_pct": 0.30,
+            "min_atr": 0.0,
+            "require_rsi_falling": True,
+        },
+    )
+    # Pattern alternates 40/41/40/41/... — no three-bar strictly falling
+    # window exists, only single-bar dips.
+    assert result["total_trades"] == 0
+
+
+def test_exclusive_nifty_ce_sim_rejects_when_momentum_negative():
+    """ECN must reject entries when ret_1 or ret_5 are non-positive,
+    matching the live ``mom_ok`` gate."""
+    n = 100
+    # Bars 50..99 satisfy every other ECN gate (trend, RSI band, etc.)
+    # but close is FLAT after bar 50, so ret_1 / ret_5 are zero.
+    closes = [100.0 * (1.0 + 0.001 * i) for i in range(50)] + [110.0] * 50
+    df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="30s"),
+        "open": closes,
+        "high": [c + 0.5 for c in closes],
+        "low": [c - 0.5 for c in closes],
+        "close": closes,
+        "atr": [1.0] * n,
+        # 3-bar rising RSI in the entry window.
+        "rsi": [55.0 + 0.5 * (i % 3) for i in range(n)],
+        # MACD setup: cross-up at bar 50 transitioning to bullish.
+        "macd": [-0.5] * 50 + [0.5] * 50,
+        "macd_signal": [0.0] * n,
+        # EMA20 below close to satisfy above_ema20.
+        "ema_20": [c - 1.0 for c in closes],
+        "ema_30": [c - 1.0 for c in closes],
+        "ema_50": [c - 2.0 for c in closes],
+        "adx": [30.0] * n,
+        "plus_di": [30.0] * n,
+        "minus_di": [10.0] * n,
+    })
+    result = RealDataBacktester._simulate_exclusive_nifty_ce(
+        df,
+        {
+            "rsi_min": 50.0,
+            "rsi_max": 80.0,
+            "macd_hist_min": 0.0,
+            "ema_atr_buffer": 0.0,
+            "min_adx": 20.0,
+            "min_di_spread": 5.0,
+        },
+    )
+    # With closes flat after bar 50, mom_ok fails on every potential
+    # entry bar. No trades should fire.
+    assert result["total_trades"] == 0
+
+
+def test_run_ml_param_optimizer_raises_systemexit_on_too_few_iterations():
+    """Very small ``--iterations`` (e.g. 2-3) used to crash with an
+    empty ``max()`` deep in the export path; must now fail loudly with
+    a SystemExit pointing to the actionable fix."""
+    from app.strategies.run_ml_param_optimizer import run_optimization
+
+    with pytest.raises(SystemExit, match="zero configurations|too small"):
+        # 2 iterations × 0.2 = 0 → bayesian gets 0, GA 0, refinement 0.
+        run_optimization(n_iterations=2, output_file="/tmp/__pytest_smoke__.json")
