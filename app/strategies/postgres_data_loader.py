@@ -392,6 +392,59 @@ class RealDataBacktester:
         require_rsi_falling = bool(params.get("require_rsi_falling", True))
         use_adx_filter = bool(params.get("use_adx_filter", False))
         min_adx = float(params.get("min_adx", 18.0))
+        # PR #283 codex round-11 P2: live ``_passes_adx_filter`` enforces
+        # BOTH bearish DI bias AND ``min_di_spread`` when ADX is on (see
+        # ``app/strategies/ema20_strategy.py``). The simulator only
+        # checked ``minus_di > plus_di``; ADX-enabled candidates with
+        # narrow DI spread were admitted here even though live rejects
+        # them. Yaml-deployed default is ``min_di_spread: 0.0`` so the
+        # simulator default keeps it permissive for legacy callers; the
+        # optimizer can sample stricter values.
+        min_di_spread = float(params.get("min_di_spread", 0.0))
+
+        # PR #283 codex round-11 P2: live EMA20 also gates intraday
+        # entries via ``first_entry_time`` (default 09:30 from the
+        # enabled yaml) and forces square-off at ``square_off_time``
+        # (default 15:00). The simulator was admitting entries from
+        # the very first bar and carrying them to the end of the
+        # frame. ``params`` overrides allow optimizer tuning.
+        from datetime import time as _time
+
+        def _parse_hhmm(s, default):
+            try:
+                hh, mm = s.split(":")
+                return _time(int(hh), int(mm))
+            except Exception:
+                return default
+
+        first_entry_t = _parse_hhmm(
+            str(params.get("first_entry_time", "9:30")), _time(9, 30)
+        )
+        square_off_t = _parse_hhmm(
+            str(params.get("square_off_time", "15:00")), _time(15, 0)
+        )
+
+        # Build IST time-of-day index for the entry/squareoff gate.
+        ist_tod = None
+        if "timestamp" in df.columns:
+            try:
+                ts = pd.to_datetime(df["timestamp"])
+                if ts.dt.tz is None:
+                    ts = ts.dt.tz_localize("UTC")
+                ist_tod = ts.dt.tz_convert("Asia/Kolkata").dt.time
+            except Exception:
+                ist_tod = None
+
+        def _within_entry_window(idx):
+            if ist_tod is None:
+                return True
+            tod = ist_tod.iloc[idx]
+            return first_entry_t <= tod < square_off_t
+
+        def _past_squareoff(idx):
+            if ist_tod is None:
+                return False
+            return ist_tod.iloc[idx] >= square_off_t
 
         # Calculate EMA
         df["ema"] = df["close"].ewm(span=ema_period, adjust=False).mean()
@@ -403,6 +456,8 @@ class RealDataBacktester:
 
         for i in range(ema_period, len(df)):
             if not in_trade:
+                if not _within_entry_window(i):
+                    continue
                 close_below_ema = df["close"].iloc[i] < df["ema"].iloc[i]
                 atr_ok = df["atr"].iloc[i] >= min_atr if min_atr > 0 else True
                 # PR #283 codex round-3 P2 + round-4 P2: RSI-falling and
@@ -430,7 +485,15 @@ class RealDataBacktester:
                     adx_ok = adx_val >= min_adx
                     # EMA20 is a short-when-below-EMA strategy; require
                     # bearish DI bias when the ADX filter is on.
-                    di_ok = minus_di_val > plus_di_val
+                    # PR #283 codex round-11 P2: live also requires the
+                    # DI spread to clear ``min_di_spread``. Without
+                    # this, ADX-enabled candidates with narrow DI
+                    # spread were admitted even though live rejects.
+                    di_spread_abs = abs(plus_di_val - minus_di_val)
+                    di_ok = (
+                        minus_di_val > plus_di_val
+                        and di_spread_abs >= min_di_spread
+                    )
                 else:
                     adx_ok = True
                     di_ok = True
@@ -444,9 +507,14 @@ class RealDataBacktester:
                 current_price = df["close"].iloc[i]
                 pnl_pct = ((entry_price - current_price) / entry_price) * 100
 
+                # PR #283 codex round-11 P2: force exit at
+                # ``square_off_time`` so positions don't carry
+                # overnight when the live strategy would have flattened.
+                squareoff_hit = _past_squareoff(i)
                 if (
                     pnl_pct <= -sl_pct_threshold
                     or pnl_pct >= tp_pct_threshold
+                    or squareoff_hit
                     or i == len(df) - 1
                 ):
                     in_trade = False
@@ -610,22 +678,54 @@ class RealDataBacktester:
         # the entire backtest. ``<= 0`` now means "no cap".
         max_trades_per_day_cfg = int(params.get("max_trades_per_day", 1))
 
+        # PR #283 codex round-11 P2: derive the timeframe seconds from
+        # the actual bar spacing in the frame so the next-bar start
+        # time matches ``candle.end_ts = ts_start + timeframe_seconds``.
+        # Probing the next stored row is wrong when the frame has gaps
+        # (overnight, halts) — the next row could be hours later, and
+        # the gate would incorrectly reject a 14:45 signal because the
+        # next ROW is 09:30 the following day.
+        timeframe_seconds = 300  # default 5min
+        if "timestamp" in df.columns and len(df) >= 2:
+            try:
+                ts_series = pd.to_datetime(df["timestamp"])
+                deltas = ts_series.diff().dropna()
+                if not deltas.empty:
+                    # Most common positive delta = bar interval.
+                    timeframe_seconds = int(
+                        max(1, deltas.dt.total_seconds().mode().iloc[0])
+                    )
+            except Exception:
+                pass
+        _BAR_INTERVAL = pd.Timedelta(seconds=timeframe_seconds)
+
+        # Pre-compute each bar's END time-of-day in IST so the entry
+        # window check uses ``candle.end_ts`` deterministically.
+        ist_end_of_day = None
+        if "timestamp" in df.columns:
+            try:
+                ts = pd.to_datetime(df["timestamp"])
+                if ts.dt.tz is None:
+                    ts = ts.dt.tz_localize("UTC")
+                ts = ts.dt.tz_convert("Asia/Kolkata")
+                ist_end_of_day = (ts + _BAR_INTERVAL).dt.time
+            except Exception:
+                ist_end_of_day = None
+
         def _within_ecn_entry_window(idx: int) -> bool:
-            """PR #283 codex round-10 P2: live ECN evaluates the entry
-            window against the NEXT bar's start time (``next_bar_start
-            = candle.end_ts``), not the signal bar's ``ts_start``. A
-            30s signal bar at 14:45:00 would have ``next_bar_start =
-            14:45:30`` and be rejected against ``last_entry_time =
-            14:45``. Use the bar AFTER the signal bar for the gate
-            when one exists; fall back to the signal bar at the very
-            end of the frame so the last bar still has SOME chance to
-            score in unit tests."""
-            if ist_time_of_day is None:
+            """PR #283 codex round-10/11 P2: live ECN evaluates the
+            entry window against the NEXT bar's start time
+            (``next_bar_start = candle.end_ts = ts_start +
+            timeframe_seconds``), not the signal bar's ``ts_start``.
+            A 30s signal bar at 14:45:00 has ``next_bar_start =
+            14:45:30`` and is rejected against ``last_entry_time =
+            14:45``. The probe uses the derived ``timeframe_seconds``
+            so it works correctly across overnight gaps and trading
+            halts (where probing the next STORED row would be hours/
+            days late)."""
+            if ist_end_of_day is None:
                 return True
-            # Inspect the next bar's start time; fall back to this bar
-            # when we're at the end of the frame.
-            probe_idx = idx + 1 if idx + 1 < len(ist_time_of_day) else idx
-            tod = ist_time_of_day.iloc[probe_idx]
+            tod = ist_end_of_day.iloc[idx]
             return _ECN_SESSION_START <= tod <= _ECN_LAST_ENTRY
 
         def _ecn_past_squareoff(idx: int) -> bool:
@@ -755,8 +855,13 @@ class RealDataBacktester:
                 macd_div_now = macd_i - macd_signal_i
                 macd_div_prev = prev_macd - prev_macd_signal
                 prev_hist = macd_div_prev  # macd_hist == macd_div in this loader
+                # PR #283 codex round-11 P2: yaml-deployed default is
+                # ``macd_near: 0.0`` (see ``app/config/strategy_env.yaml``),
+                # narrower than the strategy class fallback of 0.40. Match
+                # the DEPLOYED configuration so the simulator doesn't open
+                # the near-MACD path wider than production.
                 allow_near_macd = bool(params.get("allow_near_macd", True))
-                macd_near_thresh = float(params.get("macd_near", 0.40))
+                macd_near_thresh = float(params.get("macd_near", 0.0))
                 macd_near_cross_up = (
                     macd_div_now < 0
                     and macd_div_now > -macd_near_thresh

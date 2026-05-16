@@ -120,6 +120,11 @@ def test_ema20_sl_pct_treats_input_as_fraction():
     # PR #283 codex round-3 P2 added the RSI-falling / ADX gates to
     # the EMA20 sim; disable them here so this test only exercises the
     # SL unit-conversion contract.
+    # PR #283 codex round-11 P2: EMA20 simulator enforces an intraday
+    # entry window (default 09:30-15:00 IST). Override to "all bars"
+    # so this test remains a pure SL-unit-conversion test independent
+    # of the time gate.
+    _NO_GATE = {"first_entry_time": "00:00", "square_off_time": "23:59"}
     tight = RealDataBacktester._simulate_ema20(
         df,
         {
@@ -129,6 +134,7 @@ def test_ema20_sl_pct_treats_input_as_fraction():
             "min_atr": 0.0,
             "require_rsi_falling": False,
             "use_adx_filter": False,
+            **_NO_GATE,
         },
     )
     loose = RealDataBacktester._simulate_ema20(
@@ -140,6 +146,7 @@ def test_ema20_sl_pct_treats_input_as_fraction():
             "min_atr": 0.0,
             "require_rsi_falling": False,
             "use_adx_filter": False,
+            **_NO_GATE,
         },
     )
 
@@ -1439,17 +1446,73 @@ def test_ecn_simulator_admits_macd_near_when_allow_near_macd_true():
     )
 
 
-def test_ecn_entry_window_evaluates_against_next_bar_time():
-    """Live ECN uses ``next_bar_start = candle.end_ts`` for the
-    entry-window check, not the signal bar's ``ts_start``. A 30s
-    signal at 14:45:00 has ``next_bar_start = 14:45:30`` and is
-    rejected against ``last_entry_time = 14:45``."""
+def test_ecn_entry_window_evaluates_against_candle_end_ts():
+    """Live ECN uses ``next_bar_start = candle.end_ts = ts_start +
+    timeframe_seconds`` for the entry-window check, not the signal
+    bar's ``ts_start``. A 30s signal at 14:45:00 has
+    ``next_bar_start = 14:45:30`` and is rejected against
+    ``last_entry_time = 14:45``.
+
+    PR #283 codex round-11 P2: the round-10 fix probed the next
+    STORED row, which is wrong when the frame has gaps (overnight,
+    halts) — the next row could be hours/days later. The fix derives
+    the bar interval from the data and uses
+    ``ts + timeframe_seconds`` deterministically."""
     import inspect
 
     src = inspect.getsource(RealDataBacktester._simulate_exclusive_nifty_ce)
-    # The helper must probe the NEXT bar's time, not the signal bar's.
-    assert "idx + 1" in src, (
-        "_within_ecn_entry_window must check the next bar's time "
-        "(idx+1) — live uses next_bar_start, not the signal bar's "
-        "ts_start"
+    assert "ist_end_of_day" in src, (
+        "_within_ecn_entry_window must compute the bar's own END time "
+        "(ts_start + timeframe_seconds), not probe the next stored row"
     )
+    assert "timeframe_seconds" in src, (
+        "must derive bar interval from the data so candle.end_ts is "
+        "deterministic across overnight/trading-halt gaps"
+    )
+
+
+# ---------------------------------------------------------------------------
+# PR #283 codex round-11 regressions.
+# ---------------------------------------------------------------------------
+
+
+def test_ecn_macd_near_default_matches_deployed_yaml():
+    """PR #283 codex round-11 P2: yaml-deployed default is
+    ``macd_near: 0.0`` (see ``app/config/strategy_env.yaml``), not
+    the strategy class fallback of 0.40. The simulator must match
+    the DEPLOYED configuration so the optimizer's near-MACD path is
+    not wider than production."""
+    import inspect
+
+    src = inspect.getsource(RealDataBacktester._simulate_exclusive_nifty_ce)
+    # Default must be 0.0 (deployed yaml), not 0.40 (class fallback).
+    assert 'params.get("macd_near", 0.0)' in src, (
+        "macd_near default must mirror the yaml-deployed value 0.0, "
+        "not the strategy-class fallback 0.40"
+    )
+
+
+def test_ema20_simulator_enforces_di_spread_when_adx_filter_on():
+    """Live ``_passes_adx_filter`` requires BOTH bearish DI bias AND
+    ``min_di_spread`` when ADX is enabled. The simulator was
+    accepting candidates with narrow DI spread."""
+    import inspect
+
+    src = inspect.getsource(RealDataBacktester._simulate_ema20)
+    assert "min_di_spread" in src
+    assert "di_spread_abs" in src or "di_spread" in src
+    # Both conditions must be ANDed when ADX is enabled.
+    assert "di_spread_abs >= min_di_spread" in src
+
+
+def test_ema20_simulator_honors_intraday_entry_and_squareoff_windows():
+    """Live EMA20 yaml-default config sets ``first_entry_time: 9:30``
+    and ``square_off_time: 15:00``. The simulator must gate entries
+    inside that window and force exit at squareoff."""
+    import inspect
+
+    src = inspect.getsource(RealDataBacktester._simulate_ema20)
+    assert "first_entry_time" in src
+    assert "square_off_time" in src
+    assert "_within_entry_window" in src
+    assert "_past_squareoff" in src or "squareoff_hit" in src
