@@ -1166,7 +1166,89 @@ def test_lookup_raises_when_all_enabled_rows_are_wrong_underlying():
         top_candidates=[{"params": {"k": 1}, "metrics": {}}],
         backtest_window=(date(2026, 5, 1), date(2026, 5, 14)),
     )
-    with pytest.raises(CandidateWriterError, match="no enabled strategy_configs"):
+    with pytest.raises(CandidateWriterError, match="no strategy_configs row matches"):
+        writer.write_batch(batch, candidates_per_strategy=1)
+    # No INSERT should have been attempted.
+    assert not any(
+        sql.startswith("INSERT INTO public.strategy_config_candidates")
+        for sql, _ in conn.executed
+    )
+
+
+# ---------------------------------------------------------------------------
+# PR #288 codex round-10 regressions.
+# ---------------------------------------------------------------------------
+
+
+def test_lookup_prefers_disabled_matching_underlying_over_enabled_other(caplog):
+    """PR #288 codex round-10 P2: when a tenant has a DISABLED row
+    tagged with the candidate's underlying AND ENABLED rows tagged
+    with OTHER underlyings, the lookup must pick the disabled matching
+    row (with a warning) rather than raise. Silent attachment to the
+    wrong underlying's enabled row would mutate live trading on
+    approval; the disabled-matching path at least lets the operator
+    re-enable the right config later."""
+    conn = _FakeConnection()
+    conn.next_fetchone.append(("public.strategy_config_candidates",))
+    # cfg-banknifty is ENABLED but tagged BANKNIFTY (wrong underlying).
+    # cfg-nifty is DISABLED but tagged NIFTY (right underlying).
+    conn.next_fetch.append([
+        ("cfg-banknifty", True, "BANKNIFTY_IDX"),
+        ("cfg-nifty", False, "NIFTY_IDX"),
+    ])
+    conn.next_rowcount.append(0)
+    writer = CandidateWriter(
+        tenant_id="t",
+        broker_account_id="a",
+        optimizer_version="v1",
+        connect_fn=_connect_fn_returning(conn),
+    )
+    batch = CandidateBatch(
+        strategy_name="ema20",
+        underlying_label="NIFTY_IDX",
+        top_candidates=[{"params": {"k": 1}, "metrics": {}}],
+        backtest_window=(date(2026, 5, 1), date(2026, 5, 14)),
+    )
+    with caplog.at_level("WARNING"):
+        writer.write_batch(batch, candidates_per_strategy=1)
+    insert_executions = [
+        (sql, p) for sql, p in conn.executed
+        if sql.startswith("INSERT INTO public.strategy_config_candidates")
+    ]
+    assert len(insert_executions) == 1
+    _, params = insert_executions[0]
+    assert params.get("strategy_config_id") == "cfg-nifty", (
+        "must prefer the disabled matching-underlying row over the "
+        "enabled wrong-underlying row"
+    )
+    assert any("disabled" in r.message.lower() for r in caplog.records), (
+        "must warn loudly when attaching to a disabled config"
+    )
+
+
+def test_lookup_raises_when_only_wrong_underlying_disabled_rows_exist():
+    """When ALL rows are disabled AND tagged with non-matching
+    underlyings, the lookup must raise rather than fall back to the
+    lex-first wrong-underlying disabled row."""
+    conn = _FakeConnection()
+    conn.next_fetchone.append(("public.strategy_config_candidates",))
+    conn.next_fetch.append([
+        ("cfg-banknifty", False, "BANKNIFTY_IDX"),
+        ("cfg-natgas", False, "NG_FUT"),
+    ])
+    writer = CandidateWriter(
+        tenant_id="t",
+        broker_account_id="a",
+        optimizer_version="v1",
+        connect_fn=_connect_fn_returning(conn),
+    )
+    batch = CandidateBatch(
+        strategy_name="ema20",
+        underlying_label="NIFTY_IDX",
+        top_candidates=[{"params": {"k": 1}, "metrics": {}}],
+        backtest_window=(date(2026, 5, 1), date(2026, 5, 14)),
+    )
+    with pytest.raises(CandidateWriterError, match="no strategy_configs row matches"):
         writer.write_batch(batch, candidates_per_strategy=1)
     # No INSERT should have been attempted.
     assert not any(
