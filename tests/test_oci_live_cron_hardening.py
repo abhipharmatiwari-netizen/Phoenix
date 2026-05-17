@@ -42,15 +42,15 @@ def test_stop_phoenix_verifies_nginx_state_after_working_day_stop() -> None:
     assert "nginx remains up" not in script
 
 
-def test_backend_watchdog_is_observe_only_without_docker_socket_or_actions() -> None:
+def test_backend_watchdog_base_manifest_has_no_docker_socket_or_actions() -> None:
     compose = _read("docker-compose.oci-live.yml")
     watchdog = compose.split("  backend-watchdog:", 1)[1].split("\n# Secrets", 1)[0]
 
-    assert "observe-only" in watchdog
+    assert "base-manifest polling" in watchdog
     assert "/var/run/docker.sock" not in watchdog
     assert "docker stop phoenix-oci-web" not in watchdog
     assert "docker start phoenix-oci-web" not in watchdog
-    assert "relying on LB drain" in watchdog
+    assert "no nginx action in base manifest" in watchdog
 
 
 def test_optimizer_service_is_profile_only_one_shot_using_backend_image() -> None:
@@ -166,24 +166,14 @@ def test_redeploy_pulls_and_recreates_nginx_with_backend() -> None:
     assert "docker inspect phoenix-oci-web" in script
 
 
-def test_oci_runbook_documents_image_pair_and_observe_only_watchdog() -> None:
+def test_oci_runbook_documents_verified_vm_runtime() -> None:
     runbook = _read("docs/runbooks/oci_live_deployment.md")
 
-    assert "Build the backend and nginx" in runbook
-    assert "backend and nginx images are a release pair" in runbook
-    assert "refuses to run `docker compose up` if either image is missing" in runbook
-    assert "backend-watchdog` service is observe-only" in runbook
-    assert "Nightly Optimizer One-Shot" in runbook
-    assert "/opt/phoenix/optimizer/output" in runbook
-    assert "--profile optimizer" in runbook
-    assert "run --rm optimizer --help" in runbook
-    assert "install-optimizer-systemd.sh" in runbook
-    assert "systemctl disable --now phoenix-optimizer.timer" in runbook
-    assert "systemctl start phoenix-optimizer.service" in runbook
-    assert "/opt/phoenix/logs/optimizer.log" in runbook
-    assert "Conditional Backend Reload After Approval" in runbook
-    assert "install-backend-reload-systemd.sh" in runbook
-    assert "systemctl disable --now phoenix-backend-reload.timer" in runbook
-    assert "systemctl start phoenix-backend-reload.service" in runbook
-    assert "/opt/phoenix/logs/backend-reload.log" in runbook
-    assert "OPTIMIZER_BACKEND_RELOAD_DISABLED=true" in runbook
+    assert "phoenix-local-backend:local-1a2cc47" in runbook
+    assert "phoenix-local-nginx:local-1a2cc47" in runbook
+    assert "phoenix-oci-postgres" in runbook
+    assert "VM-local Postgres" in runbook
+    assert "source-file bind mounts" in runbook
+    assert "actively stops/starts nginx" in runbook
+    assert "optimizer and backend-reload systemd timers" in runbook
+    assert "not current" in runbook

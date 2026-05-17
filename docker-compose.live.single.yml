@@ -1,9 +1,8 @@
-# Bundled Docker/Desktop LIVE manifest
-# Current recommended automated LIVE runtime:
-# - TRADE_MODE=LIVE
-# - ENABLE_MULTI_HUB=true
-# - USE_HUB_ROUTER=true
-# - DISABLE_STREAM_WORKER=false
+# NON-CURRENT FOR PRODUCTION.
+# The current production runtime is the OCI VM documented in
+# docs/OCI_VM_RUNTIME.md. This Docker/Desktop manifest is retained for local
+# engineering/reference only and must not be used as current live-operations
+# guidance.
 # Secrets must be injected at runtime. Do not store real secrets in repo files.
 
 name: phoenix-live

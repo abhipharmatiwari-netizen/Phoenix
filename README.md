@@ -1,66 +1,79 @@
 # Phoenix
 
-Phoenix is an operator-run trading system. `ARCHITECTURE.md` is the production contract; this README is the short operator index for the current repo.
+Phoenix is currently operated from an OCI VM. The running OCI VM is the only
+source of truth for production documentation; repo manifests and historical
+runbooks are secondary evidence only when they match that VM.
 
-If any repo asset, runbook, helper script, or deployment note conflicts with `ARCHITECTURE.md`, treat the architecture document as authoritative and fix the conflicting asset before using it.
+Last verified against the VM: 2026-05-17 12:25 UTC.
 
-## Current Automated LIVE Contract
+## Current OCI VM State
 
-The recommended automated LIVE runtime is exact:
-
-- `TRADE_MODE=LIVE`
-- `ENABLE_MULTI_HUB=true`
-- `USE_HUB_ROUTER=true`
-- `DISABLE_STREAM_WORKER=false`
-- stream worker: broker market data, ticks, bars, indicators, live marks, and strategy signal generation
-- hub/router/lifecycle/account runners: order authority, idempotency, ownership, broker sync, reconciliation, lifecycle polling, and durable control-plane enforcement
-- Postgres: authoritative operational store for outbox, lifecycle state, ownership, kill-switch durability, sweep/EOD state, control-plane rows, and the bundled broker-credential path
-- LIVE secrets: Secret Manager, OCI Vault/Docker secrets, or Postgres-backed broker credentials; repo env files are templates only
-
-`DISABLE_STREAM_WORKER=true` is not an automated LIVE profile unless an approved replacement market-data/bar/indicator/strategy plane exists and is wired end to end.
-
-## Current Deployment Surfaces
-
-| Surface | Status | Canonical doc |
-|---|---|---|
-| Docker Desktop single-stack Compose | Bundled local LIVE implementation | [Docker Desktop LIVE Deployment](docs/runbooks/docker_desktop_live_deployment.md) |
-| OCI Compose | Repo-tracked cloud Compose implementation; requires deployment-specific evidence | [OCI LIVE Deployment](docs/runbooks/oci_live_deployment.md) |
-| Cloud Run | Roadmap/reference only; not approved for go-live | [Cloud Run reference](docs/runbooks/cloud_run_live_deployment.md) |
-| `docker.env` and `cloudrun.env` | Local/reference templates only | This README and file comments |
-
-No manifest is proof of LIVE readiness by itself. Approval depends on the backend container's effective environment, `/readyz`, startup/reconciliation logs, and release evidence.
-
-## Required Operator Evidence
-
-Before any LIVE approval, capture and review:
-
-- rendered Compose or deployment spec
-- `docker compose ps` or platform equivalent
-- effective backend environment proving the LIVE tuple
-- `/health/summary` and `/readyz`
-- `/admin/release-evidence` using `X-Admin-Key`
-- backend logs showing startup validation, schema guard, leader lease, recovery/reconciliation, runner startup, stream-worker startup, and balance sync readiness
-
-See [LIVE Release Evidence](docs/runbooks/release_evidence.md).
-
-## Documentation Map
-
-| Document | Role |
+| Area | Verified state |
 |---|---|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Authoritative production contract |
-| [ABOUTME.md](ABOUTME.md) | Plain-language, non-authoritative summary |
-| [Docker Desktop LIVE Deployment](docs/runbooks/docker_desktop_live_deployment.md) | Local Compose operator runbook |
-| [OCI LIVE Deployment](docs/runbooks/oci_live_deployment.md) | OCI Compose operator runbook |
-| [LIVE Release Evidence](docs/runbooks/release_evidence.md) | Approval evidence standard |
-| [Capital limits configuration](docs/runbooks/capital_limits_configuration.md) | `CAPITAL_LIMITS_JSON` and margin policy |
-| [Broker credential update](docs/runbooks/update_broker_credentials.md) | Postgres `broker_credentials` rotation |
-| [Blue/Green cutover](docs/runbooks/blue_green_cutover.md) | Controlled writer handoff |
-| [Restore drill](docs/runbooks/restore_drill.md) | Backup/restore validation |
-| [Break-glass flatten](docs/runbooks/break_glass_flatten.md) | Emergency exit path; not approved for LIVE unless step-up token issuance is available |
-| [Orphan review resolution](docs/runbooks/resolve_orphan_review.md) | `ORPHAN_REVIEW` operator workflow |
-| [Kill switch](docs/runbooks/kill_switch.md) | Trip, clear, and rearm workflow |
-| [Runtime KPIs and SLO targets](docs/kpis_slos.md) | Day-1 monitor set and alert thresholds |
-| [Strategy runtime diagnostics](docs/runbooks/strategy_runtime_diagnostics.md) | Stream/strategy startup diagnostics |
+| Host | `phoenix-vm` |
+| Repo checkout | `/opt/phoenix/app` |
+| Git state on VM | branch `main`, commit `1a2cc47d8cb23fbc9b60e5eea8e5841e10d79ccd`, untracked `docker-compose.oci-postgres.yml` |
+| Compose project | `phoenix-oci-live` |
+| Compose files in use | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` |
+| Env file in use | `/opt/phoenix/phoenix-deploy.env` |
+| Backend container | `phoenix-oci-backend`, image `phoenix-local-backend:local-1a2cc47`, healthy |
+| Web container | `phoenix-oci-web`, image `phoenix-local-nginx:local-1a2cc47`, healthy |
+| Database | VM-local `phoenix-oci-postgres` container, `postgres:16-alpine`, no Docker healthcheck |
+| Watchdog | `phoenix-oci-watchdog`, `docker:cli`; actively stops/starts nginx when backend health fails |
+| Backend command | `python -m app.main` |
+| Public backend exposure | backend port `8080` is container-only; nginx exposes host ports `80` and `8443` |
+| Health checks | backend container: `/health`, `/ready`, `/readyz`, `/health/summary`; nginx/host: `/health`, `/readyz` |
+| Runtime mode evidence | `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE` |
+| Secrets | secret files under `/run/secrets`; required names are documented, values must never be copied into git |
+
+Current drift that operators must not normalize:
+
+- The VM is not running OCIR images; it is running local images tagged `local-1a2cc47`.
+- The VM is not using an external OCI Database for PostgreSQL; it is using a VM-local Postgres container.
+- The backend has source-file bind mounts from `/opt/phoenix/app` into the container.
+- `CONTROL_PLANE_PG_SSLMODE=prefer` and `LIVE_PG_SSL_SKIP_CHECK=true` are present because the DB is local to the VM.
+- `phoenix-oci-postgres` is not part of the labelled Compose project and has no healthcheck.
+
+See [OCI VM Runtime Evidence](docs/OCI_VM_RUNTIME.md) for the evidence table.
+
+## Operator Reading Order
+
+1. [OCI VM Runtime Evidence](docs/OCI_VM_RUNTIME.md)
+2. [OCI LIVE Deployment Runbook](docs/runbooks/oci_live_deployment.md)
+3. [Architecture Contract](ARCHITECTURE.md)
+4. [Documentation Audit](docs/DOCUMENTATION_AUDIT.md)
+5. [Release Evidence](docs/runbooks/release_evidence.md)
+6. [Strategy Runtime Diagnostics](docs/runbooks/strategy_runtime_diagnostics.md)
+7. [Kill Switch](docs/runbooks/kill_switch.md)
+8. [Broker Credential Update](docs/runbooks/update_broker_credentials.md)
+9. [Restore Drill](docs/runbooks/restore_drill.md)
+
+Docker Desktop, Cloud Run, GCP, Firestore, BigQuery, and local development
+material are not current production operating models unless a future VM audit
+proves otherwise.
+
+## Safe VM Commands
+
+Run these only after connecting to the OCI VM as the operator user. Redact
+secret values and private host details before sharing output.
+
+```bash
+cd /opt/phoenix/app
+
+docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+docker inspect phoenix-oci-backend --format '{{json .Config.Image}} {{json .Config.Cmd}} {{json .HostConfig.RestartPolicy}}'
+docker inspect phoenix-oci-backend --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -E 's/=.*$/=<REDACTED>/'
+
+docker exec phoenix-oci-backend curl -sS http://localhost:8080/readyz
+curl -k -sS https://localhost:8443/readyz
+
+docker logs --tail=300 phoenix-oci-backend
+docker logs --tail=120 phoenix-oci-watchdog
+```
+
+Do not restart containers, run migrations, update credentials, flatten positions,
+or place/cancel/modify orders unless the relevant current OCI runbook explicitly
+requires that action and the operator has approved it.
 
 ## Repository Layout
 
@@ -70,39 +83,15 @@ frontend/                         React operations console
 nginx/                            Reverse proxy and frontend image config
 migrations/                       SQL migrations and bootstrap assets
 scripts/                          Operator and release utility scripts
-scripts/replay/                   Deterministic replay harness and optimizer
 tests/                            Pytest suite
-docs/runbooks/                    Current operator procedures and references
-Dockerfile                        Backend image build
-docker-compose.live.single.yml    Docker/Desktop LIVE manifest
-docker-compose.oci-live.yml       OCI Compose manifest
-phoenix-override.yml.example      OCI override template
-docker.env                        Local SHADOW/dev template only
-cloudrun.env                      Cloud Run reference template only
+docs/OCI_VM_RUNTIME.md            Current VM evidence snapshot
+docs/runbooks/oci_live_deployment.md Current OCI VM operator runbook
+docker-compose.oci-live.yml       Base Compose file used with the VM override
+phoenix-override.yml.example      Template mirroring the current VM override shape
 ```
 
-## Not Current LIVE Authority
+## Secret Rule
 
-The following are not authoritative LIVE stores or current go-live paths:
-
-- Firestore-backed control-plane or broker-secret authority
-- BigQuery or CSV as live operational authority
-- root env files as LIVE secret sources
-- legacy-authoritative LIVE mode
-- Cloud Run deployment
-- stale multi-file Docker Compose profiles not present in this repo
-
-Build clean promotion artifacts with `python scripts/build_release_artifact.py --output release/phoenix-live-source.zip`.
-
-## Repository Hygiene
-
-Keep generated files out of the checkout before packaging or handing off work:
-
-```bash
-python scripts/clean_repo.py --yes --include-deps
-```
-
-- Omit `--yes` for a dry run that only lists removable artifacts.
-- Omit `--include-deps` when you want to keep local dependency installs such as `frontend/node_modules`.
-- **Never run with `--include-runtime` on the production VM.** That flag opts in to deleting `logs/` and `state/`, which are bind-mounted to host operational data on OCI (incl. `safety_alerts.log`, `risk_positions.json`, `executed_tokens_state.json`). Default behaviour (without the flag) skips these directories entirely.
-- The cleanup script only removes known caches, build output, release zip artifacts, Python bytecode, and (gated) dependency installs / runtime state. Source files, env templates, migrations, docs, virtualenvs (`.venv/`, `venv/`, `.backtest_venv/`), and `.git` are left untouched.
+Never commit or paste real values for broker credentials, database passwords,
+admin keys, JWT/session/HMAC secrets, TOTP/PIN values, tokens, private IPs, or
+OCI identifiers. Documentation may list required variable names only.

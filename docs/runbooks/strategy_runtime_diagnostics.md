@@ -11,7 +11,8 @@ This guide is read-only unless it explicitly tells the operator to redeploy thro
 ## Preconditions
 
 - You have log access for the backend container or host log volume.
-- You know which deployment path is active: Docker Desktop or OCI Compose.
+- You are operating the current OCI VM deployment described in
+  [OCI VM Runtime Evidence](../OCI_VM_RUNTIME.md).
 - You can capture `/readyz`, backend logs, and the startup snapshot artifact before making changes.
 
 ## `STRATEGY_BAR_SKIP` events
@@ -78,7 +79,10 @@ docker exec phoenix-oci-backend env | grep ANGEL_HTTPS_PROXY
 docker exec phoenix-oci-backend grep -c 'proxy_type' /app/app/core/ws_runner.py
 ```
 
-Both must return a value. If not, redeploy the pinned image and current OCI override template. Do not restore old source-code bind mounts as a LIVE fix.
+Both must return a value. The verified VM currently uses source-file bind mounts
+for selected runtime files; treat those as current drift, not a pattern to
+extend. If the proxy patch is absent, redeploy or restore only through
+[oci_live_deployment.md](oci_live_deployment.md) and capture fresh VM evidence.
 
 ### `Only http, socks4, socks5 proxy protocols are supported`
 

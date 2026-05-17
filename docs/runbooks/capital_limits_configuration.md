@@ -6,7 +6,11 @@ Configure `CAPITAL_LIMITS_JSON` and related margin controls without weakening LI
 
 ## Scope
 
-This guide applies to the current Docker Desktop and OCI Compose LIVE paths. It does not approve helper-derived generic limits for funded LIVE accounts, repo-stored secrets, or disabling capital/risk checks.
+This guide applies to the current OCI VM runtime documented in
+[`docs/OCI_VM_RUNTIME.md`](../OCI_VM_RUNTIME.md). Docker Desktop examples in old
+revisions are non-current for production. This guide does not approve
+helper-derived generic limits for funded LIVE accounts, repo-stored secrets, or
+disabling capital/risk checks.
 
 ## Preconditions
 
@@ -112,7 +116,16 @@ For funded LIVE accounts, prefer a specific `tenant_id:broker_account_id` key. S
 `CAPITAL_LIMITS_JSON` in the operator environment before deployment, or store it
 in the approved platform secret process for your deployment path.
 
-Docker Desktop example:
+Current OCI VM example:
+
+```bash
+docker exec phoenix-oci-backend sh -lc 'test -n "$CAPITAL_LIMITS_JSON" && echo CAPITAL_LIMITS_JSON_PRESENT'
+docker exec phoenix-oci-backend curl -sS http://localhost:8080/readyz
+```
+
+Do not print the JSON value into tickets or docs.
+
+Non-current local example:
 
 ```powershell
 $env:CAPITAL_LIMITS_JSON = '{"tenant-1:A1": {"max_notional_per_order": 500000, "max_gross_exposure": 1000000}}'

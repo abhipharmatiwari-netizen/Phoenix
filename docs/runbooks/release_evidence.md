@@ -12,7 +12,11 @@ without this evidence is explicitly forbidden.
 
 ## Scope
 
-This runbook applies to Docker Desktop LIVE and OCI Compose LIVE. It does not approve Cloud Run or any deployment whose `/admin/release-evidence` output cannot be captured from the deployed backend.
+This runbook applies to the current OCI VM deployment. Docker Desktop and Cloud
+Run material are non-current for production unless a future OCI VM audit proves
+that deployment model is active. This runbook does not approve any deployment
+whose `/admin/release-evidence` output cannot be captured from the deployed
+backend.
 
 ## Preconditions
 
@@ -133,7 +137,6 @@ timestamp.
 
 ## Related
 
-- [Docker Desktop LIVE Deployment](docker_desktop_live_deployment.md)
 - [OCI LIVE Deployment](oci_live_deployment.md)
 - [Kill Switch](kill_switch.md)
 - [Break-Glass Flatten](break_glass_flatten.md)

@@ -1,9 +1,14 @@
 # Phoenix v9 Docker Desktop LIVE Deployment
 
-> **Status:** Bundled Docker/Desktop implementation runbook for the current recommended automated LIVE runtime.
+> **Status:** NON-CURRENT FOR PRODUCTION / LOCAL REFERENCE ONLY.
+>
+> The current production runtime is the OCI VM documented in
+> [OCI VM Runtime Evidence](../OCI_VM_RUNTIME.md). Do not use this document for
+> production restart, deployment, env, database, or go-live instructions.
 
-> **Cloud deployment?** For the production OCI deployment (Oracle Cloud, Vultr proxy, OCIR images),
-> see [oci_live_deployment.md](oci_live_deployment.md) instead.
+> **Current production deployment?** Use [oci_live_deployment.md](oci_live_deployment.md).
+> The verified OCI VM currently uses local images and VM-local Postgres; do not
+> assume OCIR or external Postgres from old Docker/Desktop wording.
 
 ## Purpose
 

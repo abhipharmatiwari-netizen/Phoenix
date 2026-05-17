@@ -1,42 +1,29 @@
 # phoenix-override.yml.example
 #
-# Copy to /opt/phoenix/phoenix-override.yml on the OCI VM and fill in real
-# deployment values. The filled copy is an operator-owned runtime file and must
-# not be committed to git.
+# Status: mirrors the current /opt/phoenix/phoenix-override.yml shape verified on
+# the OCI VM on 2026-05-17. Keep filled copies off git.
 #
-# Usage:
-#   CONTROL_PLANE_PG_PASSWORD_HOST=dummy docker compose \
-#     -f /opt/phoenix/app/docker-compose.oci-live.yml \
-#     -f /opt/phoenix/phoenix-override.yml \
-#     --env-file /opt/phoenix/phoenix-deploy.env \
-#     up -d --no-deps backend nginx
-#
-# CONTROL_PLANE_PG_PASSWORD_HOST=dummy satisfies compose interpolation for the
-# migrator service when deploying only backend/nginx. The backend reads the real
-# password from /run/secrets/control_plane_pg_password.
-#
-# LIVE invariants:
-#   - No source-code bind mounts. Deploy a pinned image tag instead.
-#   - No LIVE_PG_SSL_SKIP_CHECK=true for remote/cloud Postgres.
-#   - No repo-stored ADMIN_API_KEY, broker credential, DB password, or token.
-#   - nginx must mount the repo template, not a rendered config containing keys.
+# This is a current-state template, not a target-state recommendation. It
+# includes local images, VM-local Postgres wiring, nginx prerendered config, and
+# source-file bind mounts because those are what the VM is running today.
 
 name: phoenix-oci-live
 
 services:
   backend:
+    image: phoenix-local-backend:${IMAGE_TAG}
     environment:
-      # Optional broker egress proxy. Leave unset if Angel One accepts the OCI
-      # outbound IP directly.
-      # ANGEL_HTTPS_PROXY: "http://PROXY_HOST:8888"
-      # HTTPS_PROXY: "http://PROXY_HOST:8888"
+      # Optional broker egress proxy. Use the operator-approved proxy host only.
+      ANGEL_HTTPS_PROXY: "http://<PROXY_HOST>:8888"
+      HTTPS_PROXY: "http://<PROXY_HOST>:8888"
 
-      CORS_ORIGINS: "https://CHANGE_ME_PHOENIX_DOMAIN"
+      CORS_ORIGINS: "https://<PHOENIX_DOMAIN>"
 
-      # Repo-tracked OCI Compose uses an external Postgres endpoint supplied by
-      # phoenix-deploy.env. Remote/cloud Postgres must use SSL.
-      CONTROL_PLANE_PG_SSLMODE: "require"
-      REMOTE_DEPLOYMENT: "true"
+      # Current VM-local Postgres path.
+      CONTROL_PLANE_DB_DSN: "postgresql://phoenix_app@phoenix-oci-postgres:5432/phoenix"
+      CONTROL_PLANE_PG_SSLMODE: "prefer"
+      LIVE_PG_SSL_SKIP_CHECK: "true"
+      REMOTE_DEPLOYMENT: "false"
 
       DISABLE_CONTROL_TOWER_ROUTES: "true"
 
@@ -45,7 +32,22 @@ services:
       - "/opt/phoenix/state:/app/state"
       - "/opt/phoenix/certs:/app/certs:ro"
 
+      # Current VM drift: selected source files are bind-mounted over the image.
+      # Remove only through an approved deployment change and fresh VM evidence.
+      - "/opt/phoenix/app/app/core/angel_login.py:/app/app/core/angel_login.py:ro"
+      - "/opt/phoenix/app/app/core/order_client.py:/app/app/core/order_client.py:ro"
+      - "/opt/phoenix/app/app/core/universe_builder.py:/app/app/core/universe_builder.py:ro"
+      - "/opt/phoenix/app/app/core/ws_runner.py:/app/app/core/ws_runner.py:ro"
+      - "/opt/phoenix/app/app/runtime/app_runtime.py:/app/app/runtime/app_runtime.py:ro"
+      - "/opt/phoenix/app/app/server.py:/app/app/server.py:ro"
+      - "/opt/phoenix/app/app/api/auth_routes.py:/app/app/api/auth_routes.py:ro"
+      - "/opt/phoenix/app/app/config/settings.py:/app/app/config/settings.py:ro"
+      - "/opt/phoenix/app/app/hub/account_runner.py:/app/app/hub/account_runner.py:ro"
+      - "/opt/phoenix/app/app/strategies/adaptive/strategy_selector.py:/app/app/strategies/adaptive/strategy_selector.py:ro"
+      - "/opt/phoenix/app/app/config/strategy_env.yaml:/app/app/config/strategy_env.yaml:ro"
+
   nginx:
+    image: phoenix-local-nginx:${IMAGE_TAG}
     cap_add:
       - CHOWN
       - SETGID
@@ -60,6 +62,6 @@ services:
       - "0.0.0.0:80:80"
       - "0.0.0.0:8443:8443"
     volumes:
-      - "/opt/phoenix/app/nginx/nginx-ssl.conf.template:/tmp/nginx.conf.template:ro"
+      - "/opt/phoenix/nginx-ssl-prerendered.conf.template:/tmp/nginx.conf.template:ro"
       - "/opt/phoenix/certs:/etc/letsencrypt:ro"
       - "/opt/phoenix/acme-challenge:/var/www/acme-challenge:ro"

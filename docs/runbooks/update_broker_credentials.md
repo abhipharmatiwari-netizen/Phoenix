@@ -1,12 +1,11 @@
 # Update Broker Credentials in PostgreSQL
 
-**Applies to:** any Phoenix LIVE deployment that uses Postgres `broker_credentials`, including the bundled Docker/Desktop manifest in this aligned set.
+**Applies to:** the current OCI VM deployment when it uses Postgres
+`broker_credentials`.
 
-In the bundled Docker/Desktop path:
-
-- broker credentials come from Postgres `broker_credentials`
-- platform/operator secrets are supplied through a separate runtime secret process
-- repo env files are not broker secret sources
+Current production database access is through the VM-local
+`phoenix-oci-postgres` container. Docker Desktop examples in old revisions are
+not current production guidance.
 
 Use this runbook when a SmartAPI credential changes for an existing `broker_account_id`.
 
@@ -54,18 +53,29 @@ The `broker_credentials` row is selected by `broker_account_id`.
 
 ---
 
-## Step 1 — Connect to PostgreSQL
+## Step 1 - Connect to PostgreSQL
 
-### Option A — pgAdmin
+### Option A - current OCI VM `psql`
+
+Run on the OCI VM:
+
+```bash
+docker exec -it phoenix-oci-postgres psql -U phoenix_app -d phoenix
+```
+
+Do not print credential values into terminal logs or tickets.
+
+### Option B - pgAdmin
 
 1. Open pgAdmin.
 2. Connect to the `phoenix` database.
 3. Open Query Tool.
 4. Run the SQL statements from the steps below.
 
-### Option B — `psql`
+### Option C - non-current local `psql` examples
 
-Local database example:
+These examples are retained only for local engineering and are not the current
+OCI VM path:
 
 ```bash
 psql -h localhost -p 5432 -U phoenix_app -d phoenix
@@ -79,14 +89,14 @@ psql -h host.docker.internal -p 5432 -U phoenix_app -d phoenix
 
 ---
 
-## Step 2 — Check whether the broker row already exists
+## Step 2 - Check whether the broker row already exists
 
 ```sql
 SELECT
     broker_account_id,
-    api_key,
-    client_code,
-    client_public_ip,
+    api_key IS NOT NULL AS has_api_key,
+    client_code IS NOT NULL AS has_client_code,
+    totp_secret IS NOT NULL AS has_totp_secret,
     updated_at
 FROM broker_credentials
 WHERE broker_account_id = 'A1';
@@ -97,7 +107,7 @@ WHERE broker_account_id = 'A1';
 
 ---
 
-## Step 3 — Insert the broker row if it does not exist
+## Step 3 - Insert the broker row if it does not exist
 
 ```sql
 INSERT INTO broker_credentials (
@@ -113,28 +123,28 @@ INSERT INTO broker_credentials (
     updated_at
 ) VALUES (
     'A1',
-    'YOUR_API_KEY',
+    '<BROKER_API_KEY>',
     '',
-    'YOUR_CLIENT_CODE',
-    'YOUR_4_DIGIT_PIN',
-    'YOUR_TOTP_SECRET_BASE32',
-    'YOUR_CLIENT_LOCAL_IP',
-    'YOUR_CLIENT_PUBLIC_IP',
-    'YOUR_MAC_ADDRESS',
+    '<BROKER_CLIENT_CODE>',
+    '<BROKER_PIN>',
+    '<BROKER_TOTP_SECRET_BASE32>',
+    '<BROKER_CLIENT_LOCAL_IP>',
+    '<BROKER_CLIENT_PUBLIC_IP>',
+    '<BROKER_MAC_ADDRESS>',
     NOW()
 );
 ```
 
 ---
 
-## Step 4 — Update the row when credentials rotate
+## Step 4 - Update the row when credentials rotate
 
 ### Update only the API key
 
 ```sql
 UPDATE broker_credentials
 SET
-    api_key    = 'YOUR_NEW_API_KEY',
+    api_key    = '<BROKER_API_KEY>',
     updated_at = NOW()
 WHERE broker_account_id = 'A1';
 ```
@@ -144,8 +154,8 @@ WHERE broker_account_id = 'A1';
 ```sql
 UPDATE broker_credentials
 SET
-    api_key          = 'YOUR_NEW_API_KEY',
-    client_public_ip = 'YOUR_PUBLIC_IP',
+    api_key          = '<BROKER_API_KEY>',
+    client_public_ip = '<BROKER_CLIENT_PUBLIC_IP>',
     updated_at       = NOW()
 WHERE broker_account_id = 'A1';
 ```
@@ -155,7 +165,7 @@ WHERE broker_account_id = 'A1';
 ```sql
 UPDATE broker_credentials
 SET
-    totp_secret = 'YOUR_NEW_TOTP_SECRET_BASE32',
+    totp_secret = '<BROKER_TOTP_SECRET_BASE32>',
     updated_at  = NOW()
 WHERE broker_account_id = 'A1';
 ```
@@ -165,58 +175,79 @@ WHERE broker_account_id = 'A1';
 ```sql
 UPDATE broker_credentials
 SET
-    api_key          = 'YOUR_NEW_API_KEY',
-    client_code      = 'YOUR_CLIENT_CODE',
-    pin              = 'YOUR_4_DIGIT_PIN',
-    totp_secret      = 'YOUR_TOTP_SECRET_BASE32',
-    client_local_ip  = 'YOUR_LOCAL_IP',
-    client_public_ip = 'YOUR_PUBLIC_IP',
-    mac_address      = 'YOUR_MAC_ADDRESS',
+    api_key          = '<BROKER_API_KEY>',
+    client_code      = '<BROKER_CLIENT_CODE>',
+    pin              = '<BROKER_PIN>',
+    totp_secret      = '<BROKER_TOTP_SECRET_BASE32>',
+    client_local_ip  = '<BROKER_CLIENT_LOCAL_IP>',
+    client_public_ip = '<BROKER_CLIENT_PUBLIC_IP>',
+    mac_address      = '<BROKER_MAC_ADDRESS>',
     updated_at       = NOW()
 WHERE broker_account_id = 'A1';
 ```
 
 ---
 
-## Step 5 — Verify the final row
+## Step 5 - Verify the final row
 
 ```sql
 SELECT
     broker_account_id,
-    LEFT(api_key, 6) || '****' AS api_key_masked,
-    client_code,
-    client_public_ip,
+    api_key IS NOT NULL AS has_api_key,
+    client_code IS NOT NULL AS has_client_code,
+    totp_secret IS NOT NULL AS has_totp_secret,
     updated_at
 FROM broker_credentials
 WHERE broker_account_id = 'A1';
 ```
 
-Confirm that `updated_at` reflects the change you just made.
+Confirm that `updated_at` reflects the change you just made. Do not display
+client code, public IP, PIN, TOTP secret, or API key fragments in shared output.
 
-Before changing a row, capture a rollback copy:
+Before changing a row, capture a rollback copy in the approved operator secret
+store. Do not paste it into tickets or docs. For terminal evidence, capture only
+non-secret presence fields:
 
 ```sql
-SELECT *
+SELECT
+    broker_account_id,
+    api_key IS NOT NULL AS has_api_key,
+    client_code IS NOT NULL AS has_client_code,
+    totp_secret IS NOT NULL AS has_totp_secret,
+    updated_at
 FROM broker_credentials
 WHERE broker_account_id = 'A1';
 ```
 
 ---
 
-## Step 6 — Restart Phoenix
+## Step 6 - Restart Phoenix
 
 Phoenix does not treat the database update as live hot-reload proof. Restart the backend after changing broker credentials.
 
-Bundled Docker/Desktop restart command:
+Current OCI VM backend restart, after operator approval:
 
-```powershell
-docker compose -f .\docker-compose.live.single.yml restart backend
+```bash
+cd /opt/phoenix/app
+
+CONTROL_PLANE_PG_PASSWORD_HOST="$(sudo cat /run/secrets/control_plane_pg_password)" \
+docker compose \
+  -f docker-compose.oci-live.yml \
+  -f /opt/phoenix/phoenix-override.yml \
+  --env-file /opt/phoenix/phoenix-deploy.env \
+  up -d --no-deps backend
 ```
 
-If you changed multiple control-plane inputs and want a clean restart of the whole stack:
+If nginx was stopped by the watchdog and backend health is now good, recreate
+nginx separately:
 
-```powershell
-docker compose -f .\docker-compose.live.single.yml up -d --build --force-recreate
+```bash
+CONTROL_PLANE_PG_PASSWORD_HOST="$(sudo cat /run/secrets/control_plane_pg_password)" \
+docker compose \
+  -f docker-compose.oci-live.yml \
+  -f /opt/phoenix/phoenix-override.yml \
+  --env-file /opt/phoenix/phoenix-deploy.env \
+  up -d --no-deps nginx
 ```
 
 ## Validation
@@ -241,13 +272,13 @@ If login fails after rotation, restore the saved prior row, restart the backend,
 | `UPDATE 0` | wrong `broker_account_id` | run the Step 2 `SELECT` again |
 | login still fails | wrong API key or client code | verify values against the SmartAPI portal |
 | `Invalid TOTP` | wrong TOTP secret or local clock drift | re-copy the Base32 secret and verify server time sync |
-| `IP not whitelisted` (AG7002) | `client_public_ip` does not match SmartAPI configuration | update the portal and the DB row so they match; if your ISP applies CGNAT, the visible public IP may differ from the router WAN IP — always verify with `curl https://api.ipify.org` from inside the container |
+| `IP not whitelisted` (AG7002) | `client_public_ip` does not match SmartAPI configuration | update the portal and DB row through the approved secret process; if you verify public egress from the VM/container, redact the IP in notes |
 | Phoenix still uses old values | backend not restarted | restart the backend |
 
 ---
 
 ## Related
 
-- [Docker Desktop LIVE Deployment](docker_desktop_live_deployment.md)
+- [OCI LIVE Deployment](oci_live_deployment.md)
 - [Blue/Green cutover](blue_green_cutover.md)
 - `ARCHITECTURE.md`

@@ -5,7 +5,8 @@
 **Related runbooks:**
 - [Dashboard Kill Switch](dashboard-kill-switch.md) — admin UI on the Safety page (PR #240)
 - [Break-Glass Flatten](break_glass_flatten.md) — audited single-contract exit
-- [OCI LIVE Deployment](oci_live_deployment.md) — including the `RISK_MAX_DAILY_LOSS` sizing section (#221 / #243)
+- [OCI LIVE Deployment](oci_live_deployment.md)
+- [Capital Limits Configuration](capital_limits_configuration.md)
 
 ---
 
@@ -209,7 +210,8 @@ This subsection documents the status-quo behaviour of the automated exit engines
 
 When realized plus unrealized PnL crosses `-abs(RISK_MAX_DAILY_LOSS)`, the system automatically activates the durable kill switch (Codex #256 round-1 P2 correction). **The auto-trip is always GLOBAL** — the bridge in `app/core/risk_manager.py:572-576` calls `ksm.trip(KillSwitchScope.GLOBAL, "GLOBAL", ...)` unconditionally, irrespective of which account / strategy crossed the threshold. There is no per-account or per-strategy durable record produced on this path. Operators clearing a daily-loss auto-trip must therefore look up and clear the `GLOBAL` record (one durable trip blocks the whole hub), not a per-account scope.
 
-See [OCI LIVE Deployment — Sizing the daily-loss limit by capital tier](oci_live_deployment.md#sizing-the-daily-loss-limit-by-capital-tier) for the LIVE floor (default ₹5,000) and per-tier guidance.
+See [Capital Limits Configuration](capital_limits_configuration.md) for daily-loss
+and capital-limit sizing guidance.
 
 Auto-trips are SOFT by default (see Automated exit engines above for the trailing-lock interaction).
 
@@ -509,6 +511,7 @@ If a clear or rearm was issued incorrectly, immediately trip the same scope agai
 
 - [Dashboard Kill Switch](dashboard-kill-switch.md)
 - [Break-Glass Flatten](break_glass_flatten.md)
-- [OCI LIVE Deployment](oci_live_deployment.md) — including `RISK_MAX_DAILY_LOSS` sizing
+- [OCI LIVE Deployment](oci_live_deployment.md)
+- [Capital Limits Configuration](capital_limits_configuration.md)
 - [Orphan Review](resolve_orphan_review.md)
 - `ARCHITECTURE.md` §12, §12.1, §15.4

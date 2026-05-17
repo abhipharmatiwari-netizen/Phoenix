@@ -2,32 +2,64 @@
 
 ## 0. Purpose
 
-This document is the authoritative architecture contract for Phoenix v9. It defines the control flow, state models, ownership boundaries, reconciliation rules, and operational invariants that must hold before Phoenix trades with real capital.
+This document defines the Phoenix control-flow, state-model, ownership, and
+reconciliation rules that production should satisfy. It is not, by itself, proof
+of what is deployed.
 
-Every component, deployment, and operational procedure must conform to this specification. Ambiguity in this document is a defect.
+For current operations, the OCI VM is the source of truth. If this document,
+historical docs, compose comments, or old runbooks conflict with the running VM,
+the VM wins and the document must be corrected.
 
-### 0.1 Current recommended automated LIVE runtime
+Current VM evidence is captured in [docs/OCI_VM_RUNTIME.md](docs/OCI_VM_RUNTIME.md).
 
-Phoenix's current recommended approach for true automated LIVE trading is a hybrid runtime:
-- `TRADE_MODE=LIVE`
-- `ENABLE_MULTI_HUB=true`
-- `USE_HUB_ROUTER=true`
-- `DISABLE_STREAM_WORKER=false`
+### 0.1 Verified OCI VM Runtime
 
-Responsibility split in that profile:
-- **stream worker** = broker market-data session, ticks, bar building, indicator updates, and strategy signal generation
-- **hub/router/lifecycle/account runners** = order submission authority, idempotency, broker position/order/balance sync, reconciliation, ownership, lifecycle polling, durable state, and control-plane enforcement
+Verified on 2026-05-17 from the running OCI VM:
 
-In this profile, the stream worker is not the authoritative execution plane. It may generate signals and order intents, but all broker order placement and authoritative lifecycle mutation must pass through the hub bridge/router path.
+- Repo checkout: `/opt/phoenix/app`
+- Active branch/commit: `main` at `1a2cc47d8cb23fbc9b60e5eea8e5841e10d79ccd`
+- Compose project: `phoenix-oci-live`
+- Compose files: `/opt/phoenix/app/docker-compose.oci-live.yml` plus `/opt/phoenix/phoenix-override.yml`
+- Env file: `/opt/phoenix/phoenix-deploy.env`
+- Backend: `phoenix-oci-backend`, image `phoenix-local-backend:local-1a2cc47`, command `python -m app.main`
+- Web: `phoenix-oci-web`, image `phoenix-local-nginx:local-1a2cc47`
+- Database: VM-local `phoenix-oci-postgres`, image `postgres:16-alpine`
+- Watchdog: `phoenix-oci-watchdog`, image `docker:cli`
+- Runtime health: backend `/health`, `/ready`, `/readyz`, and `/health/summary` return 200 from inside the backend container
+- Health evidence: `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE`
 
-`DISABLE_STREAM_WORKER=true` is not the default automated LIVE baseline. It is valid only for operator/control-plane, reconciliation, or manual-supervision mode unless an approved replacement market-data plane exists and is wired end to end.
+The current VM differs from the intended OCIR/external-Postgres shape in these
+important ways:
 
-Current repo-tracked deployment surfaces that must implement this same contract:
-- `docker-compose.live.single.yml` is the bundled Docker/Desktop LIVE implementation.
-- `docker-compose.oci-live.yml` is the repo-tracked OCI Compose implementation. It expects OCIR images, OCI Vault/file secrets, and an explicitly configured Postgres endpoint.
-- `cloudrun.env` and `docs/runbooks/cloud_run_live_deployment.md` are Cloud Run reference/roadmap material only. They are not an approved production path until release evidence proves the same contract in Cloud Run and this architecture is updated to approve it.
+- Local images are used instead of OCIR images.
+- A VM-local Postgres container is used instead of an external OCI PostgreSQL endpoint.
+- The backend has source-file bind mounts from `/opt/phoenix/app`.
+- `CONTROL_PLANE_PG_SSLMODE=prefer` and `LIVE_PG_SSL_SKIP_CHECK=true` are present for the local DB path.
+- The nginx container mounts `/opt/phoenix/nginx-ssl-prerendered.conf.template`, not the repo nginx template directly.
+- `phoenix-oci-postgres` has no Compose labels and no Docker healthcheck.
 
-No deployment path may claim automated LIVE readiness only because a manifest exists. Readiness requires the running backend container to prove the effective runtime tuple, durable stores, startup validation, readiness gates, reconciliation state, and release evidence.
+These facts are operational state, not recommendations. Any future move to OCIR
+images or external Postgres requires a fresh VM evidence capture and doc update.
+
+### 0.2 Production Contract
+
+The production safety contract remains:
+
+- One authoritative live state path per scope.
+- Broker order placement and authoritative lifecycle mutation must pass through
+  the hub bridge/router path when the backend reports hub-authoritative mode.
+- Durable Postgres state is required for outbox, lifecycle, ownership,
+  kill-switch, tenant/account/subscription, strategy config, and trade/audit
+  records.
+- `/readyz` and `/health/summary` are the readiness evidence surfaces.
+- Secret values must come from runtime secret files or approved stores, never
+  committed env files.
+- `DISABLE_STREAM_WORKER=true` is not an automated-LIVE profile unless an
+  approved replacement market-data, bar, indicator, and strategy plane is
+  verified on the VM.
+
+Docker Desktop, Cloud Run, Firestore, BigQuery, and GCP references are
+non-current unless future OCI VM evidence proves they are active.
 
 ---
 
@@ -47,7 +79,7 @@ Phoenix runs in one of two mutually exclusive operating modes. Only one mode may
 - Legacy `RiskManager` must not independently create, delete, or release hub-owned positions.
 - Hub lifecycle services and exit engines are authoritative for automated exits.
 - Broker positions and orders are observed state, entering through reconciliation rules.
-- In the current recommended automated LIVE profile, legacy stream code remains enabled for market data, bar construction, indicator updates, and strategy signals. It must submit through the hub path and must not bypass hub ownership, risk policy, or lifecycle policy.
+- In the hub-authoritative automated profile, legacy stream code remains enabled for market data, bar construction, indicator updates, and strategy signals. It must submit through the hub path and must not bypass hub ownership, risk policy, or lifecycle policy.
 
 ### Non-negotiable authority rules
 1. A contract may have **one authoritative owner path at a time**: legacy or hub.
@@ -80,11 +112,14 @@ Phoenix runs in one of two mutually exclusive operating modes. Only one mode may
 | Control-plane credentials and secrets | Approved platform secret store in LIVE; Postgres is allowed for broker credentials | short-lived injected env/file mounts only | Repo files and long-lived plaintext env are forbidden for LIVE |
 | Hub routing table | Postgres (`CONTROL_PLANE_BACKEND=postgres`) | in-memory cache refreshed from Postgres | Firestore was a prior implementation; current LIVE stack uses Postgres exclusively. If `CONTROL_PLANE_BACKEND=firestore`, Google ADC credentials (`GOOGLE_APPLICATION_CREDENTIALS`) are required — see compose comment |
 
-Clarification: "current LIVE stack" in the matrix means the repo-tracked LIVE manifests listed in section 0.1. Those manifests use Postgres for authoritative routing; Firestore-capable code remains compatibility/reference only unless this contract is revised.
+Clarification: "current LIVE stack" in the matrix means the OCI VM runtime
+verified in section 0.1. Firestore-capable code remains compatibility/reference
+only unless this contract is revised after a fresh VM audit.
 
 ### Firestore dependency status
 
-Firestore is **not active** in the current repo-tracked LIVE manifests (`docker-compose.live.single.yml` and `docker-compose.oci-live.yml`). All authoritative backends use Postgres:
+Firestore is **not active** in the current OCI VM runtime. All authoritative
+backends use Postgres:
 - Control plane / routing table: `CONTROL_PLANE_BACKEND=postgres`
 - Sweep / EOD state: `SWEEP_STATE_BACKEND=postgres`
 - Leader lease: `LEADER_LEASE_BACKEND=postgres`
@@ -360,7 +395,7 @@ flowchart TD
 
 ### Startup guarantees
 - Secret resolution and LIVE invariant validation complete before any live worker or router accepts orders.
-- In the current recommended automated LIVE profile, the stream worker remains enabled so ticks, bars, indicators, and live marks stay fresh for strategy, dashboard, and PnL logic.
+- In the hub-authoritative automated profile, the stream worker remains enabled so ticks, bars, indicators, and live marks stay fresh for strategy, dashboard, and PnL logic.
 - Broker position/order/balance sync through hub account runners continues independently, but broker sync alone does not satisfy the automated LIVE baseline.
 - Persisted authoritative state is restored **before** broker reconciliation, so reconciliation evaluates a populated recovery graph, not an empty runtime.
 - Restored objects enter a recovery-pending state and are not considered live until reconciliation converges.
@@ -446,7 +481,7 @@ The following WARNING-level messages appear on every startup and are expected be
 
 ## 6. Stream Worker Initialization (Current Market-Data & Strategy Path)
 
-In the current recommended automated LIVE profile, this worker remains enabled. It is responsible for market data, bar construction, indicator updates, and strategy signals. It is not the authoritative execution or lifecycle plane.
+In the hub-authoritative automated profile, this worker remains enabled. It is responsible for market data, bar construction, indicator updates, and strategy signals. It is not the authoritative execution or lifecycle plane.
 
 ```mermaid
 flowchart TD
@@ -1164,7 +1199,7 @@ flowchart TD
 ```
 
 ### End-to-end authority note
-In the current recommended automated LIVE profile, stream-side strategies may still generate entry and exit signals, but those signals must route through `HUB_PATH`. `LEGACY_PATH` exists only for legacy-authoritative deployments or for audited break-glass handling.
+In the hub-authoritative automated profile, stream-side strategies may still generate entry and exit signals, but those signals must route through `HUB_PATH`. `LEGACY_PATH` exists only for legacy-authoritative deployments or for audited break-glass handling.
 
 ---
 

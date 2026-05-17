@@ -1,5 +1,12 @@
 # Blue/Green Cutover Playbook
 
+> **Status:** ROADMAP_ONLY / NOT CURRENTLY IMPLEMENTED ON THE OCI VM.
+>
+> The verified OCI VM has one Phoenix Compose project and one VM-local Postgres
+> container. No blue/green deployment was observed. Use this document only as a
+> future design reference until a fresh VM audit proves blue/green infrastructure
+> exists.
+
 **Architecture reference:** deployment and cutover policy in `ARCHITECTURE.md`
 
 ## Purpose

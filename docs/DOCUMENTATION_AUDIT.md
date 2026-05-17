@@ -1,178 +1,128 @@
-# Documentation Audit - 2026-05-07
+# Documentation Audit
 
-## Executive Summary
+Audit date: 2026-05-17.
 
-Documentation readiness: **GO** after this cleanup. The current operator docs now describe the same production contract: hub-authoritative LIVE, Postgres durable authority, stream-worker-enabled automated runtime, approved platform secret injection, and release evidence as the go-live gate.
+Scope: repository documentation, env examples, Compose comments, and operator
+script headers were checked against the running OCI VM. The OCI VM overrides all
+repo docs and historical plans.
 
-Production readiness: **NO-GO for unattended live-money operation**. The docs now expose the remaining implementation gaps instead of hiding them: LIVE break-glass flatten requires a step-up token but the repo has no HTTP issuer route, and kill-switch rearm does not enforce step-up.
+## Runtime Evidence Summary
+
+| Area | Verified current state |
+|---|---|
+| Repo path | `/opt/phoenix/app` |
+| Active git | `main` at `1a2cc47d8cb23fbc9b60e5eea8e5841e10d79ccd`; untracked `docker-compose.oci-postgres.yml` |
+| Compose project | `phoenix-oci-live` |
+| Compose files | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` |
+| Env file | `/opt/phoenix/phoenix-deploy.env` |
+| Backend | `phoenix-oci-backend`, `phoenix-local-backend:local-1a2cc47`, healthy |
+| Web | `phoenix-oci-web`, `phoenix-local-nginx:local-1a2cc47`, healthy |
+| Database | VM-local `phoenix-oci-postgres`, `postgres:16-alpine`, no healthcheck |
+| Watchdog | `phoenix-oci-watchdog`, actively stops/starts nginx on backend health failures |
+| Runtime mode | `/health/summary` reports `HUB_AUTHORITATIVE`; `/health` reports `strategy_bridge_order_router` |
+| Health endpoints | backend container `/health`, `/ready`, `/readyz`, `/health/summary`; nginx host `/health`, `/readyz` |
+| Logs | `/opt/phoenix/logs`; date-partitioned app logs plus scheduler/cert/safety logs |
+| Secret model | `/run/secrets/*`; docs may list names only |
+
+Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 
 ## Documentation Inventory
 
-| Path | Type | Current purpose | Owner/audience | Status | Action |
+| Path | Type | Claimed purpose | OCI VM match status | Action |
+|---|---|---|---|---|
+| `README.md` | entrypoint | repo/operator index | PARTIALLY_STALE | UPDATE |
+| `ABOUTME.md` | summary | plain-language overview | PARTIALLY_STALE | UPDATE |
+| `ARCHITECTURE.md` | architecture | production contract | PARTIALLY_STALE | UPDATE |
+| `Agents.md` | agent instruction | review rules | MATCHES_OCI_VM | KEEP |
+| `docs/OCI_VM_RUNTIME.md` | evidence | current VM state | MATCHES_OCI_VM | KEEP |
+| `docs/DOCUMENTATION_AUDIT.md` | audit | doc inventory/mismatch | PARTIALLY_STALE | UPDATE |
+| `docs/runbooks/oci_live_deployment.md` | runbook | OCI operations | CONTRADICTS_OCI_VM | UPDATE |
+| `docs/runbooks/oci-live.env.example` | env template | OCI env names | PARTIALLY_STALE | UPDATE |
+| `phoenix-override.yml.example` | override template | OCI override | CONTRADICTS_OCI_VM | UPDATE |
+| `docker-compose.oci-live.yml` | Compose/comments | OCI base manifest | PARTIALLY_STALE | UPDATE |
+| `docker-compose.live.single.yml` | Compose/comments | Docker Desktop live | OBSOLETE | UPDATE |
+| `.env.example` | env template | local/staging env | PARTIALLY_STALE | UPDATE |
+| `docker.env` | env template | local dev | ROADMAP_ONLY | KEEP |
+| `cloudrun.env` | env template | Cloud Run reference | ROADMAP_ONLY | UPDATE |
+| `docs/runbooks/docker_desktop_live_deployment.md` | runbook | Docker Desktop LIVE | OBSOLETE | UPDATE |
+| `docs/runbooks/cloud_run_live_deployment.md` | runbook | Cloud Run reference | ROADMAP_ONLY | UPDATE |
+| `docs/runbooks/cloudrun-live.env.example` | env template | Cloud Run env | ROADMAP_ONLY | UPDATE |
+| `docs/runbooks/update_broker_credentials.md` | runbook | broker credential rotation | UNSAFE_FOR_LIVE | UPDATE |
+| `docs/runbooks/strategy_runtime_diagnostics.md` | runbook | strategy diagnostics | PARTIALLY_STALE | UPDATE |
+| `docs/runbooks/capital_limits_configuration.md` | runbook | capital limits | PARTIALLY_STALE | UPDATE |
+| `docs/runbooks/restore_drill.md` | runbook | DB restore drill | PARTIALLY_STALE | UPDATE |
+| `docs/runbooks/blue_green_cutover.md` | runbook | blue/green cutover | ROADMAP_ONLY | UPDATE |
+| `docs/runbooks/break_glass_flatten.md` | runbook | emergency flatten | PARTIALLY_STALE | UPDATE |
+| `docs/runbooks/dashboard-kill-switch.md` | runbook | dashboard kill switch | PARTIALLY_STALE | UPDATE |
+| `docs/runbooks/kill_switch.md` | runbook | kill switch | UNKNOWN_NEEDS_EVIDENCE | KEEP |
+| `docs/runbooks/release_evidence.md` | runbook | release evidence | PARTIALLY_STALE | KEEP |
+| `docs/runbooks/resolve_orphan_review.md` | runbook | orphan review | UNKNOWN_NEEDS_EVIDENCE | KEEP |
+| `docs/runbooks/ema20_tp_pct_tuning.md` | runbook | tuning diagnostics | ROADMAP_ONLY | KEEP |
+| `docs/STRATEGIES.md` | reference | strategy catalog | UNKNOWN_NEEDS_EVIDENCE | KEEP |
+| `docs/Flowchart.md` | architecture reference | flow diagrams | PARTIALLY_STALE | KEEP |
+| `docs/kpis_slos.md` | observability | KPI/SLO reference | PARTIALLY_STALE | KEEP |
+| `docs/parameters.md` | reference | strategy parameters | UNKNOWN_NEEDS_EVIDENCE | KEEP |
+| `docs/nse-holidays.txt` | scheduler input | NSE holiday list | UNKNOWN_NEEDS_EVIDENCE | KEEP |
+| `docs/release-evidence/README.md` | evidence docs | evidence folder guide | PARTIALLY_STALE | KEEP |
+| `docs/release-evidence/restore_drill_TEMPLATE.md` | template | restore evidence | PARTIALLY_STALE | KEEP |
+| `docs/release-evidence/restore_drill_20260425.md` | historical evidence | restore drill record | OBSOLETE | KEEP |
+| `docs/release-evidence/*.json` | historical evidence | prior release evidence | OBSOLETE | KEEP |
+| `docs/archive/ARCHIVE.md` | archive index | archived docs | MATCHES_OCI_VM | KEEP |
+| `docs/archive/phoenix_backlog.csv` | archive | historical backlog | OBSOLETE | KEEP |
+| `scripts/replay/REPLAY.md` | developer doc | replay harness | ROADMAP_ONLY | KEEP |
+| `scripts/start-phoenix.sh` | script header | scheduled start | PARTIALLY_STALE | KEEP |
+| `scripts/stop-phoenix.sh` | script header | scheduled stop | PARTIALLY_STALE | KEEP |
+| `scripts/fetch-secrets.sh` | script header | secret fetch | PARTIALLY_STALE | KEEP |
+| `scripts/ops/*.sh`, `scripts/ops/*.ps1` | script headers | ops helpers | UNKNOWN_NEEDS_EVIDENCE | KEEP |
+| `app/config/strategy_env.yaml` | config comments | strategy/runtime config | PARTIALLY_STALE | KEEP |
+| `app/config/universe.yaml` | config comments | universe config | UNKNOWN_NEEDS_EVIDENCE | KEEP |
+
+## Mismatch Review
+
+| Severity | Document | Claim | OCI VM evidence | Risk | Required documentation change |
 |---|---|---|---|---|---|
-| `README.md` | Operator index | Current runtime contract and doc map | Operators, maintainers | PARTIALLY_STALE | UPDATE |
-| `ABOUTME.md` | Plain-language summary | Non-authoritative orientation | New operators, reviewers | PARTIALLY_STALE | UPDATE |
-| `ARCHITECTURE.md` | Production contract | Authoritative runtime and safety contract | Architects, SRE, reviewers | PARTIALLY_STALE | UPDATE |
-| `docs/DOCUMENTATION_AUDIT.md` | Audit record | Inventory, mismatches, validation | Maintainers, reviewers | CURRENT | KEEP |
-| `docs/Flowchart.md` | Reference diagram | Runtime flow diagram, non-authoritative | Engineers | PARTIALLY_STALE | UPDATE |
-| `docs/kpis_slos.md` | Observability guide | Current metrics, alerts, day-1 monitor set | SRE, operators | CONFLICTS_WITH_CODE | UPDATE |
-| `docs/parameters.md` | Research reference | Historical strategy parameter research | Strategy reviewers | ROADMAP_ONLY | UPDATE |
-| `docs/nse-holidays.txt` | Scheduler input | OCI weekday holiday guard | Operators | CONFLICTS_WITH_CODE | UPDATE |
-| `docs/archive/ARCHIVE.md` | Archive index | Explains archive scope | Maintainers | CURRENT | KEEP |
-| `docs/archive/phoenix_backlog.csv` | Historical backlog | Development history only | Maintainers | OBSOLETE | ARCHIVE |
-| `docs/release-evidence/README.md` | Evidence guide | How to capture evidence bundles | Operators | PARTIALLY_STALE | UPDATE |
-| `docs/release-evidence/restore_drill_TEMPLATE.md` | Evidence template | Restore drill record template | Operators | CURRENT | KEEP |
-| `docs/release-evidence/restore_drill_20260425.md` | Evidence artifact | Completed historical drill | Auditors | PARTIALLY_STALE | UPDATE |
-| `docs/runbooks/docker_desktop_live_deployment.md` | Runbook | Docker Desktop LIVE deployment | Operators | PARTIALLY_STALE | UPDATE |
-| `docs/runbooks/oci_live_deployment.md` | Runbook | OCI Compose LIVE deployment | Operators | CONFLICTS_WITH_CODE | UPDATE |
-| `docs/runbooks/cloud_run_live_deployment.md` | Reference | Future Cloud Run path | Architects | ROADMAP_ONLY | UPDATE |
-| `docs/runbooks/release_evidence.md` | Runbook | Promotion evidence standard | Release operators | PARTIALLY_STALE | UPDATE |
-| `docs/runbooks/update_broker_credentials.md` | Runbook | Postgres broker credential rotation | Operators | PARTIALLY_STALE | UPDATE |
-| `docs/runbooks/blue_green_cutover.md` | Runbook | Controlled writer handoff | Operators, SRE | PARTIALLY_STALE | UPDATE |
-| `docs/runbooks/restore_drill.md` | Runbook | Backup/restore validation | SRE, operators | PARTIALLY_STALE | UPDATE |
-| `docs/runbooks/kill_switch.md` | Runbook | Trip, clear, rearm workflow | Operators | UNSAFE_FOR_LIVE | UPDATE |
-| `docs/runbooks/break_glass_flatten.md` | Runbook | Emergency flatten workflow | Operators | UNSAFE_FOR_LIVE | UPDATE |
-| `docs/runbooks/resolve_orphan_review.md` | Runbook | Orphan review resolution | Operators | PARTIALLY_STALE | UPDATE |
-| `docs/runbooks/capital_limits_configuration.md` | Runbook | Capital limit payloads | Operators | PARTIALLY_STALE | UPDATE |
-| `docs/runbooks/strategy_runtime_diagnostics.md` | Diagnostic runbook | Stream/strategy troubleshooting | Operators, SRE | PARTIALLY_STALE | UPDATE |
-| `docs/runbooks/ema20_tp_pct_tuning.md` | Research runbook | Future tuning workflow | Strategy reviewers | ROADMAP_ONLY | UPDATE |
-| `docs/runbooks/cloudrun-live.env.example` | Env template | Cloud Run reference profile | Architects | ROADMAP_ONLY | UPDATE |
-| `docs/runbooks/oci-live.env.example` | Env template | OCI non-secret deploy env template | Operators | PARTIALLY_STALE | UPDATE |
-| `docs/runbooks/docker-live.env.example` | Env template | Obsolete multi-file Docker LIVE profile | Operators | OBSOLETE | DELETE |
-| `.env.example` | Env template | Local/dev example | Developers | CURRENT | KEEP |
-| `docker.env` | Env template | Local SHADOW/dev template | Developers | CURRENT | KEEP |
-| `cloudrun.env` | Env template | Cloud Run reference only | Architects | ROADMAP_ONLY | UPDATE |
-| `.env.oci-live.example` | Env template | Duplicate OCI env template | Operators | DUPLICATE | DELETE |
-| `docker-compose.live.single.yml` | Compose manifest | Docker Desktop LIVE manifest | Operators | CURRENT | KEEP |
-| `docker-compose.oci-live.yml` | Compose manifest | OCI Compose LIVE manifest | Operators | CURRENT | KEEP |
-| `phoenix-override.yml.example` | Compose override | OCI operator override template | Operators | CONFLICTS_WITH_CODE | UPDATE |
-| `Dockerfile` | Build config | Backend image build | Maintainers | CURRENT | KEEP |
-| `nginx/nginx.conf.template` | Nginx template | Local/reverse-proxy config | Operators | CURRENT | KEEP |
-| `nginx/nginx-ssl.conf.template` | Nginx template | OCI TLS reverse proxy config | Operators | CURRENT | KEEP |
-| `release-manifest.json` | Release manifest | Promotion artifact policy | Release operators | PARTIALLY_STALE | UPDATE |
-| `scripts/build_release_artifact.py` | Release script | Source bundle builder | Maintainers | PARTIALLY_STALE | UPDATE |
-| `scripts/start-phoenix.sh` | Ops script | OCI scheduled start | Operators | CONFLICTS_WITH_CODE | UPDATE |
-| `scripts/stop-phoenix.sh` | Ops script | OCI scheduled stop | Operators | CONFLICTS_WITH_CODE | UPDATE |
-| `scripts/fetch-secrets.sh` | Ops script | OCI Vault to `/run/secrets` | Operators | CURRENT | KEEP |
-| `scripts/docker-entrypoint.sh` | Startup script | Loads Docker secrets to env | Operators | CURRENT | KEEP |
-| `scripts/capture_release_evidence.ps1` | Evidence script | Captures evidence JSON | Operators | CURRENT | KEEP |
-| `scripts/run_migrations.sh` | Migration script | Apply/verify schema migrations | Operators | CURRENT | KEEP |
-| `scripts/rollback.py` | Utility | Rollback helper | Maintainers | CURRENT | KEEP |
-| `scripts/replay/REPLAY.md` | Replay docs | Replay subsystem usage | Developers | CURRENT | KEEP |
-| `scripts/ops/build_push_ip.sh` | OCI script | Instance-principal OCIR build/push | Operators | PARTIALLY_STALE | UPDATE |
-| `scripts/ops/build_and_push_image.sh` | OCI script | Token-based OCIR build/push | Operators | PARTIALLY_STALE | UPDATE |
-| `scripts/ops/pull_oci_logs.ps1` | OCI script | Bastion log capture | Operators | PARTIALLY_STALE | UPDATE |
-| `scripts/ops/gather_ocir_config.sh` | OCI script | Read-only OCIR config capture | Operators | CURRENT | KEEP |
-| `scripts/ops/check_attribution_deployed.sh` | OCI script | Read-only attribution marker check | Operators | CURRENT | KEEP |
-| `scripts/ops/analyze_exit_attribution.py` | Research script | Exit attribution analysis | Strategy reviewers | ROADMAP_ONLY | KEEP |
-| `scripts/ops/analyze_tp_discrimination.py` | Research script | TP discrimination analysis | Strategy reviewers | ROADMAP_ONLY | KEEP |
-| `scripts/ops/manual_deploy.sh` | OCI script | Old bind-mount deploy path | Operators | OBSOLETE | DELETE |
-| `scripts/ops/build_local_and_redeploy.sh` | OCI script | Old local-image deploy path | Operators | OBSOLETE | DELETE |
-| `scripts/ops/resolve_stuck_order.sh` | OCI script | Hard-coded direct DB state mutation | Operators | UNSAFE_FOR_LIVE | DELETE |
-| `scripts/ops/check_outbox.sh` | OCI script | Old local-Postgres read helper | Operators | OBSOLETE | DELETE |
-| `scripts/ops/backtest_smoke.sh` | Research script | Old live-DB replay smoke | Strategy reviewers | OBSOLETE | DELETE |
+| P1 | `README.md`, `ARCHITECTURE.md`, `docs/runbooks/oci_live_deployment.md`, `docker-compose.oci-live.yml` | OCI path uses OCIR images and external OCI Postgres | VM runs `phoenix-local-*` images and `phoenix-oci-postgres` | Wrong restart/deploy/DB assumptions | Mark base manifest as secondary; document current local image/local DB runtime |
+| P1 | `docs/runbooks/oci_live_deployment.md` | watchdog is observe-only | `phoenix-oci-watchdog` command/logs stop and start nginx | Operator may misread nginx outages | Document active nginx stop/start behavior |
+| P1 | `phoenix-override.yml.example` | no source-code bind mounts, repo nginx template mount | VM override has source bind mounts and prerendered nginx template | Recreated runtime would differ from production | Make example mirror current VM and label drift |
+| P1 | `docs/runbooks/oci-live.env.example` | external DB endpoint and OCIR tag are current | VM uses `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres` and local images | Failed deploy or wrong DB target | Update template to VM-local DB and local image tag shape |
+| P0 | `docs/runbooks/update_broker_credentials.md` | select `api_key`, `client_code`, `client_public_ip` during verification | Broker credential table exists on VM | Secret leakage into terminals/tickets | Replace value selection with boolean presence checks |
+| P1 | `docs/runbooks/docker_desktop_live_deployment.md` | Docker Desktop is current LIVE guidance | VM is OCI-only production | Operator could follow wrong restart/env path | Mark non-current production |
+| P1 | `docs/runbooks/blue_green_cutover.md` | blue/green cutover usable | VM has one Compose project and one local DB | False operational confidence | Mark roadmap-only |
+| P1 | `docs/runbooks/restore_drill.md` | generic/external DB examples apply | VM DB is local Postgres container | Wrong restore target | Add current OCI VM DB note |
+| P2 | Cloud Run docs/env | future Cloud Run target | no Cloud Run evidence on VM | Confusion | Mark non-current roadmap |
+| P2 | Optimizer/reload runbook sections | systemd timers installed | `systemctl status` shows units not found | Operators chase absent timers | Mark absent in runtime evidence and OCI runbook |
+| P2 | Health docs | `/api/health` as health path | nginx returns SPA for `/api/health` | False health check | Document `/health` and `/readyz` only |
 
-## Evidence Review Mismatches
-
-| Severity | Document | Claim | Evidence from repo | Risk | Required change |
-|---|---|---|---|---|---|
-| P0 | `docs/runbooks/break_glass_flatten.md`, `app/dashboard/admin_routes.py` | LIVE break-glass can be run by following the runbook | `BreakGlassFlattenRequest` requires `step_up_token` in LIVE, but no HTTP issuer route exists; only `app/security/step_up.py` service functions exist | Operator may believe emergency flatten is executable when token issuance is not wired | Mark not approved for LIVE unless token is issued through approved process; remove nonexistent issuer route claim |
-| P0 | `docs/runbooks/kill_switch.md` | Rearm requires step-up/maker-checker in app | `/admin/kill-switch/rearm` requires OPERATOR role only | Trading can be re-enabled without the architecture-required step-up | Document current gap and require external maker-checker until implemented |
-| P1 | Multiple admin runbooks | `Authorization: Bearer <ADMIN_API_KEY>` authenticates admin API | `app/dashboard/auth.py` accepts admin key via `X-Admin-Key`; bearer is JWT auth path | Runbook commands fail or encourage wrong auth model | Replace with `X-Admin-Key` |
-| P1 | `docs/runbooks/oci_live_deployment.md`, `phoenix-override.yml.example` | OCI uses local `phoenix-oci-postgres`, SSL skip, and temporary source bind mounts | `docker-compose.oci-live.yml` expects external Postgres endpoint, OCIR image tags, `/run/secrets` | Failed or unsafe OCI deployment; unpinned code overlays | Rewrite OCI runbook and override template for external Postgres, SSL, pinned images, no source mounts |
-| P1 | `scripts/start-phoenix.sh`, `scripts/stop-phoenix.sh` | Compose service `web` exists | OCI compose service is `nginx`; container is named `phoenix-oci-web` | Scheduled starts/stops fail | Change service operations to `nginx`; remove market-open `git pull` |
-| P1 | `docs/runbooks/docker-live.env.example` | Legacy Docker LIVE env template is current | Referenced compose files are absent; current manifest is `docker-compose.live.single.yml` | Operators may deploy nonexistent/stale profile | Delete obsolete template and references |
-| P1 | `.env.oci-live.example` | Root OCI env template is current | Canonical template is `docs/runbooks/oci-live.env.example` | Duplicate drift | Delete duplicate |
-| P1 | `scripts/ops/resolve_stuck_order.sh` | Force-terminal direct DB update is safe | Script hard-coded local container and mutates order outbox | Money-movement state can be changed outside current runbook controls | Delete |
-| P1 | `scripts/ops/build_push_ip.sh`, `scripts/ops/build_and_push_image.sh` | OCIR user/namespace can be hard-coded | Scripts embedded tenancy/user assumptions | Secret/account leakage and wrong tenancy push | Require `OCIR_NAMESPACE`/`OCIR_USERNAME` env vars |
-| P2 | `docs/kpis_slos.md` | Lists many metric names as supported | Actual metrics are in `app/observability/prometheus_metrics.py` and alert rules in `alert_rules.py` | Operators monitor nonexistent metrics | Replace with code-proven metrics and day-1 alert rules |
-| P2 | `docs/parameters.md`, `docs/runbooks/ema20_tp_pct_tuning.md` | Backtest recommendations read as current LIVE params | Current runnable params are in `app/config/strategy_env.yaml` and runtime DB config | Research may be applied as production truth | Mark research/reference only |
-| P2 | `cloudrun.env`, Cloud Run docs | Cloud Run profile read as deployable | No repo-tracked Cloud Run manifest/release evidence; architecture says roadmap | Premature Cloud Run go-live | Mark roadmap/reference only |
-| P2 | `docs/nse-holidays.txt` | 2026 holiday dates current | NSE holiday page and current market calendars differ from file | Scheduled OCI start can run on holidays or skip trading days | Correct dates and mark verification date |
-
-## Clean Documentation Map
+## Final Documentation Map
 
 | Final document | Purpose | Must contain | Must not contain | Source documents |
 |---|---|---|---|---|
-| `ARCHITECTURE.md` | Authoritative production contract | LIVE tuple, authority model, storage rules, security contract, known implementation gaps | Go-live shortcuts or future-path approvals without evidence | Existing architecture plus code/config review |
-| `README.md` | Concise operator index | Current runtime contract, deployment surfaces, reading order | Detailed runbook steps, obsolete profile instructions | README, architecture, runbooks |
-| `ABOUTME.md` | Plain-language summary | Non-authoritative explanation and reading order | Operational authority or conflicting go-live guidance | ABOUTME, architecture |
-| `docs/runbooks/docker_desktop_live_deployment.md` | Docker Desktop LIVE runbook | Preconditions, commands, env, validation, rollback, warnings | OCI/Cloud Run steps, legacy multi-file compose | Docker compose, helper script, startup validator |
-| `docs/runbooks/oci_live_deployment.md` | OCI Compose LIVE runbook | OCIR image, Vault secrets, external Postgres, migrations, `/readyz`, release evidence, rollback | VM-local Postgres, source bind mounts, `latest` tags | OCI compose, override, scripts |
-| `docs/runbooks/release_evidence.md` | Approval evidence standard | Required fields, pass criteria, Docker/OCI capture commands, failure handling | Claims that evidence proves strategy suitability | Runtime evidence endpoint |
-| Emergency runbooks | Controlled manual actions | Purpose, scope, auth header, failure handling, rollback | Unwired step-up claims or direct DB repairs as routine | Admin routes and auth code |
-| Reference docs | Research/roadmap | Clear status and source of truth | Current go-live claims | Existing research and roadmap files |
+| `README.md` | concise operator entrypoint | current VM state, reading order, safe commands | Docker Desktop/Cloud Run as current | VM evidence, old README |
+| `docs/OCI_VM_RUNTIME.md` | evidence snapshot | containers, images, mounts, endpoints, DB, cron, risks | secrets or private IPs | OCI commands/logs |
+| `docs/runbooks/oci_live_deployment.md` | executable current OCI runbook | exact VM commands, paths, health, DB, logs, recovery | aspirational OCIR/external DB claims | VM evidence, old OCI runbook |
+| `ARCHITECTURE.md` | production contract with current runtime preface | current VM evidence and safety invariants | stale "current recommended" deployment claims | old architecture, VM evidence |
+| `ABOUTME.md` | plain-language non-authoritative summary | current VM overview | authoritative claims | old ABOUTME, VM evidence |
+| `phoenix-override.yml.example` | current override template | current local images/local DB/bind mounts | target-only invariants as current | VM override |
+| `docs/runbooks/oci-live.env.example` | current env-name template | current variable names | secret values | VM env names |
+| non-OCI deployment docs | reference only | non-current banner | production instructions | old runbooks |
 
-## Delete And Archive Actions
+## Delete / Archive Decisions
 
 | Path | Action | Reason | Replacement / canonical reference |
 |---|---|---|---|
-| `.env.oci-live.example` | DELETE | Duplicate root OCI env template drifted from the runbook copy | `docs/runbooks/oci-live.env.example` |
-| `docs/runbooks/docker-live.env.example` | DELETE | Obsolete multi-file Docker profile references absent compose files | `docker-compose.live.single.yml`, `docs/runbooks/docker_desktop_live_deployment.md` |
-| `scripts/ops/manual_deploy.sh` | DELETE | Old source bind-mount deployment path conflicts with pinned image contract | `docs/runbooks/oci_live_deployment.md` |
-| `scripts/ops/build_local_and_redeploy.sh` | DELETE | Old local-image and bind-mount repair path conflicts with OCIR/pinned-image deployment | `scripts/ops/build_and_push_image.sh`, `scripts/ops/build_push_ip.sh` |
-| `scripts/ops/resolve_stuck_order.sh` | DELETE | Hard-coded direct DB mutation for order state is unsafe for LIVE | Incident-specific operator approval plus current runbooks |
-| `scripts/ops/check_outbox.sh` | DELETE | Hard-coded VM-local Postgres container no longer matches repo-tracked OCI path | `/readyz`, release evidence, SQL through approved DB access |
-| `scripts/ops/backtest_smoke.sh` | DELETE | Old research helper connected to live local Postgres container and installed deps dynamically | `docs/runbooks/ema20_tp_pct_tuning.md`, replay tooling |
+| none | DELETE | No files were deleted in this pass; stale docs were rewritten or marked non-current to preserve history without presenting them as current | `README.md`, `docs/OCI_VM_RUNTIME.md`, `docs/runbooks/oci_live_deployment.md` |
+| none | ARCHIVE | No file moves were required; historical release evidence remains in `docs/release-evidence/` and backlog remains in `docs/archive/` | `docs/DOCUMENTATION_AUDIT.md` inventory |
 
-No document was archived in this pass; deleted files had no safe current operational value.
+## Remaining Documentation Risks
 
-## Files Updated
+| Risk | Severity | Status |
+|---|---|---|
+| Several deep reference docs still describe target architecture more than VM-observed behavior | P2 | Marked in inventory; not operator entrypoints |
+| `docs/nse-holidays.txt` was not independently validated against an official NSE source during this pass | P2 | Follow-up needed before relying on holiday automation |
+| Release evidence endpoint was not captured with admin auth because the admin key was not printed or used | P2 | Endpoint unauthenticated status verified as 401 |
+| Script headers under `scripts/ops/` were inventoried but not fully rewritten | P2 | README/runbook no longer depend on them as canonical |
 
-Updated: `README.md`, `ABOUTME.md`, `ARCHITECTURE.md`, `cloudrun.env`, `docs/Flowchart.md`, `docs/kpis_slos.md`, `docs/parameters.md`, `docs/nse-holidays.txt`, `docs/release-evidence/README.md`, `docs/release-evidence/restore_drill_20260425.md`, all current runbooks under `docs/runbooks/`, `phoenix-override.yml.example`, `release-manifest.json`, `scripts/build_release_artifact.py`, `scripts/start-phoenix.sh`, `scripts/stop-phoenix.sh`, `scripts/ops/build_push_ip.sh`, `scripts/ops/build_and_push_image.sh`, `scripts/ops/pull_oci_logs.ps1`, `app/dashboard/admin_routes.py`, `app/config/profile_linter.py`, and the two env-template tests.
+## Validation Record
 
-## Key Content Changes
-
-- README and ABOUTME now point to the same current runtime contract as ARCHITECTURE.
-- Cloud Run is consistently roadmap/reference, not current go-live guidance.
-- Docker Desktop and OCI Compose are the only current repo-tracked deployment surfaces.
-- Admin runbooks now use `X-Admin-Key` and explicitly call out the step-up issuer gap.
-- OCI docs and override template now require external Postgres, SSL, Vault/file secrets, OCIR images, and pinned tags.
-- Obsolete direct-DB and bind-mount scripts were deleted.
-- Release artifact policy now includes the OCI compose manifest and override template.
-- KPI/SLO docs now list metrics and alert rules that exist in code.
-- 2026 NSE holiday scheduler file was corrected and dated.
-
-## Remaining Documentation And Production Risks
-
-- Production code gap: no HTTP step-up issuer route for LIVE break-glass flatten.
-- Production code gap: kill-switch rearm lacks step-up enforcement.
-- Cloud Run remains unapproved until a manifest, secret binding, runtime evidence, and recovery evidence exist.
-- Full test suite currently fails in unrelated runtime/test areas; targeted documentation/config tests pass.
-- Raw recursive doc enumeration is noisy because `.venv`, `.backtest_venv`, and `replay_output` live inside the workspace.
-- `docs/Flowchart.md` still contains Firestore compatibility nodes; the status banner says they are not current go-live guidance.
-
-## Validation Commands Executed
-
-| Command | Result |
-|---|---|
-| `git status --short` | Completed; shows expected doc/script changes plus pre-existing git ignore permission warnings |
-| `Get-ChildItem -Recurse -File -Include *.md,*.env,*.yml,*.yaml` | Non-clean raw listing due workspace venv/replay-output noise; scoped `rg --files` listing completed |
-| Required grep equivalent for runtime/deployment terms with `rg` | Completed; remaining hits are intentional current/roadmap warnings |
-| Required grep equivalent for secret terms with `rg` | Completed; remaining hits are placeholders, secret-source rules, or code/config secret mounts |
-| `pytest -q tests/config/test_profile_linter.py tests/security/test_sprint1_security.py tests/test_release_manifest_lint.py tests/test_live_single_stack_profile.py` | PASS: 49 passed, 2 warnings |
-| `pytest -q` | FAIL: 1754 passed, 20 failed, 2 skipped, 856 warnings; failures are in runtime readiness/startup validator and persistence tests, not markdown/link checks |
-| `python -m json.tool release-manifest.json` | PASS |
-| Markdown relative link check | PASS: all relative links resolve |
-| `docker compose -f docker-compose.live.single.yml config --quiet` with dummy non-secret env | PASS; Docker emitted `config.json: Access is denied` warning |
-| `docker compose -f docker-compose.oci-live.yml -f phoenix-override.yml.example config --quiet` with dummy non-secret env | PASS; Docker emitted `config.json: Access is denied` warning |
-| `git diff --stat`, `git diff --name-status` | Completed |
-
-## Final Operator Reading Order
-
-1. `ARCHITECTURE.md`
-2. `README.md`
-3. `ABOUTME.md`
-4. `docs/runbooks/docker_desktop_live_deployment.md` or `docs/runbooks/oci_live_deployment.md`
-5. `docs/runbooks/release_evidence.md`
-6. `docs/runbooks/update_broker_credentials.md`
-7. `docs/runbooks/capital_limits_configuration.md`
-8. `docs/runbooks/blue_green_cutover.md`
-9. `docs/runbooks/restore_drill.md`
-10. `docs/kpis_slos.md`
-11. Emergency only: `docs/runbooks/kill_switch.md`, `docs/runbooks/resolve_orphan_review.md`, `docs/runbooks/break_glass_flatten.md`
-12. Reference only: `docs/runbooks/cloud_run_live_deployment.md`, `docs/parameters.md`, `docs/Flowchart.md`
-
-## Git Diff Summary
-
-`git diff --stat` after the cleanup reported 44 tracked changed paths, 714 insertions, and 1514 deletions, plus this new untracked audit file. The largest reductions came from replacing the stale OCI runbook and deleting obsolete env/script paths.
+Validation commands and results are recorded in the final assistant report for
+this pass. Re-run after any further documentation edit.

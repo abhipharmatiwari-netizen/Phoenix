@@ -1,5 +1,9 @@
 # Dashboard Kill Switch — Operator Guide
 
+> **Current OCI VM note:** verify `phoenix-oci-backend` `/readyz` and
+> `/health/summary` before relying on dashboard state. The dashboard is derived
+> state; Postgres and backend health are authority.
+
 **Issue:** #238 (admin dashboard kill-switch toggle on the Safety page).
 **Related:** [`kill_switch.md`](kill_switch.md) (HTTP API reference),
 [`break_glass_flatten.md`](break_glass_flatten.md) (post-trip flatten).

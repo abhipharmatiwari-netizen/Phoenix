@@ -1,5 +1,10 @@
 # Restore Drill Runbook
 
+> **Current OCI VM note:** verified production Postgres is the
+> `phoenix-oci-postgres` container with data mounted from `/opt/phoenix/pgdata`.
+> External/cloud database examples are non-current unless a fresh VM audit proves
+> the deployment changed.
+
 **Architecture reference:** restore, recovery, and failure-drill policy in `ARCHITECTURE.md`
 
 ## Purpose

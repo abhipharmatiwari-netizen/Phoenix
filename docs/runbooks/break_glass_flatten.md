@@ -1,5 +1,10 @@
 # Break-Glass Flatten Runbook
 
+> **Current OCI VM note:** this action can place live risk-reducing orders.
+> Verify the current OCI VM health and authority path in
+> [OCI VM Runtime Evidence](../OCI_VM_RUNTIME.md) before use. Do not use
+> Docker Desktop or Cloud Run docs as production prerequisites.
+
 **Architecture reference:** §1 (Operating Modes), §3.4 (Ownership States), §15 (API control rules)
 
 Use this runbook when a live position must be forcibly exited through an audited operator action, bypassing normal strategy-driven exit logic. This is an emergency path. Use it only when automated exits are unavailable or blocked.
@@ -197,6 +202,6 @@ For any real break-glass event, record:
 
 ## Related
 
-- [Docker Desktop LIVE Deployment](docker_desktop_live_deployment.md)
+- [OCI LIVE Deployment](oci_live_deployment.md)
 - [Orphan Review](resolve_orphan_review.md)
 - `ARCHITECTURE.md` §1, §3.4, §10

@@ -1,22 +1,23 @@
-# Oracle Cloud Infrastructure (OCI) LIVE manifest
+# Oracle Cloud Infrastructure (OCI) base manifest
 #
-# Differences from docker-compose.live.single.yml:
-#   - Images pulled from OCI Container Registry (OCIR) â€” no local build
-#   - No local `db` or `db-preflight` postgres service â€” uses OCI Database for PostgreSQL
-#   - CONTROL_PLANE_PG_HOST points to OCI DB private endpoint
-#   - REMOTE_DEPLOYMENT=true triggers hard-abort on LIVE_PG_SSL_SKIP_CHECK
-#   - Secrets sourced from /run/secrets/ (written by scripts/fetch-secrets.sh via OCI Vault)
-#   - Volume mounts use OCI File Storage NFS paths
-#   - nginx binds 0.0.0.0:80 (OCI Load Balancer forwards to port 80)
-#   - DISABLE_CONTROL_TOWER_ROUTES=true (never expose control tower on cloud)
-#   - LIVE_PG_SSL_SKIP_CHECK always false (OCI DB has SSL)
-#   - POSTGRES_FORCE_IPV4 disabled (OCI private DNS resolves correctly)
+# Current source of truth is the running OCI VM, not this file alone.
+# Verified on 2026-05-17, the VM runs this base manifest together with
+# /opt/phoenix/phoenix-override.yml. The override changes the effective runtime
+# to local images, VM-local Postgres, source-file bind mounts, and a prerendered
+# nginx template. See docs/OCI_VM_RUNTIME.md and
+# docs/runbooks/oci_live_deployment.md before operating production.
 #
-# Usage:
-#   scripts/fetch-secrets.sh          # pull secrets from OCI Vault
-#   docker compose -f docker-compose.oci-live.yml run --rm migrator
-#   docker compose -f docker-compose.oci-live.yml run --rm db-preflight
-#   docker compose -f docker-compose.oci-live.yml up -d
+# This base file still contains the OCIR/external-Postgres target shape used by
+# migrator/db-preflight interpolation. Do not document that target shape as
+# current unless a fresh VM audit proves the running containers match it.
+#
+# Current VM usage:
+#   cd /opt/phoenix/app
+#   CONTROL_PLANE_PG_PASSWORD_HOST="$(sudo cat /run/secrets/control_plane_pg_password)" \
+#     docker compose -f docker-compose.oci-live.yml \
+#       -f /opt/phoenix/phoenix-override.yml \
+#       --env-file /opt/phoenix/phoenix-deploy.env \
+#       up -d --no-deps backend nginx
 #
 # Required environment variables (set in shell before running):
 #   OCIR_NAMESPACE          OCI tenancy namespace (e.g. fra12abc34xyz)
@@ -509,11 +510,11 @@ services:
       - |
           FAILS=0
           DOWN=0
-          echo "[watchdog] started - observe-only polling http://backend:8080/health every 10s"
+          echo "[watchdog] started - base-manifest polling http://backend:8080/health every 10s"
           while true; do
             if wget -q -O /dev/null --timeout=5 http://backend:8080/health 2>/dev/null; then
               if [ "$$DOWN" = "1" ]; then
-                echo "[watchdog] backend recovered - nginx action skipped (observe-only)"
+                echo "[watchdog] backend recovered - no nginx action in base manifest"
               fi
               FAILS=0
               DOWN=0
@@ -522,7 +523,7 @@ services:
                 FAILS=$$((FAILS+1))
                 echo "[watchdog] backend fail $$FAILS/3"
                 if [ "$$FAILS" -ge 3 ]; then
-                  echo "[watchdog] backend down - relying on LB drain (observe-only; no container action)"
+                  echo "[watchdog] backend down - no nginx action in base manifest"
                   DOWN=1
                   FAILS=0
                 fi

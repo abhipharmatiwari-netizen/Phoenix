@@ -6,7 +6,10 @@ This document describes a possible Cloud Run target profile for Phoenix v9. It e
 
 Do **not** treat this document as the current go-live procedure.
 
-The current repo-tracked implementation paths are Docker/Desktop (`docker-compose.live.single.yml`) and OCI Compose (`docker-compose.oci-live.yml`). Cloud Run is not approved until `ARCHITECTURE.md` is revised and release evidence proves the same runtime contract in Cloud Run.
+The current production implementation is the OCI VM documented in
+[`docs/OCI_VM_RUNTIME.md`](../OCI_VM_RUNTIME.md). Cloud Run is not approved until
+fresh runtime evidence proves a Cloud Run deployment and `ARCHITECTURE.md` is
+updated.
 
 ---
 
@@ -70,7 +73,8 @@ A future approved Cloud Run path should still preserve the current automated LIV
 
 ## Why the stream-enabled requirement matters in Cloud Run
 
-The current recommended automated LIVE runtime depends on a live mark-data and strategy plane. For Cloud Run approval, Phoenix must prove one of the following:
+The production safety contract depends on a live mark-data and strategy plane.
+For Cloud Run approval, Phoenix must prove one of the following:
 
 - the stream worker can hold the required broker session, websocket lifecycle, tick handling, bar construction, and strategy runtime within the Cloud Run deployment model, or
 - an explicitly approved replacement plane provides equivalent live marks, bar construction, indicator state, and strategy inputs
@@ -104,4 +108,5 @@ A future Cloud Run approval would need, at minimum:
 - cutover and rollback playbook evidence
 - security review showing secret handling matches the architecture rules
 
-Until that evidence exists, keep using the bundled Docker/Desktop implementation runbook for practical deployment guidance.
+Until that evidence exists, use the current OCI VM runbook for production
+deployment guidance.

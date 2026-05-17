@@ -5,14 +5,14 @@
 > guidance or as proof that Cloud Run, Firestore, or BigQuery are authoritative
 > runtime stores.
 >
-> **Backend note:** The bundled Docker/Desktop and OCI Compose LIVE paths use
-> Postgres for all durable backends (leader lease, sweep state, control plane,
-> PnL). Firestore references in this diagram are compatibility/future-path
+> **Backend note:** The current OCI VM uses Postgres for all durable backends
+> (leader lease, sweep state, control plane, PnL). Docker/Desktop is non-current
+> production material. Firestore references in this diagram are compatibility/future-path
 > references only, not current go-live guidance.
 >
 > **BigQuery note:** The BigQuery async writer (`BQ_START`, `bq-async-writer` thread, and all
-> `BQ`/`BigQuery` nodes in this diagram) is attempted in **all** deployment modes, including
-> Docker/Desktop LIVE. It is non-authoritative and non-critical: if GCP credentials are absent or
+> `BQ`/`BigQuery` nodes in this diagram) can be attempted by runtime code but is
+> not current operational authority on the OCI VM. It is non-authoritative and non-critical: if GCP credentials are absent or
 > the BQ client cannot initialise, the writer logs a WARNING and the runtime continues normally.
 > BigQuery is a supplementary analytics sink, not an authoritative operational store.
 
