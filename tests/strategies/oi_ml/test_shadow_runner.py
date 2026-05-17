@@ -4,6 +4,8 @@ from datetime import date, datetime
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from app.strategies.oi_ml import shadow_runner
 from app.strategies.oi_ml.decision import OiMlEntryAction
 from app.strategies.oi_ml.shadow_runner import (
@@ -31,6 +33,85 @@ def test_load_shadow_runner_config_defaults_to_fail_closed_missing_scorer():
     assert cfg.scorer_mode == "missing"
     assert cfg.tenant_id == "tenant-a"
     assert cfg.broker_account_id == "acct-a"
+
+
+def test_load_shadow_runner_config_reads_lightgbm_artifacts():
+    cfg = load_shadow_runner_config(
+        env={
+            "OI_ML_SHADOW_ENABLED": "true",
+            "OI_ML_SHADOW_SCORER": "lightgbm",
+            "OI_ML_SHADOW_LIGHTGBM_CLASSIFIER_PATH": "/models/classifier.txt",
+            "OI_ML_SHADOW_LIGHTGBM_FEATURE_NAMES_PATH": "/models/features.json",
+            "OI_ML_SHADOW_LIGHTGBM_MAE_MODEL_PATH": "/models/mae.txt",
+            "OI_ML_SHADOW_LIGHTGBM_DEFAULT_MAE_PREMIUM": "27.5",
+        }
+    )
+
+    assert cfg.scorer_mode == "lightgbm"
+    assert cfg.lightgbm_classifier_path == "/models/classifier.txt"
+    assert cfg.lightgbm_feature_names_path == "/models/features.json"
+    assert cfg.lightgbm_mae_model_path == "/models/mae.txt"
+    assert cfg.lightgbm_default_mae_premium == 27.5
+
+
+def test_load_shadow_runner_config_accepts_shared_model_aliases():
+    cfg = load_shadow_runner_config(
+        env={
+            "OI_ML_SHADOW_ENABLED": "true",
+            "OI_ML_SHADOW_SCORER": "lgbm",
+            "OI_ML_CLASSIFIER_MODEL_PATH": "/shared/classifier.txt",
+            "OI_ML_FEATURE_NAMES_PATH": "/shared/features.json",
+            "OI_ML_MAE_MODEL_PATH": "/shared/mae.txt",
+            "OI_ML_DEFAULT_MAE_PREMIUM": "31",
+        }
+    )
+
+    assert cfg.scorer_mode == "lgbm"
+    assert cfg.lightgbm_classifier_path == "/shared/classifier.txt"
+    assert cfg.lightgbm_feature_names_path == "/shared/features.json"
+    assert cfg.lightgbm_mae_model_path == "/shared/mae.txt"
+    assert cfg.lightgbm_default_mae_premium == 31.0
+
+
+def test_build_lightgbm_scorer_requires_artifact_paths():
+    cfg = OiMlShadowRunnerConfig(
+        enabled=True,
+        scorer_mode="lightgbm",
+    )
+
+    with pytest.raises(RuntimeError, match="OI_ML_SHADOW_LIGHTGBM_CLASSIFIER_PATH"):
+        shadow_runner._build_scorer(cfg)
+
+
+def test_build_lightgbm_scorer_loads_artifacts(monkeypatch):
+    calls = {}
+
+    class FakeLightGbmScorer:
+        @classmethod
+        def from_artifacts(cls, **kwargs):
+            calls.update(kwargs)
+            return "fake-scorer"
+
+    monkeypatch.setattr(shadow_runner, "LightGbmOiMlScorer", FakeLightGbmScorer)
+
+    cfg = OiMlShadowRunnerConfig(
+        enabled=True,
+        scorer_mode="lightgbm",
+        lightgbm_classifier_path="/models/classifier.txt",
+        lightgbm_feature_names_path="/models/features.json",
+        lightgbm_mae_model_path="/models/mae.txt",
+        lightgbm_default_mae_premium=45.0,
+    )
+
+    scorer = shadow_runner._build_scorer(cfg)
+
+    assert scorer == "fake-scorer"
+    assert calls == {
+        "classifier_path": "/models/classifier.txt",
+        "feature_names_path": "/models/features.json",
+        "mae_model_path": "/models/mae.txt",
+        "default_mae_premium": 45.0,
+    }
 
 
 def test_next_weekly_expiry_returns_upcoming_thursday():

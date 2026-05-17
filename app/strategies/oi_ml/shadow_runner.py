@@ -20,7 +20,12 @@ from app.data.postgres import connect_with_retry, get_control_plane_dsn
 from app.risk.option_sell_guard import OptionSellGuardConfig
 from app.strategies.oi_ml.decision import OiMlCeDecisionEngine, OiMlDecisionConfig, OiMlEntryAction
 from app.strategies.oi_ml.order_intents import OiMlOrderIntentConfig, build_order_intent_from_candidate
-from app.strategies.oi_ml.scoring import ConstantOiMlScorer, MissingOiMlScorer, OiMlScorer
+from app.strategies.oi_ml.scoring import (
+    ConstantOiMlScorer,
+    LightGbmOiMlScorer,
+    MissingOiMlScorer,
+    OiMlScorer,
+)
 from app.strategies.oi_ml.shadow_lifecycle import PostgresOiMlShadowLifecycleStore
 
 
@@ -43,6 +48,10 @@ class OiMlShadowRunnerConfig:
     scorer_mode: str = "missing"
     constant_probability: float = 0.0
     constant_mae_premium: float = 0.0
+    lightgbm_classifier_path: str | None = None
+    lightgbm_feature_names_path: str | None = None
+    lightgbm_mae_model_path: str | None = None
+    lightgbm_default_mae_premium: float = 0.0
     lots: int = 1
     lot_size: int = 65
     spread_width_points: int = 200
@@ -81,6 +90,23 @@ def load_shadow_runner_config(
         scorer_mode=str(source.get("OI_ML_SHADOW_SCORER") or "missing").strip().lower(),
         constant_probability=_float(source.get("OI_ML_SHADOW_CONSTANT_PROBABILITY"), 0.0),
         constant_mae_premium=_float(source.get("OI_ML_SHADOW_CONSTANT_MAE_PREMIUM"), 0.0),
+        lightgbm_classifier_path=_optional_str(
+            source.get("OI_ML_SHADOW_LIGHTGBM_CLASSIFIER_PATH")
+            or source.get("OI_ML_CLASSIFIER_MODEL_PATH")
+        ),
+        lightgbm_feature_names_path=_optional_str(
+            source.get("OI_ML_SHADOW_LIGHTGBM_FEATURE_NAMES_PATH")
+            or source.get("OI_ML_FEATURE_NAMES_PATH")
+        ),
+        lightgbm_mae_model_path=_optional_str(
+            source.get("OI_ML_SHADOW_LIGHTGBM_MAE_MODEL_PATH")
+            or source.get("OI_ML_MAE_MODEL_PATH")
+        ),
+        lightgbm_default_mae_premium=_float(
+            source.get("OI_ML_SHADOW_LIGHTGBM_DEFAULT_MAE_PREMIUM")
+            or source.get("OI_ML_DEFAULT_MAE_PREMIUM"),
+            0.0,
+        ),
         lots=_int(source.get("OI_ML_SHADOW_LOTS"), 1, minimum=1),
         lot_size=_int(source.get("OI_ML_SHADOW_LOT_SIZE"), 65, minimum=1),
         spread_width_points=_int(source.get("OI_ML_SHADOW_SPREAD_WIDTH_POINTS"), 200, minimum=1),
@@ -232,6 +258,23 @@ def _build_scorer(config: OiMlShadowRunnerConfig) -> OiMlScorer:
         return ConstantOiMlScorer(
             probability=config.constant_probability,
             predicted_mae_premium=config.constant_mae_premium,
+        )
+    if config.scorer_mode in {"lightgbm", "lgbm"}:
+        missing = []
+        if not config.lightgbm_classifier_path:
+            missing.append("OI_ML_SHADOW_LIGHTGBM_CLASSIFIER_PATH")
+        if not config.lightgbm_feature_names_path:
+            missing.append("OI_ML_SHADOW_LIGHTGBM_FEATURE_NAMES_PATH")
+        if missing:
+            raise RuntimeError(
+                "OI/ML LightGBM scorer missing required artifact env vars: "
+                + ", ".join(missing)
+            )
+        return LightGbmOiMlScorer.from_artifacts(
+            classifier_path=config.lightgbm_classifier_path,
+            feature_names_path=config.lightgbm_feature_names_path,
+            mae_model_path=config.lightgbm_mae_model_path,
+            default_mae_premium=config.lightgbm_default_mae_premium,
         )
     return MissingOiMlScorer()
 

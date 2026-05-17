@@ -79,12 +79,19 @@ services:
       OI_ML_SHADOW_CAPTURE_SNAPSHOT: "${OI_ML_SHADOW_CAPTURE_SNAPSHOT:-true}"
       # Default scorer is fail-closed until trained artifacts are promoted.
       OI_ML_SHADOW_SCORER: "${OI_ML_SHADOW_SCORER:-missing}"
+      OI_ML_SHADOW_CONSTANT_PROBABILITY: "${OI_ML_SHADOW_CONSTANT_PROBABILITY:-0}"
+      OI_ML_SHADOW_CONSTANT_MAE_PREMIUM: "${OI_ML_SHADOW_CONSTANT_MAE_PREMIUM:-0}"
+      OI_ML_SHADOW_LIGHTGBM_CLASSIFIER_PATH: "${OI_ML_SHADOW_LIGHTGBM_CLASSIFIER_PATH:-/app/models/oi_ml_ce_classifier.txt}"
+      OI_ML_SHADOW_LIGHTGBM_FEATURE_NAMES_PATH: "${OI_ML_SHADOW_LIGHTGBM_FEATURE_NAMES_PATH:-/app/models/oi_ml_feature_names.json}"
+      OI_ML_SHADOW_LIGHTGBM_MAE_MODEL_PATH: "${OI_ML_SHADOW_LIGHTGBM_MAE_MODEL_PATH:-}"
+      OI_ML_SHADOW_LIGHTGBM_DEFAULT_MAE_PREMIUM: "${OI_ML_SHADOW_LIGHTGBM_DEFAULT_MAE_PREMIUM:-0}"
       OI_ML_SHADOW_ALLOW_NAKED: "false"
       OI_SNAPSHOTTER_ENABLED: "true"
     volumes:
       - /run/secrets/control_plane_pg_password:/run/secrets/control_plane_pg_password:ro
       - /opt/phoenix/logs/oi-ml-shadow:/app/logs
       - /opt/phoenix/certs:/app/certs:ro
+      - /opt/phoenix/oi-ml-models:/app/models:ro
     networks:
       - phoenix_live
     command:
