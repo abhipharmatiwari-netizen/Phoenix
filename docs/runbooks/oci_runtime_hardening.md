@@ -26,6 +26,10 @@ approval to restart containers.
   for VM-local Postgres validation; external/cloud Postgres should use
   `require`.
 - The operator has reviewed `docker compose config` output with secrets redacted.
+- The current `phoenix-oci-postgres` environment has been checked. On the
+  verified VM, `PGDATA=/var/lib/postgresql/data` and `PG_VERSION` exists
+  directly in that directory. Do not start a candidate container with a
+  different `PGDATA` path.
 
 ## Phase 1 - Read-Only Evidence
 
@@ -71,17 +75,67 @@ database cannot start beside production.
 
 Maintenance-window migration outline:
 
-1. Capture release evidence and DB backup.
-2. Stop live trading services.
-3. Stop the unmanaged Postgres container only after confirming the backup.
-4. Start `postgres` through the `vm-local-postgres` profile.
-5. Verify `docker ps` reports `phoenix-oci-postgres` as `healthy`.
-6. Start backend and nginx through the OCI runbook.
-7. Re-run `/readyz`, `/health/summary`, and `/admin/release-evidence`.
+1. Capture release evidence.
+2. Capture and verify a database backup:
+   ```bash
+   sudo install -d -m 700 /opt/phoenix/backups
+   BACKUP="/opt/phoenix/backups/phoenix_$(date -u +%Y%m%dT%H%M%SZ).dump"
+   sudo sh -c "docker exec phoenix-oci-postgres pg_dump -U phoenix_app -d phoenix -Fc > '$BACKUP'"
+   sudo sh -c "docker exec -i phoenix-oci-postgres pg_restore -l < '$BACKUP' >/dev/null"
+   ```
+3. Stop live trading services, including the watchdog, through the current
+   Compose files:
+   ```bash
+   CONTROL_PLANE_PG_PASSWORD_HOST="$(sudo cat /run/secrets/control_plane_pg_password)" \
+   docker compose \
+     -f docker-compose.oci-live.yml \
+     -f /opt/phoenix/phoenix-override.yml \
+     --env-file /opt/phoenix/phoenix-deploy.env \
+     stop backend nginx backend-watchdog
+   ```
+4. Stop and rename the unmanaged Postgres container. Renaming preserves the old
+   container metadata for rollback and frees the `phoenix-oci-postgres` name for
+   Compose:
+   ```bash
+   OLD_PG="phoenix-oci-postgres-precompose-$(date -u +%Y%m%dT%H%M%SZ)"
+   docker stop phoenix-oci-postgres
+   docker rename phoenix-oci-postgres "$OLD_PG"
+   echo "$OLD_PG" | sudo tee /opt/phoenix/postgres-precompose-container.txt
+   ```
+5. Start `postgres` through the `vm-local-postgres` profile:
+   ```bash
+   CONTROL_PLANE_PG_PASSWORD_HOST="$(sudo cat /run/secrets/control_plane_pg_password)" \
+   docker compose \
+     --profile vm-local-postgres \
+     -f docker-compose.oci-live.yml \
+     -f /opt/phoenix/phoenix-override.yml \
+     --env-file /opt/phoenix/phoenix-deploy.env \
+     up -d postgres
+   ```
+6. Verify `docker ps` reports `phoenix-oci-postgres` as `healthy`, and verify
+   the existing data directory was used:
+   ```bash
+   docker inspect phoenix-oci-postgres --format '{{json .State.Health.Status}}'
+   docker exec phoenix-oci-postgres sh -lc 'printf "PGDATA=%s\n" "$PGDATA"; test -f "$PGDATA/PG_VERSION"'
+   docker exec phoenix-oci-postgres psql -U phoenix_app -d phoenix -c "\dt"
+   ```
+7. Start backend and nginx through the OCI runbook.
+8. Re-run `/readyz`, `/health/summary`, and `/admin/release-evidence`.
 
-Rollback: stop the Compose-managed `postgres` service and restart the previous
-unmanaged container using the same `/opt/phoenix/pgdata` mount. Do not restore a
-backup unless the data directory was modified or corrupted.
+Rollback: stop and rename the Compose-managed `postgres` container, rename the
+previous unmanaged container back to `phoenix-oci-postgres`, then start it:
+
+```bash
+OLD_PG="$(sudo cat /opt/phoenix/postgres-precompose-container.txt)"
+FAILED_PG="phoenix-oci-postgres-compose-failed-$(date -u +%Y%m%dT%H%M%SZ)"
+
+docker stop phoenix-oci-postgres || true
+docker rename phoenix-oci-postgres "$FAILED_PG" || true
+docker rename "$OLD_PG" phoenix-oci-postgres
+docker start phoenix-oci-postgres
+```
+
+Do not restore a backup unless the data directory was modified or corrupted.
 
 ## Phase 3 - Immutable Image Candidate
 

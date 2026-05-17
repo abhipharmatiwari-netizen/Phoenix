@@ -274,7 +274,7 @@ services:
       POSTGRES_DB: "${CONTROL_PLANE_PG_DB:-phoenix}"
       POSTGRES_USER: "${CONTROL_PLANE_PG_USER:-phoenix_app}"
       POSTGRES_PASSWORD_FILE: "/run/secrets/control_plane_pg_password"
-      PGDATA: "/var/lib/postgresql/data/pgdata"
+      PGDATA: "/var/lib/postgresql/data"
     secrets:
       - control_plane_pg_password
     volumes:
