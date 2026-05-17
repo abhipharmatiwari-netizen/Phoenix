@@ -23,7 +23,6 @@ services:
       PHX_MIGRATION_APP_NAME: "phoenix-oi-ml-shadow"
     volumes:
       - /opt/phoenix/oi-ml-shadow-src/migrations:/migrations:ro
-      - /opt/phoenix/oi-ml-shadow-src/scripts/run_migrations.sh:/scripts/run_migrations.sh:ro
       - /run/secrets/control_plane_pg_password:/run/secrets/control_plane_pg_password:ro
     networks:
       - phoenix_live
@@ -32,7 +31,8 @@ services:
       - -ec
       - |
           export PGPASSWORD="$$(cat /run/secrets/control_plane_pg_password)"
-          sed 's/\r$$//' /scripts/run_migrations.sh | sh -s -- apply
+          psql -v ON_ERROR_STOP=1 -f /migrations/021_option_chain_1m.sql
+          psql -v ON_ERROR_STOP=1 -f /migrations/022_oi_ml_shadow_order_intents.sql
 
   oi-ml-shadow:
     image: phoenix-oi-ml-shadow:${IMAGE_TAG:-local}
