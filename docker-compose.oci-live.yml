@@ -251,7 +251,7 @@ x-db-client-env: &db-client-env
   PGDATABASE: "${CONTROL_PLANE_PG_DB:?Set CONTROL_PLANE_PG_DB}"
   PGUSER: "${CONTROL_PLANE_PG_USER:?Set CONTROL_PLANE_PG_USER}"
   PGPASSWORD: "${CONTROL_PLANE_PG_PASSWORD_HOST:?Set CONTROL_PLANE_PG_PASSWORD_HOST}"
-  PGSSLMODE: "require"
+  PGSSLMODE: "${CONTROL_PLANE_PG_SSLMODE_HOST:-require}"
   PGCONNECT_TIMEOUT: "10"
   PHX_MIGRATION_APP_NAME: "phoenix-oci-live"
 
@@ -260,6 +260,37 @@ x-migration-volumes: &migration-volumes
   - ${PHOENIX_APP_PATH:-./scripts}/run_migrations.sh:/scripts/run_migrations.sh:ro
 
 services:
+  # Opt-in target for bringing the VM-local Postgres container under the
+  # phoenix-oci-live Compose project. The verified 2026-05-17 VM still runs
+  # phoenix-oci-postgres outside the labelled Compose project; do not enable
+  # this profile on production until the runtime-hardening runbook has been
+  # followed in a maintenance window with a fresh backup.
+  postgres:
+    image: postgres:16-alpine
+    container_name: phoenix-oci-postgres
+    profiles: ["vm-local-postgres"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${CONTROL_PLANE_PG_DB:-phoenix}"
+      POSTGRES_USER: "${CONTROL_PLANE_PG_USER:-phoenix_app}"
+      POSTGRES_PASSWORD_FILE: "/run/secrets/control_plane_pg_password"
+      PGDATA: "/var/lib/postgresql/data/pgdata"
+    secrets:
+      - control_plane_pg_password
+    volumes:
+      - "${PHOENIX_PGDATA_HOST_PATH:-/opt/phoenix/pgdata}:/var/lib/postgresql/data"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
   migrator:
     image: postgres:16-alpine
     container_name: phoenix-oci-migrator

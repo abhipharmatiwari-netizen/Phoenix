@@ -1,0 +1,16 @@
+exclude = [
+  '^http://localhost',
+  '^https://localhost',
+  '^https://127\\.0\\.0\\.1',
+  '^http://127\\.0\\.0\\.1',
+  '^app://',
+  '^file://'
+]
+
+exclude_path = [
+  'docs/release-evidence',
+  'docs/archive'
+]
+
+max_retries = 2
+timeout = 20

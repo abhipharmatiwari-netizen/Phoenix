@@ -20,6 +20,9 @@ HEALTH_INTERVAL=10
 
 echo "=== Current IMAGE_TAG ==="
 grep "IMAGE_TAG" "$ENV_FILE"
+IMAGE_TAG=$(sed -n 's/^[[:space:]]*IMAGE_TAG[[:space:]]*=[[:space:]]*//p' "$ENV_FILE" \
+  | tail -n 1 \
+  | sed "s/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//; s/^['\"]//; s/['\"]$//")
 
 echo
 printf "Deploy this image? [y/N] "
@@ -30,13 +33,22 @@ if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
 fi
 
 echo
-echo "=== Pull new image pair ==="
-CONTROL_PLANE_PG_PASSWORD_HOST=dummy \
-  docker compose \
-    -f "$COMPOSE_FILE" \
-    -f "$OVERRIDE_FILE" \
-    --env-file "$ENV_FILE" \
-    pull backend nginx
+case "$IMAGE_TAG" in
+  local-*)
+    echo "=== Local image tag detected; skipping docker compose pull ==="
+    docker image inspect "phoenix-local-backend:${IMAGE_TAG}" >/dev/null
+    docker image inspect "phoenix-local-nginx:${IMAGE_TAG}" >/dev/null
+    ;;
+  *)
+    echo "=== Pull new image pair ==="
+    CONTROL_PLANE_PG_PASSWORD_HOST=dummy \
+      docker compose \
+        -f "$COMPOSE_FILE" \
+        -f "$OVERRIDE_FILE" \
+        --env-file "$ENV_FILE" \
+        pull backend nginx
+    ;;
+esac
 
 echo
 echo "=== Restart backend ==="
@@ -51,7 +63,8 @@ echo
 echo "=== Wait for /readyz (up to ${HEALTH_TIMEOUT}s) ==="
 elapsed=0
 while [ "$elapsed" -lt "$HEALTH_TIMEOUT" ]; do
-  STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/readyz 2>/dev/null || echo "000")
+  STATUS=$(docker exec phoenix-oci-backend \
+    curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/readyz 2>/dev/null || echo "000")
   if [ "$STATUS" = "200" ]; then
     echo "  /readyz OK after ${elapsed}s"
     break
@@ -63,7 +76,7 @@ done
 
 if [ "$STATUS" != "200" ]; then
   echo "ERROR: /readyz did not return 200 within ${HEALTH_TIMEOUT}s (last: $STATUS)."
-  echo "Check logs: docker compose -f $COMPOSE_FILE logs --tail 100 backend"
+  echo "Check logs: docker logs --tail 100 phoenix-oci-backend"
   exit 1
 fi
 

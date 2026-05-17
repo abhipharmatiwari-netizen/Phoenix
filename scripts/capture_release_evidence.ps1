@@ -22,6 +22,7 @@ param(
     [string]$AdminKey    = $env:ADMIN_API_KEY,
     [string]$BaseUrl     = "http://localhost",
     [string]$OutDir      = "$PSScriptRoot\..\docs\release-evidence",
+    [string]$BackendContainer = "phoenix-oci-backend",
     [int]   $TimeoutSec  = 30
 )
 
@@ -46,6 +47,49 @@ function Invoke-PhoenixApi {
         Write-Error "API call to $Path failed: $_"
         throw
     }
+}
+
+function Redact-Evidence {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    if ($Value -is [System.Collections.IDictionary]) {
+        $copy = [ordered]@{}
+        foreach ($key in $Value.Keys) {
+            $name = [string]$key
+            if ($name -match '(?i)(secret|password|token|api[_-]?key|admin[_-]?key|pin|totp|client[_-]?code|private[_-]?ip|public[_-]?ip|ocid)') {
+                $copy[$name] = "<REDACTED>"
+            } else {
+                $copy[$name] = Redact-Evidence $Value[$key]
+            }
+        }
+        return $copy
+    }
+
+    if ($Value -is [pscustomobject]) {
+        $copy = [ordered]@{}
+        foreach ($property in $Value.PSObject.Properties) {
+            if ($property.Name -match '(?i)(secret|password|token|api[_-]?key|admin[_-]?key|pin|totp|client[_-]?code|private[_-]?ip|public[_-]?ip|ocid)') {
+                $copy[$property.Name] = "<REDACTED>"
+            } else {
+                $copy[$property.Name] = Redact-Evidence $property.Value
+            }
+        }
+        return [pscustomobject]$copy
+    }
+
+    if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
+        $items = @()
+        foreach ($item in $Value) {
+            $items += Redact-Evidence $item
+        }
+        return $items
+    }
+
+    return $Value
 }
 
 function Assert-Field {
@@ -127,13 +171,15 @@ $outFile = Join-Path $OutDir "$ts-evidence.json"
 $bundle = [PSCustomObject]@{
     captured_at    = (Get-Date -Format "o")
     commit_sha     = (git -C "$PSScriptRoot\.." rev-parse HEAD 2>$null)
-    image_id       = (docker inspect phoenix-v9-backend --format "{{.Image}}" 2>$null)
+    backend_container = $BackendContainer
+    image_id       = (docker inspect $BackendContainer --format "{{.Image}}" 2>$null)
     all_checks_pass = $allPass
     readyz          = $readyz
     release_evidence = $evidence
 }
 
-$bundle | ConvertTo-Json -Depth 20 | Set-Content -Path $outFile -Encoding UTF8
+$redactedBundle = Redact-Evidence $bundle
+$redactedBundle | ConvertTo-Json -Depth 20 | Set-Content -Path $outFile -Encoding UTF8
 Write-Host ""
 Write-Host "Bundle written to: $outFile" -ForegroundColor Cyan
 

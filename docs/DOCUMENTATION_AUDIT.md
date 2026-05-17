@@ -56,6 +56,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | `docs/runbooks/dashboard-kill-switch.md` | runbook | dashboard kill switch | PARTIALLY_STALE | UPDATE |
 | `docs/runbooks/kill_switch.md` | runbook | kill switch | UNKNOWN_NEEDS_EVIDENCE | KEEP |
 | `docs/runbooks/release_evidence.md` | runbook | release evidence | PARTIALLY_STALE | KEEP |
+| `docs/runbooks/oci_runtime_hardening.md` | runbook | runtime drift hardening | MATCHES_OCI_VM | KEEP |
 | `docs/runbooks/resolve_orphan_review.md` | runbook | orphan review | UNKNOWN_NEEDS_EVIDENCE | KEEP |
 | `docs/runbooks/ema20_tp_pct_tuning.md` | runbook | tuning diagnostics | ROADMAP_ONLY | KEEP |
 | `docs/STRATEGIES.md` | reference | strategy catalog | UNKNOWN_NEEDS_EVIDENCE | KEEP |
@@ -104,6 +105,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | `ABOUTME.md` | plain-language non-authoritative summary | current VM overview | authoritative claims | old ABOUTME, VM evidence |
 | `phoenix-override.yml.example` | current override template | current local images/local DB/bind mounts | target-only invariants as current | VM override |
 | `docs/runbooks/oci-live.env.example` | current env-name template | current variable names | secret values | VM env names |
+| `docs/runbooks/oci_runtime_hardening.md` | runtime hardening plan | opt-in Postgres healthcheck, immutable-image, bind-mount, watchdog remediation | instructions that change live VM outside maintenance | VM evidence, current drift |
 | non-OCI deployment docs | reference only | non-current banner | production instructions | old runbooks |
 
 ## Delete / Archive Decisions

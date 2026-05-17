@@ -80,6 +80,7 @@ debug.log
 
 # OCI log pulls (local diagnostic snapshots, not for commit)
 ops/oci_log_pulls/
+.artifacts/
 
 # Node.js dependency installs (rebuilt from package-lock.json by Dockerfile/CI;
 # also created locally when running tsc / npm install for typecheck).

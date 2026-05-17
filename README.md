@@ -43,10 +43,11 @@ See [OCI VM Runtime Evidence](docs/OCI_VM_RUNTIME.md) for the evidence table.
 3. [Architecture Contract](ARCHITECTURE.md)
 4. [Documentation Audit](docs/DOCUMENTATION_AUDIT.md)
 5. [Release Evidence](docs/runbooks/release_evidence.md)
-6. [Strategy Runtime Diagnostics](docs/runbooks/strategy_runtime_diagnostics.md)
-7. [Kill Switch](docs/runbooks/kill_switch.md)
-8. [Broker Credential Update](docs/runbooks/update_broker_credentials.md)
-9. [Restore Drill](docs/runbooks/restore_drill.md)
+6. [OCI Runtime Hardening](docs/runbooks/oci_runtime_hardening.md)
+7. [Strategy Runtime Diagnostics](docs/runbooks/strategy_runtime_diagnostics.md)
+8. [Kill Switch](docs/runbooks/kill_switch.md)
+9. [Broker Credential Update](docs/runbooks/update_broker_credentials.md)
+10. [Restore Drill](docs/runbooks/restore_drill.md)
 
 Docker Desktop, Cloud Run, GCP, Firestore, BigQuery, and local development
 material are not current production operating models unless a future VM audit

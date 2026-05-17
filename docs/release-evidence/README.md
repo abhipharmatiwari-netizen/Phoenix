@@ -29,8 +29,9 @@ Or use the bundled helper:
 .\scripts\capture_release_evidence.ps1
 ```
 
-The helper writes a timestamped JSON file to `docs/release-evidence/` and prints
-the pass/fail result against the criteria in `docs/runbooks/release_evidence.md`.
+The helper redacts secret-like fields, writes a timestamped JSON file to
+`docs/release-evidence/`, and prints the pass/fail result against the criteria
+in `docs/runbooks/release_evidence.md`.
 
 ## Restore drill records
 

@@ -28,6 +28,15 @@ backend.
 
 ## Collecting the bundle
 
+Preferred helper from the repository checkout:
+
+```powershell
+.\scripts\capture_release_evidence.ps1 -BaseUrl http://localhost
+```
+
+The helper redacts secret-like fields before writing a bundle under
+`docs/release-evidence/`.
+
 ```powershell
 curl.exe -s -H "X-Admin-Key: $env:ADMIN_API_KEY" `
     http://localhost/admin/release-evidence | python -m json.tool
@@ -112,6 +121,7 @@ OCI equivalent:
 ADMIN_KEY="$(sudo cat /run/secrets/admin_api_key)"
 curl -sk -H "X-Admin-Key: ${ADMIN_KEY}" \
   https://127.0.0.1:8443/admin/release-evidence
+unset ADMIN_KEY
 ```
 
 ---
