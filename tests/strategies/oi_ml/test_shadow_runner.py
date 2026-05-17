@@ -73,6 +73,84 @@ def test_load_shadow_runner_config_accepts_shared_model_aliases():
     assert cfg.lightgbm_default_mae_premium == 31.0
 
 
+def test_load_shadow_runner_config_marks_explicit_expiry():
+    cfg = load_shadow_runner_config(
+        env={
+            "OI_ML_SHADOW_ENABLED": "true",
+            "OI_ML_SHADOW_EXPIRY": "2026-05-19",
+        }
+    )
+
+    assert cfg.expiry == date(2026, 5, 19)
+    assert cfg.expiry_is_explicit is True
+
+
+def test_resolve_listed_expiry_uses_provider_calendar(monkeypatch):
+    monkeypatch.setattr(
+        shadow_runner,
+        "_load_scrip_master",
+        lambda: [
+            {
+                "symbol": "NIFTY19MAY2625200CE",
+                "expiry": "19MAY2026",
+                "strike": "2520000",
+                "exch_seg": "NFO",
+                "token": "111",
+            },
+            {
+                "symbol": "NIFTY26MAY2625200CE",
+                "expiry": "26MAY2026",
+                "strike": "2520000",
+                "exch_seg": "NFO",
+                "token": "222",
+            },
+        ],
+    )
+    cfg = OiMlShadowRunnerConfig(
+        enabled=True,
+        underlying="NIFTY",
+        expiry=date(2026, 5, 21),
+        expiry_is_explicit=False,
+        provider="angel",
+    )
+
+    resolved = shadow_runner._resolve_listed_expiry(
+        cfg,
+        today=date(2026, 5, 17),
+    )
+
+    assert resolved.expiry == date(2026, 5, 19)
+
+
+def test_resolve_listed_expiry_rejects_explicit_unlisted_expiry(monkeypatch):
+    monkeypatch.setattr(
+        shadow_runner,
+        "_load_scrip_master",
+        lambda: [
+            {
+                "symbol": "NIFTY19MAY2625200CE",
+                "expiry": "19MAY2026",
+                "strike": "2520000",
+                "exch_seg": "NFO",
+                "token": "111",
+            },
+        ],
+    )
+    cfg = OiMlShadowRunnerConfig(
+        enabled=True,
+        underlying="NIFTY",
+        expiry=date(2026, 5, 21),
+        expiry_is_explicit=True,
+        provider="angel",
+    )
+
+    with pytest.raises(RuntimeError, match="not listed"):
+        shadow_runner._resolve_listed_expiry(
+            cfg,
+            today=date(2026, 5, 17),
+        )
+
+
 def test_build_lightgbm_scorer_requires_artifact_paths():
     cfg = OiMlShadowRunnerConfig(
         enabled=True,

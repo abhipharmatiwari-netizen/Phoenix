@@ -47,6 +47,9 @@ class AngelOptionChainProvider:
             option_segments=self.option_segments,
         )
         quote_payloads = self._fetch_quote_payloads(rows)
+        context_payloads = self._fetch_context_payloads(underlying)
+        underlying_ltp = _ltp_from_payload(context_payloads.get("underlying"))
+        vix = _ltp_from_payload(context_payloads.get("vix"))
         snapshot = _aware_utc(snapshot_ts)
 
         quotes: list[OptionQuote] = []
@@ -86,7 +89,8 @@ class AngelOptionChainProvider:
                     bid=_best_bid(payload),
                     ask=_best_ask(payload),
                     ltp=_first(payload, "ltp", "lastTradedPrice", "last_price"),
-                    underlying_ltp=_first(payload, "underlyingValue", "underlying_ltp"),
+                    underlying_ltp=_first(payload, "underlyingValue", "underlying_ltp") or underlying_ltp,
+                    vix=_first(payload, "vix", "indiaVix", "india_vix") or vix,
                     raw_hash=_raw_hash(payload) if payload else None,
                     quality_flags=quality_flags,
                 )
@@ -96,10 +100,12 @@ class AngelOptionChainProvider:
     def _fetch_quote_payloads(
         self,
         rows: Sequence[Mapping[str, Any]],
+        *,
+        mode: str = "FULL",
     ) -> dict[tuple[str, str], Mapping[str, Any]]:
         fetched: dict[tuple[str, str], Mapping[str, Any]] = {}
         for exchange, tokens in _batched_exchange_tokens(rows, self.batch_size):
-            payloads = self._call_quote_fetcher({exchange: tokens})
+            payloads = self._call_quote_fetcher({exchange: tokens}, mode=mode)
             for payload in payloads:
                 token = str(
                     _first(payload, "symbolToken", "symboltoken", "token") or ""
@@ -111,15 +117,29 @@ class AngelOptionChainProvider:
                     fetched[(payload_exchange, token)] = payload
         return fetched
 
+    def _fetch_context_payloads(self, underlying: str) -> dict[str, Mapping[str, Any]]:
+        rows = _context_rows_for_underlying(self.scrip_master, underlying=underlying)
+        payloads = self._fetch_quote_payloads([row for _, row in rows], mode="LTP")
+        out: dict[str, Mapping[str, Any]] = {}
+        for label, row in rows:
+            token = str(_row_value(row, "token", "symboltoken", "symbolToken") or "").strip()
+            exchange = str(_row_value(row, "exch_seg", "exchange") or "NSE").strip().upper()
+            payload = payloads.get((exchange, token))
+            if payload is not None:
+                out[label] = payload
+        return out
+
     def _call_quote_fetcher(
         self,
         exchange_to_tokens: dict[str, list[str]],
+        *,
+        mode: str = "FULL",
     ) -> Sequence[Mapping[str, Any]]:
         method = getattr(self.quote_fetcher, "fetch_market_quotes", None)
         if callable(method):
-            return method(mode="FULL", exchange_to_tokens=exchange_to_tokens)
+            return method(mode=mode, exchange_to_tokens=exchange_to_tokens)
         if callable(self.quote_fetcher):
-            return self.quote_fetcher(mode="FULL", exchange_to_tokens=exchange_to_tokens)
+            return self.quote_fetcher(mode=mode, exchange_to_tokens=exchange_to_tokens)
         raise TypeError("quote_fetcher must expose fetch_market_quotes or be callable")
 
 
@@ -150,6 +170,93 @@ def _option_rows_for_expiry(
             continue
         rows.append(row)
     return sorted(rows, key=lambda r: (_strike_from_row(r), _option_type_from_symbol(str(_row_value(r, "symbol") or ""))))
+
+
+def listed_option_expiries(
+    scrip_master: Any,
+    *,
+    underlying: str,
+    option_segments: Sequence[str] = ("NFO", "NSEFO"),
+    on_or_after: date | None = None,
+) -> list[date]:
+    """Return provider-listed option expiries for an underlying."""
+    base = str(underlying or "").strip().upper()
+    segments = {str(seg).strip().upper() for seg in option_segments}
+    expiries: set[date] = set()
+    for row in _records(scrip_master):
+        symbol = str(_row_value(row, "symbol", "tradingsymbol", "trading_symbol") or "").strip()
+        if not symbol.upper().startswith(base):
+            continue
+        if not (symbol.upper().endswith("CE") or symbol.upper().endswith("PE")):
+            continue
+        exchange = str(_row_value(row, "exch_seg", "exchange") or "").strip().upper()
+        if exchange not in segments:
+            continue
+        parsed = _parse_date(_row_value(row, "expiry", "expiry_dt"))
+        if parsed is None:
+            continue
+        if on_or_after is not None and parsed < on_or_after:
+            continue
+        expiries.add(parsed)
+    return sorted(expiries)
+
+
+def next_listed_option_expiry(
+    scrip_master: Any,
+    *,
+    underlying: str,
+    option_segments: Sequence[str] = ("NFO", "NSEFO"),
+    on_or_after: date,
+) -> date | None:
+    """Return the first listed expiry on or after the supplied date."""
+    expiries = listed_option_expiries(
+        scrip_master,
+        underlying=underlying,
+        option_segments=option_segments,
+        on_or_after=on_or_after,
+    )
+    return expiries[0] if expiries else None
+
+
+def _context_rows_for_underlying(
+    scrip_master: Any,
+    *,
+    underlying: str,
+) -> list[tuple[str, Mapping[str, Any]]]:
+    base = str(underlying or "").strip().upper()
+    underlying_row: Mapping[str, Any] | None = None
+    vix_row: Mapping[str, Any] | None = None
+    for row in _records(scrip_master):
+        symbol = str(_row_value(row, "symbol", "tradingsymbol", "trading_symbol") or "").strip()
+        name = str(_row_value(row, "name") or "").strip()
+        exchange = str(_row_value(row, "exch_seg", "exchange") or "").strip().upper()
+        if exchange not in {"NSE", "INDICES"}:
+            continue
+        upper_symbol = symbol.upper()
+        upper_name = name.upper()
+        if vix_row is None and ("INDIA VIX" in upper_symbol or "INDIA VIX" in upper_name):
+            vix_row = row
+        if underlying_row is None and _is_underlying_index_row(
+            upper_symbol,
+            upper_name,
+            base=base,
+        ):
+            underlying_row = row
+        if underlying_row is not None and vix_row is not None:
+            break
+
+    rows: list[tuple[str, Mapping[str, Any]]] = []
+    if underlying_row is not None:
+        rows.append(("underlying", underlying_row))
+    if vix_row is not None:
+        rows.append(("vix", vix_row))
+    return rows
+
+
+def _is_underlying_index_row(symbol: str, name: str, *, base: str) -> bool:
+    if base == "NIFTY":
+        return symbol in {"NIFTY", "NIFTY 50"} or name in {"NIFTY", "NIFTY 50"}
+    return symbol == base or name == base
 
 
 def _batched_exchange_tokens(
@@ -279,6 +386,12 @@ def _best_ask(payload: Mapping[str, Any]) -> Any:
     return None
 
 
+def _ltp_from_payload(payload: Mapping[str, Any] | None) -> Any:
+    if not payload:
+        return None
+    return _first(payload, "ltp", "lastTradedPrice", "last_price")
+
+
 def _raw_hash(payload: Mapping[str, Any]) -> str:
     text = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -302,4 +415,6 @@ def _aware_utc(value: datetime) -> datetime:
 __all__ = [
     "AngelOptionChainProvider",
     "MarketQuoteFetcher",
+    "listed_option_expiries",
+    "next_listed_option_expiry",
 ]

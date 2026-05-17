@@ -7,7 +7,7 @@ interaction is optional read-only market quote fetching for OI snapshots.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 import logging
 import os
@@ -38,6 +38,7 @@ class OiMlShadowRunnerConfig:
     enabled: bool
     underlying: str = "NIFTY"
     expiry: date = field(default_factory=lambda: _next_weekly_expiry())
+    expiry_is_explicit: bool = False
     provider: str | None = "angel"
     cadence_seconds: int = 60
     max_iterations: int | None = None
@@ -74,12 +75,13 @@ def load_shadow_runner_config(
     env: Mapping[str, str] | None = None,
 ) -> OiMlShadowRunnerConfig:
     source = env or os.environ
+    expiry_value = source.get("OI_ML_SHADOW_EXPIRY") or source.get("OI_SNAPSHOTTER_EXPIRY")
+    parsed_expiry = _parse_date(expiry_value)
     return OiMlShadowRunnerConfig(
         enabled=_bool(source.get("OI_ML_SHADOW_ENABLED"), default=False),
         underlying=str(source.get("OI_ML_SHADOW_UNDERLYING") or "NIFTY").strip().upper(),
-        expiry=_parse_date(source.get("OI_ML_SHADOW_EXPIRY"))
-        or _parse_date(source.get("OI_SNAPSHOTTER_EXPIRY"))
-        or _next_weekly_expiry(),
+        expiry=parsed_expiry or _next_weekly_expiry(),
+        expiry_is_explicit=parsed_expiry is not None,
         provider=_optional_str(source.get("OI_ML_SHADOW_PROVIDER") or source.get("OI_SNAPSHOTTER_PROVIDER") or "angel"),
         cadence_seconds=_int(source.get("OI_ML_SHADOW_CADENCE_SECONDS"), 60, minimum=5),
         max_iterations=_optional_int(source.get("OI_ML_SHADOW_MAX_ITERATIONS"), minimum=1),
@@ -226,7 +228,7 @@ def main() -> int:
         level=str(os.getenv("LOG_LEVEL", "INFO")).upper(),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-    config = load_shadow_runner_config()
+    config = _resolve_listed_expiry(load_shadow_runner_config())
     logger.info(
         "oi_ml_shadow starting enabled=%s underlying=%s expiry=%s provider=%s scorer=%s capture_snapshot=%s",
         config.enabled,
@@ -251,6 +253,60 @@ def _capture_snapshot(config: OiMlShadowRunnerConfig) -> int:
     )
     results = run_runtime(runtime_config)
     return sum(result.stored_count for result in results)
+
+
+def _resolve_listed_expiry(
+    config: OiMlShadowRunnerConfig,
+    *,
+    today: date | None = None,
+) -> OiMlShadowRunnerConfig:
+    if str(config.provider or "").strip().lower() != "angel":
+        return config
+    scrip_master = _load_scrip_master()
+    from app.data.angel_option_chain_provider import (
+        listed_option_expiries,
+        next_listed_option_expiry,
+    )
+
+    current_day = today or datetime.now(IST).date()
+    if config.expiry_is_explicit:
+        expiries = set(
+            listed_option_expiries(
+                scrip_master,
+                underlying=config.underlying,
+                on_or_after=current_day,
+            )
+        )
+        if config.expiry not in expiries:
+            raise RuntimeError(
+                "configured OI/ML shadow expiry is not listed by scrip master: "
+                f"underlying={config.underlying} expiry={config.expiry.isoformat()}"
+            )
+        return config
+
+    resolved = next_listed_option_expiry(
+        scrip_master,
+        underlying=config.underlying,
+        on_or_after=current_day,
+    )
+    if resolved is None:
+        raise RuntimeError(
+            f"no listed OI/ML option expiry found for underlying={config.underlying}"
+        )
+    if resolved != config.expiry:
+        logger.info(
+            "oi_ml_shadow resolved listed expiry underlying=%s calendar_default=%s listed=%s",
+            config.underlying,
+            config.expiry.isoformat(),
+            resolved.isoformat(),
+        )
+    return replace(config, expiry=resolved)
+
+
+def _load_scrip_master() -> object:
+    from app.core.instruments_resolver import load_scrip_master
+
+    return load_scrip_master()
 
 
 def _build_scorer(config: OiMlShadowRunnerConfig) -> OiMlScorer:

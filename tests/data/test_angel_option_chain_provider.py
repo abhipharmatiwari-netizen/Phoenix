@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from app.data.angel_option_chain_provider import AngelOptionChainProvider
+from app.data.angel_option_chain_provider import AngelOptionChainProvider, listed_option_expiries
 
 
 class FakeQuoteFetcher:
@@ -117,3 +117,129 @@ def test_angel_provider_preserves_contract_with_missing_quote_payload_flag():
     missing = [quote for quote in quotes if quote.symbol_token == "999"][0]
     assert missing.quality_flags["missing_quote_payload"] is True
     assert missing.ltp is None
+
+
+def test_angel_provider_stamps_underlying_ltp_and_vix_from_context_quotes():
+    class ContextFetcher:
+        def __init__(self):
+            self.calls = []
+
+        def fetch_market_quotes(self, *, mode, exchange_to_tokens):
+            self.calls.append((mode, exchange_to_tokens))
+            payloads = {
+                "111": {
+                    "exchange": "NFO",
+                    "symbolToken": "111",
+                    "ltp": "42.8",
+                    "opnInterest": "120000",
+                    "tradeVolume": "1500",
+                    "impliedVolatility": "11.25",
+                    "bid": "42.5",
+                    "ask": "43.0",
+                },
+                "222": {
+                    "exchange": "NFO",
+                    "symbolToken": "222",
+                    "ltp": "38.2",
+                    "opnInterest": "90000",
+                    "tradeVolume": "1200",
+                    "impliedVolatility": "12.1",
+                    "bid": "38.0",
+                    "ask": "38.4",
+                },
+                "999001": {
+                    "exchange": "NSE",
+                    "symbolToken": "999001",
+                    "ltp": "25075.5",
+                },
+                "999002": {
+                    "exchange": "NSE",
+                    "symbolToken": "999002",
+                    "ltp": "14.2",
+                },
+            }
+            return [
+                payloads[token]
+                for tokens in exchange_to_tokens.values()
+                for token in tokens
+                if token in payloads
+            ]
+
+    fetcher = ContextFetcher()
+    provider = AngelOptionChainProvider(
+        fetcher,
+        [
+            {
+                "symbol": "NIFTY19MAY2625200CE",
+                "expiry": "19MAY2026",
+                "strike": "2520000",
+                "exch_seg": "NFO",
+                "token": "111",
+            },
+            {
+                "symbol": "NIFTY19MAY2625200PE",
+                "expiry": "19MAY2026",
+                "strike": "2520000",
+                "exch_seg": "NFO",
+                "token": "222",
+            },
+            {
+                "symbol": "Nifty 50",
+                "name": "NIFTY",
+                "exch_seg": "NSE",
+                "token": "999001",
+            },
+            {
+                "symbol": "India VIX",
+                "name": "INDIA VIX",
+                "exch_seg": "NSE",
+                "token": "999002",
+            },
+        ],
+        batch_size=10,
+    )
+
+    quotes = provider.fetch_chain(
+        underlying="NIFTY",
+        expiry=date(2026, 5, 19),
+        snapshot_ts=datetime(2026, 5, 19, 4, 30),
+    )
+
+    assert fetcher.calls == [
+        ("FULL", {"NFO": ["111", "222"]}),
+        ("LTP", {"NSE": ["999001", "999002"]}),
+    ]
+    assert str(quotes[0].normalized().underlying_ltp) == "25075.5"
+    assert str(quotes[0].normalized().vix) == "14.2"
+
+
+def test_listed_option_expiries_uses_provider_calendar_not_weekday_assumption():
+    scrip_master = [
+        {
+            "symbol": "NIFTY19MAY2625200CE",
+            "expiry": "19MAY2026",
+            "strike": "2520000",
+            "exch_seg": "NFO",
+            "token": "111",
+        },
+        {
+            "symbol": "NIFTY26MAY2625200CE",
+            "expiry": "26MAY2026",
+            "strike": "2520000",
+            "exch_seg": "NFO",
+            "token": "222",
+        },
+        {
+            "symbol": "NIFTY21MAY2625200CE",
+            "expiry": "21MAY2026",
+            "strike": "2520000",
+            "exch_seg": "NSE",
+            "token": "333",
+        },
+    ]
+
+    assert listed_option_expiries(
+        scrip_master,
+        underlying="NIFTY",
+        on_or_after=date(2026, 5, 20),
+    ) == [date(2026, 5, 26)]
