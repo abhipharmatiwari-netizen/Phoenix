@@ -135,10 +135,14 @@ def _feature_names_from_payload(payload: Any) -> list[str]:
 
 
 def _first_prediction(value: Any) -> float:
+    if hasattr(value, "tolist") and callable(value.tolist):
+        value = value.tolist()
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         if not value:
             raise ValueError("model returned no predictions")
         first = value[0]
+        if hasattr(first, "tolist") and callable(first.tolist):
+            first = first.tolist()
         if isinstance(first, Sequence) and not isinstance(first, (str, bytes)):
             if not first:
                 raise ValueError("model returned empty nested prediction")

@@ -51,6 +51,14 @@ class _FakeModel:
         return self.prediction
 
 
+class _ArrayLike:
+    def __init__(self, value):
+        self.value = value
+
+    def tolist(self):
+        return self.value
+
+
 def test_lightgbm_runtime_scorer_uses_feature_order_and_mae_model():
     classifier = _FakeModel([0.71])
     mae = _FakeModel([35.5])
@@ -80,3 +88,16 @@ def test_lightgbm_runtime_scorer_uses_default_mae_without_mae_model():
 
     assert score.probability == 0.62
     assert score.predicted_mae_premium == 25.0
+
+
+def test_lightgbm_runtime_scorer_accepts_array_like_predictions():
+    scorer = LightGbmOiMlScorer(
+        classifier_model=_FakeModel(_ArrayLike([0.67])),
+        mae_model=_FakeModel(_ArrayLike([[18.0]])),
+        feature_names=("x",),
+    )
+
+    score = scorer.score({"x": 1})
+
+    assert score.probability == 0.67
+    assert score.predicted_mae_premium == 18.0
