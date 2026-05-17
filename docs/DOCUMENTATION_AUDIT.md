@@ -37,6 +37,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | `docs/OCI_VM_RUNTIME.md` | evidence | current VM state | MATCHES_OCI_VM | KEEP |
 | `docs/DOCUMENTATION_AUDIT.md` | audit | doc inventory/mismatch | PARTIALLY_STALE | UPDATE |
 | `docs/runbooks/oci_live_deployment.md` | runbook | OCI operations | CONTRADICTS_OCI_VM | UPDATE |
+| `docs/runbooks/oi_ml_shadow_sidecar.md` | runbook | OI/ML shadow sidecar progress and gates | MATCHES_OCI_VM | KEEP |
 | `docs/runbooks/oci-live.env.example` | env template | OCI env names | PARTIALLY_STALE | UPDATE |
 | `phoenix-override.yml.example` | override template | OCI override | CONTRADICTS_OCI_VM | UPDATE |
 | `docker-compose.oci-live.yml` | Compose/comments | OCI base manifest | PARTIALLY_STALE | UPDATE |
@@ -106,6 +107,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | `phoenix-override.yml.example` | current override template | current local images/local DB/bind mounts | target-only invariants as current | VM override |
 | `docs/runbooks/oci-live.env.example` | current env-name template | current variable names | secret values | VM env names |
 | `docs/runbooks/oci_runtime_hardening.md` | runtime hardening plan | opt-in Postgres healthcheck, immutable-image, bind-mount, watchdog remediation | instructions that change live VM outside maintenance | VM evidence, current drift |
+| `docs/runbooks/oi_ml_shadow_sidecar.md` | OI/ML progress | sidecar image, tables, env names, scorer modes, open market-data proof gate | secret values or claims of live order routing | OI/ML sidecar deployment evidence |
 | non-OCI deployment docs | reference only | non-current banner | production instructions | old runbooks |
 
 ## Delete / Archive Decisions
@@ -121,6 +123,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 |---|---|---|
 | Several deep reference docs still describe target architecture more than VM-observed behavior | P2 | Marked in inventory; not operator entrypoints |
 | `docs/nse-holidays.txt` was not independently validated against an official NSE source during this pass | P2 | Follow-up needed before relying on holiday automation |
+| OI/ML sidecar still needs market-session FULL quote completeness evidence before promotion | P1 | Captured in `docs/runbooks/oi_ml_shadow_sidecar.md` |
 | Release evidence endpoint was not captured with admin auth because the admin key was not printed or used | P2 | Endpoint unauthenticated status verified as 401 |
 | Script headers under `scripts/ops/` were inventoried but not fully rewritten | P2 | README/runbook no longer depend on them as canonical |
 

@@ -1,6 +1,7 @@
 # OCI VM Runtime Evidence
 
 Last verified: 2026-05-17 12:25 UTC from the running OCI VM.
+OI/ML shadow sidecar evidence was added on 2026-05-18 IST.
 
 The OCI VM is the production source of truth. This file intentionally records
 what is running, including drift from repo templates. Secret values, private IPs,
@@ -45,6 +46,26 @@ OCIDs, broker identifiers, and tokens are redacted.
 | Log abnormalities | backend/web abnormal grep did not show recent critical errors; watchdog shows repeated fail/recover events | `docker logs --tail=500 ... grep` | No recent backend criticals found in sampled tail | Watchdog churn remains an operational warning |
 | OCI network | VM VNIC has private IP only, no public IP, no NSGs; subnet security list includes SSH, 80, 443, 8443, and ICMP | OCI network read-only inspection | VM is reached through private networking/Bastion/LB path | CIDRs and IPs redacted |
 
+## OI/ML Shadow Sidecar Evidence
+
+Verified on 2026-05-18 IST:
+
+| Area | Verified current state |
+|---|---|
+| Purpose | Dry-run OI/ML CE seller validation; no live order routing |
+| Checkout | `/opt/phoenix/oi-ml-shadow-src` |
+| Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
+| Image | `phoenix-oi-ml-shadow:oi-ml-shadow-8a39742` |
+| Container | `phoenix-oi-ml-shadow`, no host ports published |
+| Scorer | Smoke deployment uses `OI_ML_SHADOW_SCORER=constant` |
+| Risk posture | `OI_ML_SHADOW_ALLOW_NAKED=false`; sidecar records shadow intents only |
+| Tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents` |
+| Expiry handling | Startup resolves listed NIFTY expiry from Angel scrip master; observed `calendar_default=2026-05-21 listed=2026-05-19` |
+| Input hardening | Provider now fetches/stamps NIFTY spot and India VIX context LTPs for option-chain rows |
+| Remaining gate | Market-session FULL quote field completeness is not yet proven |
+
+Operator runbook: [OI/ML Shadow Sidecar Runbook](runbooks/oi_ml_shadow_sidecar.md).
+
 ## Current Phoenix Tables Observed
 
 The VM-local Postgres database reported these public tables:
@@ -82,6 +103,8 @@ trades
 user_broker_account_entitlements
 user_tenant_entitlements
 users
+option_chain_1m
+oi_ml_shadow_order_intents
 ```
 
 ## Current Risk Register

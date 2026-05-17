@@ -19,8 +19,9 @@
 | 8 | `ce_pdh_rb` | CE PDH RB | _DISABLED_ | declared but disabled | SELL CE | 1m | `app/strategies/ce_pdh_rb.py` |
 | 9 | `option_strategy` | Option Strategy (template) | _DISABLED / framework_ | declared multi but disabled | configurable | configurable | `app/strategies/option_strategy.py` |
 | 10 | `delta_strangle` | Delta Strangle | _DISABLED_ | NIFTY, BANKNIFTY (disabled) | SELL CE+PE | daily fixed | `app/strategies/delta_strangle.py` |
+| 11 | `oi_ml_ce_seller` | OI/ML CE Seller | _SHADOW ONLY / DISABLED_ | NIFTY only | SELL CE via bear-call-spread intent | 1m option-chain snapshots | `app/strategies/oi_ml_ce_seller.py` |
 
-A strategy is "ACTIVE" when **all three** are true: (a) `strategies[].enabled: true` in `strategy_env.yaml`, (b) its name appears in `instruments.<UNDERLYING>.allowed_strategies` for at least one enabled underlying, (c) `strategy_class` is wired up in `multi_instrument_stream.py` (it is, for all 10).
+A strategy is "ACTIVE" when **all three** are true: (a) `strategies[].enabled: true` in `strategy_env.yaml`, (b) its name appears in `instruments.<UNDERLYING>.allowed_strategies` for at least one enabled underlying, (c) `strategy_class` is wired up in `multi_instrument_stream.py` for the production runtime. `oi_ml_ce_seller` is registered/listed for tracking but remains disabled for live trading and is validated only through the shadow sidecar. Current sidecar progress is tracked in [OI/ML Shadow Sidecar Runbook](runbooks/oi_ml_shadow_sidecar.md).
 
 ---
 

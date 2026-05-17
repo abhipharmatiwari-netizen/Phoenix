@@ -5,6 +5,7 @@ source of truth for production documentation; repo manifests and historical
 runbooks are secondary evidence only when they match that VM.
 
 Last verified against the VM: 2026-05-17 12:25 UTC.
+OI/ML shadow sidecar progress was updated on 2026-05-18 IST.
 
 ## Current OCI VM State
 
@@ -20,6 +21,7 @@ Last verified against the VM: 2026-05-17 12:25 UTC.
 | Web container | `phoenix-oci-web`, image `phoenix-local-nginx:local-1a2cc47`, healthy |
 | Database | VM-local `phoenix-oci-postgres` container, `postgres:16-alpine`, no Docker healthcheck |
 | Watchdog | `phoenix-oci-watchdog`, `docker:cli`; actively stops/starts nginx when backend health fails |
+| OI/ML shadow sidecar | `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-8a39742`, dry-run only |
 | Backend command | `python -m app.main` |
 | Public backend exposure | backend port `8080` is container-only; nginx exposes host ports `80` and `8443` |
 | Health checks | backend container: `/health`, `/ready`, `/readyz`, `/health/summary`; nginx/host: `/health`, `/readyz` |
@@ -45,9 +47,10 @@ See [OCI VM Runtime Evidence](docs/OCI_VM_RUNTIME.md) for the evidence table.
 5. [Release Evidence](docs/runbooks/release_evidence.md)
 6. [OCI Runtime Hardening](docs/runbooks/oci_runtime_hardening.md)
 7. [Strategy Runtime Diagnostics](docs/runbooks/strategy_runtime_diagnostics.md)
-8. [Kill Switch](docs/runbooks/kill_switch.md)
-9. [Broker Credential Update](docs/runbooks/update_broker_credentials.md)
-10. [Restore Drill](docs/runbooks/restore_drill.md)
+8. [OI/ML Shadow Sidecar](docs/runbooks/oi_ml_shadow_sidecar.md)
+9. [Kill Switch](docs/runbooks/kill_switch.md)
+10. [Broker Credential Update](docs/runbooks/update_broker_credentials.md)
+11. [Restore Drill](docs/runbooks/restore_drill.md)
 
 Docker Desktop, Cloud Run, GCP, Firestore, BigQuery, and local development
 material are not current production operating models unless a future VM audit
@@ -87,6 +90,7 @@ scripts/                          Operator and release utility scripts
 tests/                            Pytest suite
 docs/OCI_VM_RUNTIME.md            Current VM evidence snapshot
 docs/runbooks/oci_live_deployment.md Current OCI VM operator runbook
+docs/runbooks/oi_ml_shadow_sidecar.md OI/ML shadow sidecar progress and gates
 docker-compose.oci-live.yml       Base Compose file used with the VM override
 phoenix-override.yml.example      Template mirroring the current VM override shape
 ```

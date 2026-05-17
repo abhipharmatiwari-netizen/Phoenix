@@ -25,6 +25,7 @@ Verified on 2026-05-17 from the running OCI VM:
 - Web: `phoenix-oci-web`, image `phoenix-local-nginx:local-1a2cc47`
 - Database: VM-local `phoenix-oci-postgres`, image `postgres:16-alpine`
 - Watchdog: `phoenix-oci-watchdog`, image `docker:cli`
+- OI/ML shadow sidecar: `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-8a39742`, dry-run only, no host ports
 - Runtime health: backend `/health`, `/ready`, `/readyz`, and `/health/summary` return 200 from inside the backend container
 - Health evidence: `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE`
 
@@ -40,6 +41,12 @@ important ways:
 
 These facts are operational state, not recommendations. Any future move to OCIR
 images or external Postgres requires a fresh VM evidence capture and doc update.
+
+The OI/ML CE seller sidecar is not part of the live order authority path. It is
+currently a shadow-only process that writes `option_chain_1m` and
+`oi_ml_shadow_order_intents` records for validation. Its progress and promotion
+gates are tracked in
+[docs/runbooks/oi_ml_shadow_sidecar.md](docs/runbooks/oi_ml_shadow_sidecar.md).
 
 ### 0.2 Production Contract
 

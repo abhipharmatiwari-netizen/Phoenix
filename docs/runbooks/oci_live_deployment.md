@@ -24,6 +24,9 @@ Current VM paths and containers:
 - logs: `/opt/phoenix/logs`
 - state helpers: `/opt/phoenix/state`
 - certs: `/opt/phoenix/certs`
+- OI/ML shadow checkout: `/opt/phoenix/oi-ml-shadow-src`
+- OI/ML shadow compose: `/opt/phoenix/oi-ml-shadow.yml`
+- OI/ML shadow container: `phoenix-oi-ml-shadow`
 
 Non-current for this VM unless a later evidence capture proves otherwise:
 
@@ -33,6 +36,26 @@ Non-current for this VM unless a later evidence capture proves otherwise:
 - Cloud Run/GCP deployment
 - Firestore or BigQuery as operational authority
 - optimizer and backend-reload systemd timers
+
+## OI/ML Shadow Sidecar
+
+The OI/ML CE seller sidecar is separate from the live backend/nginx stack. It is
+dry-run only, publishes no host ports, and records option-chain snapshots plus
+shadow order intents in Postgres. It must not be used as evidence that live order
+routing is enabled.
+
+Current sidecar evidence as of 2026-05-18:
+
+- image: `phoenix-oi-ml-shadow:oi-ml-shadow-8a39742`
+- checkout: `/opt/phoenix/oi-ml-shadow-src`
+- compose: `/opt/phoenix/oi-ml-shadow.yml`
+- tables: `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`
+- scorer: smoke deployment uses `OI_ML_SHADOW_SCORER=constant`
+- promotion blocker: market-session Angel FULL quote field completeness still
+  must be proven
+
+Use [OI/ML Shadow Sidecar Runbook](oi_ml_shadow_sidecar.md) for sidecar-specific
+operations and proof gates.
 
 ## OCI VM Assumptions
 
