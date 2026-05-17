@@ -785,11 +785,30 @@ strategies:
       take_profit_pct_of_credit: 0.60
       stop_loss_mult_credit: 1.8
       account_equity: 20000
+  - name: "oi_ml_ce_seller"
+    enabled: false
+    instruments:
+      - "NIFTY_IDX"
+    params:
+      account_equity: 400000
+      product_type: "INTRADAY"
+      allow_naked: false
+      entry_start_time: "09:50"
+      entry_end_time: "14:15"
+      time_stop: "14:55"
+      spread_width_points: 100
+      max_spread_loss_rupees: 5000
+      max_open_spreads: 1
+      daily_loss_limit_rupees: 8000
+      weekly_loss_limit_rupees: 16000
+      min_ml_score: 0.64
+      min_late_ml_score: 0.75
+      max_vix: 20
 
 instruments:
   NIFTY_IDX:
     enabled: true
-    allowed_strategies: ["ema20_strategy", "exclusive_nifty_ce_buy", "put_momentum_scalper", "nifty_weekly_credit_spreads"]
+    allowed_strategies: ["ema20_strategy", "exclusive_nifty_ce_buy", "put_momentum_scalper", "nifty_weekly_credit_spreads", "oi_ml_ce_seller"]
   BANKNIFTY_IDX:
     enabled: true
     allowed_strategies: ["ema20_strategy", "put_momentum_scalper"]

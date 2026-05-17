@@ -108,6 +108,13 @@ AUTHORIZED_STRATEGIES: Dict[str, StrategyMetadata] = {
         description="Weekly credit spread strategy on NIFTY",
         underlying_agnostic=False,
     ),
+    "oi_ml_ce_seller": StrategyMetadata(
+        canonical_name="oi_ml_ce_seller",
+        strategy_class=None,
+        display_name="OI/ML CE Seller",
+        description="Intraday NIFTY OI and ML gated bear-call-spread strategy",
+        underlying_agnostic=False,
+    ),
 }
 
 # Frozen set of all authorized canonical strategy names

@@ -168,3 +168,50 @@ def test_fetch_historical_candles_formats_ist_window_and_returns_rows(monkeypatc
     assert payload["fromdate"] == "2026-03-10 09:30"
     assert payload["todate"] == "2026-03-10 09:45"
     assert candles == [["2026-03-10T09:30:00+05:30", 100, 101, 99.5, 100.5, 1000]]
+
+
+def test_fetch_market_quotes_uses_full_mode_and_returns_fetched_rows(monkeypatch):
+    mod = importlib.import_module(MODULE_PATH)
+
+    class _FakeResponse:
+        status = 200
+
+        def getheaders(self):
+            return [
+                ("Content-Type", "application/json"),
+                ("X-Request-ID", "req-quote-1"),
+            ]
+
+        def read(self):
+            return (
+                b'{"status": true, "message": "SUCCESS", "data": {"fetched": ['
+                b'{"exchange": "NFO", "symbolToken": "12345", "ltp": 42.8, '
+                b'"opnInterest": 120000}]}}'
+            )
+
+    class _FakeConnection:
+        def __init__(self, *args, **kwargs):
+            self.body = None
+
+        def request(self, method, path, body=None, headers=None):
+            self.method = method
+            self.path = path
+            self.body = body
+
+        def getresponse(self):
+            return _FakeResponse()
+
+    conn = _FakeConnection()
+    monkeypatch.setattr(mod.rate_limiter, "acquire", lambda key: None)
+    monkeypatch.setattr(mod.http.client, "HTTPSConnection", lambda *args, **kwargs: conn)
+
+    client = mod.AngelOrderClient("jwt-token", "api-key")
+    rows = client.fetch_market_quotes(
+        mode="FULL",
+        exchange_to_tokens={"NFO": ["12345"]},
+    )
+
+    payload = json.loads(conn.body)
+    assert conn.path == "/rest/secure/angelbroking/market/v1/quote/"
+    assert payload == {"mode": "FULL", "exchangeTokens": {"NFO": ["12345"]}}
+    assert rows == [{"exchange": "NFO", "symbolToken": "12345", "ltp": 42.8, "opnInterest": 120000}]

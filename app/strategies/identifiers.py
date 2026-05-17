@@ -22,6 +22,7 @@ CE_PDH_RB_ID: StrategyId = "ce_pdh_rb"
 PUT_MOMENTUM_SCALPER_ID: StrategyId = "put_momentum_scalper"
 PUT_REVERSION_WRITER_ID: StrategyId = "put_reversion_writer"
 NIFTY_WEEKLY_CREDIT_SPREADS_ID: StrategyId = "nifty_weekly_credit_spreads"
+OI_ML_CE_SELLER_ID: StrategyId = "oi_ml_ce_seller"
 EXCLUSIVE_NIFTY_CE_BUY_ID: StrategyId = "exclusive_nifty_ce_buy"
 PUT_BUY_ID: StrategyId = "put_buy"
 
@@ -50,6 +51,7 @@ __all__ = [
     "PUT_MOMENTUM_SCALPER_ID",
     "PUT_REVERSION_WRITER_ID",
     "NIFTY_WEEKLY_CREDIT_SPREADS_ID",
+    "OI_ML_CE_SELLER_ID",
     "EXCLUSIVE_NIFTY_CE_BUY_ID",
     "PUT_BUY_ID",
 ]

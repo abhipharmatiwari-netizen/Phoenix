@@ -61,6 +61,7 @@ from app.strategies.ce_pdh_rb import CePdhRangeBreakoutStrategy
 from app.strategies.put_momentum_scalper import PutMomentumScalperStrategy
 from app.strategies.put_reversion_writer import PutReversionWriterStrategy
 from app.strategies.nifty_weekly_credit_spreads import NiftyWeeklyCreditSpreadStrategy
+from app.strategies.oi_ml_ce_seller import OiMlCeSellerStrategy
 from app.strategies.exclusive_nifty_ce_buy import ExclusiveNiftyCeBuyStrategy
 from app.strategies.put_buy_live import PutBuyLiveStrategy
 from app.strategies.naming import canonicalize_strategy_name
@@ -1789,6 +1790,7 @@ STRATEGY_REGISTRY = {
     "put_momentum_scalper": PutMomentumScalperStrategy,
     "put_reversion_writer": PutReversionWriterStrategy,
     "nifty_weekly_credit_spreads": NiftyWeeklyCreditSpreadStrategy,
+    "oi_ml_ce_seller": OiMlCeSellerStrategy,
     "exclusive_nifty_ce_buy": ExclusiveNiftyCeBuyStrategy,
     "put_buy": PutBuyLiveStrategy,
 }
@@ -2715,6 +2717,16 @@ def stream_multi_instruments(
                     params=params,
                     config_resolver=resolver,
                 )
+            if canonical_name == "oi_ml_ce_seller":
+                return OiMlCeSellerStrategy(
+                    instrument_meta=instrument_meta,
+                    order_client=order_client,
+                    risk_manager=risk_manager,
+                    env_prefix=env_prefix,
+                    underlying_label=underlying_param,
+                    params=params,
+                    config_resolver=resolver,
+                )
         except Exception as exc:
             logger.exception(
                 "Failed to init strategy %s for %s: %s", name, underlying_label, exc
@@ -2819,6 +2831,7 @@ def stream_multi_instruments(
         "put_reversion_writer",
         "put_buy",
         "nifty_weekly_credit_spreads",
+        "oi_ml_ce_seller",
         "option_strategy",
         "delta_strangle",
     ]

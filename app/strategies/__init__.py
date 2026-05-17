@@ -17,6 +17,7 @@ __all__ = [
     "PutMomentumScalperStrategy",
     "PutReversionWriterStrategy",
     "NiftyWeeklyCreditSpreadStrategy",
+    "OiMlCeSellerStrategy",
     "ExclusiveNiftyCeBuyStrategy",
     "PutBuyStrategy",
     "PutBuyLiveStrategy",
@@ -39,6 +40,10 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "NiftyWeeklyCreditSpreadStrategy": (
         ".nifty_weekly_credit_spreads",
         "NiftyWeeklyCreditSpreadStrategy",
+    ),
+    "OiMlCeSellerStrategy": (
+        ".oi_ml_ce_seller",
+        "OiMlCeSellerStrategy",
     ),
     "ExclusiveNiftyCeBuyStrategy": (
         ".exclusive_nifty_ce_buy",

@@ -1,0 +1,103 @@
+# OCI VM OI/ML shadow sidecar.
+#
+# Run this beside the live stack from a separate checkout/image. It publishes no
+# ports, starts no nginx, and runs the standalone shadow runner instead of
+# app.main. It records dry-run shadow intents only.
+
+name: phoenix-oi-ml-shadow
+
+services:
+  oi-ml-migrator:
+    image: postgres:16-alpine
+    container_name: phoenix-oi-ml-shadow-migrator
+    restart: "no"
+    env_file:
+      - /opt/phoenix/phoenix-deploy.env
+    environment:
+      PGHOST: "phoenix-oci-postgres"
+      PGPORT: "5432"
+      PGDATABASE: "${CONTROL_PLANE_PG_DB:?Set CONTROL_PLANE_PG_DB in phoenix-deploy.env}"
+      PGUSER: "${CONTROL_PLANE_PG_USER:?Set CONTROL_PLANE_PG_USER in phoenix-deploy.env}"
+      PGSSLMODE: "prefer"
+      PGCONNECT_TIMEOUT: "10"
+      PHX_MIGRATION_APP_NAME: "phoenix-oi-ml-shadow"
+    volumes:
+      - /opt/phoenix/oi-ml-shadow-src/migrations:/migrations:ro
+      - /opt/phoenix/oi-ml-shadow-src/scripts/run_migrations.sh:/scripts/run_migrations.sh:ro
+      - /run/secrets/control_plane_pg_password:/run/secrets/control_plane_pg_password:ro
+    networks:
+      - phoenix_live
+    command:
+      - sh
+      - -ec
+      - |
+          export PGPASSWORD="$$(cat /run/secrets/control_plane_pg_password)"
+          sed 's/\r$$//' /scripts/run_migrations.sh | sh -s -- apply
+
+  oi-ml-shadow:
+    image: phoenix-oi-ml-shadow:${IMAGE_TAG:-local}
+    container_name: phoenix-oi-ml-shadow
+    init: true
+    restart: unless-stopped
+    depends_on:
+      oi-ml-migrator:
+        condition: service_completed_successfully
+    env_file:
+      - /opt/phoenix/phoenix-deploy.env
+    environment:
+      APP_ENV: "shadow"
+      TRADE_MODE: "PAPER"
+      REQUIRE_LIVE_TRADE_MODE: "false"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      TZ: "Asia/Kolkata"
+      DEFAULT_TIME_ZONE: "Asia/Kolkata"
+
+      CONTROL_PLANE_BACKEND: "postgres"
+      SWEEP_STATE_BACKEND: "postgres"
+      BROKER_SECRET_BACKEND: "postgres"
+      CONTROL_PLANE_PG_HOST: "phoenix-oci-postgres"
+      CONTROL_PLANE_PG_PORT: "5432"
+      CONTROL_PLANE_PG_DB: "${CONTROL_PLANE_PG_DB:?Set CONTROL_PLANE_PG_DB in phoenix-deploy.env}"
+      CONTROL_PLANE_PG_USER: "${CONTROL_PLANE_PG_USER:?Set CONTROL_PLANE_PG_USER in phoenix-deploy.env}"
+      CONTROL_PLANE_PG_SSLMODE: "prefer"
+      LIVE_PG_SSL_SKIP_CHECK: "true"
+      REMOTE_DEPLOYMENT: "false"
+      POSTGRES_CONNECT_TIMEOUT_SECONDS: "10"
+      POSTGRES_SESSION_TIMEZONE: "Asia/Kolkata"
+
+      DISABLE_STREAM_WORKER: "true"
+      ENABLE_MULTI_HUB: "false"
+      USE_HUB_ROUTER: "false"
+      LEADER_LEASE_ENABLED: "false"
+      OI_ML_SHADOW_ENABLED: "true"
+      OI_ML_SHADOW_UNDERLYING: "${OI_ML_SHADOW_UNDERLYING:-NIFTY}"
+      OI_ML_SHADOW_PROVIDER: "${OI_ML_SHADOW_PROVIDER:-angel}"
+      OI_ML_SHADOW_CADENCE_SECONDS: "${OI_ML_SHADOW_CADENCE_SECONDS:-60}"
+      OI_ML_SHADOW_MARKET_WINDOW_ONLY: "${OI_ML_SHADOW_MARKET_WINDOW_ONLY:-true}"
+      OI_ML_SHADOW_START_TIME: "${OI_ML_SHADOW_START_TIME:-09:45}"
+      OI_ML_SHADOW_END_TIME: "${OI_ML_SHADOW_END_TIME:-14:30}"
+      OI_ML_SHADOW_CAPTURE_SNAPSHOT: "${OI_ML_SHADOW_CAPTURE_SNAPSHOT:-true}"
+      # Default scorer is fail-closed until trained artifacts are promoted.
+      OI_ML_SHADOW_SCORER: "${OI_ML_SHADOW_SCORER:-missing}"
+      OI_ML_SHADOW_ALLOW_NAKED: "false"
+      OI_SNAPSHOTTER_ENABLED: "true"
+    volumes:
+      - /run/secrets/control_plane_pg_password:/run/secrets/control_plane_pg_password:ro
+      - /opt/phoenix/logs/oi-ml-shadow:/app/logs
+      - /opt/phoenix/certs:/app/certs:ro
+    networks:
+      - phoenix_live
+    command:
+      - python
+      - -m
+      - app.strategies.oi_ml.shadow_runner
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  phoenix_live:
+    external: true
+    name: phoenix-oci-live_default

@@ -101,6 +101,29 @@ def test_loader_accepts_strategy_instrument_override_rows(tmp_path):
     assert cfg["strategies"][0]["instruments"][1] == "BANKNIFTY_IDX"
 
 
+def test_loader_accepts_oi_ml_ce_seller_name(tmp_path):
+    mod = importlib.import_module(MODULE_PATH)
+    yaml_path = tmp_path / "strategy_env_oi_ml_ce_seller.yaml"
+    yaml_path.write_text(
+        "strategies:\n"
+        "  - name: oi_ml_ce_seller\n"
+        "    enabled: false\n"
+        "    instruments: [\"NIFTY_IDX\"]\n"
+        "instruments:\n"
+        "  NIFTY_IDX:\n"
+        "    enabled: true\n"
+        "    allowed_strategies: [\"oi_ml_ce_seller\"]\n",
+        encoding="utf-8",
+    )
+
+    cfg = mod.load_strategy_env_from_yaml(yaml_path)
+
+    assert cfg["strategies"][0]["name"] == "oi_ml_ce_seller"
+    assert cfg["instruments"]["NIFTY_IDX"]["allowed_strategies"] == [
+        "oi_ml_ce_seller"
+    ]
+
+
 def test_loader_accepts_directional_regime_keys_in_selector_and_profiles(tmp_path):
     mod = importlib.import_module(MODULE_PATH)
     yaml_path = tmp_path / "strategy_env_directional_regime.yaml"

@@ -553,6 +553,58 @@ class AngelOrderClient:
             return []
         return list(candles)
 
+    # Fetch market quotes for one or more exchange/token groups.
+    def fetch_market_quotes(
+        self,
+        *,
+        mode: str,
+        exchange_to_tokens: Dict[str, list[str]],
+    ) -> list[Dict[str, Any]]:
+        quote_mode = str(mode or "").strip().upper()
+        if quote_mode not in {"LTP", "OHLC", "FULL"}:
+            raise ValueError("mode must be one of LTP, OHLC, FULL")
+
+        normalized: Dict[str, list[str]] = {}
+        for exchange, raw_tokens in (exchange_to_tokens or {}).items():
+            tokens = [str(token).strip() for token in (raw_tokens or []) if str(token).strip()]
+            if tokens:
+                normalized[str(exchange).strip().upper()] = tokens
+        if not normalized:
+            return []
+
+        payload = {"mode": quote_mode, "exchangeTokens": normalized}
+        body = json.dumps(payload)
+        logger.debug("Market quote request payload_head=%s", _payload_head(payload))
+        rate_limiter.acquire("quote")
+        conn = _make_angel_connection()
+        conn.request(
+            "POST",
+            "/rest/secure/angelbroking/market/v1/quote/",
+            body=body,
+            headers=self._headers(),
+        )
+        res = conn.getresponse()
+        _text, headers, data = _read_json_response(
+            res,
+            url="https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote/",
+        )
+        request_id = _extract_request_id(headers)
+        logger.info(
+            "Market quote response status=%s event=MARKET_QUOTE_RESPONSE request_id=%s mode=%s groups=%d",
+            res.status,
+            request_id or "-",
+            quote_mode,
+            len(normalized),
+        )
+        logger.debug("Market quote response head=%r", _payload_head(data))
+        if not data.get("status"):
+            raise RuntimeError(f"market quote failed: {_payload_head(data)}")
+        data_block = data.get("data", {})
+        fetched = data_block.get("fetched") if isinstance(data_block, dict) else data_block
+        if not isinstance(fetched, list):
+            return []
+        return [dict(item) for item in fetched if isinstance(item, dict)]
+
     # Fetch live positions with blocking detection and fallback logic.
     def get_positions(self) -> Dict[str, Any]:
         """Fetch live positions from Angel One SmartAPI.
