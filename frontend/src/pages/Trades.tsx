@@ -1,25 +1,85 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { TenantService } from '../client';
-import { Trade } from '../types/trading';
+import { BrokerAccount, Trade } from '../types/trading';
 import DataTable, { Column } from '../components/shared/DataTable';
 import LoadingSpinner from '../components/shared/LoadingSpinner';
 import StaleBanner from '../components/shared/StaleBanner';
 
+function todayInputValue(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function dateInputToIso(value: string, endOfDay = false): string {
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(
+    year,
+    (month || 1) - 1,
+    day || 1,
+    endOfDay ? 23 : 0,
+    endOfDay ? 59 : 0,
+    endOfDay ? 59 : 0,
+    endOfDay ? 999 : 0,
+  );
+  return date.toISOString();
+}
+
 const Trades: React.FC = () => {
+  const [accounts, setAccounts] = useState<BrokerAccount[]>([]);
+  const [selectedAccountId, setSelectedAccountId] = useState('');
   const [trades, setTrades] = useState<Trade[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [fromDate, setFromDate] = useState('');
-  const [toDate, setToDate] = useState('');
+  const [fromDate, setFromDate] = useState(todayInputValue);
+  const [toDate, setToDate] = useState(todayInputValue);
   const [strategyFilter, setStrategyFilter] = useState('all');
 
+  useEffect(() => {
+    let active = true;
+    const fetchAccounts = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const resp = await TenantService.listMyAccounts();
+        if (!active) return;
+        setAccounts(resp.accounts);
+        if (resp.accounts.length > 0) {
+          setSelectedAccountId(resp.accounts[0].broker_account_id);
+        } else {
+          setTrades([]);
+        }
+      } catch (err) {
+        if (active) setError(err instanceof Error ? err.message : 'Failed to fetch accounts');
+      } finally {
+        if (active) setLoading(false);
+      }
+    };
+    fetchAccounts();
+    return () => { active = false; };
+  }, []);
+
   const fetchTrades = useCallback(async () => {
+    if (!selectedAccountId) {
+      setTrades([]);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
-      const params: { from_time?: string; to_time?: string; limit?: number } = { limit: 500 };
-      if (fromDate) params.from_time = new Date(fromDate).toISOString();
-      if (toDate) params.to_time = new Date(toDate + 'T23:59:59').toISOString();
+      const params: {
+        broker_account_id: string;
+        from_time?: string;
+        to_time?: string;
+        limit?: number;
+      } = {
+        broker_account_id: selectedAccountId,
+        limit: 500,
+      };
+      if (fromDate) params.from_time = dateInputToIso(fromDate);
+      if (toDate) params.to_time = dateInputToIso(toDate, true);
       const resp = await TenantService.getMyTrades(params);
       setTrades(resp.trades);
     } catch (err) {
@@ -27,7 +87,7 @@ const Trades: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [fromDate, toDate]);
+  }, [selectedAccountId, fromDate, toDate]);
 
   useEffect(() => { fetchTrades(); }, [fetchTrades]);
 
@@ -87,6 +147,20 @@ const Trades: React.FC = () => {
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
         <h1 style={{ margin: 0 }}>Trades</h1>
+        {accounts.length > 1 && (
+          <select
+            value={selectedAccountId}
+            onChange={(e) => setSelectedAccountId(e.target.value)}
+            aria-label="Select broker account"
+            style={{ padding: '0.4rem 0.75rem', border: '1px solid #d1d5db', borderRadius: 4 }}
+          >
+            {accounts.map(a => (
+              <option key={a.broker_account_id} value={a.broker_account_id}>
+                {a.display_name} ({a.trading_mode})
+              </option>
+            ))}
+          </select>
+        )}
         <label style={{ fontSize: '0.8rem', color: '#6b7280' }}>
           From: <input type="date" value={fromDate} onChange={e => setFromDate(e.target.value)}
             style={{ padding: '0.3rem', border: '1px solid #d1d5db', borderRadius: 4, marginLeft: 4 }}

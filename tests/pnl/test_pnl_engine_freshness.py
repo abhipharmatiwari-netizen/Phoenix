@@ -163,3 +163,55 @@ def test_account_total_uses_seed_snapshot_without_double_counting_strategy_marks
     )
 
     assert total == pytest.approx(-65.0)
+
+
+def test_display_realized_account_resets_previous_session(monkeypatch):
+    base_time = datetime(2026, 5, 8, 9, 15, tzinfo=timezone.utc)
+    engine, clock = _build_engine(monkeypatch, base_time=base_time)
+    tenant_id = TenantId("tenant-1")
+    broker_account_id = BrokerAccountId("A1")
+    strategy_id = StrategyId("position_trailing_lock")
+
+    engine.on_trade(
+        TradeEvent(
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+            strategy_id=strategy_id,
+            symbol="NATURALGAS22MAY26265CE",
+            qty=1,
+            price=100.0,
+            trade_time=base_time,
+            fees=0.0,
+        )
+    )
+    engine.on_trade(
+        TradeEvent(
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+            strategy_id=strategy_id,
+            symbol="NATURALGAS22MAY26265CE",
+            qty=-1,
+            price=120.0,
+            trade_time=base_time,
+            fees=0.0,
+        )
+    )
+
+    assert engine.get_display_realized_pnl_account(
+        tenant_id=tenant_id,
+        broker_account_id=broker_account_id,
+    ) == pytest.approx(20.0)
+
+    clock.advance(timedelta(days=1))
+
+    assert engine.get_display_realized_pnl_account(
+        tenant_id=tenant_id,
+        broker_account_id=broker_account_id,
+    ) == pytest.approx(0.0)
+    snap = engine.get_snapshot(
+        tenant_id=tenant_id,
+        broker_account_id=broker_account_id,
+        strategy_id=strategy_id,
+    )
+    assert snap is not None
+    assert snap.realized_pnl == pytest.approx(0.0)

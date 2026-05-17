@@ -345,6 +345,8 @@ class PnLEngine:
         snap = self._get_snapshot(tenant_id, broker_account_id, strategy_id)
         if snap is None:
             return None
+        self._reset_if_new_day(snap, self._clock.now_utc())
+        self._state_store.upsert_snapshot(snap)
         return float(snap.realized_pnl) + float(snap.net_open_qty) * float(snap.open_avg_price)
 
     # Update unrealized PnL and exposure for a snapshot.
@@ -496,8 +498,11 @@ class PnLEngine:
             tenant_id=tenant_id,
             broker_account_id=broker_account_id,
         )
+        now = self._clock.now_utc()
         total = 0.0
         for snap in snaps:
+            self._reset_if_new_day(snap, now)
+            self._state_store.upsert_snapshot(snap)
             total += float(snap.realized_pnl or 0.0) + float(snap.net_open_qty or 0) * float(
                 snap.open_avg_price or 0.0
             )

@@ -3,6 +3,7 @@ import types
 from datetime import datetime, timezone
 from types import SimpleNamespace
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import app.server as server
@@ -32,6 +33,78 @@ def test_callable_behaviour_placeholder(name):
     mod = importlib.import_module(MODULE_PATH)
     obj = getattr(mod, name)
     assert obj is not None
+
+
+@pytest.mark.asyncio
+async def test_get_my_trades_passes_account_and_time_filters(monkeypatch):
+    tenant_routes = importlib.import_module("app.dashboard.tenant_routes")
+    from_time = datetime(2026, 5, 17, 0, 0, tzinfo=timezone.utc)
+    to_time = datetime(2026, 5, 17, 23, 59, tzinfo=timezone.utc)
+    calls = []
+
+    def _fetch_trades_for_tenant(**kwargs):
+        calls.append(kwargs)
+        return [
+            {
+                "trade_id": "T-fresh",
+                "tenant_id": "tenant-123",
+                "broker_account_id": "acc-1",
+            }
+        ]
+
+    monkeypatch.setattr(
+        tenant_routes,
+        "fetch_trades_for_tenant",
+        _fetch_trades_for_tenant,
+    )
+
+    payload = await tenant_routes.get_my_trades(
+        ctx=TenantContext(
+            tenant_id=TenantId("tenant-123"),
+            broker_account_ids=("acc-1",),
+        ),
+        broker_account_id=BrokerAccountId("acc-1"),
+        from_time=from_time,
+        to_time=to_time,
+        limit=25,
+    )
+
+    assert payload["tenant_id"] == "tenant-123"
+    assert payload["count"] == 1
+    assert payload["trades"][0]["trade_id"] == "T-fresh"
+    assert calls == [
+        {
+            "tenant_id": TenantId("tenant-123"),
+            "broker_account_id": BrokerAccountId("acc-1"),
+            "start_time": from_time,
+            "end_time": to_time,
+            "limit": 25,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_my_trades_rejects_unentitled_account(monkeypatch):
+    tenant_routes = importlib.import_module("app.dashboard.tenant_routes")
+    monkeypatch.setattr(
+        tenant_routes,
+        "fetch_trades_for_tenant",
+        lambda **kwargs: pytest.fail("fetch should not run for an unentitled account"),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await tenant_routes.get_my_trades(
+            ctx=TenantContext(
+                tenant_id=TenantId("tenant-123"),
+                broker_account_ids=("acc-1",),
+            ),
+            broker_account_id=BrokerAccountId("acc-2"),
+            from_time=None,
+            to_time=None,
+            limit=500,
+        )
+
+    assert exc_info.value.status_code == 404
 
 
 def test_tenant_routes_require_admin_key(monkeypatch):
