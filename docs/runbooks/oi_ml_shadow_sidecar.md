@@ -13,10 +13,10 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 | Area | State |
 |---|---|
 | Branch | `oi-ml-shadow-sidecar` |
-| Latest deployed sidecar commit | `b1c3993` |
+| Latest deployed sidecar commit | `7770232` |
 | OCI checkout | `/opt/phoenix/oi-ml-shadow-src` |
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
-| Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-b1c3993` |
+| Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-7770232` |
 | Container | `phoenix-oi-ml-shadow` |
 | Database tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`, `public.option_chain_validation_reports` |
 | Default scorer | `missing` in compose; deployed smoke override uses `constant` |
