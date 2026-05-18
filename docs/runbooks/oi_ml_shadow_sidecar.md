@@ -51,6 +51,7 @@ Recent validation:
 | Sidecar compose | `ops/compose/docker-compose.oi-ml-shadow.yml` | Done |
 | Broker proxy/session reuse | `ops/compose/docker-compose.oi-ml-shadow.yml`, `app/data/oi_snapshotter_runtime.py` | Done |
 | Provider-filter SQL typing | `app/data/option_chain_repository.py` | Done |
+| NSE web validation adapter | `app/data/nse_option_chain_provider.py`, `app/data/option_chain_validation.py`, `scripts/data/validate_nse_vs_angel_option_chain.py` | Done, validation-only |
 | Strategy scaffold | `app/strategies/oi_ml_ce_seller.py` | Done, fail-closed and disabled by default |
 
 ## Inputs Required Before a Candidate Can Pass
@@ -134,6 +135,45 @@ Earlier sidecar login timeouts were fixed by forwarding the same broker proxy
 environment used by the live backend and by reusing a read-only Angel quote
 session. The field-completeness gate is still open until a live market-window
 snapshot shows usable `iv` and fresh source timestamps.
+
+## NSE Cross-Validation
+
+NSE's public option-chain page can be used as an operator-triggered validation
+source for OI, volume, IV, bid, ask, and LTP. It must not be used as a live
+trading feed or order-routing dependency.
+
+Compare the latest stored Angel snapshot against a saved NSE payload:
+
+```bash
+python scripts/data/validate_nse_vs_angel_option_chain.py \
+  --expiry 2026-05-19 \
+  --decision-ts 2026-05-18T10:00:00+00:00 \
+  --nse-json-input /path/to/nse_option_chain.json
+```
+
+Fetch NSE directly, compare with the latest Angel snapshot from the previous
+15 minutes, and store normalized NSE rows as `provider='nse_web'` for audit:
+
+```bash
+python scripts/data/validate_nse_vs_angel_option_chain.py \
+  --expiry 2026-05-19 \
+  --lookback-minutes 15 \
+  --store-nse \
+  --output-json /tmp/nse_vs_angel_validation.json
+```
+
+The command prints a JSON report with:
+
+- matched contract count;
+- Angel-only and NSE-only contracts;
+- per-field differences outside configured tolerances;
+- missing IV counts by provider;
+- `validation_only=true` metadata.
+
+Default tolerances are intentionally narrow: exact OI, volume within `250` or
+`5%`, price fields within `0.10` or `1%`, and IV within `0.50` or `5%`. Use
+the `--*-tolerance` flags only for manual investigation; do not hide systematic
+provider drift by widening them permanently.
 
 ## Safe Operations
 
