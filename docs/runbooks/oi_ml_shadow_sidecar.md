@@ -24,6 +24,7 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 | Broker proxy/session | Sidecar now forwards backend broker proxy env and reuses the Angel quote session during the snapshotter session |
 | LightGBM support | Implemented with `lightgbm==4.6.0`; artifact paths must be explicit |
 | Continuous NSE validation | Enabled in deployed sidecar; reports stored in `public.option_chain_validation_reports` |
+| Snapshot validation window | `09:15`-`15:30` IST; trade-decision window remains `09:45`-`14:30` IST |
 | Live order routing | Not used by the sidecar |
 
 Recent validation:
@@ -151,7 +152,9 @@ trading feed or order-routing dependency.
 
 Automatic continuous validation is available inside the OI/ML sidecar and the
 sidecar compose defaults `OI_ML_ENABLE_NSE_VALIDATION=true`. When enabled, each
-captured Angel snapshot triggers:
+captured Angel snapshot triggers validation. The snapshot/validation window is
+separate from the entry window: data capture runs from `09:15` to `15:30` IST,
+while shadow trade decisions remain restricted to `09:45` to `14:30` IST.
 
 - an NSE web option-chain pull for the same underlying/expiry;
 - optional NSE quote persistence as `provider='nse_web'`;
@@ -164,6 +167,8 @@ Sidecar env:
 
 ```text
 OI_ML_ENABLE_NSE_VALIDATION=true
+OI_ML_SHADOW_SNAPSHOT_START_TIME=09:15
+OI_ML_SHADOW_SNAPSHOT_END_TIME=15:30
 OI_ML_NSE_VALIDATION_STORE_QUOTES=true
 OI_ML_NSE_VALIDATION_LOG_ALL=true
 OI_ML_NSE_VALIDATION_FAIL_ON_ERROR=false

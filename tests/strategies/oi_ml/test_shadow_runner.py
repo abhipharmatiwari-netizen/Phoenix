@@ -85,6 +85,21 @@ def test_load_shadow_runner_config_marks_explicit_expiry():
     assert cfg.expiry_is_explicit is True
 
 
+def test_load_shadow_runner_config_reads_snapshot_window():
+    cfg = load_shadow_runner_config(
+        env={
+            "OI_ML_SHADOW_ENABLED": "true",
+            "OI_ML_SHADOW_SNAPSHOT_START_TIME": "09:20",
+            "OI_ML_SHADOW_SNAPSHOT_END_TIME": "15:25",
+        }
+    )
+
+    assert cfg.snapshot_start_time.hour == 9
+    assert cfg.snapshot_start_time.minute == 20
+    assert cfg.snapshot_end_time.hour == 15
+    assert cfg.snapshot_end_time.minute == 25
+
+
 def test_resolve_listed_expiry_uses_provider_calendar(monkeypatch):
     monkeypatch.setattr(
         shadow_runner,
@@ -210,11 +225,35 @@ def test_shadow_once_skips_outside_market_window_without_connecting(monkeypatch)
 
     result = run_shadow_once(
         cfg,
-        now=datetime(2026, 5, 19, 15, 1, tzinfo=IST),
+        now=datetime(2026, 5, 19, 22, 1, tzinfo=IST),
     )
 
     assert result.decision_action == "NO_TRADE"
     assert result.reason == "outside_shadow_window"
+
+
+def test_shadow_once_captures_snapshot_inside_snapshot_window_before_entry(monkeypatch):
+    def fail_decision(*args, **kwargs):
+        raise AssertionError("decision engine should not run outside entry window")
+
+    monkeypatch.setattr(shadow_runner, "get_control_plane_dsn", lambda: "dsn")
+    monkeypatch.setattr(shadow_runner, "connect_with_retry", lambda *_, **__: FakeConn())
+    monkeypatch.setattr(shadow_runner, "_capture_snapshot", lambda cfg: 220)
+    monkeypatch.setattr(shadow_runner, "OiMlCeDecisionEngine", fail_decision)
+    cfg = OiMlShadowRunnerConfig(
+        enabled=True,
+        expiry=date(2026, 5, 21),
+        market_window_only=True,
+    )
+
+    result = run_shadow_once(
+        cfg,
+        now=datetime(2026, 5, 19, 9, 20, tzinfo=IST),
+    )
+
+    assert result.decision_action == "NO_TRADE"
+    assert result.reason == "outside_entry_window"
+    assert result.snapshot_stored_rows == 220
 
 
 class FakeConn:

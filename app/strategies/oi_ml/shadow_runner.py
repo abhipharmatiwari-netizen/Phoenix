@@ -45,6 +45,8 @@ class OiMlShadowRunnerConfig:
     market_window_only: bool = True
     start_time: time = time(9, 45)
     end_time: time = time(14, 30)
+    snapshot_start_time: time = time(9, 15)
+    snapshot_end_time: time = time(15, 30)
     capture_snapshot: bool = True
     scorer_mode: str = "missing"
     constant_probability: float = 0.0
@@ -88,6 +90,16 @@ def load_shadow_runner_config(
         market_window_only=_bool(source.get("OI_ML_SHADOW_MARKET_WINDOW_ONLY"), default=True),
         start_time=_parse_time(source.get("OI_ML_SHADOW_START_TIME"), time(9, 45)),
         end_time=_parse_time(source.get("OI_ML_SHADOW_END_TIME"), time(14, 30)),
+        snapshot_start_time=_parse_time(
+            source.get("OI_ML_SHADOW_SNAPSHOT_START_TIME")
+            or source.get("OI_SNAPSHOTTER_START_TIME"),
+            time(9, 15),
+        ),
+        snapshot_end_time=_parse_time(
+            source.get("OI_ML_SHADOW_SNAPSHOT_END_TIME")
+            or source.get("OI_SNAPSHOTTER_END_TIME"),
+            time(15, 30),
+        ),
         capture_snapshot=_bool(source.get("OI_ML_SHADOW_CAPTURE_SNAPSHOT"), default=True),
         scorer_mode=str(source.get("OI_ML_SHADOW_SCORER") or "missing").strip().lower(),
         constant_probability=_float(source.get("OI_ML_SHADOW_CONSTANT_PROBABILITY"), 0.0),
@@ -127,14 +139,26 @@ def run_shadow_once(
         return OiMlShadowRunResult(decision_action="DISABLED", reason="shadow_runner_disabled")
 
     current = (now or datetime.now(IST)).astimezone(IST)
-    if config.market_window_only and not _within_window(current, config.start_time, config.end_time):
+    inside_entry_window = _within_window(current, config.start_time, config.end_time)
+    inside_snapshot_window = _within_window(
+        current,
+        config.snapshot_start_time,
+        config.snapshot_end_time,
+    )
+    if config.market_window_only and not inside_entry_window and not inside_snapshot_window:
         return OiMlShadowRunResult(decision_action="NO_TRADE", reason="outside_shadow_window")
 
     snapshot_stored = 0
     dsn = get_control_plane_dsn()
     with connect_with_retry(dsn, autocommit=False) as conn:
-        if config.capture_snapshot:
+        if config.capture_snapshot and (not config.market_window_only or inside_snapshot_window):
             snapshot_stored = _capture_snapshot(config)
+        if config.market_window_only and not inside_entry_window:
+            return OiMlShadowRunResult(
+                decision_action="NO_TRADE",
+                reason="outside_entry_window",
+                snapshot_stored_rows=snapshot_stored,
+            )
 
         repository = OptionChainRepository(conn)
         scorer = _build_scorer(config)
