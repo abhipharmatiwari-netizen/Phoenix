@@ -13,14 +13,15 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 | Area | State |
 |---|---|
 | Branch | `oi-ml-shadow-sidecar` |
-| Latest deployed sidecar commit | `8a39742` |
+| Latest deployed sidecar commit | `9e91b77` |
 | OCI checkout | `/opt/phoenix/oi-ml-shadow-src` |
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
-| Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-8a39742` |
+| Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-9e91b77` |
 | Container | `phoenix-oi-ml-shadow` |
 | Database tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents` |
 | Default scorer | `missing` in compose; deployed smoke override uses `constant` |
 | Smoke scorer currently used | `OI_ML_SHADOW_SCORER=constant`, probability `0.64`, MAE premium `40` |
+| Broker proxy/session | Sidecar now forwards backend broker proxy env and reuses the Angel quote session during the snapshotter session |
 | LightGBM support | Implemented with `lightgbm==4.6.0`; artifact paths must be explicit |
 | Live order routing | Not used by the sidecar |
 
@@ -30,8 +31,9 @@ Recent validation:
 - Sidecar startup resolved provider-listed NIFTY expiry from Angel scrip master:
   `calendar_default=2026-05-21 listed=2026-05-19`.
 - Live backend and nginx were healthy after restart: `/readyz=200`, `/health=200`.
-- Shadow intent count remained `0` during off-market verification, expected because
-  `OI_ML_SHADOW_MARKET_WINDOW_ONLY=true`.
+- Off-market smoke on 2026-05-18 21:11 IST proved Angel login through proxy and
+  FULL/LTP quote calls: `220` NIFTY rows fetched/stored, `0` shadow intents
+  because scorer was fail-closed for the smoke run.
 
 ## Implemented Progress
 
@@ -47,6 +49,8 @@ Recent validation:
 | LightGBM shadow scorer mode | `app/strategies/oi_ml/shadow_runner.py` | Done |
 | Shadow order-intent lifecycle | `app/strategies/oi_ml/order_intents.py`, `app/strategies/oi_ml/shadow_lifecycle.py` | Done |
 | Sidecar compose | `ops/compose/docker-compose.oi-ml-shadow.yml` | Done |
+| Broker proxy/session reuse | `ops/compose/docker-compose.oi-ml-shadow.yml`, `app/data/oi_snapshotter_runtime.py` | Done |
+| Provider-filter SQL typing | `app/data/option_chain_repository.py` | Done |
 | Strategy scaffold | `app/strategies/oi_ml_ce_seller.py` | Done, fail-closed and disabled by default |
 
 ## Inputs Required Before a Candidate Can Pass
@@ -94,7 +98,9 @@ caching.
 ## Remaining Promotion Gate
 
 Do not promote this strategy beyond shadow until a market-window snapshot proves
-real broker FULL quote completeness.
+real broker FULL quote completeness. The 2026-05-18 off-market smoke proved
+connectivity and storage, but all off-market rows were flagged because `iv` was
+missing and source timestamps were stale.
 
 Required proof from `public.option_chain_1m` for the active listed NIFTY expiry:
 
@@ -124,9 +130,10 @@ Expected result before promotion:
 - Any `flagged_rows` must be explained and must not include required candidate
   strikes.
 
-The transient off-market broker preflight timed out during Angel login, so the
-field-completeness gate is still open. This is a deployment proof issue, not a
-reason to assume missing fields are acceptable.
+Earlier sidecar login timeouts were fixed by forwarding the same broker proxy
+environment used by the live backend and by reusing a read-only Angel quote
+session. The field-completeness gate is still open until a live market-window
+snapshot shows usable `iv` and fresh source timestamps.
 
 ## Safe Operations
 
@@ -142,7 +149,7 @@ Restart the sidecar with smoke constants:
 
 ```bash
 cd /opt/phoenix
-IMAGE_TAG=oi-ml-shadow-8a39742 \
+IMAGE_TAG=oi-ml-shadow-9e91b77 \
 OI_ML_SHADOW_SCORER=constant \
 OI_ML_SHADOW_CONSTANT_PROBABILITY=0.64 \
 OI_ML_SHADOW_CONSTANT_MAE_PREMIUM=40 \

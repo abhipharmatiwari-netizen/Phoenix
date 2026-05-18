@@ -21,7 +21,7 @@ OI/ML shadow sidecar progress was updated on 2026-05-18 IST.
 | Web container | `phoenix-oci-web`, image `phoenix-local-nginx:local-1a2cc47`, healthy |
 | Database | VM-local `phoenix-oci-postgres` container, `postgres:16-alpine`, no Docker healthcheck |
 | Watchdog | `phoenix-oci-watchdog`, `docker:cli`; actively stops/starts nginx when backend health fails |
-| OI/ML shadow sidecar | `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-8a39742`, dry-run only |
+| OI/ML shadow sidecar | `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-9e91b77`, dry-run only |
 | Backend command | `python -m app.main` |
 | Public backend exposure | backend port `8080` is container-only; nginx exposes host ports `80` and `8443` |
 | Health checks | backend container: `/health`, `/ready`, `/readyz`, `/health/summary`; nginx/host: `/health`, `/readyz` |

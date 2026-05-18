@@ -55,14 +55,16 @@ Verified on 2026-05-18 IST:
 | Purpose | Dry-run OI/ML CE seller validation; no live order routing |
 | Checkout | `/opt/phoenix/oi-ml-shadow-src` |
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
-| Image | `phoenix-oi-ml-shadow:oi-ml-shadow-8a39742` |
+| Image | `phoenix-oi-ml-shadow:oi-ml-shadow-9e91b77` |
 | Container | `phoenix-oi-ml-shadow`, no host ports published |
 | Scorer | Smoke deployment uses `OI_ML_SHADOW_SCORER=constant` |
 | Risk posture | `OI_ML_SHADOW_ALLOW_NAKED=false`; sidecar records shadow intents only |
 | Tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents` |
 | Expiry handling | Startup resolves listed NIFTY expiry from Angel scrip master; observed `calendar_default=2026-05-21 listed=2026-05-19` |
 | Input hardening | Provider now fetches/stamps NIFTY spot and India VIX context LTPs for option-chain rows |
-| Remaining gate | Market-session FULL quote field completeness is not yet proven |
+| Broker proxy/session | Sidecar forwards backend broker proxy env and reuses the Angel quote session during snapshotting |
+| Smoke proof | 2026-05-18 21:11 IST off-market run fetched/stored `220` NIFTY rows through Angel FULL/LTP quote APIs; no shadow intent was recorded |
+| Remaining gate | Market-session FULL quote field completeness is not yet proven; off-market smoke still had missing `iv` and stale source timestamps |
 
 Operator runbook: [OI/ML Shadow Sidecar Runbook](runbooks/oi_ml_shadow_sidecar.md).
 

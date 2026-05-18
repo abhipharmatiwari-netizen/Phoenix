@@ -46,11 +46,13 @@ routing is enabled.
 
 Current sidecar evidence as of 2026-05-18:
 
-- image: `phoenix-oi-ml-shadow:oi-ml-shadow-8a39742`
+- image: `phoenix-oi-ml-shadow:oi-ml-shadow-9e91b77`
 - checkout: `/opt/phoenix/oi-ml-shadow-src`
 - compose: `/opt/phoenix/oi-ml-shadow.yml`
 - tables: `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`
 - scorer: smoke deployment uses `OI_ML_SHADOW_SCORER=constant`
+- broker access: sidecar forwards backend broker proxy env and reuses the Angel
+  quote session during snapshotting
 - promotion blocker: market-session Angel FULL quote field completeness still
   must be proven
 

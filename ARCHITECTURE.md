@@ -25,7 +25,7 @@ Verified on 2026-05-17 from the running OCI VM:
 - Web: `phoenix-oci-web`, image `phoenix-local-nginx:local-1a2cc47`
 - Database: VM-local `phoenix-oci-postgres`, image `postgres:16-alpine`
 - Watchdog: `phoenix-oci-watchdog`, image `docker:cli`
-- OI/ML shadow sidecar: `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-8a39742`, dry-run only, no host ports
+- OI/ML shadow sidecar: `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-9e91b77`, dry-run only, no host ports
 - Runtime health: backend `/health`, `/ready`, `/readyz`, and `/health/summary` return 200 from inside the backend container
 - Health evidence: `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE`
 
