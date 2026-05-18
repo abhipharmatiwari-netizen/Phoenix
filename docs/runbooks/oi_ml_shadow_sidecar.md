@@ -13,16 +13,17 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 | Area | State |
 |---|---|
 | Branch | `oi-ml-shadow-sidecar` |
-| Latest deployed sidecar commit | `9e91b77` |
+| Latest deployed sidecar commit | `b1c3993` |
 | OCI checkout | `/opt/phoenix/oi-ml-shadow-src` |
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
-| Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-9e91b77` |
+| Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-b1c3993` |
 | Container | `phoenix-oi-ml-shadow` |
 | Database tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`, `public.option_chain_validation_reports` |
 | Default scorer | `missing` in compose; deployed smoke override uses `constant` |
 | Smoke scorer currently used | `OI_ML_SHADOW_SCORER=constant`, probability `0.64`, MAE premium `40` |
 | Broker proxy/session | Sidecar now forwards backend broker proxy env and reuses the Angel quote session during the snapshotter session |
 | LightGBM support | Implemented with `lightgbm==4.6.0`; artifact paths must be explicit |
+| Continuous NSE validation | Enabled in deployed sidecar; reports stored in `public.option_chain_validation_reports` |
 | Live order routing | Not used by the sidecar |
 
 Recent validation:
@@ -34,6 +35,11 @@ Recent validation:
 - Off-market smoke on 2026-05-18 21:11 IST proved Angel login through proxy and
   FULL/LTP quote calls: `220` NIFTY rows fetched/stored, `0` shadow intents
   because scorer was fail-closed for the smoke run.
+- Off-market validation smoke on 2026-05-18 22:13 IST proved automatic
+  NSE-validation report persistence: `report_id=1`, `220` Angel rows,
+  `0` NSE comparable rows, status `MISMATCH/WARN`. This is expected to remain a
+  promotion blocker until a market-window run shows fresh Angel IV and NSE
+  comparable contracts.
 
 ## Implemented Progress
 
