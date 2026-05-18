@@ -20,7 +20,7 @@ WHERE underlying = %(underlying)s
   AND expiry = %(expiry)s
   AND snapshot_ts <= %(decision_ts)s
   AND snapshot_ts >= %(min_snapshot_ts)s
-  AND (%(provider)s IS NULL OR provider = %(provider)s)
+  AND (%(provider)s::text IS NULL OR provider = %(provider)s::text)
 ORDER BY snapshot_ts DESC, strike ASC, option_type ASC
 """
 
@@ -39,7 +39,7 @@ WHERE underlying = %(underlying)s
   AND option_type = %(option_type)s
   AND snapshot_ts >= %(start_ts)s
   AND snapshot_ts <= %(end_ts)s
-  AND (%(provider)s IS NULL OR provider = %(provider)s)
+  AND (%(provider)s::text IS NULL OR provider = %(provider)s::text)
 ORDER BY snapshot_ts ASC
 """
 

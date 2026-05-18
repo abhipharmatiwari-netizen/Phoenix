@@ -96,6 +96,7 @@ def test_fetch_latest_snapshot_returns_only_latest_rows_at_or_before_decision_ti
     assert [quote.strike for quote in quotes] == [25200, 25300]
     sql, params = conn.cursor_obj.executed[0]
     assert "snapshot_ts <= %(decision_ts)s" in sql
+    assert "%(provider)s::text IS NULL" in sql
     assert params["underlying"] == "NIFTY"
     assert params["provider"] == "angel"
 
@@ -117,5 +118,6 @@ def test_fetch_candidate_window_filters_exact_contract_and_time_window():
     assert len(quotes) == 2
     sql, params = conn.cursor_obj.executed[0]
     assert "strike = %(strike)s" in sql
+    assert "%(provider)s::text IS NULL" in sql
     assert params["option_type"] == "CE"
     assert params["provider"] is None
