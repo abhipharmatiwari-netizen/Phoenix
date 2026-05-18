@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta, timezone
+import logging
 import os
+import threading
 from typing import Mapping
 
 from app.core import angel_login
@@ -14,6 +16,8 @@ from app.data.angel_option_chain_provider import AngelOptionChainProvider
 from app.data.oi_snapshotter import OiSnapshotter, SnapshotResult
 from app.data.option_chain_store import OptionChainStore
 from app.data.postgres import connect_with_retry, get_control_plane_dsn
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,19 @@ class OiSnapshotterRuntimeConfig:
     cadence_seconds: int = 60
     max_snapshots: int | None = None
     batch_size: int = 50
+    reuse_broker_session: bool = True
+    session_max_age_minutes: int = 600
+
+
+@dataclass(frozen=True)
+class _CachedAngelQuoteClient:
+    client: AngelOrderClient
+    created_at_utc: datetime
+    broker_account_id: str | None
+
+
+_CLIENT_CACHE_LOCK = threading.Lock()
+_CACHED_CLIENT: _CachedAngelQuoteClient | None = None
 
 
 def load_runtime_config(
@@ -70,6 +87,15 @@ def load_runtime_config(
             else _optional_int(source.get("OI_SNAPSHOTTER_MAX_SNAPSHOTS"), minimum=1)
         ),
         batch_size=_int_value(source.get("OI_SNAPSHOTTER_BATCH_SIZE"), 50, minimum=1),
+        reuse_broker_session=_bool_value(
+            source.get("OI_SNAPSHOTTER_REUSE_BROKER_SESSION"),
+            default=True,
+        ),
+        session_max_age_minutes=_int_value(
+            source.get("OI_SNAPSHOTTER_SESSION_MAX_AGE_MINUTES"),
+            600,
+            minimum=5,
+        ),
     )
 
 
@@ -79,14 +105,7 @@ def run_runtime(config: OiSnapshotterRuntimeConfig) -> list[SnapshotResult]:
     if config.provider != "angel":
         raise ValueError(f"unsupported OI snapshotter provider={config.provider!r}")
 
-    tokens = angel_login.angel_login_and_get_tokens()
-    client = AngelOrderClient(
-        jwt_token=tokens["jwtToken"],
-        api_key=tokens["API_KEY"],
-        client_local_ip=tokens.get("client_local_ip"),
-        client_public_ip=tokens.get("client_public_ip"),
-        mac_address=tokens.get("mac_address"),
-    )
+    client = _get_angel_quote_client(config)
     provider = AngelOptionChainProvider(
         quote_fetcher=client,
         scrip_master=load_scrip_master(),
@@ -113,6 +132,77 @@ def run_runtime(config: OiSnapshotterRuntimeConfig) -> list[SnapshotResult]:
             cadence_seconds=config.cadence_seconds,
             max_snapshots=config.max_snapshots,
         )
+
+
+def _get_angel_quote_client(config: OiSnapshotterRuntimeConfig) -> AngelOrderClient:
+    if not config.reuse_broker_session:
+        return _login_angel_quote_client()
+
+    global _CACHED_CLIENT
+    now_utc = datetime.now(timezone.utc)
+    with _CLIENT_CACHE_LOCK:
+        if _CACHED_CLIENT is not None and not _cache_expired(
+            _CACHED_CLIENT,
+            now_utc=now_utc,
+            max_age_minutes=config.session_max_age_minutes,
+        ):
+            return _CACHED_CLIENT.client
+
+        client = _login_angel_quote_client()
+        _CACHED_CLIENT = _CachedAngelQuoteClient(
+            client=client,
+            created_at_utc=now_utc,
+            broker_account_id=os.getenv("HUB_DEFAULT_BROKER_ACCOUNT_ID") or None,
+        )
+        return client
+
+
+def _login_angel_quote_client() -> AngelOrderClient:
+    tokens = angel_login.angel_login_and_get_tokens()
+    broker_account_id = os.getenv("HUB_DEFAULT_BROKER_ACCOUNT_ID") or None
+    proxy_configured = bool(
+        os.getenv("ANGEL_HTTPS_PROXY")
+        or os.getenv("HTTPS_PROXY")
+        or os.getenv("https_proxy")
+    )
+    logger.info(
+        "oi_snapshotter Angel quote session established broker_account_id=%s proxy_configured=%s",
+        broker_account_id or "default",
+        proxy_configured,
+    )
+    return AngelOrderClient(
+        jwt_token=tokens["jwtToken"],
+        api_key=tokens["API_KEY"],
+        broker_account_id=broker_account_id,
+        client_local_ip=tokens.get("client_local_ip"),
+        client_public_ip=tokens.get("client_public_ip"),
+        mac_address=tokens.get("mac_address"),
+    )
+
+
+def _cache_expired(
+    cached: _CachedAngelQuoteClient,
+    *,
+    now_utc: datetime,
+    max_age_minutes: int,
+) -> bool:
+    created = cached.created_at_utc
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    max_age = timedelta(minutes=max(5, int(max_age_minutes)))
+    return now_utc - created >= max_age
+
+
+def clear_cached_angel_quote_client() -> None:
+    """Clear the cached Angel quote session.
+
+    Primarily useful for tests and supervised recovery tooling. The sidecar
+    still creates no order-capable route; this cache only avoids repeated
+    read-only quote logins during the same market session.
+    """
+    global _CACHED_CLIENT
+    with _CLIENT_CACHE_LOCK:
+        _CACHED_CLIENT = None
 
 
 def _parse_date(value: str | date | None) -> date | None:
@@ -154,6 +244,7 @@ def _optional_int(value: object, *, minimum: int) -> int | None:
 
 __all__ = [
     "OiSnapshotterRuntimeConfig",
+    "clear_cached_angel_quote_client",
     "load_runtime_config",
     "run_runtime",
 ]
