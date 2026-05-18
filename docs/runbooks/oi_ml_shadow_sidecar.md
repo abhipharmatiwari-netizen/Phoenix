@@ -18,7 +18,7 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
 | Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-9e91b77` |
 | Container | `phoenix-oi-ml-shadow` |
-| Database tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents` |
+| Database tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`, `public.option_chain_validation_reports` |
 | Default scorer | `missing` in compose; deployed smoke override uses `constant` |
 | Smoke scorer currently used | `OI_ML_SHADOW_SCORER=constant`, probability `0.64`, MAE premium `40` |
 | Broker proxy/session | Sidecar now forwards backend broker proxy env and reuses the Angel quote session during the snapshotter session |
@@ -52,6 +52,7 @@ Recent validation:
 | Broker proxy/session reuse | `ops/compose/docker-compose.oi-ml-shadow.yml`, `app/data/oi_snapshotter_runtime.py` | Done |
 | Provider-filter SQL typing | `app/data/option_chain_repository.py` | Done |
 | NSE web validation adapter | `app/data/nse_option_chain_provider.py`, `app/data/option_chain_validation.py`, `scripts/data/validate_nse_vs_angel_option_chain.py` | Done, validation-only |
+| Continuous NSE validation loop | `app/data/option_chain_realtime_validator.py`, `app/data/option_chain_validation_store.py`, `migrations/023_option_chain_validation_reports.sql` | Done, opt-in via env |
 | Strategy scaffold | `app/strategies/oi_ml_ce_seller.py` | Done, fail-closed and disabled by default |
 
 ## Inputs Required Before a Candidate Can Pass
@@ -142,6 +143,31 @@ NSE's public option-chain page can be used as an operator-triggered validation
 source for OI, volume, IV, bid, ask, and LTP. It must not be used as a live
 trading feed or order-routing dependency.
 
+Automatic continuous validation is available inside the OI/ML sidecar and the
+sidecar compose defaults `OI_ML_ENABLE_NSE_VALIDATION=true`. When enabled, each
+captured Angel snapshot triggers:
+
+- an NSE web option-chain pull for the same underlying/expiry;
+- optional NSE quote persistence as `provider='nse_web'`;
+- an Angel-vs-NSE comparison for OI, volume, IV, bid, ask, and LTP;
+- one compact container-log observation per snapshot, with warnings for
+  mismatches, provider-only contracts, missing IV, or fetch errors;
+- a full JSON report in `public.option_chain_validation_reports` for EOD review.
+
+Sidecar env:
+
+```text
+OI_ML_ENABLE_NSE_VALIDATION=true
+OI_ML_NSE_VALIDATION_STORE_QUOTES=true
+OI_ML_NSE_VALIDATION_LOG_ALL=true
+OI_ML_NSE_VALIDATION_FAIL_ON_ERROR=false
+OI_ML_NSE_VALIDATION_TIMEOUT_SECONDS=10
+```
+
+`FAIL_ON_ERROR=false` is deliberate for shadow mode: validation failures are
+logged and persisted without stopping Angel snapshot ingestion. Do not wire this
+table into live order routing.
+
 Compare the latest stored Angel snapshot against a saved NSE payload:
 
 ```bash
@@ -175,6 +201,39 @@ Default tolerances are intentionally narrow: exact OI, volume within `250` or
 the `--*-tolerance` flags only for manual investigation; do not hide systematic
 provider drift by widening them permanently.
 
+End-of-day summary:
+
+```bash
+docker exec phoenix-oci-postgres psql -U phoenix_app -d phoenix -c "
+SELECT
+  status,
+  severity,
+  count(*) AS reports,
+  sum(mismatch_count) AS mismatches,
+  sum(primary_only_count) AS angel_only,
+  sum(reference_only_count) AS nse_only,
+  sum(missing_primary_iv) AS missing_angel_iv,
+  sum(missing_reference_iv) AS missing_nse_iv
+FROM public.option_chain_validation_reports
+WHERE validation_ts::date = CURRENT_DATE
+GROUP BY status, severity
+ORDER BY status, severity;"
+```
+
+Recent abnormal observations:
+
+```bash
+docker exec phoenix-oci-postgres psql -U phoenix_app -d phoenix -c "
+SELECT validation_ts, snapshot_ts, underlying, expiry, status, severity,
+       compared_contracts, mismatch_count, primary_only_count,
+       reference_only_count, missing_primary_iv, missing_reference_iv
+FROM public.option_chain_validation_reports
+WHERE validation_ts::date = CURRENT_DATE
+  AND status <> 'OK'
+ORDER BY validation_ts DESC
+LIMIT 50;"
+```
+
 ## Safe Operations
 
 Inspect sidecar status:
@@ -203,7 +262,8 @@ Validate tables:
 ```bash
 docker exec phoenix-oci-postgres psql -U phoenix_app -d phoenix \
   -c "\dt public.option_chain_1m" \
-  -c "\dt public.oi_ml_shadow_order_intents"
+  -c "\dt public.oi_ml_shadow_order_intents" \
+  -c "\dt public.option_chain_validation_reports"
 ```
 
 Check shadow intent count:

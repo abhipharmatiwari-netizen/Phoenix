@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 import logging
 import time as time_module
-from typing import Callable, Sequence
+from typing import Callable, Protocol, Sequence
 from zoneinfo import ZoneInfo
 
 from app.data.option_chain_provider import (
@@ -28,6 +28,21 @@ class SnapshotResult:
     fetched_count: int
     stored_count: int
     unusable_for_live_count: int
+    validation_status: str | None = None
+    validation_report_id: int | None = None
+    validation_mismatch_count: int | None = None
+
+
+class OptionChainSnapshotValidator(Protocol):
+    def validate(
+        self,
+        *,
+        primary_quotes: Sequence[OptionQuote],
+        underlying: str,
+        expiry: date,
+        snapshot_ts: datetime,
+    ) -> object | None:
+        ...
 
 
 class OiSnapshotter:
@@ -38,11 +53,13 @@ class OiSnapshotter:
         *,
         provider: OptionChainProvider,
         store: object,
+        validator: OptionChainSnapshotValidator | None = None,
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.provider = provider
         self.store = store
+        self.validator = validator
         self.clock = clock or (lambda: datetime.now(IST))
         self.sleep = sleep or time_module.sleep
 
@@ -63,6 +80,32 @@ class OiSnapshotter:
         )
         stored_count = int(self.store.upsert_quotes(quotes))
         unusable_count = sum(1 for quote in quotes if not is_quote_usable_for_live_entry(quote))
+        validation_status = None
+        validation_report_id = None
+        validation_mismatch_count = None
+        if self.validator is not None:
+            try:
+                validation = self.validator.validate(
+                    primary_quotes=quotes,
+                    underlying=underlying,
+                    expiry=expiry,
+                    snapshot_ts=snapshot,
+                )
+                validation_status = getattr(validation, "status", None)
+                validation_report_id = getattr(validation, "report_id", None)
+                validation_mismatch_count = getattr(validation, "mismatch_count", None)
+            except Exception as exc:
+                logger.exception(
+                    "oi_snapshot validation failed provider=%s underlying=%s expiry=%s snapshot_ts=%s error=%s",
+                    getattr(self.provider, "provider_name", "unknown"),
+                    str(underlying).strip().upper(),
+                    expiry.isoformat(),
+                    snapshot.isoformat(),
+                    exc,
+                )
+                validator_config = getattr(self.validator, "config", None)
+                if getattr(validator_config, "fail_on_error", False):
+                    raise
         result = SnapshotResult(
             provider=str(getattr(self.provider, "provider_name", "unknown")),
             underlying=str(underlying).strip().upper(),
@@ -71,15 +114,21 @@ class OiSnapshotter:
             fetched_count=len(quotes),
             stored_count=stored_count,
             unusable_for_live_count=unusable_count,
+            validation_status=validation_status,
+            validation_report_id=validation_report_id,
+            validation_mismatch_count=validation_mismatch_count,
         )
         logger.info(
-            "oi_snapshot stored provider=%s underlying=%s expiry=%s fetched=%d stored=%d unusable=%d",
+            "oi_snapshot stored provider=%s underlying=%s expiry=%s fetched=%d stored=%d unusable=%d validation_status=%s validation_report_id=%s validation_mismatches=%s",
             result.provider,
             result.underlying,
             result.expiry.isoformat(),
             result.fetched_count,
             result.stored_count,
             result.unusable_for_live_count,
+            result.validation_status,
+            result.validation_report_id,
+            result.validation_mismatch_count,
         )
         return result
 
@@ -133,6 +182,7 @@ def _seconds_to_next_bucket(now: datetime, cadence_seconds: int) -> float:
 
 __all__ = [
     "IST",
+    "OptionChainSnapshotValidator",
     "OiSnapshotter",
     "SnapshotResult",
 ]

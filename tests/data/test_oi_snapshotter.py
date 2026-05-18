@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from app.data.oi_snapshotter import OiSnapshotter
@@ -48,6 +49,15 @@ class FakeStore:
         return len(quotes)
 
 
+class FakeValidator:
+    def __init__(self):
+        self.calls = []
+
+    def validate(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(status="OK", report_id=123, mismatch_count=0)
+
+
 def test_snapshotter_capture_once_buckets_timestamp_and_persists_quotes():
     provider = FakeProvider()
     store = FakeStore()
@@ -70,6 +80,29 @@ def test_snapshotter_capture_once_buckets_timestamp_and_persists_quotes():
     assert result.unusable_for_live_count == 0
     assert provider.calls[0][2] == result.snapshot_ts
     assert store.quotes[0].trading_symbol == "NIFTY19MAY2625200CE"
+
+
+def test_snapshotter_capture_once_runs_validator_after_persisting_quotes():
+    provider = FakeProvider()
+    store = FakeStore()
+    validator = FakeValidator()
+    snapshotter = OiSnapshotter(
+        provider=provider,
+        store=store,
+        validator=validator,
+        clock=lambda: datetime(2026, 5, 19, 10, 0, 23, tzinfo=IST),
+    )
+
+    result = snapshotter.capture_once(
+        underlying="NIFTY",
+        expiry=date(2026, 5, 19),
+    )
+
+    assert result.validation_status == "OK"
+    assert result.validation_report_id == 123
+    assert result.validation_mismatch_count == 0
+    assert validator.calls[0]["primary_quotes"] == store.quotes
+    assert validator.calls[0]["snapshot_ts"] == result.snapshot_ts
 
 
 def test_snapshotter_run_session_can_be_bounded_for_supervised_jobs():

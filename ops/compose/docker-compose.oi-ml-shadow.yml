@@ -33,6 +33,7 @@ services:
           export PGPASSWORD="$$(cat /run/secrets/control_plane_pg_password)"
           psql -v ON_ERROR_STOP=1 -f /migrations/021_option_chain_1m.sql
           psql -v ON_ERROR_STOP=1 -f /migrations/022_oi_ml_shadow_order_intents.sql
+          psql -v ON_ERROR_STOP=1 -f /migrations/023_option_chain_validation_reports.sql
 
   oi-ml-shadow:
     image: phoenix-oi-ml-shadow:${IMAGE_TAG:-local}
@@ -94,6 +95,11 @@ services:
       OI_SNAPSHOTTER_ENABLED: "true"
       OI_SNAPSHOTTER_REUSE_BROKER_SESSION: "${OI_SNAPSHOTTER_REUSE_BROKER_SESSION:-true}"
       OI_SNAPSHOTTER_SESSION_MAX_AGE_MINUTES: "${OI_SNAPSHOTTER_SESSION_MAX_AGE_MINUTES:-600}"
+      OI_ML_ENABLE_NSE_VALIDATION: "${OI_ML_ENABLE_NSE_VALIDATION:-true}"
+      OI_ML_NSE_VALIDATION_STORE_QUOTES: "${OI_ML_NSE_VALIDATION_STORE_QUOTES:-true}"
+      OI_ML_NSE_VALIDATION_LOG_ALL: "${OI_ML_NSE_VALIDATION_LOG_ALL:-true}"
+      OI_ML_NSE_VALIDATION_FAIL_ON_ERROR: "${OI_ML_NSE_VALIDATION_FAIL_ON_ERROR:-false}"
+      OI_ML_NSE_VALIDATION_TIMEOUT_SECONDS: "${OI_ML_NSE_VALIDATION_TIMEOUT_SECONDS:-10}"
     volumes:
       - /run/secrets/control_plane_pg_password:/run/secrets/control_plane_pg_password:ro
       - /opt/phoenix/logs/oi-ml-shadow:/app/logs

@@ -14,7 +14,14 @@ from app.core.instruments_resolver import load_scrip_master
 from app.core.order_client import AngelOrderClient
 from app.data.angel_option_chain_provider import AngelOptionChainProvider
 from app.data.oi_snapshotter import OiSnapshotter, SnapshotResult
+from app.data.nse_option_chain_provider import NseOptionChainProvider, NseWebOptionChainClient
+from app.data.option_chain_realtime_validator import (
+    RealtimeOptionChainValidationConfig,
+    RealtimeOptionChainValidator,
+)
 from app.data.option_chain_store import OptionChainStore
+from app.data.option_chain_validation import OptionChainValidationConfig
+from app.data.option_chain_validation_store import OptionChainValidationReportStore
 from app.data.postgres import connect_with_retry, get_control_plane_dsn
 
 logger = logging.getLogger(__name__)
@@ -35,6 +42,18 @@ class OiSnapshotterRuntimeConfig:
     batch_size: int = 50
     reuse_broker_session: bool = True
     session_max_age_minutes: int = 600
+    nse_validation_enabled: bool = False
+    nse_validation_store_quotes: bool = True
+    nse_validation_log_all: bool = True
+    nse_validation_fail_on_error: bool = False
+    nse_validation_timeout_seconds: int = 10
+    nse_validation_oi_abs_tolerance: int = 0
+    nse_validation_volume_abs_tolerance: int = 250
+    nse_validation_volume_pct_tolerance: float = 0.05
+    nse_validation_price_abs_tolerance: float = 0.10
+    nse_validation_price_pct_tolerance: float = 0.01
+    nse_validation_iv_abs_tolerance: float = 0.50
+    nse_validation_iv_pct_tolerance: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -96,6 +115,63 @@ def load_runtime_config(
             600,
             minimum=5,
         ),
+        nse_validation_enabled=_bool_value(
+            source.get("OI_ML_ENABLE_NSE_VALIDATION")
+            or source.get("OI_CHAIN_NSE_VALIDATION_ENABLED"),
+            default=False,
+        ),
+        nse_validation_store_quotes=_bool_value(
+            source.get("OI_ML_NSE_VALIDATION_STORE_QUOTES"),
+            default=True,
+        ),
+        nse_validation_log_all=_bool_value(
+            source.get("OI_ML_NSE_VALIDATION_LOG_ALL"),
+            default=True,
+        ),
+        nse_validation_fail_on_error=_bool_value(
+            source.get("OI_ML_NSE_VALIDATION_FAIL_ON_ERROR"),
+            default=False,
+        ),
+        nse_validation_timeout_seconds=_int_value(
+            source.get("OI_ML_NSE_VALIDATION_TIMEOUT_SECONDS"),
+            10,
+            minimum=1,
+        ),
+        nse_validation_oi_abs_tolerance=_int_value(
+            source.get("OI_ML_NSE_VALIDATION_OI_ABS_TOLERANCE"),
+            0,
+            minimum=0,
+        ),
+        nse_validation_volume_abs_tolerance=_int_value(
+            source.get("OI_ML_NSE_VALIDATION_VOLUME_ABS_TOLERANCE"),
+            250,
+            minimum=0,
+        ),
+        nse_validation_volume_pct_tolerance=_float_value(
+            source.get("OI_ML_NSE_VALIDATION_VOLUME_PCT_TOLERANCE"),
+            0.05,
+            minimum=0.0,
+        ),
+        nse_validation_price_abs_tolerance=_float_value(
+            source.get("OI_ML_NSE_VALIDATION_PRICE_ABS_TOLERANCE"),
+            0.10,
+            minimum=0.0,
+        ),
+        nse_validation_price_pct_tolerance=_float_value(
+            source.get("OI_ML_NSE_VALIDATION_PRICE_PCT_TOLERANCE"),
+            0.01,
+            minimum=0.0,
+        ),
+        nse_validation_iv_abs_tolerance=_float_value(
+            source.get("OI_ML_NSE_VALIDATION_IV_ABS_TOLERANCE"),
+            0.50,
+            minimum=0.0,
+        ),
+        nse_validation_iv_pct_tolerance=_float_value(
+            source.get("OI_ML_NSE_VALIDATION_IV_PCT_TOLERANCE"),
+            0.05,
+            minimum=0.0,
+        ),
     )
 
 
@@ -113,10 +189,12 @@ def run_runtime(config: OiSnapshotterRuntimeConfig) -> list[SnapshotResult]:
     )
     dsn = config.dsn or get_control_plane_dsn()
     with connect_with_retry(dsn, autocommit=False) as conn:
-        snapshotter = OiSnapshotter(
-            provider=provider,
-            store=OptionChainStore(conn, commit=True),
-        )
+        store = OptionChainStore(conn, commit=True)
+        validator = _build_nse_validator(config, conn) if config.nse_validation_enabled else None
+        if validator is None:
+            snapshotter = OiSnapshotter(provider=provider, store=store)
+        else:
+            snapshotter = OiSnapshotter(provider=provider, store=store, validator=validator)
         if config.once:
             return [
                 snapshotter.capture_once(
@@ -132,6 +210,38 @@ def run_runtime(config: OiSnapshotterRuntimeConfig) -> list[SnapshotResult]:
             cadence_seconds=config.cadence_seconds,
             max_snapshots=config.max_snapshots,
         )
+
+
+def _build_nse_validator(
+    config: OiSnapshotterRuntimeConfig,
+    conn: object,
+) -> RealtimeOptionChainValidator:
+    nse_provider = NseOptionChainProvider(
+        NseWebOptionChainClient(
+            timeout_seconds=float(config.nse_validation_timeout_seconds),
+        )
+    )
+    quote_store = OptionChainStore(conn, commit=True) if config.nse_validation_store_quotes else None
+    return RealtimeOptionChainValidator(
+        reference_provider=nse_provider,
+        reference_quote_store=quote_store,
+        report_store=OptionChainValidationReportStore(conn, commit=True),
+        config=RealtimeOptionChainValidationConfig(
+            enabled=True,
+            store_reference_quotes=config.nse_validation_store_quotes,
+            log_all_observations=config.nse_validation_log_all,
+            fail_on_error=config.nse_validation_fail_on_error,
+            validation_config=OptionChainValidationConfig(
+                oi_abs_tolerance=config.nse_validation_oi_abs_tolerance,
+                volume_abs_tolerance=config.nse_validation_volume_abs_tolerance,
+                volume_pct_tolerance=config.nse_validation_volume_pct_tolerance,
+                price_abs_tolerance=config.nse_validation_price_abs_tolerance,
+                price_pct_tolerance=config.nse_validation_price_pct_tolerance,
+                iv_abs_tolerance=config.nse_validation_iv_abs_tolerance,
+                iv_pct_tolerance=config.nse_validation_iv_pct_tolerance,
+            ),
+        ),
+    )
 
 
 def _get_angel_quote_client(config: OiSnapshotterRuntimeConfig) -> AngelOrderClient:
@@ -234,6 +344,14 @@ def _int_value(value: object, default: int, *, minimum: int) -> int:
     except (TypeError, ValueError):
         parsed = int(default)
     return max(int(minimum), parsed)
+
+
+def _float_value(value: object, default: float, *, minimum: float) -> float:
+    try:
+        parsed = float(value) if value not in (None, "") else float(default)
+    except (TypeError, ValueError):
+        parsed = float(default)
+    return max(float(minimum), parsed)
 
 
 def _optional_int(value: object, *, minimum: int) -> int | None:
