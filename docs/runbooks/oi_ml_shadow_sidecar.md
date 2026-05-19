@@ -60,6 +60,7 @@ Recent validation:
 | Provider-filter SQL typing | `app/data/option_chain_repository.py` | Done |
 | NSE web validation adapter | `app/data/nse_option_chain_provider.py`, `app/data/option_chain_validation.py`, `scripts/data/validate_nse_vs_angel_option_chain.py` | Done, validation-only |
 | Continuous NSE validation loop | `app/data/option_chain_realtime_validator.py`, `app/data/option_chain_validation_store.py`, `migrations/023_option_chain_validation_reports.sql` | Done, opt-in via env |
+| Read-time NSE IV enrichment | `app/data/option_chain_repository.py` | Done, exact-contract enrichment for Angel reads from recent `provider='nse_web'` rows |
 | Strategy scaffold | `app/strategies/oi_ml_ce_seller.py` | Done, fail-closed and disabled by default |
 
 ## Inputs Required Before a Candidate Can Pass
@@ -72,14 +73,18 @@ The current runtime path needs these fields per option quote:
 | `trading_symbol`, `exchange`, `symbol_token` | Angel scrip master | Auditability and eventual order-intent construction |
 | `oi` | Angel FULL quote | OI wall, PCR, max pain, concentration features |
 | `volume` | Angel FULL quote | Quote completeness and future liquidity features |
-| `iv` | Angel FULL quote | Volatility features and later sigma filters |
+| `iv` | Angel FULL quote when supplied; otherwise recent exact-contract `nse_web` validation row at read time | Volatility features and later sigma filters |
 | `bid`, `ask`, `ltp` | Angel FULL quote | Premium, bid/ask quality, labels, stops |
 | `source_ts` | Angel quote payload when available | Staleness detection |
 | `underlying_ltp` | NSE NIFTY context LTP fallback, or option payload if supplied | OTM filter, distance features, spot stops |
 | `vix` | NSE India VIX context LTP fallback, or option payload if supplied | Option-sell guard and naked/spread gating |
 
 Missing hard fields are persisted in `quality_flags`; live entry gates must reject
-rows with hard quality flags.
+rows with hard quality flags. Missing Angel IV is an optional field. When the
+repository enriches IV from stored NSE validation rows, it does not update the
+Angel row; the returned in-memory quote is tagged with
+`iv_enrichment_mode=read_time`, `iv_enriched_from_provider=nse_web`, and the
+reference snapshot timestamp.
 
 ## Resolved Gaps
 
@@ -107,24 +112,29 @@ caching.
 ## Remaining Promotion Gate
 
 Do not promote this strategy beyond shadow until a market-window snapshot proves
-real broker FULL quote completeness. The 2026-05-18 off-market smoke proved
-connectivity and storage, but all off-market rows were flagged because `iv` was
-missing and source timestamps were stale.
+real broker FULL quote completeness for the hard fields and proves that IV is
+available either directly from Angel or through fresh exact-contract NSE
+validation rows. The 2026-05-18 off-market smoke proved connectivity and
+storage, but all off-market rows were flagged because source timestamps were
+stale.
 
 Required proof from `public.option_chain_1m` for the active listed NIFTY expiry:
 
 ```sql
 SELECT
-  count(*) AS rows,
-  count(oi) AS oi_rows,
-  count(volume) AS volume_rows,
-  count(iv) AS iv_rows,
-  count(bid) AS bid_rows,
-  count(ask) AS ask_rows,
-  count(ltp) AS ltp_rows,
-  count(underlying_ltp) AS spot_rows,
-  count(vix) AS vix_rows,
-  count(*) FILTER (WHERE quality_flags <> '{}'::jsonb) AS flagged_rows
+  count(*) FILTER (WHERE provider = 'angel') AS angel_rows,
+  count(oi) FILTER (WHERE provider = 'angel') AS oi_rows,
+  count(volume) FILTER (WHERE provider = 'angel') AS volume_rows,
+  count(iv) FILTER (WHERE provider = 'angel') AS direct_angel_iv_rows,
+  count(bid) FILTER (WHERE provider = 'angel') AS bid_rows,
+  count(ask) FILTER (WHERE provider = 'angel') AS ask_rows,
+  count(ltp) FILTER (WHERE provider = 'angel') AS ltp_rows,
+  count(underlying_ltp) FILTER (WHERE provider = 'angel') AS spot_rows,
+  count(vix) FILTER (WHERE provider = 'angel') AS vix_rows,
+  count(iv) FILTER (WHERE provider = 'nse_web') AS nse_iv_rows,
+  count(*) FILTER (
+    WHERE provider = 'angel' AND quality_flags <> '{}'::jsonb
+  ) AS flagged_angel_rows
 FROM public.option_chain_1m
 WHERE underlying = 'NIFTY'
   AND expiry = DATE '2026-05-19'
@@ -133,16 +143,20 @@ WHERE underlying = 'NIFTY'
 
 Expected result before promotion:
 
-- `rows > 0`.
-- `oi_rows`, `volume_rows`, `iv_rows`, `bid_rows`, `ask_rows`, `ltp_rows`,
-  `spot_rows`, and `vix_rows` should be close to `rows`.
-- Any `flagged_rows` must be explained and must not include required candidate
+- `angel_rows > 0`.
+- `oi_rows`, `volume_rows`, `bid_rows`, `ask_rows`, `ltp_rows`, `spot_rows`,
+  and `vix_rows` should be close to `angel_rows`.
+- `direct_angel_iv_rows` may be low if Angel omits IV. In that case, confirm
+  `nse_iv_rows` exists for matching fresh rows and repository-returned quotes
+  carry `iv_enrichment_mode=read_time`.
+- Any `flagged_angel_rows` must be explained and must not include required candidate
   strikes.
 
 Earlier sidecar login timeouts were fixed by forwarding the same broker proxy
 environment used by the live backend and by reusing a read-only Angel quote
 session. The field-completeness gate is still open until a live market-window
-snapshot shows usable `iv` and fresh source timestamps.
+snapshot shows fresh source timestamps and usable IV, either direct from Angel
+or enriched from stored NSE validation rows.
 
 ## NSE Cross-Validation
 
@@ -162,6 +176,12 @@ while shadow trade decisions remain restricted to `09:45` to `14:30` IST.
 - one compact container-log observation per snapshot, with warnings for
   mismatches, provider-only contracts, missing IV, or fetch errors;
 - a full JSON report in `public.option_chain_validation_reports` for EOD review.
+
+The strategy repository may use stored `nse_web` rows only to fill missing IV in
+the returned in-memory Angel quote. It requires the same underlying, expiry,
+strike, and option type, and the reference snapshot must be no more than 120
+seconds older than the Angel snapshot. This is enrichment for shadow analytics,
+not an order-routing dependency, and raw stored provider rows remain separate.
 
 Sidecar env:
 

@@ -111,6 +111,14 @@ def test_quote_quality_flags_reject_live_entries():
     assert "quote_quality:missing_symbol_token" in result.reasons
 
 
+def test_optional_quote_quality_flags_do_not_reject_live_entries():
+    result = evaluate_option_sell_guard(_context(quote=_quote(iv=None)))
+
+    assert result.allowed is True
+    assert "quote_quality:missing_optional_fields" not in result.reasons
+    assert result.metadata["quote_quality_flags"]["missing_optional_fields"] == ["iv"]
+
+
 def test_stale_snapshot_rejects_even_when_source_timestamp_is_clean():
     stale_quote = _quote(
         snapshot_ts=_now(9, 57),

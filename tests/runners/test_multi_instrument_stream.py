@@ -1,5 +1,6 @@
 from datetime import datetime, timezone, timedelta
 
+import asyncio
 import importlib
 import json
 import logging
@@ -121,6 +122,98 @@ def test_record_tick_throttle_action_tracks_merged_and_dropped_only():
         "stream_tick_throttle_total",
         labels={"action": "queued"},
     ) == 0.0
+
+
+def test_position_trailing_lock_tick_submit_is_disabled_by_default():
+    def _unexpected_runtime():
+        raise AssertionError("runtime should not be resolved when tick mode is disabled")
+
+    assert (
+        mis._submit_position_trailing_lock_tick(
+            settings=SimpleNamespace(position_trailing_lock_tick_enabled=False),
+            label="NG_ATM_CE_295",
+            ltp=6.05,
+            token="555295",
+            symbol="NATURALGAS22MAY26295CE",
+            runtime_getter=_unexpected_runtime,
+        )
+        is False
+    )
+
+
+def test_position_trailing_lock_tick_submit_routes_to_engine(monkeypatch):
+    class _Engine:
+        def __init__(self):
+            self.calls = []
+
+        async def evaluate_tick(self, runners, *, tick_label, tick_symbol, tick_token, price):
+            self.calls.append(
+                {
+                    "runners": list(runners),
+                    "tick_label": tick_label,
+                    "tick_symbol": tick_symbol,
+                    "tick_token": tick_token,
+                    "price": price,
+                }
+            )
+
+    class _BridgeLoop:
+        def __init__(self):
+            self.timeout_s = None
+
+        def submit(self, coro, *, timeout_s):
+            self.timeout_s = timeout_s
+            asyncio.run(coro)
+
+    engine = _Engine()
+    runner_a = SimpleNamespace(broker_account_id="A1-shadow", runtime_mode="SHADOW")
+    runner_b = SimpleNamespace(broker_account_id="A2-shadow", runtime_mode="SHADOW")
+    runners_by_id = {
+        "A1-shadow": runner_a,
+        "A2-shadow": runner_b,
+    }
+    runtime = SimpleNamespace(
+        position_trailing_lock_engine=engine,
+        hub=SimpleNamespace(
+            list_runner_ids=lambda: ["A1-shadow", "A2-shadow"],
+            get_runner=lambda broker_account_id: runners_by_id[broker_account_id],
+        ),
+    )
+    bridge = _BridgeLoop()
+    monkeypatch.setattr(
+        mis,
+        "load_stability_feature_flags",
+        lambda: SimpleNamespace(
+            strategy_bridge_max_inflight=3,
+            strategy_bridge_timeout_s=2.5,
+        ),
+    )
+    monkeypatch.setattr(
+        mis,
+        "get_shared_bridge_loop",
+        lambda *, max_inflight: bridge,
+    )
+
+    submitted = mis._submit_position_trailing_lock_tick(
+        settings=SimpleNamespace(position_trailing_lock_tick_enabled=True),
+        label="NG_ATM_CE_295",
+        ltp=6.05,
+        token="555295",
+        symbol="NATURALGAS22MAY26295CE",
+        runtime_getter=lambda: runtime,
+    )
+
+    assert submitted is True
+    assert bridge.timeout_s == 2.5
+    assert engine.calls == [
+        {
+            "runners": [runner_a, runner_b],
+            "tick_label": "NG_ATM_CE_295",
+            "tick_symbol": "NATURALGAS22MAY26295CE",
+            "tick_token": "555295",
+            "price": 6.05,
+        }
+    ]
 
 
 def test_filter_stream_universe_keeps_enabled_preopen_equity_labels():

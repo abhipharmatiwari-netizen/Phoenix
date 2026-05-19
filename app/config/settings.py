@@ -427,6 +427,14 @@ class Settings(BaseSettings):
             "current P&L falls below peak * (1 - giveback_pct)."
         ),
     )
+    position_trailing_lock_tick_enabled: bool = Field(
+        default=False,
+        validation_alias="POSITION_TRAILING_LOCK_TICK_ENABLED",
+        description=(
+            "Evaluate per-position trailing profit lock on matching market-data "
+            "ticks in addition to the watchdog sweep."
+        ),
+    )
     position_trailing_lock_giveback_pct: float = Field(
         default=0.10,
         validation_alias="POSITION_TRAILING_LOCK_GIVEBACK_PCT",

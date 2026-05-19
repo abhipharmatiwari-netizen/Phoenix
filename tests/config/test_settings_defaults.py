@@ -136,6 +136,8 @@ class TestProductionCriticalDefaults:
         assert hasattr(s, "allow_live_capital_checks_disabled"), "#144: field must exist"
         assert hasattr(s, "capital_margin_check_mode"), "#145: field must exist"
         assert hasattr(s, "position_sync_interval_seconds"), "#145: field must exist"
+        assert hasattr(s, "position_trailing_lock_tick_enabled"), "#301: field must exist"
         assert s.capital_margin_check_mode == "enforce"
         assert s.position_sync_interval_seconds == 90
         assert s.allow_live_capital_checks_disabled is False
+        assert s.position_trailing_lock_tick_enabled is False

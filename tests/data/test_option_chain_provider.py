@@ -61,6 +61,27 @@ def test_quality_flags_detect_missing_required_fields_and_bad_bid_ask():
     assert is_quote_usable_for_live_entry(quote) is False
 
 
+def test_missing_iv_is_optional_for_live_entry_but_still_reported():
+    quote = _quote(iv=None)
+    flags = quality_flags_for_quote(quote)
+
+    assert "missing_required_fields" not in flags
+    assert flags["missing_optional_fields"] == ["iv"]
+    assert is_quote_usable_for_live_entry(quote) is True
+
+
+def test_old_iv_only_required_flag_is_recomputed_as_optional():
+    quote = _quote(
+        iv=None,
+        quality_flags={"missing_required_fields": ["iv"]},
+    )
+    flags = quality_flags_for_quote(quote)
+
+    assert "missing_required_fields" not in flags
+    assert flags["missing_optional_fields"] == ["iv"]
+    assert is_quote_usable_for_live_entry(quote) is True
+
+
 def test_quality_flags_detect_stale_source_timestamp():
     quote = _quote(source_ts=datetime(2026, 5, 19, 9, 55, tzinfo=timezone.utc))
     flags = quality_flags_for_quote(quote, max_source_lag_seconds=120)

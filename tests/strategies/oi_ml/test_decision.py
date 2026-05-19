@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
 from app.data.option_chain_provider import OptionQuote
@@ -101,6 +102,34 @@ def test_decision_engine_stages_first_guarded_spread_candidate():
     assert decision.selected.guard_result.allowed is True
     assert repo.calls[0]["provider"] == "angel"
     assert repo.calls[0]["min_snapshot_ts"] == DECISION_TS - timedelta(seconds=120)
+
+
+def test_decision_engine_stages_angel_candidate_when_iv_is_missing():
+    snapshot = [
+        _quote(25200, "CE", ltp=120.0, oi=1000, vix=16.0, spot=25140.0),
+        _quote(25200, "PE", ltp=80.0, oi=700, vix=16.0, spot=25140.0),
+    ]
+    snapshot[0] = replace(snapshot[0], iv=None)
+    snapshot[1] = replace(snapshot[1], iv=None)
+    engine = OiMlCeDecisionEngine(
+        FakeRepository(snapshot),
+        ConstantOiMlScorer(probability=0.64, predicted_mae_premium=40.0),
+        config=_config(),
+    )
+
+    decision = engine.evaluate_entry(
+        underlying="NIFTY",
+        expiry=EXPIRY,
+        decision_ts=DECISION_TS,
+    )
+
+    assert decision.action == OiMlEntryAction.STAGE_ENTRY
+    assert decision.reason == "candidate_passed_guard"
+    assert decision.selected is not None
+    assert decision.selected.guard_result.allowed is True
+    assert "missing_optional_fields" in decision.selected.guard_result.metadata[
+        "quote_quality_flags"
+    ]
 
 
 def test_decision_engine_fails_closed_without_snapshot():

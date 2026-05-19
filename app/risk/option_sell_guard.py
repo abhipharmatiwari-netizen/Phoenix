@@ -21,6 +21,15 @@ from app.strategies.identifiers import OI_ML_CE_SELLER_ID
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
+_HARD_QUOTE_QUALITY_FLAGS = frozenset(
+    {
+        "missing_required_fields",
+        "missing_symbol_token",
+        "invalid_option_type",
+        "bad_bid_ask",
+        "stale_source_seconds",
+    }
+)
 
 
 class OptionSellStructure(str, Enum):
@@ -263,7 +272,11 @@ def _normalise_quote(
     )
     if flags:
         metadata["quote_quality_flags"] = flags
-        reasons.extend(f"quote_quality:{name}" for name in sorted(flags))
+        reasons.extend(
+            f"quote_quality:{name}"
+            for name in sorted(flags)
+            if name in _HARD_QUOTE_QUALITY_FLAGS
+        )
 
     snapshot_ts = _as_ist(normalised.snapshot_ts)
     age_seconds = (now_ist - snapshot_ts).total_seconds()

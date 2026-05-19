@@ -9,6 +9,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
 import logging
+import threading
 from zoneinfo import ZoneInfo
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -2067,6 +2068,9 @@ class PositionTrailingLockEngine:
         Tuple[str, str, str],
         Tuple[Optional[str], Optional[int]],
     ] = field(default_factory=dict, init=False, repr=False)
+    _submission_guard_lock: threading.RLock = field(
+        default_factory=threading.RLock, init=False, repr=False
+    )
 
     @staticmethod
     def _is_live_mode() -> bool:
@@ -2083,6 +2087,11 @@ class PositionTrailingLockEngine:
 
     def _enabled(self) -> bool:
         return bool(getattr(self.settings, "position_trailing_lock_enabled", False))
+
+    def _tick_enabled(self) -> bool:
+        return bool(
+            getattr(self.settings, "position_trailing_lock_tick_enabled", False)
+        )
 
     def _resolve_kill_switch_manager(self) -> Any:
         """Resolve the current durable kill-switch manager via the provider.
@@ -2424,6 +2433,36 @@ class PositionTrailingLockEngine:
                     exc,
                 )
 
+    def _reserve_inflight_marker(
+        self,
+        *,
+        tenant_id: Any,
+        broker_account_id: Any,
+        symbol: str,
+        broker_order_id: Optional[str],
+        fail_closed: bool = False,
+    ) -> bool:
+        with self._submission_guard_lock:
+            if self._is_inflight_blocked(
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=symbol,
+            ):
+                self._maybe_log_inflight_skip(
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    symbol=symbol,
+                )
+                return False
+            self._set_inflight_marker(
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=symbol,
+                broker_order_id=broker_order_id,
+                fail_closed=fail_closed,
+            )
+            return True
+
     def _clear_inflight_marker(
         self, *, tenant_id: Any, broker_account_id: Any, symbol: str,
     ) -> None:
@@ -2631,6 +2670,318 @@ class PositionTrailingLockEngine:
         if ltp is None:
             return None
         return float((float(ltp) - avg_f) * qty)
+
+    @staticmethod
+    def _compute_unrealized_pnl_from_price(
+        pos: Any, price: float,
+    ) -> Optional[float]:
+        try:
+            qty = int(_position_value(pos, "quantity") or 0)
+        except (TypeError, ValueError):
+            return None
+        if qty == 0:
+            return None
+        avg_price = _position_value(pos, "avg_price")
+        if avg_price is None:
+            avg_price = _position_value(pos, "average_price")
+        if avg_price is None:
+            return None
+        try:
+            return float((float(price) - float(avg_price)) * qty)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _position_matches_tick(
+        pos: Any,
+        *,
+        tick_label: Optional[str],
+        tick_symbol: Optional[str],
+        tick_token: Optional[str],
+    ) -> bool:
+        pos_symbol = str(_position_value(pos, "symbol", "") or "").strip()
+        pos_symbol_norm = pos_symbol.upper()
+        pos_token = str(_position_symbol_token(pos) or "").strip()
+        label_norm = str(tick_label or "").strip().upper()
+        symbol_norm = str(tick_symbol or "").strip().upper()
+        token_norm = str(tick_token or "").strip()
+
+        if token_norm and pos_token and token_norm == pos_token:
+            return True
+        if symbol_norm and pos_symbol_norm and symbol_norm == pos_symbol_norm:
+            return True
+        if label_norm and pos_symbol_norm and label_norm == pos_symbol_norm:
+            return True
+
+        resolved_label = dashboard_bus.resolve_label(
+            symbol=pos_symbol,
+            token=pos_token or None,
+        )
+        if resolved_label and label_norm:
+            return str(resolved_label).strip().upper() == label_norm
+        return False
+
+    def _maybe_log_ownership_exit_lock_skip(
+        self,
+        *,
+        tenant_id: Any,
+        broker_account_id: Any,
+        symbol: str,
+        owner: Optional[str],
+        released_at: Optional[datetime],
+    ) -> None:
+        key = (str(tenant_id), str(broker_account_id), str(symbol))
+        if not hasattr(self, "_ownership_exit_lock_skip_log_state"):
+            self._ownership_exit_lock_skip_log_state: Dict[
+                Tuple[str, str, str], datetime
+            ] = {}
+        now = self.clock.now_utc()
+        last = self._ownership_exit_lock_skip_log_state.get(key)
+        if last is not None and (now - last).total_seconds() < 60.0:
+            return
+        self._ownership_exit_lock_skip_log_state[key] = now
+        log_event(
+            logger,
+            event_type="POSITION_TRAILING_LOCK_SKIPPED_OWNERSHIP_EXIT_INFLIGHT",
+            message=(
+                "Trailing-lock submission skipped: position ownership "
+                "already has an active exit lock for this contract."
+            ),
+            level=logging.WARNING,
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+            symbol=symbol,
+            owner=owner,
+            released_at=released_at.isoformat() if released_at else None,
+        )
+
+    def _position_ownership_exit_lock_active(
+        self,
+        *,
+        tenant_id: Any,
+        broker_account_id: Any,
+        pos: Any,
+        symbol: str,
+    ) -> bool:
+        store = getattr(self.order_router, "_position_ownership_store", None)
+        if store is None:
+            return False
+        try:
+            contract_key, _reason = derive_contract_key_from_position(pos)
+            get_record = getattr(store, "get_ownership_record", None)
+            if not callable(get_record):
+                return False
+            record = get_record(
+                tenant_id=TenantId(str(tenant_id)),
+                broker_account_id=BrokerAccountId(str(broker_account_id)),
+                contract_key=contract_key,
+            )
+            released_at = getattr(record, "released_at", None)
+            if released_at is None:
+                return False
+            if released_at.tzinfo is None:
+                released_at = released_at.replace(tzinfo=timezone.utc)
+            watchdog = float(getattr(store, "_exit_lock_max_seconds", 0.0) or 0.0)
+            if watchdog <= 0.0:
+                return False
+            age = (self.clock.now_utc() - released_at).total_seconds()
+            if age >= watchdog:
+                return False
+            self._maybe_log_ownership_exit_lock_skip(
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=symbol,
+                owner=getattr(record, "owner_strategy_id", None),
+                released_at=released_at,
+            )
+            return True
+        except Exception as exc:
+            if self._is_live_mode():
+                log_event(
+                    logger,
+                    event_type="POSITION_TRAILING_LOCK_OWNERSHIP_LOOKUP_FAILED",
+                    message=(
+                        "Trailing-lock ownership exit-lock lookup failed in "
+                        "LIVE; failing closed for this position."
+                    ),
+                    level=logging.ERROR,
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    symbol=symbol,
+                    error=repr(exc),
+                )
+                return True
+            logger.warning(
+                "PositionTrailingLockEngine: ownership exit-lock lookup "
+                "failed for %s (non-fatal in non-LIVE): %s",
+                symbol,
+                exc,
+            )
+            return False
+
+    async def evaluate_tick(
+        self,
+        runners: Iterable[AccountRunner],
+        *,
+        tick_label: Optional[str],
+        price: float,
+        tick_symbol: Optional[str] = None,
+        tick_token: Optional[str] = None,
+    ) -> None:
+        """Evaluate trailing profit protection for positions matching one tick.
+
+        The watchdog path remains the authoritative cleanup sweep. This path is
+        deliberately narrow: it only updates/submits for positions whose broker
+        symbol/token maps to the incoming tick.
+        """
+        if not self._enabled() or not self._tick_enabled():
+            return
+        try:
+            price_f = float(price)
+        except (TypeError, ValueError):
+            return
+        if price_f <= 0.0:
+            return
+
+        if self.inflight_disabled:
+            log_event(
+                logger,
+                event_type="POSITION_TRAILING_LOCK_TICK_DISABLED_NO_BACKEND",
+                message=(
+                    "Tick-driven trailing-lock submission skipped: durable "
+                    "inflight backend was not constructed at startup (LIVE)."
+                ),
+                level=logging.ERROR,
+            )
+            return
+
+        if not self._inflight_hydrated:
+            self._hydrate_inflight_markers_from_backend()
+        if self._is_live_mode() and not self._inflight_hydrated:
+            log_event(
+                logger,
+                event_type="POSITION_TRAILING_LOCK_TICK_SKIPPED_HYDRATE_PENDING",
+                message=(
+                    "Tick-driven trailing-lock submission skipped: durable "
+                    "inflight marker hydrate has not succeeded yet in LIVE."
+                ),
+                level=logging.ERROR,
+                failed_attempts=self._inflight_hydrate_failed_attempts,
+            )
+            return
+
+        giveback_pct = float(
+            getattr(self.settings, "position_trailing_lock_giveback_pct", 0.10)
+        )
+        floor_inr = float(
+            getattr(self.settings, "position_trailing_lock_floor_inr", 500.0)
+        )
+        cooldown = float(
+            getattr(self.settings, "position_trailing_lock_exit_cooldown_seconds", 30.0)
+        )
+        for runner in runners:
+            try:
+                await self._evaluate_runner_tick(
+                    runner,
+                    tick_label=tick_label,
+                    tick_symbol=tick_symbol,
+                    tick_token=tick_token,
+                    price=price_f,
+                    giveback_pct=giveback_pct,
+                    floor_inr=floor_inr,
+                    cooldown=cooldown,
+                )
+            except Exception as exc:
+                log_event(
+                    logger,
+                    event_type="POSITION_TRAILING_LOCK_TICK_RUNNER_ERROR",
+                    message="PositionTrailingLockEngine tick evaluation failed",
+                    level=logging.ERROR,
+                    tenant_id=getattr(runner, "tenant_id", None),
+                    broker_account_id=getattr(runner, "broker_account_id", None),
+                    tick_label=tick_label,
+                    tick_symbol=tick_symbol,
+                    tick_token=tick_token,
+                    error=repr(exc),
+                )
+
+    async def _evaluate_runner_tick(
+        self,
+        runner: AccountRunner,
+        *,
+        tick_label: Optional[str],
+        tick_symbol: Optional[str],
+        tick_token: Optional[str],
+        price: float,
+        giveback_pct: float,
+        floor_inr: float,
+        cooldown: float,
+    ) -> None:
+        tenant_id = getattr(runner, "tenant_id", None)
+        broker_account_id = getattr(runner, "broker_account_id", None)
+        if tenant_id is None or broker_account_id is None:
+            return
+
+        kill_switch_tripped = self._is_kill_switch_tripped_for_scope(
+            tenant_id=tenant_id, broker_account_id=broker_account_id,
+        )
+        if kill_switch_tripped:
+            self._maybe_log_suppression_skip(
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+            )
+            return
+
+        positions = self.state_store.get_positions(broker_account_id) or []
+        for pos in positions:
+            symbol = str(_position_value(pos, "symbol", "") or "").strip()
+            if not symbol:
+                continue
+            if not self._position_matches_tick(
+                pos,
+                tick_label=tick_label,
+                tick_symbol=tick_symbol,
+                tick_token=tick_token,
+            ):
+                continue
+            try:
+                qty = int(_position_value(pos, "quantity") or 0)
+            except (TypeError, ValueError):
+                qty = 0
+            if qty == 0:
+                continue
+            if self._is_inflight_blocked(
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=symbol,
+            ):
+                self._maybe_log_inflight_skip(
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    symbol=symbol,
+                )
+                continue
+            if self._position_ownership_exit_lock_active(
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                pos=pos,
+                symbol=symbol,
+            ):
+                continue
+            unrealized = self._compute_unrealized_pnl_from_price(pos, price)
+            if unrealized is None:
+                continue
+            decision = self.manager.evaluate(
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=symbol,
+                current_unrealized_pnl=unrealized,
+                floor_inr=floor_inr,
+                giveback_pct=giveback_pct,
+                exit_cooldown_seconds=cooldown,
+            )
+            if decision.exit_required:
+                await self._emit_exit(runner, pos, decision)
 
     async def evaluate_runners(self, runners: Iterable[AccountRunner]) -> None:
         if not self._enabled():
@@ -2916,6 +3267,13 @@ class PositionTrailingLockEngine:
                     broker_account_id=broker_account_id,
                     symbol=symbol,
                 )
+                continue
+            if self._position_ownership_exit_lock_active(
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                pos=pos,
+                symbol=symbol,
+            ):
                 continue
             live_symbols.add(symbol)
             unrealized = self._compute_unrealized_pnl(pos, symbol)
@@ -3732,13 +4090,15 @@ class PositionTrailingLockEngine:
         except Exception:  # pragma: no cover - defensive
             self._inflight_exit_specs[_key] = (None, None)
         try:
-            self._set_inflight_marker(
+            reserved = self._reserve_inflight_marker(
                 tenant_id=tenant_id,
                 broker_account_id=broker_account_id,
                 symbol=decision.symbol,
                 broker_order_id=None,  # populated post-submit on success
                 fail_closed=_fail_closed_persist,
             )
+            if not reserved:
+                return
         except Exception as exc:
             # Pre-submit marker persistence failed in LIVE. ``_set_inflight_marker``
             # has already logged the ERROR event and rolled back the in-memory

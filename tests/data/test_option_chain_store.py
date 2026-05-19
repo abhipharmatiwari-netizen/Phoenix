@@ -76,6 +76,18 @@ def test_option_quote_to_row_serializes_quality_flags_for_jsonb():
     assert flags == {"missing_symbol_token": True, "source": "test"}
 
 
+def test_option_quote_to_row_recomputes_iv_only_required_flag_as_optional():
+    row = option_quote_to_row(
+        _quote(
+            iv=None,
+            quality_flags={"missing_required_fields": ["iv"]},
+        )
+    )
+    flags = json.loads(row["quality_flags"])
+
+    assert flags == {"missing_optional_fields": ["iv"]}
+
+
 def test_option_quote_to_row_rejects_invalid_option_type():
     with pytest.raises(ValueError, match="invalid option_type"):
         option_quote_to_row(_quote(option_type="XX"))

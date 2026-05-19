@@ -17,10 +17,12 @@ VALID_OPTION_TYPES = frozenset({"CE", "PE"})
 REQUIRED_QUOTE_FIELDS = (
     "oi",
     "volume",
-    "iv",
     "bid",
     "ask",
     "ltp",
+)
+OPTIONAL_QUOTE_FIELDS = (
+    "iv",
 )
 
 
@@ -123,6 +125,16 @@ def quality_flags_for_quote(
     else:
         flags.pop("missing_required_fields", None)
 
+    optional_missing = [
+        field_name
+        for field_name in OPTIONAL_QUOTE_FIELDS
+        if getattr(q, field_name) is None
+    ]
+    if optional_missing:
+        flags["missing_optional_fields"] = sorted(set(optional_missing))
+    else:
+        flags.pop("missing_optional_fields", None)
+
     if not q.symbol_token:
         flags["missing_symbol_token"] = True
     else:
@@ -190,6 +202,7 @@ def _optional_decimal(value: Any) -> Decimal | None:
 __all__ = [
     "OptionChainProvider",
     "OptionQuote",
+    "OPTIONAL_QUOTE_FIELDS",
     "REQUIRED_QUOTE_FIELDS",
     "VALID_OPTION_TYPES",
     "is_quote_usable_for_live_entry",

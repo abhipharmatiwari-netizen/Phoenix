@@ -51,6 +51,7 @@ from app.brokers.base import (
     OrderPurpose,
 )
 from app.orders.strategy_bridge import place_order_via_bridge
+from app.orders.bridge_loop import StrategyBridgeTimeoutError, get_shared_bridge_loop
 from app.brokers.backoff import BackoffState
 from app.strategies.option_strategy import OptionStrategy
 from app.strategies.delta_strangle import DeltaStrangleStrategy
@@ -163,6 +164,85 @@ def _refresh_strategy_instances_after_atm_update(
                 )
             summary["open_legs_after"] += len(getattr(inst, "open_legs", {}) or {})
     return summary
+
+
+def _hub_runners_from_runtime(runtime: Any) -> List[Any]:
+    hub = getattr(runtime, "hub", None)
+    if hub is None:
+        return []
+    list_ids = getattr(hub, "list_runner_ids", None)
+    get_runner = getattr(hub, "get_runner", None)
+    if callable(list_ids) and callable(get_runner):
+        runners: List[Any] = []
+        for broker_account_id in list_ids():
+            runner = get_runner(broker_account_id)
+            if runner is not None:
+                runners.append(runner)
+        return runners
+    account_runners = getattr(hub, "_account_runners", None)
+    if isinstance(account_runners, dict):
+        return list(account_runners.values())
+    return []
+
+
+def _submit_position_trailing_lock_tick(
+    *,
+    settings: Any,
+    label: str,
+    ltp: float,
+    token: Optional[str] = None,
+    symbol: Optional[str] = None,
+    runtime_getter: Optional[Callable[[], Any]] = None,
+) -> bool:
+    if not bool(getattr(settings, "position_trailing_lock_tick_enabled", False)):
+        return False
+    try:
+        price = float(ltp)
+    except (TypeError, ValueError):
+        return False
+    if price <= 0.0:
+        return False
+    try:
+        if runtime_getter is None:
+            from app.hub.runtime import get_hub_runtime
+
+            runtime_getter = get_hub_runtime
+        runtime = runtime_getter()
+        engine = getattr(runtime, "position_trailing_lock_engine", None)
+        if engine is None:
+            return False
+        runners = _hub_runners_from_runtime(runtime)
+        if not runners:
+            return False
+        flags = load_stability_feature_flags()
+        bridge_loop = get_shared_bridge_loop(
+            max_inflight=flags.strategy_bridge_max_inflight
+        )
+        bridge_loop.submit(
+            engine.evaluate_tick(
+                runners,
+                tick_label=label,
+                tick_symbol=symbol,
+                tick_token=token,
+                price=price,
+            ),
+            timeout_s=flags.strategy_bridge_timeout_s,
+        )
+        return True
+    except StrategyBridgeTimeoutError:
+        logger.warning(
+            "position_trailing_lock tick evaluation timed out label=%s token=%s",
+            label,
+            token,
+        )
+    except Exception as exc:
+        logger.warning(
+            "position_trailing_lock tick evaluation failed label=%s token=%s err=%s",
+            label,
+            token,
+            exc,
+        )
+    return False
 
 # Allow disabling trading window filter for testing/debugging
 _DISABLE_TRADING_WINDOW_FILTER = os.getenv("DISABLE_TRADING_WINDOW_FILTER", "false").lower() == "true"
@@ -4323,6 +4403,22 @@ def stream_multi_instruments(
         # Log dashboard bus update
         # logger.debug(f"📊 [DASHBOARD] Recording tick for {label}: {ltp}")
         dashboard_bus.record_tick(label, ltp, ts)
+
+        if getattr(settings, "position_trailing_lock_tick_enabled", False):
+            tick_symbol = None
+            if isinstance(meta, dict):
+                tick_symbol = (
+                    meta.get("symbol")
+                    or meta.get("tradingsymbol")
+                    or meta.get("trading_symbol")
+                )
+            _submit_position_trailing_lock_tick(
+                settings=settings,
+                label=label,
+                ltp=ltp,
+                token=token,
+                symbol=str(tick_symbol) if tick_symbol else None,
+            )
 
         # RISK-5.4: Feed India VIX tick into circuit breaker for volatility protection.
         if label == "INDIAVIX_IDX":

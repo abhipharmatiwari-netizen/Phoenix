@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -66,6 +67,23 @@ def test_select_candidate_quotes_filters_otm_side_premium_and_oi():
             min_oi=1,
             min_otm_points=0.0,
         ),
+    )
+
+    assert [quote.strike for quote in candidates] == [25200]
+
+
+def test_select_candidate_quotes_accepts_angel_quotes_without_iv():
+    snapshot = [
+        _quote(25200, "CE", ltp=80.0, oi=1000, token="25200CE"),
+        _quote(25200, "PE", ltp=70.0, oi=1000, token="25200PE"),
+    ]
+    snapshot[0] = replace(snapshot[0], iv=None)
+    snapshot[1] = replace(snapshot[1], iv=None)
+
+    candidates = select_candidate_quotes(
+        snapshot,
+        decision_ts=DECISION_TS,
+        config=OiMlDatasetConfig(option_type="CE"),
     )
 
     assert [quote.strike for quote in candidates] == [25200]

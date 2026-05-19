@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from app.data.option_chain_repository import OptionChainRepository
 
 
 class FakeCursor:
-    def __init__(self, rows):
-        self.rows = rows
+    def __init__(self, row_sets):
+        self.row_sets = [list(row_set) for row_set in row_sets]
+        self.rows = []
         self.executed = []
         self.description = [
             ("snapshot_ts",),
@@ -41,6 +42,7 @@ class FakeCursor:
 
     def execute(self, sql, params):
         self.executed.append((sql, params))
+        self.rows = self.row_sets.pop(0) if self.row_sets else []
 
     def fetchall(self):
         return self.rows
@@ -48,13 +50,25 @@ class FakeCursor:
 
 class FakeConnection:
     def __init__(self, rows):
-        self.cursor_obj = FakeCursor(rows)
+        if rows and isinstance(rows[0], list):
+            row_sets = rows
+        else:
+            row_sets = [rows]
+        self.cursor_obj = FakeCursor(row_sets)
 
     def cursor(self):
         return self.cursor_obj
 
 
-def _row(snapshot_ts, strike=25200):
+def _row(
+    snapshot_ts,
+    strike=25200,
+    *,
+    option_type="CE",
+    iv="11.25",
+    provider="angel",
+    quality_flags=None,
+):
     return (
         snapshot_ts,
         None,
@@ -62,22 +76,32 @@ def _row(snapshot_ts, strike=25200):
         "NIFTY",
         date(2026, 5, 19),
         strike,
-        "CE",
-        f"NIFTY19MAY26{strike}CE",
+        option_type,
+        f"NIFTY19MAY26{strike}{option_type}",
         "NFO",
         str(strike),
         120000,
         1500,
-        "11.25",
+        iv,
         "42.5",
         "43.0",
         "42.8",
         "25140.5",
         None,
-        "angel",
+        provider,
         "hash",
-        {},
+        quality_flags or {},
     )
+
+
+def _nse_iv_row(snapshot_ts, strike=25200, *, option_type="CE", iv="12.34"):
+    return {
+        "snapshot_ts": snapshot_ts,
+        "strike": strike,
+        "option_type": option_type,
+        "iv": iv,
+        "provider": "nse_web",
+    }
 
 
 def test_fetch_latest_snapshot_returns_only_latest_rows_at_or_before_decision_time():
@@ -121,3 +145,120 @@ def test_fetch_candidate_window_filters_exact_contract_and_time_window():
     assert "%(provider)s::text IS NULL" in sql
     assert params["option_type"] == "CE"
     assert params["provider"] is None
+
+
+def test_fetch_latest_snapshot_enriches_missing_angel_iv_from_nse_reference():
+    older = datetime(2026, 5, 19, 4, 29, tzinfo=timezone.utc)
+    latest = datetime(2026, 5, 19, 4, 30, tzinfo=timezone.utc)
+    conn = FakeConnection(
+        [
+            [
+                _row(
+                    latest,
+                    25200,
+                    iv=None,
+                    quality_flags={
+                        "missing_required_fields": ["iv"],
+                        "missing_optional_fields": ["iv"],
+                    },
+                ),
+                _row(latest, 25300, iv="10.50"),
+            ],
+            [_nse_iv_row(latest, 25200, iv="12.34")],
+        ]
+    )
+
+    quotes = OptionChainRepository(conn).fetch_latest_snapshot(
+        underlying="nifty",
+        expiry=date(2026, 5, 19),
+        decision_ts=latest,
+        min_snapshot_ts=older,
+        provider="Angel",
+    )
+
+    enriched = next(quote for quote in quotes if quote.strike == 25200)
+    untouched = next(quote for quote in quotes if quote.strike == 25300)
+    assert str(enriched.iv) == "12.34"
+    assert enriched.provider == "angel"
+    assert enriched.quality_flags["iv_enrichment_mode"] == "read_time"
+    assert enriched.quality_flags["iv_enriched_from_provider"] == "nse_web"
+    assert "missing_required_fields" not in enriched.quality_flags
+    assert "missing_optional_fields" not in enriched.quality_flags
+    assert str(untouched.iv) == "10.50"
+
+    assert len(conn.cursor_obj.executed) == 2
+    sql, params = conn.cursor_obj.executed[1]
+    assert "provider = %(reference_provider)s" in sql
+    assert params["reference_provider"] == "nse_web"
+    assert params["min_reference_ts"] == latest - timedelta(seconds=120)
+    assert params["max_snapshot_ts"] == latest
+
+
+def test_fetch_latest_snapshot_does_not_use_stale_nse_iv_reference():
+    older = datetime(2026, 5, 19, 4, 29, tzinfo=timezone.utc)
+    latest = datetime(2026, 5, 19, 4, 30, tzinfo=timezone.utc)
+    stale_reference = latest - timedelta(seconds=121)
+    conn = FakeConnection(
+        [
+            [_row(latest, 25200, iv=None)],
+            [_nse_iv_row(stale_reference, 25200, iv="12.34")],
+        ]
+    )
+
+    quotes = OptionChainRepository(conn).fetch_latest_snapshot(
+        underlying="NIFTY",
+        expiry=date(2026, 5, 19),
+        decision_ts=latest,
+        min_snapshot_ts=older,
+        provider="angel",
+    )
+
+    assert quotes[0].iv is None
+
+
+def test_fetch_latest_snapshot_skips_iv_enrichment_for_non_angel_provider():
+    older = datetime(2026, 5, 19, 4, 29, tzinfo=timezone.utc)
+    latest = datetime(2026, 5, 19, 4, 30, tzinfo=timezone.utc)
+    conn = FakeConnection([_row(latest, 25200, iv=None, provider="nse_web")])
+
+    quotes = OptionChainRepository(conn).fetch_latest_snapshot(
+        underlying="NIFTY",
+        expiry=date(2026, 5, 19),
+        decision_ts=latest,
+        min_snapshot_ts=older,
+        provider="nse_web",
+    )
+
+    assert quotes[0].iv is None
+    assert len(conn.cursor_obj.executed) == 1
+
+
+def test_fetch_candidate_window_enriches_missing_angel_iv_by_contract():
+    start = datetime(2026, 5, 19, 4, 30, tzinfo=timezone.utc)
+    end = datetime(2026, 5, 19, 5, 0, tzinfo=timezone.utc)
+    conn = FakeConnection(
+        [
+            [_row(start, 25200, iv=None), _row(end, 25200, iv=None)],
+            [
+                _nse_iv_row(start, 25200, iv="11.11"),
+                _nse_iv_row(end - timedelta(seconds=30), 25200, iv="12.22"),
+            ],
+        ]
+    )
+
+    quotes = OptionChainRepository(conn).fetch_candidate_window(
+        underlying="NIFTY",
+        expiry=date(2026, 5, 19),
+        strike=25200,
+        option_type="ce",
+        start_ts=start,
+        end_ts=end,
+        provider="angel",
+    )
+
+    assert [str(quote.iv) for quote in quotes] == ["11.11", "12.22"]
+    sql, params = conn.cursor_obj.executed[1]
+    assert "strike = %(strike)s" in sql
+    assert params["reference_provider"] == "nse_web"
+    assert params["strike"] == 25200
+    assert params["option_type"] == "CE"

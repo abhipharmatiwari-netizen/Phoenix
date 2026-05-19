@@ -15,11 +15,15 @@ from typing import List
 
 import pytest
 
-from app.brokers.base import Position, ProductType
+from app.brokers.base import OrderSide, Position, ProductType
 from app.core.dashboard_bus import dashboard_bus
-from app.core.identifiers import BrokerAccountId, TenantId
+from app.core.identifiers import BrokerAccountId, StrategyId, TenantId
 from app.data.state_store import StateStore
 from app.hub.exit_engines import PositionTrailingLockEngine
+from app.orders.position_ownership import (
+    PositionOwnershipStore,
+    derive_contract_key_from_position,
+)
 from app.pnl.position_trailing_lock import (
     PositionTrailingLockManager,
     _NoopPositionTrailingLockBackend,
@@ -29,6 +33,7 @@ from app.pnl.position_trailing_lock import (
 def _mk_settings(**overrides) -> SimpleNamespace:
     base = dict(
         position_trailing_lock_enabled=True,
+        position_trailing_lock_tick_enabled=False,
         position_trailing_lock_giveback_pct=0.10,
         position_trailing_lock_floor_inr=500.0,
         position_trailing_lock_exit_cooldown_seconds=0.0,
@@ -66,10 +71,13 @@ class _RecordingOrderRouter:
         return ("hub-order-id", SimpleNamespace(status="OK"))
 
 
-def _runner(tenant_id: str, broker_account_id: str) -> SimpleNamespace:
+def _runner(
+    tenant_id: str, broker_account_id: str, *, runtime_mode: str = "LIVE"
+) -> SimpleNamespace:
     return SimpleNamespace(
         tenant_id=TenantId(tenant_id),
         broker_account_id=BrokerAccountId(broker_account_id),
+        runtime_mode=runtime_mode,
     )
 
 
@@ -82,6 +90,24 @@ def _seed_ltp(symbol: str, price: float, *, lot_size: int = 1250) -> None:
 
     dashboard_bus.record_tick(symbol, price, datetime.now(timezone.utc))
     dashboard_bus.upsert_instrument_meta(symbol, {"symbol": symbol, "lot_size": lot_size})
+
+
+def _seed_label_meta(
+    label: str,
+    *,
+    symbol: str,
+    token: str = "999001",
+    lot_size: int = 1250,
+) -> None:
+    dashboard_bus.upsert_instrument_meta(
+        label,
+        {
+            "symbol": symbol,
+            "token": token,
+            "symboltoken": token,
+            "lot_size": lot_size,
+        },
+    )
 
 
 def _mark_positions_sync_fresh(
@@ -199,6 +225,212 @@ async def test_engine_emits_exit_when_giveback_breached():
     from app.brokers.base import OrderSide
 
     assert call["side"] == OrderSide.SELL
+
+
+@pytest.mark.asyncio
+async def test_tick_mode_exits_matching_short_position_on_giveback():
+    state_store = StateStore()
+    symbol = "NATURALGAS22MAY26295CE"
+    state_store.set_positions(
+        "A1",
+        [
+            Position(
+                symbol=symbol,
+                quantity=-1250,
+                avg_price=6.75,
+                product_type=ProductType.INTRADAY,
+            )
+        ],
+    )
+    _seed_label_meta("NG_ATM_CE_295", symbol=symbol, token="555295")
+
+    router = _RecordingOrderRouter()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(position_trailing_lock_tick_enabled=True),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+
+    # Favorable move for the short: (6.75 - 5.70) * 1250 = 1312.50.
+    await engine.evaluate_tick(
+        [_runner("t-1", "A1")],
+        tick_label="NG_ATM_CE_295",
+        tick_token="555295",
+        price=5.70,
+    )
+    assert router.calls == []
+
+    # Retrace below the 90% lock floor: (6.75 - 6.05) * 1250 = 875.
+    await engine.evaluate_tick(
+        [_runner("t-1", "A1")],
+        tick_label="NG_ATM_CE_295",
+        tick_token="555295",
+        price=6.05,
+    )
+    assert len(router.calls) == 1
+    assert router.calls[0]["symbol"] == symbol
+    assert router.calls[0]["side"] == OrderSide.BUY
+    assert router.calls[0]["exit_reason"] == "position_giveback_breach"
+
+    # A repeated burst tick while the marker is in-flight must not submit again.
+    await engine.evaluate_tick(
+        [_runner("t-1", "A1")],
+        tick_label="NG_ATM_CE_295",
+        tick_token="555295",
+        price=6.05,
+    )
+    assert len(router.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_tick_mode_evaluates_each_matching_shadow_runner_independently():
+    state_store = StateStore()
+    symbol = "NATURALGAS22MAY26295CE"
+    for account_id, avg_price in (
+        ("A1-shadow", 6.75),
+        ("A2-shadow", 6.80),
+    ):
+        state_store.set_positions(
+            account_id,
+            [
+                Position(
+                    symbol=symbol,
+                    quantity=-1250,
+                    avg_price=avg_price,
+                    product_type=ProductType.INTRADAY,
+                )
+            ],
+        )
+    _seed_label_meta("NG_ATM_CE_295", symbol=symbol, token="555295")
+
+    router = _RecordingOrderRouter()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(position_trailing_lock_tick_enabled=True),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+    shadow_runners = [
+        _runner("t-1", "A1-shadow", runtime_mode="SHADOW"),
+        _runner("t-1", "A2-shadow", runtime_mode="SHADOW"),
+    ]
+
+    await engine.evaluate_tick(
+        shadow_runners,
+        tick_label="NG_ATM_CE_295",
+        tick_token="555295",
+        price=5.70,
+    )
+    assert router.calls == []
+
+    await engine.evaluate_tick(
+        shadow_runners,
+        tick_label="NG_ATM_CE_295",
+        tick_token="555295",
+        price=6.05,
+    )
+
+    assert len(router.calls) == 2
+    assert {call["broker_account_id"] for call in router.calls} == {
+        "A1-shadow",
+        "A2-shadow",
+    }
+    assert {call["symbol"] for call in router.calls} == {symbol}
+    assert {call["side"] for call in router.calls} == {OrderSide.BUY}
+    assert {call["strategy_id"] for call in router.calls} == {
+        "system::position_trailing_lock"
+    }
+
+
+@pytest.mark.asyncio
+async def test_tick_mode_ignores_non_matching_tick():
+    state_store = StateStore()
+    symbol = "NATURALGAS22MAY26295CE"
+    state_store.set_positions(
+        "A1",
+        [
+            Position(
+                symbol=symbol,
+                quantity=-1250,
+                avg_price=6.75,
+                product_type=ProductType.INTRADAY,
+            )
+        ],
+    )
+    _seed_label_meta("NG_ATM_CE_295", symbol=symbol, token="555295")
+
+    router = _RecordingOrderRouter()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(position_trailing_lock_tick_enabled=True),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+
+    await engine.evaluate_tick(
+        [_runner("t-1", "A1")],
+        tick_label="OTHER_LABEL",
+        tick_token="555999",
+        price=5.70,
+    )
+    await engine.evaluate_tick(
+        [_runner("t-1", "A1")],
+        tick_label="OTHER_LABEL",
+        tick_token="555999",
+        price=6.05,
+    )
+    assert router.calls == []
+
+
+@pytest.mark.asyncio
+async def test_tick_mode_skips_when_strategy_exit_lock_is_active():
+    state_store = StateStore()
+    symbol = "NATURALGAS22MAY26295CE"
+    pos = Position(
+        symbol=symbol,
+        quantity=-1250,
+        avg_price=6.75,
+        product_type=ProductType.INTRADAY,
+    )
+    state_store.set_positions("A1", [pos])
+    _seed_label_meta("NG_ATM_CE_295", symbol=symbol, token="555295")
+
+    ownership_store = PositionOwnershipStore()
+    contract_key, reason = derive_contract_key_from_position(pos)
+    assert contract_key is not None, reason
+    first_exit = ownership_store.try_acquire(
+        tenant_id=TenantId("t-1"),
+        broker_account_id=BrokerAccountId("A1"),
+        contract_key=contract_key,
+        strategy_id=StrategyId("ema20_strategy"),
+        is_exit_order=True,
+        unknown_mode="block_entries",
+    )
+    assert first_exit.allowed is True
+
+    router = _RecordingOrderRouter()
+    router._position_ownership_store = ownership_store  # type: ignore[attr-defined]
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(position_trailing_lock_tick_enabled=True),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+
+    await engine.evaluate_tick(
+        [_runner("t-1", "A1")],
+        tick_label="NG_ATM_CE_295",
+        tick_token="555295",
+        price=5.70,
+    )
+    await engine.evaluate_tick(
+        [_runner("t-1", "A1")],
+        tick_label="NG_ATM_CE_295",
+        tick_token="555295",
+        price=6.05,
+    )
+    assert router.calls == []
 
 
 @pytest.mark.asyncio
