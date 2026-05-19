@@ -1290,6 +1290,21 @@ class AppRuntime:
                 evidence["position_records_active"] = non_flat
         except Exception:
             evidence["position_records_in_memory"] = -1
+        try:
+            from app.orders.position_record_invariants import (
+                count_terminal_nonzero_position_records,
+            )
+
+            evidence["position_record_invariants"] = {
+                "terminal_nonzero_net_qty_count": (
+                    count_terminal_nonzero_position_records()
+                ),
+            }
+        except Exception as exc:
+            evidence["position_record_invariants"] = {
+                "terminal_nonzero_net_qty_count": None,
+                "error": str(exc),
+            }
 
         # Kill switch state
         try:
@@ -1320,6 +1335,9 @@ class AppRuntime:
         evidence["safety_flags"] = {
             "enable_capital_checks": str(_os.getenv("ENABLE_CAPITAL_CHECKS", "")).lower() == "true",
             "enable_risk_checks": str(_os.getenv("ENABLE_RISK_CHECKS", "")).lower() == "true",
+            "order_router_enforce_global_kill_switch": str(
+                _os.getenv("ORDER_ROUTER_ENFORCE_GLOBAL_KILL_SWITCH", "")
+            ).lower() == "true",
             "order_submission_outbox_required": str(
                 _os.getenv("ORDER_SUBMISSION_OUTBOX_REQUIRED", "")
             ).lower() == "true",

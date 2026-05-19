@@ -77,6 +77,7 @@ def _base_live_env(**overrides):
         "PROFIT_ENABLE_DAILY_TARGET": "true",
         "PROFIT_DAILY_TARGET": "10000",
         "ORDER_ROUTER_ENFORCE_IDEMPOTENCY": "true",
+        "ORDER_ROUTER_ENFORCE_GLOBAL_KILL_SWITCH": "true",
         "POSITION_OWNERSHIP_ENABLED": "true",
         "POSITION_OWNERSHIP_UNKNOWN_MODE": "block_entries",
         "ORDER_LIFECYCLE_PERSIST_MARKERS_REQUIRED": "true",

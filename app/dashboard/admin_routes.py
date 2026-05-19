@@ -775,6 +775,8 @@ def clear_position_record(
                 cur.execute(
                     "UPDATE internal_position_records "
                     "SET position_state = 'FLAT', "
+                    "    net_qty = 0, "
+                    "    unrealized_pnl = 0, "
                     "    state_reason = %s, "
                     "    last_reconciled_at = NOW(), "
                     "    updated_at = NOW() "
@@ -836,6 +838,7 @@ def clear_position_record(
         },
         after={
             "position_state": "FLAT",
+            "net_qty": 0,
             "state_reason": payload.reason or "force_cleared_by_admin",
             "force": payload.force,
             "broker_net_qty_at_clear": broker_net_qty,

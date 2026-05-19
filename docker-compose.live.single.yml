@@ -142,6 +142,7 @@ x-live-backend-env: &live-backend-env
   PROFIT_BLOCK_NEW_ORDERS_ON_TARGET: "true"
 
   ORDER_ROUTER_ENFORCE_IDEMPOTENCY: "true"
+  ORDER_ROUTER_ENFORCE_GLOBAL_KILL_SWITCH: "true"
   ORDER_SUBMISSION_OUTBOX_ENABLED: "true"
   ORDER_SUBMISSION_OUTBOX_REQUIRED: "true"
   ORDER_SUBMISSION_OUTBOX_BACKEND: "postgres"
@@ -361,7 +362,9 @@ services:
                   FROM (VALUES
                       ('idx_broker_accounts_client_code'),
                       ('idx_subscriptions_tenant_account_mode'),
-                      ('idx_users_email')
+                      ('idx_users_email'),
+                      ('idx_strategy_config_candidates_cfg_status'),
+                      ('idx_strategy_config_candidates_created_at')
                   ) AS req(required_index)
                   WHERE NOT EXISTS (
                       SELECT 1

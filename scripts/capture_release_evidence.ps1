@@ -151,7 +151,9 @@ $checks = @(
     @{ Label = "risk_checks enabled";                      Actual = $evidence.safety_flags.enable_risk_checks;               Expected = $true;    Op = "eq"   }
     @{ Label = "outbox required";                          Actual = $evidence.safety_flags.order_submission_outbox_required;  Expected = $true;    Op = "eq"   }
     @{ Label = "ownership enabled";                        Actual = $evidence.safety_flags.position_ownership_enabled;        Expected = $true;    Op = "eq"   }
+    @{ Label = "global kill switch router gate enabled";   Actual = $evidence.safety_flags.order_router_enforce_global_kill_switch; Expected = $true; Op = "eq"   }
     @{ Label = "risk_fail_open == false";                  Actual = $evidence.safety_flags.risk_fail_open_on_missing_pnl;    Expected = $false;   Op = "eq"   }
+    @{ Label = "terminal position records net_qty == 0";   Actual = $evidence.position_record_invariants.terminal_nonzero_net_qty_count; Expected = 0; Op = "eq"   }
     @{ Label = "synthetic_contamination_cleared";          Actual = $evidence.synthetic_contamination_cleared;               Expected = $null;    Op = "true" }
     @{ Label = "/readyz ready == true";                    Actual = $readyz.ready;                                           Expected = $true;    Op = "eq"   }
     @{ Label = "degraded_scope_count == 0";                Actual = $readyz.degraded_scope_count;                            Expected = 0;        Op = "eq"   }

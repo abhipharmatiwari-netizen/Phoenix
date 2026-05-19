@@ -906,10 +906,36 @@ def _build_docker_health_summary() -> dict[str, Any]:
     if not stream_worker_running and stream_worker_expected:
         degraded_reasons.append("stream_worker_stopped")
     schema_status = str(schema_snapshot.get("status") or "unknown").strip().lower()
-    if schema_status == "error":
+    schema_missing = bool(
+        schema_snapshot.get("missing_tables") or schema_snapshot.get("missing_indexes")
+    )
+    if schema_status in {"error", "degraded"} or schema_missing:
         degraded_reasons.append("schema_error")
     if tracked_accounts and not last_position_sync_ok_ts:
         degraded_reasons.append("position_sync_not_ready")
+    terminal_nonzero_count: int | None = None
+    terminal_nonzero_error: str | None = None
+    try:
+        _control_plane_backend = str(
+            getattr(get_settings(), "control_plane_backend", "") or ""
+        ).strip().lower()
+    except Exception:
+        _control_plane_backend = ""
+    if schema_status == "ok" and _control_plane_backend == "postgres":
+        try:
+            from app.orders.position_record_invariants import (
+                count_terminal_nonzero_position_records,
+            )
+
+            terminal_nonzero_count = count_terminal_nonzero_position_records()
+            if terminal_nonzero_count > 0:
+                degraded_reasons.append("terminal_position_records_nonzero_net_qty")
+        except Exception as exc:
+            terminal_nonzero_error = str(exc)
+            logger.warning(
+                "Health summary failed to check terminal position-record invariant: %s",
+                exc,
+            )
 
     status = "ok" if not degraded_reasons else "degraded"
 
@@ -975,6 +1001,10 @@ def _build_docker_health_summary() -> dict[str, Any]:
         "tracked_account_count": len(tracked_accounts),
         "degraded_reasons": degraded_reasons,
         "schema": schema_snapshot,
+        "position_record_invariants": {
+            "terminal_nonzero_net_qty_count": terminal_nonzero_count,
+            "error": terminal_nonzero_error,
+        },
         "watchdog": watchdog_snapshot,
         "leader_lease": leader_lease_snapshot,
         "alert_evaluator": runtime_alert_status,
@@ -1191,6 +1221,31 @@ async def readyz() -> JSONResponse:
         payload["ready"] = False
         payload["reason"] = "startup_recovery_in_progress"
         return JSONResponse(status_code=503, content=payload)
+
+    schema_getter = getattr(runtime, "schema_status", None)
+    if callable(schema_getter):
+        try:
+            schema_snapshot = dict(schema_getter())
+        except Exception as exc:
+            schema_snapshot = {
+                "status": "error",
+                "missing_tables": [],
+                "missing_indexes": [],
+                "error": str(exc),
+            }
+        schema_status = str(schema_snapshot.get("status") or "unknown").strip().lower()
+        schema_missing = bool(
+            schema_snapshot.get("missing_tables") or schema_snapshot.get("missing_indexes")
+        )
+        if schema_status in {"error", "degraded"} or schema_missing:
+            payload["ready"] = False
+            payload["reason"] = "schema_guard_degraded"
+            payload["schema_guard"] = {
+                "status": schema_status or "unknown",
+                "missing_tables": list(schema_snapshot.get("missing_tables") or []),
+                "missing_indexes": list(schema_snapshot.get("missing_indexes") or []),
+            }
+            return JSONResponse(status_code=503, content=payload)
 
     startup_recovery_getter = getattr(runtime, "startup_recovery_status", None)
     if callable(startup_recovery_getter):
@@ -1540,6 +1595,26 @@ async def readyz() -> JSONResponse:
 
         except Exception as _pos_exc:
             logger.warning("readyz: position authority check failed: %s", _pos_exc)
+
+    if _readiness_trade_mode() == "LIVE":
+        try:
+            from app.orders.position_record_invariants import (
+                count_terminal_nonzero_position_records,
+            )
+
+            terminal_nonzero_count = count_terminal_nonzero_position_records()
+            payload["terminal_position_records_nonzero_net_qty_count"] = (
+                terminal_nonzero_count
+            )
+            if terminal_nonzero_count > 0:
+                payload["ready"] = False
+                payload["reason"] = "terminal_position_records_nonzero_net_qty"
+                return JSONResponse(status_code=503, content=payload)
+        except Exception as exc:
+            logger.warning(
+                "readyz: terminal position-record invariant check failed: %s",
+                exc,
+            )
 
     if _readiness_trade_mode() == "LIVE":
         try:

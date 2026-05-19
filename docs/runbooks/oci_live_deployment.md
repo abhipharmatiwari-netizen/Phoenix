@@ -239,6 +239,7 @@ Expected tables include:
 - `public.position_ownership_ledger`
 - `public.internal_position_records`
 - `public.strategy_configs`
+- `public.strategy_config_candidates`
 - `public.broker_credentials`
 - `public.kill_switch_state`
 - `public.schema_migrations`
@@ -266,7 +267,10 @@ Cron evidence observed:
 30 18 * * 0-4 /opt/phoenix/stop-phoenix.sh  >> /opt/phoenix/logs/cron-scheduler.log 2>&1
 ```
 
-Manual restart of the backend only, after operator approval:
+Run the migration and database preflight steps below before any backend/nginx
+recreate for a release that changes `migrations/`, schema guard requirements, or
+live startup validation. Manual restart of the backend only, after operator
+approval:
 
 ```bash
 cd /opt/phoenix/app

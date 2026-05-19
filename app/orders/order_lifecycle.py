@@ -1051,6 +1051,8 @@ class OrderLifecycleService:
             return None
         prior = copy.deepcopy(record)
         record.position_state = PositionState.FLAT
+        record.net_qty = 0.0
+        record.unrealized_pnl = 0.0
         record.state_reason = str(reason or "force_cleared_by_admin")
         record.last_reconciled_at = self._clock.now_utc()
         return prior

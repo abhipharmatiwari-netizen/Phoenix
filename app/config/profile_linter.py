@@ -110,6 +110,10 @@ def _build_lint_settings(env: dict[str, str]) -> SimpleNamespace:
             env.get("ORDER_ROUTER_ENFORCE_IDEMPOTENCY"),
             default=False,
         ),
+        order_router_enforce_global_kill_switch=_parse_bool(
+            env.get("ORDER_ROUTER_ENFORCE_GLOBAL_KILL_SWITCH"),
+            default=False,
+        ),
         position_ownership_enabled=_parse_bool(
             env.get("POSITION_OWNERSHIP_ENABLED"),
             default=False,

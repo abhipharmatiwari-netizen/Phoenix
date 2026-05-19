@@ -573,6 +573,9 @@ def validate_runtime_startup_settings(
             "ORDER_ROUTER_ENFORCE_IDEMPOTENCY": getattr(
                 settings, "order_router_enforce_idempotency", False
             ),
+            "ORDER_ROUTER_ENFORCE_GLOBAL_KILL_SWITCH": getattr(
+                settings, "order_router_enforce_global_kill_switch", False
+            ),
             "POSITION_OWNERSHIP_ENABLED": getattr(
                 settings, "position_ownership_enabled", False
             ),

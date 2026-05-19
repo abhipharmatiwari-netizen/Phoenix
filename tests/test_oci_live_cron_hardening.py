@@ -169,8 +169,8 @@ def test_redeploy_pulls_and_recreates_nginx_with_backend() -> None:
 def test_oci_runbook_documents_verified_vm_runtime() -> None:
     runbook = _read("docs/runbooks/oci_live_deployment.md")
 
-    assert "phoenix-local-backend:local-1a2cc47" in runbook
-    assert "phoenix-local-nginx:local-1a2cc47" in runbook
+    assert "phoenix-local-backend:local-29c24f0" in runbook
+    assert "phoenix-local-nginx:local-29c24f0" in runbook
     assert "phoenix-oci-postgres" in runbook
     assert "VM-local Postgres" in runbook
     assert "source-file bind mounts" in runbook

@@ -11,7 +11,8 @@
 # migrator/db-preflight interpolation. Do not document that target shape as
 # current unless a fresh VM audit proves the running containers match it.
 #
-# Current VM usage:
+# Current VM backend/nginx recreation, only after migrator and db-preflight
+# have completed for the release:
 #   cd /opt/phoenix/app
 #   CONTROL_PLANE_PG_PASSWORD_HOST="$(sudo cat /run/secrets/control_plane_pg_password)" \
 #     docker compose -f docker-compose.oci-live.yml \
@@ -138,6 +139,7 @@ x-live-backend-env: &live-backend-env
   PROFIT_BLOCK_NEW_ORDERS_ON_TARGET: "true"
 
   ORDER_ROUTER_ENFORCE_IDEMPOTENCY: "true"
+  ORDER_ROUTER_ENFORCE_GLOBAL_KILL_SWITCH: "true"
   ORDER_SUBMISSION_OUTBOX_ENABLED: "true"
   ORDER_SUBMISSION_OUTBOX_REQUIRED: "true"
   ORDER_SUBMISSION_OUTBOX_BACKEND: "postgres"
@@ -382,7 +384,9 @@ services:
                   FROM (VALUES
                       ('idx_broker_accounts_client_code'),
                       ('idx_subscriptions_tenant_account_mode'),
-                      ('idx_users_email')
+                      ('idx_users_email'),
+                      ('idx_strategy_config_candidates_cfg_status'),
+                      ('idx_strategy_config_candidates_created_at')
                   ) AS req(required_index)
                   WHERE NOT EXISTS (
                       SELECT 1 FROM pg_indexes i

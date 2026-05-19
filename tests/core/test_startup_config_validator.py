@@ -42,6 +42,7 @@ def _valid_runtime_settings(**overrides):
         "profit_enable_daily_target": True,
         "profit_daily_target": 1200.0,
         "order_router_enforce_idempotency": True,
+        "order_router_enforce_global_kill_switch": True,
         "position_ownership_enabled": True,
         "position_ownership_unknown_mode": "block_entries",
         "order_lifecycle_persist_markers_required": True,
@@ -1044,6 +1045,25 @@ def test_runtime_settings_validator_rejects_live_without_required_guardrails():
             settings=_valid_runtime_settings(
                 order_router_enforce_idempotency=False,
                 risk_fail_open_on_missing_pnl=True,
+            ),
+            runtime_cfg=_valid_runtime_cfg(app_env="production"),
+            env={
+                "TRADE_MODE": "LIVE",
+                "POSITION_SYNC_INTERVAL_SECONDS": "30",
+                "ORDERS_SYNC_INTERVAL_SECONDS": "90",
+                "DASHBOARD_AUTH_DISABLED": "false",
+            },
+        )
+
+
+def test_runtime_settings_validator_rejects_live_without_global_kill_switch_router_gate():
+    with pytest.raises(
+        ValueError,
+        match="TRADE_MODE=LIVE requires ORDER_ROUTER_ENFORCE_GLOBAL_KILL_SWITCH=true",
+    ):
+        validate_runtime_startup_settings(
+            settings=_valid_runtime_settings(
+                order_router_enforce_global_kill_switch=False,
             ),
             runtime_cfg=_valid_runtime_cfg(app_env="production"),
             env={

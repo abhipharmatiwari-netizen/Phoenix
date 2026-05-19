@@ -232,6 +232,79 @@ def test_health_summary_reports_required_fields(api_client, monkeypatch):
     assert payload["last_broker_blocked_or_rate_limited_ts"] == "2026-03-05T11:00:00Z"
 
 
+def test_health_summary_degrades_when_schema_guard_degraded(api_client, monkeypatch):
+    client, runtime = api_client
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = True
+    runtime.schema_state = {
+        "status": "degraded",
+        "checked_at": "2026-03-05T00:00:00Z",
+        "missing_tables": ["strategy_config_candidates"],
+        "missing_indexes": [],
+    }
+    monkeypatch.setattr(
+        server,
+        "get_hub_runtime",
+        lambda: SimpleNamespace(
+            hub=SimpleNamespace(list_runner_ids=lambda: []),
+            state_store=StateStore(),
+        ),
+    )
+
+    resp = client.get("/health/summary")
+    payload = resp.json()
+
+    assert resp.status_code == 200
+    assert payload["status"] == "degraded"
+    assert payload["schema_status"] == "degraded"
+    assert "schema_error" in payload["degraded_reasons"]
+
+
+def test_health_summary_degrades_when_terminal_position_records_have_quantity(
+    api_client,
+    monkeypatch,
+):
+    client, runtime = api_client
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = True
+    monkeypatch.setattr(
+        server,
+        "get_hub_runtime",
+        lambda: SimpleNamespace(
+            hub=SimpleNamespace(list_runner_ids=lambda: []),
+            state_store=StateStore(),
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            control_plane_backend="postgres",
+            enable_multi_hub=False,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    from app.orders import position_record_invariants
+
+    monkeypatch.setattr(
+        position_record_invariants,
+        "count_terminal_nonzero_position_records",
+        lambda: 2,
+    )
+
+    resp = client.get("/health/summary")
+    payload = resp.json()
+
+    assert resp.status_code == 200
+    assert payload["status"] == "degraded"
+    assert (
+        payload["position_record_invariants"]["terminal_nonzero_net_qty_count"]
+        == 2
+    )
+    assert "terminal_position_records_nonzero_net_qty" in payload["degraded_reasons"]
+
+
 def test_health_summary_does_not_expect_stream_worker_when_disabled(api_client, monkeypatch):
     client, runtime = api_client
     runtime.worker_running_state = False
@@ -1007,6 +1080,110 @@ def test_readyz_returns_503_when_startup_recovery_is_degraded(monkeypatch):
     assert payload["reason"] == "startup_recovery_degraded_failed_1_unresolved_0"
     assert payload["startup_recovery_status"] == "degraded"
     assert payload["startup_recovery_summary"] == {"failed": 1, "unresolved_active": 0}
+
+
+def test_readyz_returns_503_when_schema_guard_degraded(monkeypatch):
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+    runtime.schema_state = {
+        "status": "degraded",
+        "checked_at": "2026-03-05T00:00:00Z",
+        "missing_tables": ["strategy_config_candidates"],
+        "missing_indexes": [],
+    }
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=False,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz")
+
+    assert resp.status_code == 503
+    payload = resp.json()
+    assert payload["ready"] is False
+    assert payload["reason"] == "schema_guard_degraded"
+    assert payload["schema_guard"]["missing_tables"] == ["strategy_config_candidates"]
+
+
+def test_readyz_returns_503_when_terminal_position_records_have_quantity(monkeypatch):
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = True
+    runtime.leader_lease_state = {
+        "enabled": True,
+        "owned": True,
+        "task_running": True,
+    }
+    hub_stub = SimpleNamespace(
+        registered_runner_count=1,
+        running_runner_count=1,
+        failed_runner_count=0,
+    )
+    hub_runtime_stub = SimpleNamespace(
+        hub=hub_stub,
+        audit_position_avg_price_corruption=lambda: {
+            "corrupt_count": 0,
+            "samples": [],
+            "read_failures": [],
+        },
+    )
+
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: hub_runtime_stub)
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            env={"TRADE_MODE": "LIVE"},
+            runtime=SimpleNamespace(app_env="production"),
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=True,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    from app.orders import position_record_invariants
+
+    monkeypatch.setattr(
+        position_record_invariants,
+        "count_terminal_nonzero_position_records",
+        lambda: 4,
+    )
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz")
+
+    assert resp.status_code == 503
+    payload = resp.json()
+    assert payload["reason"] == "terminal_position_records_nonzero_net_qty"
+    assert payload["terminal_position_records_nonzero_net_qty_count"] == 4
 
 
 def test_readyz_returns_200_when_runtime_ready_no_multi_hub(monkeypatch):

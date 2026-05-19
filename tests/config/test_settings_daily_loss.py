@@ -33,6 +33,7 @@ def _runtime_settings(**overrides):
         "profit_enable_daily_target": True,
         "profit_daily_target": 10000.0,
         "order_router_enforce_idempotency": True,
+        "order_router_enforce_global_kill_switch": True,
         "position_ownership_enabled": True,
         "position_ownership_unknown_mode": "block_entries",
         "order_lifecycle_persist_markers_required": True,

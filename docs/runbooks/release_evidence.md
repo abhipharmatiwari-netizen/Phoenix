@@ -56,6 +56,7 @@ deployment log or PR.
 | `is_leader` | `true` |
 | `position_authority_restored` | `true` when `startup_recovery.summary.position_records_loaded > 0`; `false` is allowed only for a fresh database with zero non-terminal position records and green `/readyz` effective authority |
 | `schema_guard.status` | `"ok"` or empty missing lists |
+| `position_record_invariants.terminal_nonzero_net_qty_count` | `0` |
 | `startup_recovery.status` | `"ok"` or `"skipped"` — never `"failed"` |
 | `stream_worker.running` | `true` |
 | `runner_count` | ≥ 1 |
@@ -64,6 +65,7 @@ deployment log or PR.
 | `safety_flags.enable_risk_checks` | `true` |
 | `safety_flags.order_submission_outbox_required` | `true` |
 | `safety_flags.position_ownership_enabled` | `true` |
+| `safety_flags.order_router_enforce_global_kill_switch` | `true` |
 | `safety_flags.risk_fail_open_on_missing_pnl` | `false` |
 | `synthetic_contamination_cleared` | `true` |
 

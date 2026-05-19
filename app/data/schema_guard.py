@@ -17,6 +17,7 @@ _CONTROL_PLANE_TABLES = {
     "broker_accounts",
     "subscriptions",
     "strategy_configs",
+    "strategy_config_candidates",
     "users",
 }
 _SWEEP_TABLES = {"sweep_states", "eod_states"}
@@ -29,6 +30,8 @@ _REQUIRED_INDEXES = {
     "idx_broker_accounts_client_code",
     "idx_subscriptions_tenant_account_mode",
     "idx_users_email",
+    "idx_strategy_config_candidates_cfg_status",
+    "idx_strategy_config_candidates_created_at",
     "position_ownership_ledger_acct_idx",
     "idx_internal_position_records_active",
 }

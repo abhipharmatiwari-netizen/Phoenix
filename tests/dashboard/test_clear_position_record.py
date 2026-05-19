@@ -77,6 +77,8 @@ def test_force_clear_returns_prior_record_and_marks_flat():
 
     # In-memory record is now FLAT.
     assert rec.position_state == PositionState.FLAT
+    assert rec.net_qty == 0.0
+    assert rec.unrealized_pnl == 0.0
     assert rec.state_reason == "manual_recovery_post_flip"
     assert rec.last_reconciled_at is not None
 
@@ -199,9 +201,10 @@ def test_clear_route_force_overrides_safety_check(monkeypatch):
     )
     _patch_rate_limit(monkeypatch)
     # Stub Postgres path so the test doesn't need a live DB.
+    conn = _StubConn()
     monkeypatch.setattr(
         "app.data.postgres.connect_with_retry",
-        lambda *_a, **_kw: _StubConn(),
+        lambda *_a, **_kw: conn,
     )
     monkeypatch.setattr(
         "app.data.postgres.get_control_plane_dsn",
@@ -212,6 +215,8 @@ def test_clear_route_force_overrides_safety_check(monkeypatch):
     out = clear_position_record(_mk_request_stub(), payload, _mk_admin_ctx())
     assert out["status"] == "ok"
     assert rec.position_state == PositionState.FLAT
+    assert rec.net_qty == 0.0
+    assert any("net_qty = 0" in sql for sql in conn.executed_sql)
 
 
 def test_clear_route_clean_path_when_broker_is_flat(monkeypatch):
@@ -227,9 +232,10 @@ def test_clear_route_clean_path_when_broker_is_flat(monkeypatch):
         "app.dashboard.admin_routes.get_hub_runtime", lambda: runtime
     )
     _patch_rate_limit(monkeypatch)
+    conn = _StubConn()
     monkeypatch.setattr(
         "app.data.postgres.connect_with_retry",
-        lambda *_a, **_kw: _StubConn(),
+        lambda *_a, **_kw: conn,
     )
     monkeypatch.setattr(
         "app.data.postgres.get_control_plane_dsn",
@@ -242,6 +248,8 @@ def test_clear_route_clean_path_when_broker_is_flat(monkeypatch):
     assert out["scope_key"] == scope
     assert out["prior_state"] == "RECOVERY_PENDING"
     assert rec.position_state == PositionState.FLAT
+    assert rec.net_qty == 0.0
+    assert any("net_qty = 0" in sql for sql in conn.executed_sql)
 
 
 def test_clear_route_403_when_role_insufficient(monkeypatch):
@@ -268,9 +276,14 @@ def test_clear_route_403_when_role_insufficient(monkeypatch):
 # ---- helpers ----------------------------------------------------------
 
 class _StubCursor:
-    def __init__(self) -> None:
+    def __init__(self, conn: "_StubConn") -> None:
+        self.conn = conn
         self.rowcount = 0
-    def execute(self, *_a, **_kw): return None
+
+    def execute(self, sql, *_a, **_kw):
+        self.conn.executed_sql.append(str(sql))
+        return None
+
     def fetchone(self): return None
     def fetchall(self): return []
     def __enter__(self): return self
@@ -278,7 +291,10 @@ class _StubCursor:
 
 
 class _StubConn:
-    def cursor(self): return _StubCursor()
+    def __init__(self) -> None:
+        self.executed_sql = []
+
+    def cursor(self): return _StubCursor(self)
     def commit(self): return None
     def close(self): return None
     def __enter__(self): return self

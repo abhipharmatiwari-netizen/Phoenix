@@ -154,6 +154,7 @@ The single-file Compose manifest wires the required LIVE settings directly into 
 - `DASHBOARD_AUTH_DISABLED=false`
 - `DISABLE_CONTROL_TOWER_ROUTES=false`
 - `ORDER_ROUTER_ENFORCE_IDEMPOTENCY=true`
+- `ORDER_ROUTER_ENFORCE_GLOBAL_KILL_SWITCH=true`
 - `POSITION_OWNERSHIP_ENABLED=true`
 - `ENABLE_EOD_EXIT=true`
 - `RISK_STATE_PATH=/app/state/risk_positions.json` — risk restart-helper persisted to the `/app/state` volume, separate from the log volume
@@ -203,7 +204,7 @@ curl.exe http://localhost/health/summary
 This proves the backend container, not just the host shell, resolved the required automated LIVE tuple:
 
 ```powershell
-docker compose -f .\docker-compose.live.single.yml exec backend sh -lc "env | egrep '^(TRADE_MODE|REQUIRE_LIVE_TRADE_MODE|ENABLE_MULTI_HUB|USE_HUB_ROUTER|DISABLE_STREAM_WORKER|BROKER_SECRET_BACKEND|CONTROL_PLANE_BACKEND|SWEEP_STATE_BACKEND|APP_RUNTIME_STARTUP_VALIDATE|SCHEMA_CHECK_MODE|BROKER_SCHEMA_CHECK_MODE|DASHBOARD_AUTH_DISABLED|DISABLE_CONTROL_TOWER_ROUTES|ORDER_ROUTER_ENFORCE_IDEMPOTENCY|POSITION_OWNERSHIP_ENABLED|ENABLE_EOD_EXIT|RISK_STATE_PATH|ANGEL_POSTBACK_AUTH_MODE)='"
+docker compose -f .\docker-compose.live.single.yml exec backend sh -lc "env | egrep '^(TRADE_MODE|REQUIRE_LIVE_TRADE_MODE|ENABLE_MULTI_HUB|USE_HUB_ROUTER|DISABLE_STREAM_WORKER|BROKER_SECRET_BACKEND|CONTROL_PLANE_BACKEND|SWEEP_STATE_BACKEND|APP_RUNTIME_STARTUP_VALIDATE|SCHEMA_CHECK_MODE|BROKER_SCHEMA_CHECK_MODE|DASHBOARD_AUTH_DISABLED|DISABLE_CONTROL_TOWER_ROUTES|ORDER_ROUTER_ENFORCE_IDEMPOTENCY|ORDER_ROUTER_ENFORCE_GLOBAL_KILL_SWITCH|POSITION_OWNERSHIP_ENABLED|ENABLE_EOD_EXIT|RISK_STATE_PATH|ANGEL_POSTBACK_AUTH_MODE)='"
 ```
 
 `ANGEL_POSTBACK_AUTH_MODE` must resolve to `direct_broker` in LIVE. If it is absent or set to `disabled`, all Angel broker postbacks return HTTP 401 and the lifecycle service will not receive fill events from broker-initiated callbacks (§126).
