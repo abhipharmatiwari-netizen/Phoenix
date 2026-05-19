@@ -1,7 +1,7 @@
 # OCI VM Runtime Evidence
 
-Last verified: 2026-05-17 12:25 UTC from the running OCI VM.
-OI/ML shadow sidecar evidence was added on 2026-05-18 IST.
+Last verified: 2026-05-19 18:51 UTC from the running OCI VM.
+OI/ML shadow sidecar evidence was updated on 2026-05-20 00:21 IST.
 
 The OCI VM is the production source of truth. This file intentionally records
 what is running, including drift from repo templates. Secret values, private IPs,
@@ -13,14 +13,14 @@ OCIDs, broker identifiers, and tokens are redacted.
 |---|---|---|---|---|
 | Host | `phoenix-vm`, `opc`, `/home/opc` | `hostname; date; whoami; pwd` | VM reachable through OCI Bastion; VM VNIC has no public IP | Do not document private IPs |
 | Deployed repo path | `/opt/phoenix/app` | Compose labels and `git -C` | Active checkout lives under `/opt/phoenix/app` | `/opt/phoenix` also contains operator-owned runtime files |
-| Active git commit/branch | `main`, `1a2cc47d8cb23fbc9b60e5eea8e5841e10d79ccd` | `git -C /opt/phoenix/app branch --show-current`, `rev-parse HEAD` | VM checkout is on `main` at `1a2cc47` | `git status --short` shows untracked `docker-compose.oci-postgres.yml` |
+| Active git commit/branch | `main`, `29c24f0` | `git -C /opt/phoenix/app branch --show-current`, `rev-parse HEAD` | VM checkout is on `main` at `29c24f0` | `git status --short` shows untracked `docker-compose.oci-postgres.yml` |
 | Compose project | `phoenix-oci-live` | `docker inspect ... Labels` | backend, nginx, and watchdog have Compose labels | `phoenix-oci-postgres` has no Compose labels |
 | Compose files used | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` | `com.docker.compose.project.config_files` labels | These are the active Phoenix Compose files for labelled containers | Runtime override must be treated as authoritative |
 | Env file used | `/opt/phoenix/phoenix-deploy.env` | runtime scripts and Compose commands | Non-secret deploy env file exists on VM | Document names only, not values |
 | Running Phoenix containers | `phoenix-oci-backend`, `phoenix-oci-web`, `phoenix-oci-watchdog`, `phoenix-oci-postgres` | `docker ps`, `docker inspect` | All four were running during audit | Aurelium containers also run on the host but are outside Phoenix docs |
 | Stopped Phoenix containers | none shown by name | `docker ps -a` | `phoenix-oci-optimizer` is not present | Optimizer systemd units are also absent |
-| Backend image | `phoenix-local-backend:local-1a2cc47`, image ID `sha256:35feef34...` | `docker inspect phoenix-oci-backend` | Local image, not OCIR | Created 2026-05-13 |
-| Web image | `phoenix-local-nginx:local-1a2cc47`, image ID `sha256:c7e2220...` | `docker inspect phoenix-oci-web` | Local image, not OCIR | Created 2026-05-15 |
+| Backend image | `phoenix-local-backend:local-29c24f0` | `docker inspect phoenix-oci-backend` | Local image, not OCIR | Recreated 2026-05-19 18:51 UTC |
+| Web image | `phoenix-local-nginx:local-29c24f0` | `docker inspect phoenix-oci-web` | Local image, not OCIR | Recreated 2026-05-19 18:51 UTC |
 | Database image | `postgres:16-alpine`, image ID `sha256:4e6e670...` | `docker inspect phoenix-oci-postgres` | VM-local Postgres container | No Docker healthcheck |
 | Watchdog image | `docker:cli`, image ID `sha256:17b5c235...` | `docker inspect phoenix-oci-watchdog` | Docker CLI sidecar | Has Docker socket mount |
 | Backend command | `python -m app.main` via `docker-entrypoint.sh` | `docker inspect` | FastAPI backend runs in backend container | Port 8080 is container-only |
@@ -34,7 +34,7 @@ OCIDs, broker identifiers, and tokens are redacted.
 | Backend mounts | `/opt/phoenix/logs`, `/opt/phoenix/state`, `/opt/phoenix/certs`, `/run/secrets/*`, plus source-file bind mounts | `docker inspect .Mounts` | Runtime includes host state/log/cert mounts and source overlays | Source bind mounts are current drift |
 | Web mounts | `/opt/phoenix/nginx-ssl-prerendered.conf.template`, `/opt/phoenix/certs`, `/opt/phoenix/acme-challenge`, `/run/secrets/admin_api_key` | `docker inspect .Mounts` | nginx uses a prerendered host template | Repo nginx template is not directly mounted today |
 | Postgres mounts | `/opt/phoenix/pgdata` to `/var/lib/postgresql/data` | `docker inspect .Mounts` | DB data is local VM disk path | Backup/restore docs must use this fact |
-| Logs | `/opt/phoenix/logs`, date-partitioned app logs, audit JSONL, scheduler logs, cert renewal log | `find /opt/phoenix/logs` | Current logs under `/opt/phoenix/logs/2026-05-17` and root log files | `/opt/phoenix/logs` is writable by container UID |
+| Logs | `/opt/phoenix/logs`, date-partitioned app logs, audit JSONL, scheduler logs, cert renewal log | `find /opt/phoenix/logs` | Current logs under `/opt/phoenix/logs/2026-05-20` and root log files | `/opt/phoenix/logs` is writable by container UID |
 | State files | `/opt/phoenix/state/risk_positions.json` and `.bak` | `ls -la /opt/phoenix/state` | Restart helper files exist | Not authoritative over Postgres |
 | Health endpoints | backend container `/health`, `/ready`, `/readyz`, `/health/summary` return 200 | `docker exec phoenix-oci-backend curl ...` | Backend ready at container-local port 8080 | Host `localhost:8080` is not exposed |
 | nginx health | host `http://localhost/health`, `http://localhost/readyz`, `https://localhost:8443/health`, `https://localhost:8443/readyz` return 200 | `curl -k` on VM | nginx proxies current health paths | `/api/health` falls through to SPA and is not a health API |
@@ -48,23 +48,24 @@ OCIDs, broker identifiers, and tokens are redacted.
 
 ## OI/ML Shadow Sidecar Evidence
 
-Verified on 2026-05-18 IST:
+Verified on 2026-05-20 IST:
 
 | Area | Verified current state |
 |---|---|
 | Purpose | Dry-run OI/ML CE seller validation; no live order routing |
 | Checkout | `/opt/phoenix/oi-ml-shadow-src` |
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
-| Image | `phoenix-oi-ml-shadow:oi-ml-shadow-9e91b77` |
+| Image | `phoenix-oi-ml-shadow:oi-ml-shadow-29c24f0` |
 | Container | `phoenix-oi-ml-shadow`, no host ports published |
 | Scorer | Smoke deployment uses `OI_ML_SHADOW_SCORER=constant` |
 | Risk posture | `OI_ML_SHADOW_ALLOW_NAKED=false`; sidecar records shadow intents only |
-| Tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents` |
-| Expiry handling | Startup resolves listed NIFTY expiry from Angel scrip master; observed `calendar_default=2026-05-21 listed=2026-05-19` |
+| Tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`, `public.option_chain_validation_reports` |
+| Expiry handling | Startup resolves listed NIFTY expiry from Angel scrip master; latest observed `calendar_default=2026-05-21 listed=2026-05-26` |
 | Input hardening | Provider now fetches/stamps NIFTY spot and India VIX context LTPs for option-chain rows |
 | Broker proxy/session | Sidecar forwards backend broker proxy env and reuses the Angel quote session during snapshotting |
 | Smoke proof | 2026-05-18 21:11 IST off-market run fetched/stored `220` NIFTY rows through Angel FULL/LTP quote APIs; no shadow intent was recorded |
-| Remaining gate | Market-session FULL quote field completeness is not yet proven; off-market smoke still had missing `iv` and stale source timestamps |
+| IV handling | Missing Angel IV is enriched at read time from fresh exact-contract `nse_web` validation rows; raw provider rows remain separate |
+| Remaining gate | Market-session hard-field completeness and fresh source timestamps still need proof before promotion beyond shadow |
 
 Operator runbook: [OI/ML Shadow Sidecar Runbook](runbooks/oi_ml_shadow_sidecar.md).
 
@@ -107,6 +108,7 @@ user_tenant_entitlements
 users
 option_chain_1m
 oi_ml_shadow_order_intents
+option_chain_validation_reports
 ```
 
 ## Current Risk Register

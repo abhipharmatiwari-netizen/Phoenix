@@ -1,6 +1,6 @@
 # Phoenix OCI LIVE Deployment Runbook
 
-Status: current operator runbook for the OCI VM verified on 2026-05-17.
+Status: current operator runbook for the OCI VM verified on 2026-05-19.
 
 This runbook describes what is actually running on the OCI VM. It does not
 describe the older intended OCIR/external-Postgres deployment as current state.
@@ -44,17 +44,19 @@ dry-run only, publishes no host ports, and records option-chain snapshots plus
 shadow order intents in Postgres. It must not be used as evidence that live order
 routing is enabled.
 
-Current sidecar evidence as of 2026-05-18:
+Current sidecar evidence as of 2026-05-20 IST:
 
-- image: `phoenix-oi-ml-shadow:oi-ml-shadow-9e91b77`
+- image: `phoenix-oi-ml-shadow:oi-ml-shadow-29c24f0`
 - checkout: `/opt/phoenix/oi-ml-shadow-src`
 - compose: `/opt/phoenix/oi-ml-shadow.yml`
 - tables: `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`
 - scorer: smoke deployment uses `OI_ML_SHADOW_SCORER=constant`
 - broker access: sidecar forwards backend broker proxy env and reuses the Angel
   quote session during snapshotting
-- promotion blocker: market-session Angel FULL quote field completeness still
-  must be proven
+- IV handling: missing Angel IV is enriched at read time from fresh exact-contract
+  `nse_web` validation rows; raw provider rows remain separate
+- promotion blocker: market-session hard-field completeness and fresh source
+  timestamps still must be proven
 
 Use [OI/ML Shadow Sidecar Runbook](oi_ml_shadow_sidecar.md) for sidecar-specific
 operations and proof gates.
@@ -148,8 +150,8 @@ docker inspect phoenix-oci-postgres --format '{{json .Mounts}}'
 Expected success evidence:
 
 - backend and web are `healthy`
-- backend image is `phoenix-local-backend:local-1a2cc47`
-- web image is `phoenix-local-nginx:local-1a2cc47`
+- backend image is `phoenix-local-backend:local-29c24f0`
+- web image is `phoenix-local-nginx:local-29c24f0`
 - Postgres is `phoenix-oci-postgres`
 - backend command is `python -m app.main`
 
@@ -350,7 +352,7 @@ The operator owns:
 
 | Drift | Evidence | Risk |
 |---|---|---|
-| Local images instead of OCIR | `phoenix-local-backend:local-1a2cc47`, `phoenix-local-nginx:local-1a2cc47` | Old OCIR docs do not describe current deploy/restart behavior |
+| Local images instead of OCIR | `phoenix-local-backend:local-29c24f0`, `phoenix-local-nginx:local-29c24f0` | Old OCIR docs do not describe current deploy/restart behavior |
 | VM-local Postgres | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres` | External DB backup/SSL assumptions are not current |
 | Source bind mounts | backend mounts selected `/opt/phoenix/app/app/...` files | Container image alone is not the full deployed code |
 | Watchdog stops nginx | watchdog command/logs | Nginx availability can change without a manual nginx command |

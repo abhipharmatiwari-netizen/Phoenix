@@ -1,7 +1,7 @@
 # OI/ML Shadow Sidecar Runbook
 
 Status: current progress record for the OI/ML CE seller shadow sidecar as of
-2026-05-18.
+2026-05-20 IST.
 
 This sidecar is a dry-run research and validation process. It must not place,
 modify, cancel, or exit live orders. It runs beside the live OCI stack, publishes
@@ -13,10 +13,10 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 | Area | State |
 |---|---|
 | Branch | `oi-ml-shadow-sidecar` |
-| Latest deployed sidecar commit | `7770232` |
+| Latest deployed sidecar commit | `29c24f0` |
 | OCI checkout | `/opt/phoenix/oi-ml-shadow-src` |
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
-| Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-7770232` |
+| Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-29c24f0` |
 | Container | `phoenix-oi-ml-shadow` |
 | Database tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`, `public.option_chain_validation_reports` |
 | Default scorer | `missing` in compose; deployed smoke override uses `constant` |
@@ -30,8 +30,15 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 Recent validation:
 
 - Local focused OI/ML suite: `159 passed`.
-- Sidecar startup resolved provider-listed NIFTY expiry from Angel scrip master:
-  `calendar_default=2026-05-21 listed=2026-05-19`.
+- 2026-05-19 18:51 UTC / 2026-05-20 00:21 IST deployment:
+  backend `phoenix-local-backend:local-29c24f0`, nginx
+  `phoenix-local-nginx:local-29c24f0`, and sidecar
+  `phoenix-oi-ml-shadow:oi-ml-shadow-29c24f0`.
+- Post-deploy `/readyz` returned `ready=true` through both backend-local and
+  nginx-local checks. Sidecar restarted outside the market window and logged
+  `reason=outside_shadow_window`.
+- Latest sidecar startup resolved provider-listed NIFTY expiry from Angel scrip
+  master: `calendar_default=2026-05-21 listed=2026-05-26`.
 - Live backend and nginx were healthy after restart: `/readyz=200`, `/health=200`.
 - Off-market smoke on 2026-05-18 21:11 IST proved Angel login through proxy and
   FULL/LTP quote calls: `220` NIFTY rows fetched/stored, `0` shadow intents
@@ -279,7 +286,7 @@ Restart the sidecar with smoke constants:
 
 ```bash
 cd /opt/phoenix
-IMAGE_TAG=oi-ml-shadow-9e91b77 \
+IMAGE_TAG=oi-ml-shadow-29c24f0 \
 OI_ML_SHADOW_SCORER=constant \
 OI_ML_SHADOW_CONSTANT_PROBABILITY=0.64 \
 OI_ML_SHADOW_CONSTANT_MAE_PREMIUM=40 \
