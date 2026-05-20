@@ -53,6 +53,10 @@ Current sidecar evidence as of 2026-05-20 IST:
 - scorer: smoke deployment uses `OI_ML_SHADOW_SCORER=constant`
 - broker access: sidecar forwards backend broker proxy env and reuses the Angel
   quote session during snapshotting
+- health visibility: backend dashboard health uses
+  `OI_ML_SHADOW_HEALTH_ENABLED=true` to observe the external sidecar without
+  enabling the runner inside the live backend; the sidecar also has a Docker
+  healthcheck
 - IV handling: missing Angel IV is enriched at read time from fresh exact-contract
   `nse_web` validation rows; raw provider rows remain separate
 - promotion blocker: market-session hard-field completeness and fresh source

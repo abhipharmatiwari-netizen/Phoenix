@@ -74,6 +74,7 @@ Verified on 2026-05-20 IST:
 | Container | `phoenix-oi-ml-shadow`, no host ports published |
 | Scorer | Smoke deployment uses `OI_ML_SHADOW_SCORER=constant` |
 | Risk posture | `OI_ML_SHADOW_ALLOW_NAKED=false`; sidecar records shadow intents only |
+| Health visibility | Backend observes the external sidecar with `OI_ML_SHADOW_HEALTH_ENABLED=true`; sidecar Docker healthcheck runs `python -m app.strategies.oi_ml.shadow_health` |
 | Tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`, `public.option_chain_validation_reports` |
 | Expiry handling | Startup resolves listed NIFTY expiry from Angel scrip master; latest observed `calendar_default=2026-05-21 listed=2026-05-26` |
 | Input hardening | Provider now fetches/stamps NIFTY spot and India VIX context LTPs for option-chain rows |

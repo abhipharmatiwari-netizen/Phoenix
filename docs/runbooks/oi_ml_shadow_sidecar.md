@@ -125,18 +125,31 @@ The main dashboard health summary exposes read-only sidecar evidence under
 curl -sS http://localhost:8000/health/summary
 ```
 
-When `OI_ML_SHADOW_ENABLED=true`, the payload includes today's `option_chain_1m`
-row count, latest snapshot/source/ingest timestamps, validation report count,
-shadow intent count, and a dry-run invariant (`live_order_path_enabled=false`).
-If the sidecar is enabled after the snapshot window starts and no option-chain
-rows are present, dashboard status is degraded with reason
-`oi_ml_shadow_ingestion_degraded`; the alert rule
-`oi_ml_shadow_ingestion_degraded` fires with a sanitized row count.
+The live backend observes the separate sidecar with
+`OI_ML_SHADOW_HEALTH_ENABLED=true`. This is a dashboard-only health flag: it
+does not start the shadow runner in the backend and does not create an order
+route. The payload includes today's `option_chain_1m` row count, latest
+snapshot/source/ingest timestamps, validation report count, shadow intent count,
+and a dry-run invariant (`live_order_path_enabled=false`). If the sidecar is
+expected after the snapshot window starts and no option-chain rows are present,
+dashboard status is degraded with reason `oi_ml_shadow_ingestion_degraded`; the
+alert rule `oi_ml_shadow_ingestion_degraded` fires with a sanitized row count.
 
 Repeated provider/login timeouts are logged as compact
 `oi_ml_shadow_ingestion_degraded` warnings with a consecutive-failure count.
 Detailed stack traces are debug-level only on the first failure and every tenth
 failure, so the retry signal stays visible without flooding operator logs.
+
+The sidecar container has its own Docker healthcheck:
+
+```bash
+python -m app.strategies.oi_ml.shadow_health
+```
+
+The command prints sanitized JSON and exits non-zero when the expected sidecar
+evidence is degraded or unavailable. Freshness is enforced only during the
+snapshot window; after the window closes, today's completed snapshot remains
+healthy instead of being marked stale overnight.
 
 ## Remaining Promotion Gate
 

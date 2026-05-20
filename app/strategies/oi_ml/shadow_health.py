@@ -8,6 +8,7 @@ and shadow-intent freshness without enabling any live order path.
 from __future__ import annotations
 
 import os
+import json
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
@@ -68,12 +69,15 @@ def collect_shadow_ingestion_status(
     source = env or os.environ
     config = load_shadow_runner_config(env=source)
     current = (now or datetime.now(IST)).astimezone(IST)
-    enabled = bool(config.enabled)
+    health_override = _env_bool_or_none(source.get("OI_ML_SHADOW_HEALTH_ENABLED"))
+    enabled = bool(config.enabled if health_override is None else health_override)
     provider = str(config.provider or "").strip().lower() or "unknown"
     base = {
         "enabled": enabled,
         "status": "disabled" if not enabled else "unknown",
-        "reason": "shadow_runner_disabled" if not enabled else None,
+        "reason": _disabled_reason(config.enabled, health_override) if not enabled else None,
+        "runner_enabled": bool(config.enabled),
+        "health_enabled": enabled,
         "underlying": config.underlying,
         "provider": provider,
         "dry_run_only": True,
@@ -120,6 +124,11 @@ def collect_shadow_ingestion_status(
     latest_intent_ts = _row_value(intent_rows, "latest_intent_created_at")
 
     snapshot_expected = _snapshot_expected(current, config.snapshot_start_time)
+    snapshot_window_active = _within_window(
+        current,
+        config.snapshot_start_time,
+        config.snapshot_end_time,
+    )
     max_stale_seconds = _env_int(
         source.get("OI_ML_SHADOW_MAX_STALE_SECONDS"),
         DEFAULT_MAX_STALE_SECONDS,
@@ -135,7 +144,7 @@ def collect_shadow_ingestion_status(
     latest_ingested_age = _age_seconds(latest_ingested_at, current)
     if (
         config.capture_snapshot
-        and snapshot_expected
+        and snapshot_window_active
         and option_count > 0
         and latest_ingested_age is not None
         and latest_ingested_age > max_stale_seconds
@@ -148,12 +157,15 @@ def collect_shadow_ingestion_status(
     reason = ",".join(reasons) if reasons else None
     if not snapshot_expected:
         reason = "before_shadow_snapshot_window"
+    elif not snapshot_window_active and not reasons:
+        reason = "after_shadow_snapshot_window"
 
     return {
         **base,
         "status": status,
         "reason": reason,
         "snapshot_expected": snapshot_expected,
+        "snapshot_window_active": snapshot_window_active,
         "snapshot_window": {
             "start": config.snapshot_start_time.isoformat(timespec="minutes"),
             "end": config.snapshot_end_time.isoformat(timespec="minutes"),
@@ -189,6 +201,11 @@ def collect_shadow_ingestion_status(
 
 def _snapshot_expected(current: datetime, start_time: time) -> bool:
     return current.astimezone(IST).time() >= start_time
+
+
+def _within_window(value: datetime, start: time, end: time) -> bool:
+    now_time = value.astimezone(IST).time()
+    return start <= now_time <= end
 
 
 def _fetch_one(conn: Any, sql: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -252,4 +269,38 @@ def _env_bool(value: object, *, default: bool) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-__all__ = ["collect_shadow_ingestion_status"]
+def _env_bool_or_none(value: object) -> bool | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _disabled_reason(runner_enabled: bool, health_override: bool | None) -> str:
+    if health_override is False:
+        return "shadow_health_disabled"
+    if not runner_enabled:
+        return "shadow_runner_disabled"
+    return "shadow_health_disabled"
+
+
+def _json_default(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def main() -> int:
+    status = collect_shadow_ingestion_status()
+    print(json.dumps(status, sort_keys=True, default=_json_default))
+    if status.get("enabled") and status.get("status") in {"degraded", "unknown"}:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+__all__ = ["collect_shadow_ingestion_status", "main"]

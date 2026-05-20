@@ -247,6 +247,18 @@ x-live-backend-env: &live-backend-env
   ML_ENABLED: "false"
   ML_MODE: "OFF"
 
+  # Dashboard-only health contract for the separate OI/ML shadow sidecar.
+  # This does not enable the shadow runner inside the live backend and does
+  # not create any live order route.
+  OI_ML_SHADOW_HEALTH_ENABLED: "${OI_ML_SHADOW_HEALTH_ENABLED:-true}"
+  OI_ML_SHADOW_UNDERLYING: "${OI_ML_SHADOW_UNDERLYING:-NIFTY}"
+  OI_ML_SHADOW_PROVIDER: "${OI_ML_SHADOW_PROVIDER:-angel}"
+  OI_ML_SHADOW_CAPTURE_SNAPSHOT: "${OI_ML_SHADOW_CAPTURE_SNAPSHOT:-true}"
+  OI_ML_SHADOW_SNAPSHOT_START_TIME: "${OI_ML_SHADOW_SNAPSHOT_START_TIME:-09:15}"
+  OI_ML_SHADOW_SNAPSHOT_END_TIME: "${OI_ML_SHADOW_SNAPSHOT_END_TIME:-15:30}"
+  OI_ML_SHADOW_MAX_STALE_SECONDS: "${OI_ML_SHADOW_MAX_STALE_SECONDS:-180}"
+  OI_ML_SHADOW_VALIDATION_REQUIRED: "${OI_ML_SHADOW_VALIDATION_REQUIRED:-true}"
+
 x-db-client-env: &db-client-env
   PGHOST: "${CONTROL_PLANE_PG_HOST:?Set CONTROL_PLANE_PG_HOST}"
   PGPORT: "${CONTROL_PLANE_PG_PORT:-5432}"

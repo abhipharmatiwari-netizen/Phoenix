@@ -85,6 +85,8 @@ services:
       OI_ML_SHADOW_SNAPSHOT_START_TIME: "${OI_ML_SHADOW_SNAPSHOT_START_TIME:-09:15}"
       OI_ML_SHADOW_SNAPSHOT_END_TIME: "${OI_ML_SHADOW_SNAPSHOT_END_TIME:-15:30}"
       OI_ML_SHADOW_CAPTURE_SNAPSHOT: "${OI_ML_SHADOW_CAPTURE_SNAPSHOT:-true}"
+      OI_ML_SHADOW_MAX_STALE_SECONDS: "${OI_ML_SHADOW_MAX_STALE_SECONDS:-180}"
+      OI_ML_SHADOW_VALIDATION_REQUIRED: "${OI_ML_SHADOW_VALIDATION_REQUIRED:-true}"
       # Default scorer is fail-closed until trained artifacts are promoted.
       OI_ML_SHADOW_SCORER: "${OI_ML_SHADOW_SCORER:-missing}"
       OI_ML_SHADOW_CONSTANT_PROBABILITY: "${OI_ML_SHADOW_CONSTANT_PROBABILITY:-0}"
@@ -119,7 +121,11 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      disable: true
+      test: ["CMD", "python", "-m", "app.strategies.oi_ml.shadow_health"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 90s
 
 networks:
   phoenix_live:
