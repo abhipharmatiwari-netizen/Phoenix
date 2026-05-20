@@ -4,7 +4,7 @@ Phoenix is currently operated from an OCI VM. The running OCI VM is the only
 source of truth for production documentation; repo manifests and historical
 runbooks are secondary evidence only when they match that VM.
 
-Last verified against the VM: 2026-05-19 18:51 UTC.
+Last verified against the VM: 2026-05-20 16:02 UTC.
 OI/ML shadow sidecar deployment was verified on 2026-05-20 00:21 IST.
 
 ## Current OCI VM State
@@ -13,12 +13,12 @@ OI/ML shadow sidecar deployment was verified on 2026-05-20 00:21 IST.
 |---|---|
 | Host | `phoenix-vm` |
 | Repo checkout | `/opt/phoenix/app` |
-| Git state on VM | branch `main`, commit `29c24f0`, untracked `docker-compose.oci-postgres.yml` |
+| Git state on VM | branch `main`, commit `349d55f`, untracked `docker-compose.oci-postgres.yml` |
 | Compose project | `phoenix-oci-live` |
 | Compose files in use | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` |
 | Env file in use | `/opt/phoenix/phoenix-deploy.env` |
-| Backend container | `phoenix-oci-backend`, image `phoenix-local-backend:local-29c24f0`, healthy |
-| Web container | `phoenix-oci-web`, image `phoenix-local-nginx:local-29c24f0`, healthy |
+| Backend container | `phoenix-oci-backend`, image `phoenix-local-backend:local-349d55f`, healthy |
+| Web container | `phoenix-oci-web`, image `phoenix-local-nginx:local-349d55f`, healthy |
 | Database | VM-local `phoenix-oci-postgres` container, `postgres:16-alpine`, no Docker healthcheck |
 | Watchdog | `phoenix-oci-watchdog`, `docker:cli`; actively stops/starts nginx when backend health fails |
 | OI/ML shadow sidecar | `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-29c24f0`, dry-run only |
@@ -30,7 +30,7 @@ OI/ML shadow sidecar deployment was verified on 2026-05-20 00:21 IST.
 
 Current drift that operators must not normalize:
 
-- The VM is not running OCIR images; it is running local images tagged `local-29c24f0`.
+- The VM is not running OCIR images; it is running local images tagged `local-349d55f`.
 - The VM is not using an external OCI Database for PostgreSQL; it is using a VM-local Postgres container.
 - The backend has source-file bind mounts from `/opt/phoenix/app` into the container.
 - `CONTROL_PLANE_PG_SSLMODE=prefer` and `LIVE_PG_SSL_SKIP_CHECK=true` are present because the DB is local to the VM.

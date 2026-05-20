@@ -30,9 +30,9 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 Recent validation:
 
 - Local focused OI/ML suite: `159 passed`.
-- 2026-05-19 18:51 UTC / 2026-05-20 00:21 IST deployment:
-  backend `phoenix-local-backend:local-29c24f0`, nginx
-  `phoenix-local-nginx:local-29c24f0`, and sidecar
+- 2026-05-20 16:02 UTC / 21:32 IST core deployment:
+  backend `phoenix-local-backend:local-349d55f`, nginx
+  `phoenix-local-nginx:local-349d55f`. The OI/ML sidecar remains on
   `phoenix-oi-ml-shadow:oi-ml-shadow-29c24f0`.
 - Post-deploy `/readyz` returned `ready=true` through both backend-local and
   nginx-local checks. Sidecar restarted outside the market window and logged

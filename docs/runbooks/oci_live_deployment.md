@@ -150,8 +150,10 @@ docker inspect phoenix-oci-postgres --format '{{json .Mounts}}'
 Expected success evidence:
 
 - backend and web are `healthy`
-- backend image is `phoenix-local-backend:local-29c24f0`
-- web image is `phoenix-local-nginx:local-29c24f0`
+- backend image is `phoenix-local-backend:local-349d55f` in the latest verified
+  deployment
+- web image is `phoenix-local-nginx:local-349d55f` in the latest verified
+  deployment
 - Postgres is `phoenix-oci-postgres`
 - backend command is `python -m app.main`
 
@@ -356,7 +358,7 @@ The operator owns:
 
 | Drift | Evidence | Risk |
 |---|---|---|
-| Local images instead of OCIR | `phoenix-local-backend:local-29c24f0`, `phoenix-local-nginx:local-29c24f0` | Old OCIR docs do not describe current deploy/restart behavior |
+| Local images instead of OCIR | `phoenix-local-backend:local-349d55f`, `phoenix-local-nginx:local-349d55f` | Old OCIR docs do not describe current deploy/restart behavior |
 | VM-local Postgres | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres` | External DB backup/SSL assumptions are not current |
 | Source bind mounts | backend mounts selected `/opt/phoenix/app/app/...` files | Container image alone is not the full deployed code |
 | Watchdog stops nginx | watchdog command/logs | Nginx availability can change without a manual nginx command |
