@@ -49,6 +49,7 @@ export interface HubPosition {
   entry_ts: string;
   product_type: string;
   ltp: number | null;
+  unrealized_pnl?: number | null;
 }
 
 export interface PnlData {
@@ -56,6 +57,7 @@ export interface PnlData {
   total: number;
   realized: number;
   open: number;
+  invalid_marks_count?: number;
 }
 
 export interface StrategySelection {

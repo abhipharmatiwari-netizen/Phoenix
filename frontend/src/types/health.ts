@@ -6,7 +6,7 @@ export interface AccountStaleness {
 }
 
 export interface HealthSummary {
-  status: 'ok' | 'degraded';
+  status: 'ok' | 'degraded' | 'unknown';
   service: string;
   timestamp: string;
   schema_status: string;
@@ -18,7 +18,47 @@ export interface HealthSummary {
   last_broker_blocked_or_rate_limited_ts: string | null;
   tracked_account_count: number;
   degraded_reasons: string[];
+  readiness?: {
+    ready: boolean;
+    http_status: number;
+    reason?: string | null;
+    degraded_scope_count?: number;
+    position_state_counts?: Record<string, number>;
+    degraded_positions?: number;
+    reconciling_positions?: number;
+    blocking_count?: number;
+  };
   schema: { status: string; checked_at: string; missing_tables: string[]; missing_indexes: string[] };
+  oi_ml_shadow_ingestion?: {
+    enabled: boolean;
+    status: 'ok' | 'degraded' | 'unknown' | 'disabled';
+    reason?: string | null;
+    underlying?: string;
+    provider?: string;
+    dry_run_only?: boolean;
+    live_order_path_enabled?: boolean;
+    checked_at?: string;
+    snapshot_expected?: boolean;
+    option_chain?: {
+      today_row_count: number;
+      latest_snapshot_ts?: string | null;
+      latest_source_ts?: string | null;
+      latest_ingested_at?: string | null;
+      latest_ingested_age_seconds?: number | null;
+    };
+    validation_reports?: {
+      today_report_count: number;
+      latest_validation_ts?: string | null;
+      latest_status?: string;
+      latest_severity?: string;
+      latest_primary_quote_count?: number;
+      latest_reference_quote_count?: number;
+    };
+    shadow_intents?: {
+      today_intent_count: number;
+      latest_created_at?: string | null;
+    };
+  };
   watchdog: Record<string, unknown>;
   per_account_staleness: AccountStaleness[];
   alerts: { firing_count: number; firing_rules: string[] };

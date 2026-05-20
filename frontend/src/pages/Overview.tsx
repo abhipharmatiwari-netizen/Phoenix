@@ -29,9 +29,11 @@ const Overview: React.FC = () => {
     };
 
     fetchHealthSummary();
+    const timer = window.setInterval(fetchHealthSummary, 30_000);
 
     return () => {
       active = false;
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -48,6 +50,11 @@ const Overview: React.FC = () => {
     }
   };
 
+  const overallReady = healthSummary?.readiness?.ready ?? healthSummary?.status === 'ok';
+  const overallValue = overallReady
+    ? (healthSummary?.status || 'ok')
+    : (healthSummary?.readiness?.reason || healthSummary?.status || 'degraded');
+
   return (
     <div>
       <h1>Overview</h1>
@@ -57,8 +64,8 @@ const Overview: React.FC = () => {
         <div className="health-tiles">
           <HealthTile
             title="Overall Status"
-            status={getStatusColor(healthSummary.status)}
-            value={healthSummary.status}
+            status={overallReady && healthSummary.status === 'ok' ? 'green' : 'red'}
+            value={overallValue}
           />
           <HealthTile
             title="Stream Worker"

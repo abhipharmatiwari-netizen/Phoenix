@@ -21,16 +21,22 @@ const Shell = () => {
       try {
         const health = await DefaultService.getHealthSummary();
         if (active) {
-          const degraded = health.status !== 'ok';
+          const readinessReady = health.readiness?.ready ?? health.status === 'ok';
+          const degraded = health.status !== 'ok' || !readinessReady;
           setSystemDegraded(degraded);
           setDegradedMessage(
             degraded
-              ? `System degraded: ${(health.degraded_reasons || []).join(', ') || health.status}`
+              ? `System degraded: ${(health.degraded_reasons || []).join(', ') || health.readiness?.reason || health.status}`
               : ''
           );
         }
-      } catch {
-        // Silently ignore health check failures in shell
+      } catch (err) {
+        if (active) {
+          setSystemDegraded(true);
+          setDegradedMessage(
+            `System status unavailable: ${err instanceof Error ? err.message : 'health check failed'}`
+          );
+        }
       }
     };
     checkHealth();

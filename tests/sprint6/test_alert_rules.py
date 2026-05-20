@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from types import SimpleNamespace
 
 from app.observability.alert_rules import (
     AlertEvaluator,
@@ -177,6 +178,41 @@ class TestBuiltInRules:
         results = ev.evaluate_all()
         alert = next(r for r in results if r.rule_name == "leader_lease_failure")
         assert alert.state == AlertState.FIRING
+
+    def test_position_authority_readiness_alert_fires(self, monkeypatch):
+        monkeypatch.setenv("TRADE_MODE", "LIVE")
+        monkeypatch.setattr(
+            "app.hub.runtime.get_hub_runtime",
+            lambda: SimpleNamespace(
+                order_lifecycle=SimpleNamespace(
+                    count_positions_by_state=lambda: {"RECONCILING": 2}
+                )
+            ),
+        )
+        ev = get_alert_evaluator()
+        results = ev.evaluate_all()
+        alert = next(
+            r for r in results if r.rule_name == "readiness_position_authority_degraded"
+        )
+        assert alert.state == AlertState.FIRING
+        assert alert.value == 2
+
+    def test_oi_ml_shadow_ingestion_alert_fires(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.strategies.oi_ml.shadow_health.collect_shadow_ingestion_status",
+            lambda: {
+                "enabled": True,
+                "status": "degraded",
+                "reason": "option_chain_rows_missing",
+                "option_chain": {"today_row_count": 0},
+            },
+        )
+        ev = get_alert_evaluator()
+        results = ev.evaluate_all()
+        alert = next(r for r in results if r.rule_name == "oi_ml_shadow_ingestion_degraded")
+        assert alert.state == AlertState.FIRING
+        assert alert.value == 0
+        assert "option_chain_rows_missing" in alert.message
 
     def test_stuck_orders_alert_fires(self):
         gauge_set("phoenix_stuck_orders_count", 1)

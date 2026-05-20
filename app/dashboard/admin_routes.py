@@ -1,6 +1,7 @@
 """Admin CRUD endpoints for the control plane (A8 dashboard/admin)."""
 
 from __future__ import annotations
+import ast
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -29,7 +30,11 @@ from app.core.identifiers import BrokerAccountId, StrategyId, TenantId
 from app.hub.hub import pick_active_subscription
 from app.hub.exit_engines import PositionExitPlan, build_position_exit_plan
 from app.hub.runtime import get_hub_runtime
-from app.orders.position_ownership import ContractKey, normalize_contract_key
+from app.orders.position_ownership import (
+    ContractKey,
+    derive_contract_key_from_position,
+    normalize_contract_key,
+)
 from app.orders.router import OrderRouter
 from app.tenants.firestore_client import (
     get_broker_account,
@@ -45,6 +50,15 @@ from app.tenants.subscription_service import compute_account_runtime_mode
 from app.tenants.models import BrokerAccountModel, SubscriptionModel, TenantModel
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+_POSITION_AUTHORITY_RECOVERY_STATES = {
+    "DEGRADED",
+    "RECONCILING",
+    "RECOVERY_PENDING",
+    "MANUAL_REVIEW",
+    "FORCED_FLATTENING",
+}
 
 
 # Payload for tenant upsert operations.
@@ -310,10 +324,251 @@ def _resolve_break_glass_exit_plan(
     }
 
 
+def _field_text(obj: Any, key: str) -> str:
+    if isinstance(obj, dict):
+        return str(obj.get(key) or "").strip()
+    return str(getattr(obj, key, "") or "").strip()
+
+
+def _context_scoped(ctx: AdminContext) -> bool:
+    if ctx.all_tenants:
+        return False
+    auth_source = str(getattr(ctx, "auth_source", "") or "").strip()
+    return bool(
+        ctx.tenant_ids
+        or ctx.broker_account_ids
+        or auth_source in {"bearer", "ws_ticket"}
+    )
+
+
+def _isoformat_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _position_state_text(record: Any) -> str:
+    state = getattr(record, "position_state", None)
+    return str(getattr(state, "value", state) or "").strip().upper()
+
+
+def _parse_contract_key_text(value: Any) -> ContractKey | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = ast.literal_eval(text)
+    except Exception:
+        return None
+    if not isinstance(parsed, (tuple, list)) or len(parsed) < 5:
+        return None
+    try:
+        return normalize_contract_key(
+            ContractKey(
+                underlying=str(parsed[0]),
+                expiry=str(parsed[1]),
+                strike=str(parsed[2]),
+                option_right=str(parsed[3]),
+                product_type=str(parsed[4]),
+            )
+        )
+    except Exception:
+        return None
+
+
+def _contract_storage_key(contract_key: ContractKey | None) -> tuple[str, str, str, str, str] | None:
+    if contract_key is None:
+        return None
+    try:
+        return normalize_contract_key(contract_key).as_storage_key()
+    except Exception:
+        return None
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _position_quantity(position: Any) -> float | None:
+    return _safe_float(
+        _position_field(position, "quantity")
+        or _position_field(position, "net_qty")
+        or _position_field(position, "net_quantity")
+        or _position_field(position, "netqty")
+    )
+
+
+def _position_contract_storage_key(position: Any) -> tuple[str, str, str, str, str] | None:
+    explicit = _position_field(position, "contract_key")
+    parsed = _parse_contract_key_text(explicit)
+    if parsed is not None:
+        return parsed.as_storage_key()
+    derived, _reason = derive_contract_key_from_position(position)
+    return _contract_storage_key(derived)
+
+
+def _position_matches_contract(
+    position: Any,
+    *,
+    record_contract_text: str,
+    record_contract_key: ContractKey | None,
+) -> bool:
+    expected_key = _contract_storage_key(record_contract_key)
+    actual_key = _position_contract_storage_key(position)
+    if expected_key is not None and actual_key is not None:
+        return actual_key == expected_key
+
+    explicit = _position_field(position, "contract_key")
+    explicit_text = str(explicit or "").strip()
+    if record_contract_text and explicit_text:
+        return explicit_text == record_contract_text or record_contract_text in explicit_text
+    return False
+
+
+def _sanitized_broker_position(position: Any) -> dict[str, Any]:
+    return {
+        "symbol": str(_position_field(position, "symbol") or ""),
+        "product_type": str(_position_field(position, "product_type") or ""),
+        "quantity": _position_quantity(position),
+        "contract_key": str(_position_field(position, "contract_key") or ""),
+    }
+
+
+def _broker_flat_evidence(runtime: Any, record: Any) -> dict[str, Any]:
+    broker_account_id = str(getattr(record, "account_id", "") or "")
+    record_contract_text = str(getattr(record, "contract_key", "") or "").strip()
+    record_contract_key = _parse_contract_key_text(record_contract_text)
+    checked_at = datetime.now(timezone.utc).isoformat()
+    try:
+        positions = runtime.state_store.get_positions(broker_account_id) or []
+    except Exception as exc:
+        return {
+            "status": "unknown",
+            "reason": "broker_positions_unavailable",
+            "error": type(exc).__name__,
+            "checked_at": checked_at,
+            "matched_positions": 0,
+            "net_qty": None,
+        }
+
+    matches = [
+        position
+        for position in positions
+        if _position_matches_contract(
+            position,
+            record_contract_text=record_contract_text,
+            record_contract_key=record_contract_key,
+        )
+    ]
+    net_qty = sum(
+        qty for qty in (_position_quantity(position) for position in matches) if qty is not None
+    )
+    flat = abs(float(net_qty or 0.0)) <= 0.0001
+    return {
+        "status": "flat" if flat else "nonzero",
+        "reason": "broker_position_flat" if flat else "broker_position_nonzero",
+        "checked_at": checked_at,
+        "matched_positions": len(matches),
+        "net_qty": float(net_qty or 0.0),
+        "positions": [_sanitized_broker_position(position) for position in matches],
+    }
+
+
+def _iter_lifecycle_position_records(lifecycle: Any) -> list[Any]:
+    records_method = getattr(lifecycle, "list_position_records", None)
+    if callable(records_method):
+        return list(records_method())
+    records = getattr(lifecycle, "_position_records", {})
+    lock = getattr(lifecycle, "_recent_entry_lock", None)
+    if lock is not None:
+        with lock:
+            return list(records.values())
+    return list(records.values())
+
+
+def _position_recovery_record_snapshot(runtime: Any, record: Any) -> dict[str, Any]:
+    evidence = _broker_flat_evidence(runtime, record)
+    state_text = _position_state_text(record)
+    return {
+        "scope_key": str(getattr(record, "ownership_key", "") or ""),
+        "tenant_id": str(getattr(record, "tenant_id", "") or ""),
+        "broker_account_id": str(getattr(record, "account_id", "") or ""),
+        "strategy_id": str(getattr(record, "strategy_id", "") or ""),
+        "contract_key": str(getattr(record, "contract_key", "") or ""),
+        "position_state": state_text,
+        "state_reason": str(getattr(record, "state_reason", "") or ""),
+        "side": str(getattr(record, "side", "") or ""),
+        "net_qty": _safe_float(getattr(record, "net_qty", None)),
+        "filled_qty_open": _safe_float(getattr(record, "filled_qty_open", None)),
+        "filled_qty_close": _safe_float(getattr(record, "filled_qty_close", None)),
+        "realized_pnl": _safe_float(getattr(record, "realized_pnl", None)),
+        "unrealized_pnl": _safe_float(getattr(record, "unrealized_pnl", None)),
+        "last_evidence_at": _isoformat_or_none(getattr(record, "last_evidence_at", None)),
+        "last_reconciled_at": _isoformat_or_none(getattr(record, "last_reconciled_at", None)),
+        "broker_evidence": evidence,
+        "recovery": {
+            "clear_position_record_endpoint": "/admin/state/clear-position-record",
+            "allowed_without_force": evidence.get("status") == "flat",
+            "post_clear_recheck_endpoints": ["/dashboard/status", "/readyz"],
+        },
+    }
+
+
+def _degraded_scope_allowed(ctx: AdminContext, scope_key: str) -> bool:
+    if not _context_scoped(ctx):
+        return True
+    parts = {part.strip() for part in str(scope_key or "").split(":") if part.strip()}
+    tenant_allowed = any(tenant_id in parts for tenant_id in ctx.tenant_ids)
+    account_allowed = (
+        not ctx.broker_account_ids
+        or any(account_id in parts for account_id in ctx.broker_account_ids)
+    )
+    return bool(tenant_allowed and account_allowed)
+
+
+def _degraded_scope_snapshots(ctx: AdminContext) -> list[dict[str, Any]]:
+    try:
+        from app.core.degraded_scope_manager import degraded_scope_manager
+        scopes = degraded_scope_manager.active_scopes()
+    except Exception:
+        return []
+    snapshots: list[dict[str, Any]] = []
+    for scope in scopes:
+        scope_key = str(getattr(scope, "scope_key", "") or "")
+        if not _degraded_scope_allowed(ctx, scope_key):
+            continue
+        reason = getattr(scope, "reason", "")
+        snapshots.append(
+            {
+                "scope_key": scope_key,
+                "reason": str(getattr(reason, "value", reason) or ""),
+                "entered_at": _isoformat_or_none(getattr(scope, "entered_at", None)),
+                "last_checked_at": _isoformat_or_none(getattr(scope, "last_checked_at", None)),
+                "recovery_attempts": int(getattr(scope, "recovery_attempts", 0) or 0),
+                "exit_restricted": bool(getattr(scope, "exit_restricted", False)),
+                "exit_restriction_reason": str(
+                    getattr(scope, "exit_restriction_reason", "") or ""
+                ),
+            }
+        )
+    return snapshots
+
+
 # List all tenants.
 @router.get("/tenants")
 async def list_tenants(ctx: AdminContext = Depends(get_admin_context)):
     tenants = get_all_tenants()
+    if _context_scoped(ctx):
+        tenants = [
+            tenant
+            for tenant in tenants
+            if ctx.can_access_tenant(_field_text(tenant, "tenant_id"))
+        ]
     return {"count": len(tenants), "tenants": tenants}
 
 
@@ -321,6 +576,13 @@ async def list_tenants(ctx: AdminContext = Depends(get_admin_context)):
 @router.get("/broker-accounts")
 async def list_broker_accounts(ctx: AdminContext = Depends(get_admin_context)):
     accounts = get_all_broker_accounts()
+    if _context_scoped(ctx):
+        accounts = [
+            account
+            for account in accounts
+            if ctx.can_access_tenant(_field_text(account, "tenant_id"))
+            and ctx.can_access_broker_account(_field_text(account, "broker_account_id"))
+        ]
     return {"count": len(accounts), "broker_accounts": accounts}
 
 
@@ -335,6 +597,14 @@ async def list_runners(ctx: AdminContext = Depends(get_admin_context)):
     for broker_account_id in runner_ids:
         runner = hub.get_runner(broker_account_id)
         if runner is None:
+            continue
+        if (
+            _context_scoped(ctx)
+            and (
+                not ctx.can_access_tenant(str(getattr(runner, "tenant_id", "") or ""))
+                or not ctx.can_access_broker_account(str(broker_account_id or ""))
+            )
+        ):
             continue
         items.append(
             {
@@ -677,6 +947,60 @@ def manual_sweep(
     return {"status": "ok", "result": result}
 
 
+@router.get("/state/position-authority/recovery")
+def position_authority_recovery(
+    request: Request,
+    ctx: AdminContext = Depends(get_admin_context),
+):
+    """Expose audited recovery evidence for degraded position authority records."""
+    ctx.require_role(AdminRole.READONLY)
+    check_rate_limit(request)
+
+    runtime = get_hub_runtime()
+    lifecycle = getattr(runtime, "order_lifecycle", None)
+    if lifecycle is None:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Order lifecycle service not available on this runtime.",
+        )
+
+    all_records = _iter_lifecycle_position_records(lifecycle)
+    position_state_counts: dict[str, int] = {}
+    recovery_records: list[dict[str, Any]] = []
+    for record in all_records:
+        tenant_id = str(getattr(record, "tenant_id", "") or "")
+        broker_account_id = str(getattr(record, "account_id", "") or "")
+        if (
+            _context_scoped(ctx)
+            and (
+                not ctx.can_access_tenant(tenant_id)
+                or not ctx.can_access_broker_account(broker_account_id)
+            )
+        ):
+            continue
+        state_text = _position_state_text(record)
+        position_state_counts[state_text] = position_state_counts.get(state_text, 0) + 1
+        if state_text in _POSITION_AUTHORITY_RECOVERY_STATES:
+            recovery_records.append(_position_recovery_record_snapshot(runtime, record))
+
+    degraded_scopes = _degraded_scope_snapshots(ctx)
+    blocking_count = len(degraded_scopes) + len(recovery_records)
+    return {
+        "status": "degraded" if blocking_count else "ok",
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "degraded_scope_count": len(degraded_scopes),
+        "degraded_scopes": degraded_scopes,
+        "position_state_counts": position_state_counts,
+        "recovery_record_count": len(recovery_records),
+        "records": recovery_records,
+        "recovery_action": {
+            "clear_position_record_endpoint": "/admin/state/clear-position-record",
+            "post_clear_recheck_endpoints": ["/dashboard/status", "/readyz"],
+            "force_requires_break_glass_audit": True,
+        },
+    }
+
+
 # Force-clear a stuck internal_position_records row to FLAT.
 #
 # Designed for the recovery scenario surfaced by the 2026-05-07 A1 incident:
@@ -721,36 +1045,29 @@ def clear_position_record(
         )
 
     broker_account_id = str(prior.account_id or "")
-    contract_key_text = str(prior.contract_key or "")
 
     # Safety check: broker must be flat for this contract unless force=True.
     broker_net_qty: float | None = None
     if not payload.force:
-        try:
-            positions = runtime.state_store.get_positions(broker_account_id) or []
-        except Exception as exc:
+        broker_evidence = _broker_flat_evidence(runtime, prior)
+        broker_net_qty = _safe_float(broker_evidence.get("net_qty"))
+        if broker_evidence.get("status") == "unknown":
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Could not read broker positions for safety check: {exc}",
-            ) from exc
-        for pos in positions:
-            sym = str(_position_field(pos, "symbol") or "")
-            ctx_text = repr(getattr(pos, "contract_key", None)) if hasattr(pos, "contract_key") else ""
-            if contract_key_text and (contract_key_text in ctx_text or contract_key_text == ctx_text):
-                qty = _position_field(pos, "quantity")
-                try:
-                    broker_net_qty = float(qty or 0)
-                except (TypeError, ValueError):
-                    broker_net_qty = None
-                if broker_net_qty and abs(broker_net_qty) > 0.0001:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=(
-                            f"Broker still reports net_qty={broker_net_qty} for {sym} "
-                            f"under scope {payload.scope_key!r}. Square the broker side "
-                            "first or pass force=true to override."
-                        ),
-                    )
+                detail=(
+                    "Could not read broker positions for safety check: "
+                    f"{broker_evidence.get('error') or broker_evidence.get('reason')}"
+                ),
+            )
+        if broker_evidence.get("status") != "flat":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Broker still reports net_qty={broker_net_qty} "
+                    f"under scope {payload.scope_key!r}. Square the broker side "
+                    "first or pass force=true to override."
+                ),
+            )
 
     cleared = lifecycle.force_clear_position_record(
         scope_key=payload.scope_key,
@@ -852,6 +1169,12 @@ def clear_position_record(
         "scope_key": payload.scope_key,
         "prior_state": prior.position_state.value if hasattr(prior.position_state, "value") else str(prior.position_state),
         "ledger_rows_deleted": ledger_deleted,
+        "post_clear_recheck_endpoints": ["/dashboard/status", "/readyz"],
+        "position_state_counts_after_clear": (
+            lifecycle.count_positions_by_state()
+            if callable(getattr(lifecycle, "count_positions_by_state", None))
+            else {}
+        ),
     }
 
 

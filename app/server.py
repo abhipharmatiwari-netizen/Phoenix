@@ -37,7 +37,6 @@ from app.core.dashboard_bus import dashboard_bus
 from app.core.feature_flags import load_stability_feature_flags
 from app.core.identifiers import BrokerAccountId, TenantId
 from app.core.rate_limit_middleware import check_rate_limit
-from app.core.lot_size import lot_size_for_symbol, qty_to_lots
 from app.core.logging_utils import log_event, reset_log_context, set_log_context
 from app.dashboard.admin_routes import router as admin_router
 from app.dashboard.auth import (
@@ -214,19 +213,144 @@ def _dashboard_ws_path(websocket: WebSocket) -> str:
     return path or "/ws/dashboard"
 
 
-def _build_dashboard_payload(*, settings: Any, use_delta: bool, first_message: bool) -> dict[str, Any]:
-    if use_delta and first_message:
+def _ctx_all_tenants(admin_ctx: AdminContext | None) -> bool:
+    if admin_ctx is None or bool(getattr(admin_ctx, "all_tenants", False)):
+        return True
+    auth_source = str(getattr(admin_ctx, "auth_source", "") or "").strip()
+    has_scope = bool(
+        getattr(admin_ctx, "tenant_ids", ())
+        or getattr(admin_ctx, "broker_account_ids", ())
+        or auth_source in {"bearer", "ws_ticket"}
+    )
+    return not has_scope
+
+
+def _runner_allowed_for_context(
+    *,
+    admin_ctx: AdminContext | None,
+    tenant_id: object,
+    broker_account_id: object,
+) -> bool:
+    if _ctx_all_tenants(admin_ctx):
+        return True
+    tenant_text = str(tenant_id or "").strip()
+    account_text = str(broker_account_id or "").strip()
+    return bool(
+        tenant_text
+        and admin_ctx is not None
+        and admin_ctx.can_access_tenant(tenant_text)
+        and admin_ctx.can_access_broker_account(account_text)
+    )
+
+
+def _position_authority_readiness_snapshot() -> dict[str, Any]:
+    degraded_scope_count = 0
+    degraded_scope_error: str | None = None
+    try:
+        from app.core.degraded_scope_manager import degraded_scope_manager
+        degraded_scope_count = len(degraded_scope_manager.active_scopes())
+    except Exception as exc:
+        degraded_scope_error = str(exc)
+
+    position_state_counts: dict[str, int] = {}
+    try:
+        hub_rt = get_hub_runtime()
+        order_lifecycle = getattr(hub_rt, "order_lifecycle", None)
+        count_fn = getattr(order_lifecycle, "count_positions_by_state", None)
+        if callable(count_fn):
+            raw_counts = count_fn()
+            if isinstance(raw_counts, dict):
+                position_state_counts = {
+                    str(key): int(value or 0)
+                    for key, value in raw_counts.items()
+                }
+    except Exception:
+        position_state_counts = {}
+
+    degraded_positions = int(position_state_counts.get("DEGRADED", 0) or 0)
+    reconciling_positions = int(position_state_counts.get("RECONCILING", 0) or 0)
+    blocking_count = (
+        int(degraded_scope_count or 0)
+        + degraded_positions
+        + reconciling_positions
+    )
+    return {
+        "degraded_scope_count": int(degraded_scope_count or 0),
+        "degraded_scope_error": degraded_scope_error,
+        "position_state_counts": position_state_counts,
+        "degraded_positions": degraded_positions,
+        "reconciling_positions": reconciling_positions,
+        "blocking_count": blocking_count,
+    }
+
+
+def _oi_ml_shadow_ingestion_status() -> dict[str, Any]:
+    try:
+        from app.strategies.oi_ml.shadow_health import collect_shadow_ingestion_status
+
+        return collect_shadow_ingestion_status()
+    except Exception as exc:
+        return {
+            "enabled": False,
+            "status": "unknown",
+            "reason": "shadow_ingestion_status_error",
+            "error": type(exc).__name__,
+            "dry_run_only": True,
+            "live_order_path_enabled": False,
+        }
+
+
+def _dashboard_readiness_contract(
+    *,
+    runtime: Any,
+    degraded_reasons: list[str],
+    position_authority: dict[str, Any],
+) -> dict[str, Any]:
+    ready = bool(getattr(runtime, "ready", False))
+    reason: str | None = None
+    if not ready:
+        reason = "runtime_not_ready"
+    if _readiness_trade_mode() == "LIVE" and int(position_authority.get("blocking_count", 0) or 0) > 0:
+        ready = False
+        reason = "position_authority_degraded"
+    if degraded_reasons:
+        ready = False
+        reason = reason or degraded_reasons[0]
+    return {
+        "ready": ready,
+        "http_status": 200 if ready else 503,
+        "reason": reason,
+        **position_authority,
+    }
+
+
+def _build_dashboard_payload(
+    *,
+    settings: Any,
+    use_delta: bool,
+    first_message: bool,
+    admin_ctx: AdminContext | None = None,
+) -> dict[str, Any]:
+    scoped = not _ctx_all_tenants(admin_ctx)
+    effective_use_delta = bool(use_delta and not scoped)
+    if effective_use_delta and first_message:
         payload = dashboard_bus.delta_snapshot(full_interval=1)
     else:
-        payload = dashboard_bus.delta_snapshot() if use_delta else dashboard_bus.snapshot()
-    if not use_delta:
+        payload = dashboard_bus.delta_snapshot() if effective_use_delta else dashboard_bus.snapshot()
+    if not effective_use_delta:
         payload["_mode"] = "full_snapshot"
+    if scoped:
+        payload["trades"] = {"recent": [], "open_positions": []}
+        payload["_scope_filtered"] = True
     payload["multi_hub_enabled"] = settings.enable_multi_hub
     if settings.enable_multi_hub:
         try:
-            hub_positions = _build_hub_positions_snapshot()
+            hub_positions = _build_hub_positions_snapshot(admin_ctx=admin_ctx)
             payload["hub_positions"] = hub_positions
-            payload["pnl"] = _build_hub_pnl_snapshot(hub_positions)
+            payload["pnl"] = _build_hub_pnl_snapshot(
+                hub_positions,
+                admin_ctx=admin_ctx,
+            )
         except Exception as exc:  # pragma: no cover - dashboard best-effort
             logger.error("Dashboard hub positions snapshot failed: %s", exc)
             payload["hub_positions"] = []
@@ -238,6 +362,7 @@ async def _dashboard_ws_sender_loop(
     *,
     settings: Any,
     use_delta: bool,
+    admin_ctx: AdminContext | None = None,
 ) -> None:
     first_message = True
     while True:
@@ -245,6 +370,7 @@ async def _dashboard_ws_sender_loop(
             settings=settings,
             use_delta=use_delta,
             first_message=first_message,
+            admin_ctx=admin_ctx,
         )
         first_message = False
         await websocket.send_text(json.dumps(payload))
@@ -429,7 +555,9 @@ dashboard_bus.set_mode(_runtime_cfg.runner_mode)
 
 
 # Compile a dashboard snapshot of positions across all running accounts.
-def _build_hub_positions_snapshot() -> list[dict[str, Any]]:
+def _build_hub_positions_snapshot(
+    admin_ctx: AdminContext | None = None,
+) -> list[dict[str, Any]]:
     runtime = get_hub_runtime()
     hub = runtime.hub
     rows: list[dict[str, Any]] = []
@@ -439,74 +567,38 @@ def _build_hub_positions_snapshot() -> list[dict[str, Any]]:
             continue
         runner = hub.get_runner(broker_account_id)
         tenant_id = runner.tenant_id if runner else ""
+        if not _runner_allowed_for_context(
+            admin_ctx=admin_ctx,
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+        ):
+            continue
         for pos in positions:
-            if isinstance(pos, dict):
-                raw_qty = pos.get("quantity", pos.get("qty", pos.get("net_qty")))
-                symbol = str(
-                    pos.get("symbol")
-                    or pos.get("tradingsymbol")
-                    or pos.get("trading_symbol")
-                    or ""
-                ).strip()
-                avg_price = (
-                    pos.get("avg_price")
-                    or pos.get("avgPrice")
-                    or pos.get("average_price")
-                    or pos.get("avgprice")
-                    or 0.0
-                )
-                symbol_token = (
-                    pos.get("symboltoken")
-                    or pos.get("token")
-                    or pos.get("instrument_token")
-                )
-                entry_ts = pos.get("entry_ts") or pos.get("entryTs")
-                product_type = (
-                    pos.get("product_type")
-                    or pos.get("productType")
-                    or pos.get("producttype")
-                    or ""
-                )
-            else:
-                raw_qty = getattr(pos, "quantity", None)
-                symbol = str(getattr(pos, "symbol", "") or "").strip()
-                avg_price = getattr(pos, "avg_price", 0.0) or 0.0
-                symbol_token = getattr(pos, "symbol_token", None) or getattr(
-                    pos, "token", None
-                )
-                entry_ts = getattr(pos, "entry_ts", None)
-                product_type = getattr(pos, "product_type", "")
-                if hasattr(product_type, "value"):
-                    product_type = product_type.value
-                product_type = str(product_type)
+            view = tenant_routes._normalize_position_view(pos)
+            raw_qty = view.get("quantity", view.get("net_qty"))
+            symbol = str(view.get("symbol") or "").strip()
             try:
                 qty = int(raw_qty or 0)
             except Exception:
                 qty = 0
             if qty == 0 or not symbol:
                 continue
-            side = "BUY" if qty > 0 else "SELL"
-            lot_size = lot_size_for_symbol(symbol)
-            qty_lots = qty_to_lots(qty, symbol)
-            last_price = dashboard_bus.get_last_price_for_instrument(
-                symbol=symbol,
-                token=str(symbol_token) if symbol_token not in (None, "") else None,
-            )
             rows.append(
                 {
                     "tenant_id": str(tenant_id),
                     "broker_account_id": str(broker_account_id),
                     "symbol": symbol,
-                    "side": side,
+                    "side": view.get("side") or ("BUY" if qty > 0 else "SELL"),
                     "qty": abs(qty),
-                    "qty_lots": abs(qty_lots),
-                    "lot_size": lot_size,
+                    "qty_lots": abs(_coerce_int(view.get("qty_lots"))),
+                    "lot_size": _coerce_int(view.get("lot_size")),
                     "net_qty": qty,
-                    "avg_price": float(avg_price or 0.0),
-                    "entry_price": float(avg_price or 0.0),
-                    "entry_ts": entry_ts,
-                    "product_type": product_type,
-                    "ltp": last_price,
+                    "avg_price": float(view.get("avg_price") or 0.0),
+                    "entry_price": float(view.get("entry_price") or 0.0),
+                    "entry_ts": view.get("entry_ts"),
+                    "product_type": str(view.get("product_type") or ""),
+                    "ltp": view.get("ltp"),
+                    "unrealized_pnl": view.get("unrealized_pnl"),
                 }
             )
     return rows
@@ -514,6 +606,7 @@ def _build_hub_positions_snapshot() -> list[dict[str, Any]]:
 
 def _build_hub_pnl_snapshot(
     hub_positions: list[dict[str, Any]] | None = None,
+    admin_ctx: AdminContext | None = None,
 ) -> dict[str, Any]:
     runtime = get_hub_runtime()
     pnl_engine = getattr(runtime, "pnl_engine", None)
@@ -525,6 +618,12 @@ def _build_hub_pnl_snapshot(
             runner = runtime.hub.get_runner(broker_account_id)
             tenant_id = str(getattr(runner, "tenant_id", "") or "").strip()
             account_id = str(broker_account_id or "").strip()
+            if not _runner_allowed_for_context(
+                admin_ctx=admin_ctx,
+                tenant_id=tenant_id,
+                broker_account_id=account_id,
+            ):
+                continue
             if not tenant_id or not account_id:
                 continue
             account_key = (tenant_id, account_id)
@@ -549,6 +648,7 @@ def _build_hub_pnl_snapshot(
 
     open_total = 0.0
     by_instrument: dict[str, float] = {}
+    invalid_marks_count = 0
     for row in hub_positions or []:
         symbol = str(row.get("symbol") or "").strip()
         if not symbol:
@@ -562,7 +662,20 @@ def _build_hub_pnl_snapshot(
         mark_price = _coerce_float(row.get("ltp"))
         if mark_price is None:
             mark_price = entry_price
-        pnl = (mark_price - entry_price) * net_qty
+        row_unrealized = _coerce_float(row.get("unrealized_pnl"))
+        if (
+            row_unrealized is None
+            and row.get("unrealized_pnl") is None
+            and _coerce_float(row.get("ltp")) is not None
+            and (entry_price is None or entry_price <= 0.0)
+        ):
+            invalid_marks_count += 1
+            continue
+        pnl = (
+            row_unrealized
+            if row_unrealized is not None
+            else (mark_price - entry_price) * net_qty
+        )
         open_total += pnl
         by_instrument[symbol] = round(by_instrument.get(symbol, 0.0) + pnl, 2)
 
@@ -573,6 +686,7 @@ def _build_hub_pnl_snapshot(
         "total": round(realized_total + open_total, 2),
         "realized": realized_total,
         "open": open_total,
+        "invalid_marks_count": invalid_marks_count,
     }
 
 
@@ -937,7 +1051,27 @@ def _build_docker_health_summary() -> dict[str, Any]:
                 exc,
             )
 
+    position_authority = _position_authority_readiness_snapshot()
+    if (
+        _readiness_trade_mode() == "LIVE"
+        and int(position_authority.get("blocking_count", 0) or 0) > 0
+    ):
+        degraded_reasons.append("position_authority_degraded")
+
+    readiness_degraded_reasons = list(degraded_reasons)
+    oi_ml_shadow_ingestion = _oi_ml_shadow_ingestion_status()
+    if (
+        oi_ml_shadow_ingestion.get("enabled")
+        and oi_ml_shadow_ingestion.get("status") in {"degraded", "unknown"}
+    ):
+        degraded_reasons.append("oi_ml_shadow_ingestion_degraded")
+
     status = "ok" if not degraded_reasons else "degraded"
+    readiness_contract = _dashboard_readiness_contract(
+        runtime=runtime,
+        degraded_reasons=readiness_degraded_reasons,
+        position_authority=position_authority,
+    )
 
     # OPS-6.6: Per-account staleness + policy state
     per_account_staleness: list[dict[str, Any]] = []
@@ -961,7 +1095,8 @@ def _build_docker_health_summary() -> dict[str, Any]:
     try:
         from app.observability.alert_rules import get_alert_evaluator
         evaluator = get_alert_evaluator()
-        firing = evaluator.get_firing_alerts()
+        statuses = evaluator.evaluate_all()
+        firing = [a for a in statuses if getattr(a.state, "value", a.state) == "firing"]
         alert_summary = {
             "firing_count": len(firing),
             "firing_rules": [a.rule_name for a in firing],
@@ -1000,11 +1135,13 @@ def _build_docker_health_summary() -> dict[str, Any]:
         "last_broker_blocked_or_rate_limited_ts": last_broker_blocked_ts,
         "tracked_account_count": len(tracked_accounts),
         "degraded_reasons": degraded_reasons,
+        "readiness": readiness_contract,
         "schema": schema_snapshot,
         "position_record_invariants": {
             "terminal_nonzero_net_qty_count": terminal_nonzero_count,
             "error": terminal_nonzero_error,
         },
+        "oi_ml_shadow_ingestion": oi_ml_shadow_ingestion,
         "watchdog": watchdog_snapshot,
         "leader_lease": leader_lease_snapshot,
         "alert_evaluator": runtime_alert_status,
@@ -1047,6 +1184,12 @@ async def health() -> dict:
 @app.get("/health/summary")
 async def health_summary() -> dict:
     """Unified Docker/K8s health summary for runtime and broker-sync signals."""
+    return _build_docker_health_summary()
+
+
+@app.get("/dashboard/status")
+async def dashboard_status() -> dict:
+    """Dashboard status contract. Overall status follows readiness blockers."""
     return _build_docker_health_summary()
 
 
@@ -2127,9 +2270,10 @@ async def dashboard_socket(websocket: WebSocket) -> None:
     resolved_mode = _dashboard_ws_mode_token(requested_mode)
     use_delta = resolved_mode == "delta"
     ticket = websocket.query_params.get("ticket")
+    admin_ctx: AdminContext | None = None
     if auth_required or ticket:
         try:
-            verify_dashboard_ws_ticket(
+            admin_ctx = verify_dashboard_ws_ticket(
                 ticket,
                 path=_dashboard_ws_path(websocket),
                 mode=resolved_mode,
@@ -2145,6 +2289,7 @@ async def dashboard_socket(websocket: WebSocket) -> None:
             websocket,
             settings=settings,
             use_delta=use_delta,
+            admin_ctx=admin_ctx,
         )
     )
     disconnect_task = asyncio.create_task(_dashboard_ws_disconnect_watcher(websocket))

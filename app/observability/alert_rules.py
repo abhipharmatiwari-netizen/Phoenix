@@ -9,6 +9,7 @@ or triggered from /health/alerts endpoint.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -459,6 +460,87 @@ def build_default_alert_rules() -> list[AlertRule]:
         severity=AlertSeverity.CRITICAL,
         evaluate_fn=_check_leader_lease_failure,
         labels={"component": "leader_election"},
+    ))
+
+    # 15. Readiness-critical position authority blockers.
+    def _check_position_authority_degraded() -> tuple[bool, Any, str]:
+        if str(os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper() != "LIVE":
+            return False, 0, ""
+        degraded_scopes = 0
+        try:
+            from app.core.degraded_scope_manager import degraded_scope_manager
+            degraded_scopes = len(degraded_scope_manager.active_scopes())
+        except Exception:
+            degraded_scopes = 0
+
+        degraded_positions = 0
+        reconciling_positions = 0
+        try:
+            from app.hub.runtime import get_hub_runtime
+            runtime = get_hub_runtime()
+            order_lifecycle = getattr(runtime, "order_lifecycle", None)
+            count_fn = getattr(order_lifecycle, "count_positions_by_state", None)
+            if callable(count_fn):
+                counts = count_fn() or {}
+                degraded_positions = int(counts.get("DEGRADED", 0) or 0)
+                reconciling_positions = int(counts.get("RECONCILING", 0) or 0)
+        except Exception:
+            degraded_positions = 0
+            reconciling_positions = 0
+
+        blockers = degraded_scopes + degraded_positions + reconciling_positions
+        if blockers > 0:
+            return (
+                True,
+                blockers,
+                (
+                    "Readiness blocked by position authority state: "
+                    f"degraded_scopes={degraded_scopes} "
+                    f"degraded_positions={degraded_positions} "
+                    f"reconciling_positions={reconciling_positions}"
+                ),
+            )
+        return False, 0, ""
+
+    rules.append(AlertRule(
+        name="readiness_position_authority_degraded",
+        description="LIVE readiness is blocked by degraded/reconciling position authority",
+        severity=AlertSeverity.CRITICAL,
+        evaluate_fn=_check_position_authority_degraded,
+        labels={"component": "readiness"},
+    ))
+
+    # 16. OI/ML shadow ingestion visibility.
+    def _check_oi_ml_shadow_ingestion() -> tuple[bool, Any, str]:
+        try:
+            from app.strategies.oi_ml.shadow_health import collect_shadow_ingestion_status
+
+            status = collect_shadow_ingestion_status()
+        except Exception as exc:
+            return False, 0, f"evaluation_error:{type(exc).__name__}"
+        if not status.get("enabled"):
+            return False, 0, ""
+        state = str(status.get("status") or "").strip().lower()
+        if state not in {"degraded", "unknown"}:
+            return False, 0, ""
+        option_chain = status.get("option_chain") if isinstance(status.get("option_chain"), dict) else {}
+        row_count = int(option_chain.get("today_row_count") or 0)
+        reason = str(status.get("reason") or state)
+        return (
+            True,
+            row_count,
+            (
+                "OI/ML shadow ingestion degraded: "
+                f"reason={reason} today_option_rows={row_count}"
+            ),
+        )
+
+    rules.append(AlertRule(
+        name="oi_ml_shadow_ingestion_degraded",
+        description="OI/ML shadow sidecar is enabled but ingestion evidence is missing or stale",
+        severity=AlertSeverity.WARNING,
+        evaluate_fn=_check_oi_ml_shadow_ingestion,
+        labels={"component": "oi_ml_shadow"},
     ))
 
     return rules

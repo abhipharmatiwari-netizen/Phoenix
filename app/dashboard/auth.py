@@ -215,6 +215,9 @@ def issue_dashboard_ws_ticket(
         "nonce": resolved_nonce,
         "caller": admin_ctx.caller,
         "role": admin_ctx.role.value,
+        "tenant_ids": list(admin_ctx.tenant_ids),
+        "broker_account_ids": list(admin_ctx.broker_account_ids),
+        "all_tenants": bool(admin_ctx.all_tenants),
     }
     payload_segment = _urlsafe_b64encode_bytes(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -292,7 +295,24 @@ def verify_dashboard_ws_ticket(
     role_value = str(payload.get("role") or AdminRole.ADMIN.value).strip().lower()
     role = AdminRole(role_value) if role_value in {r.value for r in AdminRole} else AdminRole.ADMIN
     caller = str(payload.get("caller") or "dashboard_ticket").strip() or "dashboard_ticket"
-    return AdminContext(caller=caller, role=role, auth_source="ws_ticket")
+    tenant_ids = tuple(
+        str(value).strip()
+        for value in (payload.get("tenant_ids") or [])
+        if str(value or "").strip()
+    )
+    broker_account_ids = tuple(
+        str(value).strip()
+        for value in (payload.get("broker_account_ids") or [])
+        if str(value or "").strip()
+    )
+    return AdminContext(
+        caller=caller,
+        role=role,
+        auth_source="ws_ticket",
+        tenant_ids=tenant_ids,
+        broker_account_ids=broker_account_ids,
+        all_tenants=bool(payload.get("all_tenants", False)),
+    )
 
 
 

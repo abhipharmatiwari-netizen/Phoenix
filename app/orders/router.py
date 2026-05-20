@@ -783,6 +783,27 @@ class OrderRouter:
             )
 
     # Record trade and update PnL if the order was filled.
+    @staticmethod
+    def _resolve_ownership_strategy_id(
+        *,
+        strategy_id: StrategyId,
+        order_req: OrderRequest,
+        policy_ctx: OrderInterceptionContext,
+    ) -> StrategyId:
+        if policy_ctx.position_ownership_fill_owner_strategy_id is not None:
+            return policy_ctx.position_ownership_fill_owner_strategy_id
+        try:
+            is_owner_hint_eligible = bool(order_req.is_exit_order) and bool(
+                getattr(order_req, "position_ownership_bypass", False)
+            )
+        except Exception:
+            is_owner_hint_eligible = False
+        if is_owner_hint_eligible:
+            hinted = str(getattr(order_req, "strategy_id", "") or "").strip()
+            if hinted:
+                return StrategyId(hinted)
+        return strategy_id
+
     def _record_trade_and_pnl(
         self,
         hub_order_id: str,
@@ -851,6 +872,7 @@ class OrderRouter:
 
             signed_qty = filled_qty if order_req.side.value == "BUY" else -filled_qty
             trade_time = self._clock.now_utc()
+            pnl_strategy_id = ownership_strategy_id or strategy_id
 
             try:
                 hk = HubOrderKey(
@@ -871,7 +893,7 @@ class OrderRouter:
                 ),
                 tenant_id=tenant_id,
                 broker_account_id=broker_account_id,
-                strategy_id=strategy_id,
+                strategy_id=pnl_strategy_id,
                 symbol=order_req.symbol,
                 side=order_req.side.value,
                 qty=filled_qty,
@@ -918,7 +940,7 @@ class OrderRouter:
                 event = TradeEvent(
                     tenant_id=tenant_id,
                     broker_account_id=broker_account_id,
-                    strategy_id=strategy_id,
+                    strategy_id=pnl_strategy_id,
                     symbol=order_req.symbol,
                     qty=signed_qty,
                     price=price,
@@ -949,7 +971,7 @@ class OrderRouter:
                 tenant_id=tenant_id,
                 broker_account_id=broker_account_id,
                 contract_key=contract_key,
-                strategy_id=ownership_strategy_id or strategy_id,
+                strategy_id=pnl_strategy_id,
                 signed_qty=signed_qty,
             )
         except Exception:
@@ -1221,6 +1243,11 @@ class OrderRouter:
                     pass
                 return _finalize_response(rejected)
         order_req_exec = policy_ctx.order_req
+        ownership_strategy_id = self._resolve_ownership_strategy_id(
+            strategy_id=strategy_id,
+            order_req=order_req_exec,
+            policy_ctx=policy_ctx,
+        )
 
         if self._submission_outbox is not None:
             claimed, existing_record = self._submission_outbox.reserve_submission(
@@ -1231,10 +1258,7 @@ class OrderRouter:
                 hub_order_id=hub_order_id,
                 order_req=order_req_exec,
                 contract_key=policy_ctx.position_ownership_contract_key,
-                ownership_strategy_id=(
-                    policy_ctx.position_ownership_fill_owner_strategy_id
-                    or strategy_id
-                ),
+                ownership_strategy_id=ownership_strategy_id,
                 created_at=self._clock.now_utc(),
             )
             if not claimed:
@@ -1384,10 +1408,7 @@ class OrderRouter:
                     order_req=order_req_exec,
                     response=response,
                     contract_key=policy_ctx.position_ownership_contract_key,
-                    ownership_strategy_id=(
-                        policy_ctx.position_ownership_fill_owner_strategy_id
-                        or strategy_id
-                    ),
+                    ownership_strategy_id=ownership_strategy_id,
                 )
             except Exception:
                 logger.exception(
@@ -1413,10 +1434,7 @@ class OrderRouter:
                     order_req=order_req_exec,
                     response=response,
                     contract_key=policy_ctx.position_ownership_contract_key,
-                    ownership_strategy_id=(
-                        policy_ctx.position_ownership_fill_owner_strategy_id
-                        or strategy_id
-                    ),
+                    ownership_strategy_id=ownership_strategy_id,
                 )
         else:
             self._record_trade_and_pnl(
@@ -1427,10 +1445,7 @@ class OrderRouter:
                 order_req=order_req_exec,
                 response=response,
                 contract_key=policy_ctx.position_ownership_contract_key,
-                ownership_strategy_id=(
-                    policy_ctx.position_ownership_fill_owner_strategy_id
-                    or strategy_id
-                ),
+                ownership_strategy_id=ownership_strategy_id,
             )
         return hub_order_id, response
 

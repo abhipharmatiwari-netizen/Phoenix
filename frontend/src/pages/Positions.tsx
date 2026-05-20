@@ -162,19 +162,24 @@ function mapHubPositionToPosition(row: HubPosition): Position {
     : row.side === 'SELL'
       ? -Math.abs(row.qty)
       : Math.abs(row.qty);
+  const avgPrice = Number(row.avg_price || 0);
+  const backendUnrealized = row.unrealized_pnl;
+  const computedUnrealized = row.ltp != null && avgPrice > 0
+    ? (row.ltp - avgPrice) * quantity
+    : undefined;
   return {
     symbol: row.symbol,
     quantity,
     net_qty: quantity,
     qty_lots: row.side === 'SELL' ? -Math.abs(row.qty_lots) : Math.abs(row.qty_lots),
     lot_size: row.lot_size,
-    avg_price: row.avg_price,
+    avg_price: avgPrice,
     entry_price: row.entry_price,
     entry_ts: row.entry_ts,
     product_type: row.product_type,
     side: row.side,
     ltp: row.ltp ?? undefined,
-    unrealized_pnl: row.ltp != null ? (row.ltp - row.avg_price) * quantity : undefined,
+    unrealized_pnl: backendUnrealized ?? computedUnrealized,
   };
 }
 

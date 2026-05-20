@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { AdminService, getTenantId, setTenantId as persistTenantId } from '../../client';
-import { Role } from '../../lib/rbac';
 import './TopNav.css';
 
 interface TenantOption {
@@ -25,7 +24,7 @@ const TopNav: React.FC = () => {
         return;
       }
 
-      if (user.canAccessAllTenants || user.role === Role.ADMIN) {
+      if (user.canAccessAllTenants) {
         try {
           const response = await AdminService.listTenants();
           if (cancelled) {

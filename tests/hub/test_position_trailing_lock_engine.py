@@ -66,6 +66,8 @@ class _RecordingOrderRouter:
                 "purpose": order_req.purpose,
                 "exit_reason": order_req.exit_reason,
                 "qty": order_req.quantity,
+                "order_strategy_id": getattr(order_req, "strategy_id", None),
+                "strategy_context": getattr(order_req, "strategy_context", None),
             }
         )
         return ("hub-order-id", SimpleNamespace(status="OK"))
@@ -281,6 +283,67 @@ async def test_tick_mode_exits_matching_short_position_on_giveback():
         price=6.05,
     )
     assert len(router.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_trailing_lock_exit_carries_original_owner_strategy_hint():
+    state_store = StateStore()
+    symbol = "NATURALGAS22MAY26295CE"
+    pos = Position(
+        symbol=symbol,
+        quantity=-1250,
+        avg_price=6.75,
+        product_type=ProductType.INTRADAY,
+    )
+    state_store.set_positions("A1", [pos])
+    _seed_label_meta("NG_ATM_CE_295", symbol=symbol, token="555295")
+
+    ownership_store = PositionOwnershipStore()
+    contract_key, reason = derive_contract_key_from_position(pos)
+    assert contract_key is not None, reason
+    ownership_store.try_acquire(
+        tenant_id="t-1",
+        broker_account_id="A1",
+        contract_key=contract_key,
+        strategy_id="ema20_strategy",
+        is_exit_order=False,
+        unknown_mode="block_entries",
+    )
+    ownership_store.apply_fill(
+        tenant_id="t-1",
+        broker_account_id="A1",
+        contract_key=contract_key,
+        strategy_id="ema20_strategy",
+        signed_qty=-1250,
+    )
+
+    router = _RecordingOrderRouter()
+    router._position_ownership_store = ownership_store
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(position_trailing_lock_tick_enabled=True),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+
+    await engine.evaluate_tick(
+        [_runner("t-1", "A1")],
+        tick_label="NG_ATM_CE_295",
+        tick_token="555295",
+        price=5.70,
+    )
+    await engine.evaluate_tick(
+        [_runner("t-1", "A1")],
+        tick_label="NG_ATM_CE_295",
+        tick_token="555295",
+        price=6.05,
+    )
+
+    assert len(router.calls) == 1
+    call = router.calls[0]
+    assert call["strategy_id"] == "system::position_trailing_lock"
+    assert call["order_strategy_id"] == "ema20_strategy"
+    assert call["strategy_context"]["position_owner_strategy_id"] == "ema20_strategy"
 
 
 @pytest.mark.asyncio

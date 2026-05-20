@@ -226,10 +226,12 @@ def run_shadow_loop(config: OiMlShadowRunnerConfig) -> int:
         logger.info("oi_ml_shadow disabled; set OI_ML_SHADOW_ENABLED=true")
         return 0
     iterations = 0
+    consecutive_failures = 0
     while True:
         iterations += 1
         try:
             result = run_shadow_once(config)
+            consecutive_failures = 0
             logger.info(
                 "oi_ml_shadow iteration=%d action=%s reason=%s snapshot_rows=%d intent_id=%s record_id=%s",
                 iterations,
@@ -240,7 +242,16 @@ def run_shadow_loop(config: OiMlShadowRunnerConfig) -> int:
                 result.shadow_record_id,
             )
         except Exception as exc:
-            logger.exception("oi_ml_shadow iteration=%d failed: %s", iterations, exc)
+            consecutive_failures += 1
+            reason = _classify_shadow_failure(exc)
+            logger.warning(
+                "oi_ml_shadow_ingestion_degraded iteration=%d reason=%s consecutive_failures=%d",
+                iterations,
+                reason,
+                consecutive_failures,
+            )
+            if consecutive_failures == 1 or consecutive_failures % 10 == 0:
+                logger.debug("oi_ml_shadow failure detail", exc_info=True)
 
         if config.max_iterations is not None and iterations >= config.max_iterations:
             return 0
@@ -370,6 +381,17 @@ def _next_weekly_expiry(today: date | None = None) -> date:
 def _within_window(value: datetime, start: time, end: time) -> bool:
     now_time = value.astimezone(IST).time()
     return start <= now_time <= end
+
+
+def _classify_shadow_failure(exc: Exception) -> str:
+    if isinstance(exc, TimeoutError):
+        return "provider_timeout"
+    message = str(exc or "").lower()
+    if "timeout" in message or "timed out" in message:
+        return "provider_timeout"
+    if "login" in message or "auth" in message:
+        return "provider_login_failed"
+    return type(exc).__name__
 
 
 def _parse_date(value: object) -> date | None:

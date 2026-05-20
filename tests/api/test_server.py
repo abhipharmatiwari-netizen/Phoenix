@@ -305,6 +305,79 @@ def test_health_summary_degrades_when_terminal_position_records_have_quantity(
     assert "terminal_position_records_nonzero_net_qty" in payload["degraded_reasons"]
 
 
+def test_dashboard_status_degrades_when_readyz_position_authority_blocks(
+    api_client,
+    monkeypatch,
+):
+    client, runtime = api_client
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = True
+    monkeypatch.setattr(server, "_readiness_trade_mode", lambda: "LIVE")
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    from app.observability import alert_rules
+
+    alert_rules.reset_alert_evaluator()
+    hub_runtime = SimpleNamespace(
+        hub=SimpleNamespace(list_runner_ids=lambda: []),
+        state_store=StateStore(),
+        order_lifecycle=SimpleNamespace(
+            count_positions_by_state=lambda: {"RECONCILING": 1}
+        ),
+    )
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: hub_runtime)
+    monkeypatch.setattr("app.hub.runtime.get_hub_runtime", lambda: hub_runtime)
+
+    resp = client.get("/dashboard/status")
+    payload = resp.json()
+
+    assert resp.status_code == 200
+    assert payload["status"] == "degraded"
+    assert "position_authority_degraded" in payload["degraded_reasons"]
+    assert payload["readiness"]["ready"] is False
+    assert payload["readiness"]["http_status"] == 503
+    assert payload["readiness"]["reason"] == "position_authority_degraded"
+    assert "readiness_position_authority_degraded" in payload["alerts"]["firing_rules"]
+
+
+def test_health_summary_surfaces_oi_ml_shadow_ingestion_degraded(
+    api_client,
+    monkeypatch,
+):
+    client, runtime = api_client
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = True
+    monkeypatch.setattr(
+        server,
+        "get_hub_runtime",
+        lambda: SimpleNamespace(
+            hub=SimpleNamespace(list_runner_ids=lambda: []),
+            state_store=StateStore(),
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "_oi_ml_shadow_ingestion_status",
+        lambda: {
+            "enabled": True,
+            "status": "degraded",
+            "reason": "option_chain_rows_missing",
+            "dry_run_only": True,
+            "live_order_path_enabled": False,
+            "option_chain": {"today_row_count": 0},
+        },
+    )
+
+    resp = client.get("/health/summary")
+    payload = resp.json()
+
+    assert resp.status_code == 200
+    assert payload["status"] == "degraded"
+    assert "oi_ml_shadow_ingestion_degraded" in payload["degraded_reasons"]
+    assert payload["readiness"]["ready"] is True
+    assert payload["oi_ml_shadow_ingestion"]["reason"] == "option_chain_rows_missing"
+    assert payload["oi_ml_shadow_ingestion"]["live_order_path_enabled"] is False
+
+
 def test_health_summary_does_not_expect_stream_worker_when_disabled(api_client, monkeypatch):
     client, runtime = api_client
     runtime.worker_running_state = False
@@ -569,6 +642,54 @@ def test_build_hub_positions_snapshot_resolves_ltp_from_dashboard_label(monkeypa
     assert rows[0]["ltp"] == 27.75
 
 
+def test_build_hub_positions_snapshot_filters_by_admin_entitlement(monkeypatch):
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [
+            Position(
+                symbol="NATURALGAS24MAR26310CE",
+                quantity=-1250,
+                avg_price=26.6,
+                product_type=ProductType.INTRADAY,
+            )
+        ],
+    )
+    state_store.set_positions(
+        "A2",
+        [
+            Position(
+                symbol="NIFTY17FEB2625750CE",
+                quantity=-65,
+                avg_price=101.0,
+                product_type=ProductType.INTRADAY,
+            )
+        ],
+    )
+    runners = {
+        "A1": SimpleNamespace(tenant_id="tenant-1"),
+        "A2": SimpleNamespace(tenant_id="tenant-2"),
+    }
+    runtime = SimpleNamespace(
+        hub=SimpleNamespace(
+            list_runner_ids=lambda: ["A1", "A2"],
+            get_runner=lambda broker_account_id: runners.get(broker_account_id),
+        ),
+        state_store=state_store,
+    )
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: runtime)
+
+    rows = server._build_hub_positions_snapshot(
+        admin_ctx=dashboard_auth.AdminContext(
+            caller="scoped",
+            tenant_ids=("tenant-1",),
+            broker_account_ids=("A1",),
+        )
+    )
+
+    assert [row["broker_account_id"] for row in rows] == ["A1"]
+
+
 def test_build_hub_pnl_snapshot_aggregates_open_and_realized_pnl(monkeypatch):
     state_store = StateStore()
     state_store.set_positions(
@@ -631,7 +752,34 @@ def test_build_hub_pnl_snapshot_keeps_realized_when_positions_are_flat(monkeypat
         "total": 99.25,
         "realized": 99.25,
         "open": 0.0,
+        "invalid_marks_count": 0,
     }
+
+
+def test_build_hub_pnl_snapshot_counts_invalid_avg_price_marks(monkeypatch):
+    runtime = SimpleNamespace(
+        hub=SimpleNamespace(list_runner_ids=lambda: [], get_runner=lambda _: None),
+        state_store=StateStore(),
+        pnl_engine=None,
+    )
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: runtime)
+
+    pnl = server._build_hub_pnl_snapshot(
+        [
+            {
+                "symbol": "NIFTY17FEB2625750CE",
+                "net_qty": -65,
+                "avg_price": 0.0,
+                "entry_price": 0.0,
+                "ltp": 151.2,
+                "unrealized_pnl": None,
+            }
+        ]
+    )
+
+    assert pnl["open"] == 0.0
+    assert pnl["invalid_marks_count"] == 1
+    assert pnl["by_instrument"] == {}
 
 
 def test_toggle_strategy_endpoint_updates_switchboard(api_client):

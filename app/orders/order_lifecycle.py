@@ -1029,6 +1029,12 @@ class OrderLifecycleService:
         record = self._position_records.get(str(scope_key))
         return copy.deepcopy(record) if record is not None else None
 
+    def list_position_records(self) -> list[InternalPosition]:
+        """Return a stable snapshot of in-memory position records for admin evidence."""
+        with self._recent_entry_lock:
+            records_snapshot = list(self._position_records.values())
+        return [copy.deepcopy(record) for record in records_snapshot]
+
     def force_clear_position_record(
         self,
         *,
@@ -1999,12 +2005,13 @@ class OrderLifecycleService:
         except Exception:
             canonical_hub_order_id = HubOrderId(ctx.hub_order_id)
 
+        pnl_strategy_id = ctx.ownership_strategy_id or ctx.strategy_id
         record = build_trade_record_from_fill(
             trade_id=broker_order_id,
             hub_order_id=str(canonical_hub_order_id or ctx.hub_order_id),
             tenant_id=ctx.tenant_id,
             broker_account_id=ctx.broker_account_id,
-            strategy_id=ctx.strategy_id,
+            strategy_id=pnl_strategy_id,
             symbol=ctx.symbol,
             side=ctx.side,
             qty=filled_qty,
@@ -2055,7 +2062,7 @@ class OrderLifecycleService:
                     TradeEvent(
                         tenant_id=ctx.tenant_id,
                         broker_account_id=ctx.broker_account_id,
-                        strategy_id=ctx.strategy_id,
+                        strategy_id=pnl_strategy_id,
                         symbol=ctx.symbol,
                         qty=signed_qty,
                         price=price,
@@ -2078,7 +2085,7 @@ class OrderLifecycleService:
                         TradeOpenEvent(
                             tenant_id=ctx.tenant_id,
                             broker_account_id=ctx.broker_account_id,
-                            strategy_id=ctx.strategy_id,
+                            strategy_id=pnl_strategy_id,
                             symbol=ctx.symbol,
                             qty=filled_qty,
                             entry_price=price,
@@ -2091,7 +2098,7 @@ class OrderLifecycleService:
                         TradeCloseEvent(
                             tenant_id=ctx.tenant_id,
                             broker_account_id=ctx.broker_account_id,
-                            strategy_id=ctx.strategy_id,
+                            strategy_id=pnl_strategy_id,
                             symbol=ctx.symbol,
                             qty=filled_qty,
                             exit_price=price,

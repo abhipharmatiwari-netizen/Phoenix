@@ -33,6 +33,7 @@ from app.pnl.position_trailing_lock import (
 from app.orders.router import OrderRouter
 from app.orders.position_ownership import (
     ContractKey,
+    UNKNOWN_OWNER,
     derive_contract_key_from_position,
     render_contract,
 )
@@ -432,6 +433,7 @@ class ProfitSweepEngine:
     profit_lock_manager: ProfitLockManager
     clock: Optional[IClock] = None
     _clock: IClock = field(init=False)
+    _exclude_exchanges: set[str] = field(default_factory=set)
     
     # Legacy fields (kept for old-style profit sweep compatibility)
     _swept_today: Dict[Tuple[TenantId, BrokerAccountId], date] = field(
@@ -440,6 +442,27 @@ class ProfitSweepEngine:
 
     def __post_init__(self) -> None:
         self._clock = self.clock or SystemClock()
+        raw_excl = getattr(self.settings, "eod_exit_excluded_exchanges", "") or ""
+        self._exclude_exchanges = {
+            s.strip().upper()
+            for s in str(raw_excl or "").split(",")
+            if s and s.strip()
+        }
+
+    @staticmethod
+    def _norm_exchange(raw: object) -> str:
+        if raw is None:
+            return ""
+        try:
+            return str(raw).strip().upper()
+        except Exception:
+            return ""
+
+    def _is_excluded_exchange(self, exchange: object) -> bool:
+        exch = self._norm_exchange(exchange)
+        if not exch or not self._exclude_exchanges:
+            return False
+        return any(exch == ex or exch.startswith(ex) for ex in self._exclude_exchanges)
 
     # Return today's date in the configured hub time zone.
     def _today(self) -> date:
@@ -2084,6 +2107,68 @@ class PositionTrailingLockEngine:
             str(os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper()
             == "LIVE"
         )
+
+    def _resolve_position_owner_strategy_id(
+        self,
+        *,
+        tenant_id: Any,
+        broker_account_id: Any,
+        pos: Any,
+    ) -> Optional[str]:
+        for attr_name in (
+            "owner_strategy_id",
+            "ownership_strategy_id",
+            "position_owner_strategy_id",
+            "strategy_id",
+        ):
+            raw = _position_value(pos, attr_name)
+            token = str(raw or "").strip()
+            if token and token != UNKNOWN_OWNER and not token.startswith("system::"):
+                return token
+
+        store = getattr(self.order_router, "_position_ownership_store", None)
+        if store is None:
+            return None
+        try:
+            contract_key, _reason = derive_contract_key_from_position(pos)
+            if contract_key is None:
+                return None
+            owner: Optional[str] = None
+            get_owner = getattr(store, "get_owner", None)
+            if callable(get_owner):
+                owner = get_owner(
+                    tenant_id=TenantId(str(tenant_id)),
+                    broker_account_id=BrokerAccountId(str(broker_account_id)),
+                    contract_key=contract_key,
+                )
+            if owner in (None, UNKNOWN_OWNER):
+                get_record = getattr(store, "get_ownership_record", None)
+                if callable(get_record):
+                    record = get_record(
+                        tenant_id=TenantId(str(tenant_id)),
+                        broker_account_id=BrokerAccountId(str(broker_account_id)),
+                        contract_key=contract_key,
+                    )
+                    owner = getattr(record, "owner_strategy_id", None)
+            owner_text = str(owner or "").strip()
+            if owner_text and owner_text != UNKNOWN_OWNER and not owner_text.startswith("system::"):
+                return owner_text
+        except Exception as exc:
+            if self._is_live_mode():
+                log_event(
+                    logger,
+                    event_type="POSITION_TRAILING_LOCK_OWNER_LOOKUP_FAILED",
+                    message=(
+                        "Trailing-lock owner lookup failed in LIVE; exit will "
+                        "still route as system actor but cannot pre-bind owner."
+                    ),
+                    level=logging.WARNING,
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    symbol=str(_position_value(pos, "symbol", "") or ""),
+                    error=repr(exc),
+                )
+        return None
 
     def _enabled(self) -> bool:
         return bool(getattr(self.settings, "position_trailing_lock_enabled", False))
@@ -3991,13 +4076,18 @@ class PositionTrailingLockEngine:
             )
             return
 
+        owner_strategy_id = self._resolve_position_owner_strategy_id(
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+            pos=pos,
+        )
         exit_plan = build_position_exit_plan(
             pos,
             tag=reason,
             position_ownership_bypass=True,
             exit_reason=reason,
             account_id=str(broker_account_id),
-            strategy_id="system::position_trailing_lock",
+            strategy_id=owner_strategy_id or "system::position_trailing_lock",
         )
         if not exit_plan.ok or exit_plan.order_req is None:
             log_event(
@@ -4014,6 +4104,12 @@ class PositionTrailingLockEngine:
                 reason=exit_plan.reason,
             )
             return
+        if owner_strategy_id:
+            exit_plan.order_req.strategy_context = {
+                **(exit_plan.order_req.strategy_context or {}),
+                "position_owner_strategy_id": owner_strategy_id,
+                "exit_actor_strategy_id": "system::position_trailing_lock",
+            }
         # Issue #225 (PR #236 review):
         #   P1 — arm marker BEFORE submit_order so that if the router
         #   raises AFTER it placed the broker order (e.g. lifecycle

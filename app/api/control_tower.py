@@ -70,6 +70,46 @@ def _request_id_from_request(request: Request) -> str | None:
     return request.headers.get("X-Request-Id") or request.headers.get("X-Correlation-Id")
 
 
+def _context_scoped(ctx: AdminContext) -> bool:
+    if ctx.all_tenants:
+        return False
+    auth_source = str(getattr(ctx, "auth_source", "") or "").strip()
+    return bool(
+        ctx.tenant_ids
+        or ctx.broker_account_ids
+        or auth_source in {"bearer", "ws_ticket"}
+    )
+
+
+def _tenant_allowed_for_context(tenant_id: object, ctx: AdminContext) -> bool:
+    return bool(
+        not _context_scoped(ctx)
+        or ctx.can_access_tenant(str(tenant_id or "").strip())
+    )
+
+
+def _account_allowed_for_context(account: BrokerAccountModel, ctx: AdminContext) -> bool:
+    if not _context_scoped(ctx):
+        return True
+    return bool(
+        ctx.can_access_tenant(str(getattr(account, "tenant_id", "") or "").strip())
+        and ctx.can_access_broker_account(
+            str(getattr(account, "broker_account_id", "") or "").strip()
+        )
+    )
+
+
+def _config_allowed_for_context(config: StrategyConfigModel, ctx: AdminContext) -> bool:
+    if not _context_scoped(ctx):
+        return True
+    return bool(
+        ctx.can_access_tenant(str(getattr(config, "tenant_id", "") or "").strip())
+        and ctx.can_access_broker_account(
+            str(getattr(config, "broker_account_id", "") or "").strip()
+        )
+    )
+
+
 # Build the list of known strategies for the control tower matrix.
 def _discover_strategy_columns() -> List[StrategyColumn]:
     """Build the list of strategies from the authoritative registry."""
@@ -101,13 +141,18 @@ def _aggregate_strategy_state(
 
 
 # Return tenant broker accounts that are enabled and have active subscriptions.
-def _eligible_accounts_for_tenant(tenant_id: TenantId) -> List[BrokerAccountModel]:
+def _eligible_accounts_for_tenant(
+    tenant_id: TenantId,
+    ctx: AdminContext | None = None,
+) -> List[BrokerAccountModel]:
     """
     Active broker accounts for a tenant that have at least one active subscription.
     """
     accounts = get_broker_accounts_for_tenant(tenant_id)
     eligible: List[BrokerAccountModel] = []
     for acct in accounts:
+        if ctx is not None and not _account_allowed_for_context(acct, ctx):
+            continue
         if not getattr(acct, "enabled", False):
             continue
         subs = get_subscriptions_for_account(acct.broker_account_id)
@@ -120,13 +165,21 @@ def _eligible_accounts_for_tenant(tenant_id: TenantId) -> List[BrokerAccountMode
 @router.get("/matrix", response_model=ControlTowerMatrixResponse)
 def get_control_tower_matrix(ctx: AdminContext = Depends(get_admin_context)) -> ControlTowerMatrixResponse:
     ctx.require_role(AdminRole.OPERATOR)
-    tenants: List[TenantModel] = get_all_tenants()
+    tenants: List[TenantModel] = [
+        tenant
+        for tenant in get_all_tenants()
+        if _tenant_allowed_for_context(getattr(tenant, "tenant_id", ""), ctx)
+    ]
     strategies = _discover_strategy_columns()
 
     matrix: Dict[str, Dict[str, bool]] = {}
     for tenant in tenants:
         tenant_id = str(tenant.tenant_id)
-        configs = get_strategy_configs_for_tenant(tenant.tenant_id)
+        configs = [
+            cfg
+            for cfg in get_strategy_configs_for_tenant(tenant.tenant_id)
+            if _config_allowed_for_context(cfg, ctx)
+        ]
         state = _aggregate_strategy_state(configs)
         row = {
             strat.strategy_id: bool(state.get(strat.strategy_id, False))
@@ -160,6 +213,11 @@ def toggle_control_tower(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="tenant_id and strategy_id are required",
         )
+    if not _tenant_allowed_for_context(req.tenant_id, ctx):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tenant is outside the caller's entitlement scope",
+        )
 
     tenant_id = TenantId(req.tenant_id)
     strategy_id_raw = str(req.strategy_id or "").strip()
@@ -176,9 +234,11 @@ def toggle_control_tower(
     strategy_id = StrategyId(canonical_strategy_id)
     now = datetime.now(timezone.utc)
 
-    existing_configs = get_strategy_configs_for_tenant_strategy(
-        tenant_id, strategy_id
-    )
+    existing_configs = [
+        cfg
+        for cfg in get_strategy_configs_for_tenant_strategy(tenant_id, strategy_id)
+        if _config_allowed_for_context(cfg, ctx)
+    ]
     previous_enabled = any(
         bool(getattr(cfg, "enabled", False))
         for cfg in existing_configs
@@ -187,7 +247,7 @@ def toggle_control_tower(
     created_any = False
 
     if req.enabled:
-        eligible_accounts = _eligible_accounts_for_tenant(tenant_id)
+        eligible_accounts = _eligible_accounts_for_tenant(tenant_id, ctx)
         existing_accounts = {
             cfg.broker_account_id for cfg in existing_configs if cfg is not None
         }
@@ -212,9 +272,11 @@ def toggle_control_tower(
         target_configs = existing_configs
         if req.enabled and created_any:
             # Refresh configs if any were just created so updates happen uniformly
-            target_configs = get_strategy_configs_for_tenant_strategy(
-                tenant_id, strategy_id
-            )
+            target_configs = [
+                cfg
+                for cfg in get_strategy_configs_for_tenant_strategy(tenant_id, strategy_id)
+                if _config_allowed_for_context(cfg, ctx)
+            ]
         for cfg in target_configs:
             model = StrategyConfigModel(
                 strategy_config_id=cfg.strategy_config_id,
@@ -230,7 +292,7 @@ def toggle_control_tower(
     else:
         # No existing configs and enabling requested: create across eligible accounts.
         if req.enabled:
-            eligible_accounts = _eligible_accounts_for_tenant(tenant_id)
+            eligible_accounts = _eligible_accounts_for_tenant(tenant_id, ctx)
             for acct in eligible_accounts:
                 cfg_id = f"{tenant_id}_{acct.broker_account_id}_{strategy_id}"
                 model = StrategyConfigModel(

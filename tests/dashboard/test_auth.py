@@ -124,7 +124,12 @@ async def test_get_admin_context_rejects_expired_hmac_timestamp(monkeypatch):
 def test_dashboard_ws_ticket_round_trip():
     settings = _settings()
     ticket = auth.issue_dashboard_ws_ticket(
-        admin_ctx=auth.AdminContext(caller='admin', role=auth.AdminRole.READONLY),
+        admin_ctx=auth.AdminContext(
+            caller='admin',
+            role=auth.AdminRole.READONLY,
+            tenant_ids=('tenant-1',),
+            broker_account_ids=('acc-1',),
+        ),
         path='/ws/dashboard',
         mode='delta',
         settings=settings,
@@ -145,6 +150,8 @@ def test_dashboard_ws_ticket_round_trip():
     assert ticket.mode == 'delta'
     assert ctx.caller == 'admin'
     assert ctx.role == auth.AdminRole.READONLY
+    assert ctx.tenant_ids == ('tenant-1',)
+    assert ctx.broker_account_ids == ('acc-1',)
 
 
 

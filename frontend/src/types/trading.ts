@@ -85,6 +85,7 @@ export interface PnLSnapshot {
   realized_pnl: number;
   unrealized_pnl: number;
   gross_exposure: number;
+  invalid_marks_count?: number;
   as_of?: string | null;
   session_date?: string | null;
 }

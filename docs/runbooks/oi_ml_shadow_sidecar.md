@@ -116,6 +116,28 @@ The sidecar runs as container user `appuser`; `/opt/phoenix/logs/oi-ml-shadow`
 must be writable by that user. Host ownership was corrected to allow scrip-master
 caching.
 
+### Ingestion visibility
+
+The main dashboard health summary exposes read-only sidecar evidence under
+`oi_ml_shadow_ingestion`:
+
+```bash
+curl -sS http://localhost:8000/health/summary
+```
+
+When `OI_ML_SHADOW_ENABLED=true`, the payload includes today's `option_chain_1m`
+row count, latest snapshot/source/ingest timestamps, validation report count,
+shadow intent count, and a dry-run invariant (`live_order_path_enabled=false`).
+If the sidecar is enabled after the snapshot window starts and no option-chain
+rows are present, dashboard status is degraded with reason
+`oi_ml_shadow_ingestion_degraded`; the alert rule
+`oi_ml_shadow_ingestion_degraded` fires with a sanitized row count.
+
+Repeated provider/login timeouts are logged as compact
+`oi_ml_shadow_ingestion_degraded` warnings with a consecutive-failure count.
+Detailed stack traces are debug-level only on the first failure and every tenth
+failure, so the retry signal stays visible without flooding operator logs.
+
 ## Remaining Promotion Gate
 
 Do not promote this strategy beyond shadow until a market-window snapshot proves

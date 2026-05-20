@@ -19,6 +19,7 @@ from app.core.position_state import InternalPosition, PositionState
 from app.dashboard.admin_routes import (
     ClearPositionRecordRequest,
     clear_position_record,
+    position_authority_recovery,
 )
 from app.dashboard.auth import AdminContext, AdminRole
 from app.orders.order_lifecycle import OrderLifecycleService
@@ -247,9 +248,66 @@ def test_clear_route_clean_path_when_broker_is_flat(monkeypatch):
     assert out["status"] == "ok"
     assert out["scope_key"] == scope
     assert out["prior_state"] == "RECOVERY_PENDING"
+    assert "/readyz" in out["post_clear_recheck_endpoints"]
+    assert out["position_state_counts_after_clear"]["FLAT"] == 1
     assert rec.position_state == PositionState.FLAT
     assert rec.net_qty == 0.0
     assert any("net_qty = 0" in sql for sql in conn.executed_sql)
+
+
+def test_position_authority_recovery_exposes_flat_broker_evidence(monkeypatch):
+    svc = _mk_lifecycle()
+    scope = "tenant-1:A1:ema20_strategy:INTRADAY:('NG', '2026-05-22', '255', 'CE', 'INTRADAY')"
+    _seed_record(svc, scope_key=scope)
+    runtime = SimpleNamespace(
+        order_lifecycle=svc,
+        state_store=_RecordingStateStore([]),
+    )
+    monkeypatch.setattr(
+        "app.dashboard.admin_routes.get_hub_runtime", lambda: runtime
+    )
+    _patch_rate_limit(monkeypatch)
+
+    out = position_authority_recovery(_mk_request_stub(), _mk_admin_ctx())
+
+    assert out["status"] == "degraded"
+    assert out["recovery_record_count"] == 1
+    record = out["records"][0]
+    assert record["scope_key"] == scope
+    assert record["broker_evidence"]["status"] == "flat"
+    assert record["recovery"]["allowed_without_force"] is True
+    assert "/admin/state/clear-position-record" == record["recovery"]["clear_position_record_endpoint"]
+    assert "/dashboard/status" in out["recovery_action"]["post_clear_recheck_endpoints"]
+
+
+def test_position_authority_recovery_filters_scoped_admin(monkeypatch):
+    svc = _mk_lifecycle()
+    allowed_scope = "tenant-1:A1:ema20_strategy:INTRADAY:('NG', '2026-05-22', '255', 'CE', 'INTRADAY')"
+    denied_scope = "tenant-2:A2:ema20_strategy:INTRADAY:('NG', '2026-05-22', '260', 'CE', 'INTRADAY')"
+    _seed_record(svc, scope_key=allowed_scope)
+    denied = _seed_record(svc, scope_key=denied_scope)
+    denied.tenant_id = "tenant-2"
+    denied.account_id = "A2"
+    runtime = SimpleNamespace(
+        order_lifecycle=svc,
+        state_store=_RecordingStateStore([]),
+    )
+    monkeypatch.setattr(
+        "app.dashboard.admin_routes.get_hub_runtime", lambda: runtime
+    )
+    _patch_rate_limit(monkeypatch)
+    ctx = AdminContext(
+        caller="tenant-admin",
+        role=AdminRole.OPERATOR,
+        auth_source="bearer",
+        tenant_ids=("tenant-1",),
+        broker_account_ids=("A1",),
+    )
+
+    out = position_authority_recovery(_mk_request_stub(), ctx)
+
+    assert out["recovery_record_count"] == 1
+    assert out["records"][0]["scope_key"] == allowed_scope
 
 
 def test_clear_route_403_when_role_insufficient(monkeypatch):

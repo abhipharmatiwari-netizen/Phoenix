@@ -86,8 +86,13 @@ const Safety: React.FC = () => {
     return () => { active = false; clearInterval(timer); };
   }, []);
 
-  const isDegraded = health?.status !== 'ok';
+  const isDegraded = health?.status !== 'ok' || health?.readiness?.ready === false;
   const degradedReasons = health?.degraded_reasons || [];
+  const readinessReason = health?.readiness?.reason;
+  const shadowIngestion = health?.oi_ml_shadow_ingestion;
+  const shadowStatus = shadowIngestion?.status || 'unknown';
+  const shadowRows = shadowIngestion?.option_chain?.today_row_count ?? 0;
+  const shadowValidationReports = shadowIngestion?.validation_reports?.today_report_count ?? 0;
 
   const auditColumns: Column<AuditEvent & Record<string, unknown>>[] = useMemo(() => [
     { key: 'timestamp', header: 'Time', render: (row) => new Date(row.timestamp).toLocaleString() },
@@ -176,7 +181,7 @@ const Safety: React.FC = () => {
               </div>
               <StatusBadge
                 status={isDegraded ? 'error' : 'ok'}
-                label={health?.status?.toUpperCase() || 'UNKNOWN'}
+                label={(readinessReason || health?.status || 'UNKNOWN').toUpperCase()}
               />
               {degradedReasons.length > 0 && (
                 <ul style={{ textAlign: 'left', maxWidth: 500, margin: '1rem auto', color: '#dc2626', fontSize: '0.875rem' }}>
@@ -198,6 +203,16 @@ const Safety: React.FC = () => {
               </Card>
               <Card title="Tracked Accounts">
                 <span style={{ fontSize: '1.5rem', fontWeight: 700 }}>{health?.tracked_account_count ?? 0}</span>
+              </Card>
+              <Card title="OI/ML Shadow">
+                <StatusBadge
+                  status={shadowStatus === 'ok' || shadowStatus === 'disabled' ? 'ok' : 'error'}
+                  label={shadowStatus.toUpperCase()}
+                />
+                <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: '#4b5563' }}>
+                  Rows {shadowRows} / Reports {shadowValidationReports}
+                  {shadowIngestion?.reason ? ` / ${shadowIngestion.reason}` : ''}
+                </div>
               </Card>
             </div>
 
