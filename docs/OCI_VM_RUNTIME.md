@@ -13,13 +13,13 @@ OCIDs, broker identifiers, and tokens are redacted.
 |---|---|---|---|---|
 | Host | `phoenix-vm`, `opc`, `/home/opc` | `hostname; date; whoami; pwd` | VM reachable through OCI Bastion; VM VNIC has no public IP | Do not document private IPs |
 | Deployed repo path | `/opt/phoenix/app` | Compose labels and `git -C` | Active checkout lives under `/opt/phoenix/app` | `/opt/phoenix` also contains operator-owned runtime files |
-| Active git commit/branch | `main`, `349d55f` | `git -C /opt/phoenix/app branch --show-current`, `rev-parse HEAD` | VM checkout is on `main` at `349d55f` | `git status --short` shows untracked `docker-compose.oci-postgres.yml` |
+| Active git commit/branch | `main`, `50513ec` | `git -C /opt/phoenix/app branch --show-current`, `rev-parse HEAD` | VM checkout is on `main` at `50513ec`; backend image is from `e1f9ddb` because `50513ec` changed sidecar compose only | `git status --short` shows untracked `docker-compose.oci-postgres.yml` |
 | Compose project | `phoenix-oci-live` | `docker inspect ... Labels` | backend, nginx, and watchdog have Compose labels | `phoenix-oci-postgres` has no Compose labels |
 | Compose files used | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` | `com.docker.compose.project.config_files` labels | These are the active Phoenix Compose files for labelled containers | Runtime override must be treated as authoritative |
 | Env file used | `/opt/phoenix/phoenix-deploy.env` | runtime scripts and Compose commands | Non-secret deploy env file exists on VM | Document names only, not values |
 | Running Phoenix containers | `phoenix-oci-backend`, `phoenix-oci-web`, `phoenix-oci-watchdog`, `phoenix-oci-postgres` | `docker ps`, `docker inspect` | All four were running during audit | Aurelium containers also run on the host but are outside Phoenix docs |
 | Stopped Phoenix containers | none shown by name | `docker ps -a` | `phoenix-oci-optimizer` is not present | Optimizer systemd units are also absent |
-| Backend image | `phoenix-local-backend:local-349d55f` | `docker inspect phoenix-oci-backend` | Local image, not OCIR | Recreated 2026-05-20 16:02 UTC |
+| Backend image | `phoenix-local-backend:local-e1f9ddb` | `docker inspect phoenix-oci-backend` | Local image, not OCIR | Recreated 2026-05-20 16:46 UTC |
 | Web image | `phoenix-local-nginx:local-349d55f` | `docker inspect phoenix-oci-web` | Local image, not OCIR | Recreated 2026-05-20 16:02 UTC |
 | Database image | `postgres:16-alpine`, image ID `sha256:4e6e670...` | `docker inspect phoenix-oci-postgres` | VM-local Postgres container | No Docker healthcheck |
 | Watchdog image | `docker:cli`, image ID `sha256:17b5c235...` | `docker inspect phoenix-oci-watchdog` | Docker CLI sidecar | Has Docker socket mount |
@@ -48,8 +48,8 @@ OCIDs, broker identifiers, and tokens are redacted.
 
 ## 2026-05-20 Position-Authority Recovery
 
-Commit `349d55f` was deployed as `phoenix-local-backend:local-349d55f` and
-`phoenix-local-nginx:local-349d55f`. During deployment, the new recovery
+Commit `e1f9ddb` was deployed as `phoenix-local-backend:local-e1f9ddb`; nginx
+remains `phoenix-local-nginx:local-349d55f`. During deployment, the recovery
 endpoint reported two `RECOVERY_PENDING` records for the same NIFTY contract and
 broker account with `broker_evidence.status=flat`. Both records were cleared via
 `POST /admin/state/clear-position-record` with `force=false` and audit events
@@ -70,7 +70,7 @@ Verified on 2026-05-20 IST:
 | Purpose | Dry-run OI/ML CE seller validation; no live order routing |
 | Checkout | `/opt/phoenix/oi-ml-shadow-src` |
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
-| Image | `phoenix-oi-ml-shadow:oi-ml-shadow-29c24f0` |
+| Image | `phoenix-oi-ml-shadow:oi-ml-shadow-50513ec` |
 | Container | `phoenix-oi-ml-shadow`, no host ports published |
 | Scorer | Smoke deployment uses `OI_ML_SHADOW_SCORER=constant` |
 | Risk posture | `OI_ML_SHADOW_ALLOW_NAKED=false`; sidecar records shadow intents only |

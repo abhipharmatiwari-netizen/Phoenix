@@ -13,10 +13,10 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 | Area | State |
 |---|---|
 | Branch | `oi-ml-shadow-sidecar` |
-| Latest deployed sidecar commit | `29c24f0` |
+| Latest deployed sidecar commit | `50513ec` |
 | OCI checkout | `/opt/phoenix/oi-ml-shadow-src` |
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
-| Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-29c24f0` |
+| Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-50513ec` |
 | Container | `phoenix-oi-ml-shadow` |
 | Database tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`, `public.option_chain_validation_reports` |
 | Default scorer | `missing` in compose; deployed smoke override uses `constant` |
@@ -30,10 +30,14 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 Recent validation:
 
 - Local focused OI/ML suite: `159 passed`.
-- 2026-05-20 16:02 UTC / 21:32 IST core deployment:
-  backend `phoenix-local-backend:local-349d55f`, nginx
-  `phoenix-local-nginx:local-349d55f`. The OI/ML sidecar remains on
-  `phoenix-oi-ml-shadow:oi-ml-shadow-29c24f0`.
+- 2026-05-20 16:50 UTC / 22:20 IST rectification deployment:
+  backend `phoenix-local-backend:local-e1f9ddb`, nginx
+  `phoenix-local-nginx:local-349d55f`, sidecar
+  `phoenix-oi-ml-shadow:oi-ml-shadow-50513ec`.
+- Post-rectification `/readyz` returned `ready=true`, backend/nginx were
+  healthy, and `/health/summary` reported `status=degraded` with
+  `oi_ml_shadow_ingestion_degraded` because 2026-05-20 IST sidecar evidence was
+  absent.
 - Post-deploy `/readyz` returned `ready=true` through both backend-local and
   nginx-local checks. Sidecar restarted outside the market window and logged
   `reason=outside_shadow_window`.
@@ -321,7 +325,7 @@ Restart the sidecar with smoke constants:
 
 ```bash
 cd /opt/phoenix
-IMAGE_TAG=oi-ml-shadow-29c24f0 \
+IMAGE_TAG=oi-ml-shadow-50513ec \
 OI_ML_SHADOW_SCORER=constant \
 OI_ML_SHADOW_CONSTANT_PROBABILITY=0.64 \
 OI_ML_SHADOW_CONSTANT_MAE_PREMIUM=40 \
