@@ -1066,11 +1066,15 @@ def _build_docker_health_summary() -> dict[str, Any]:
     ):
         degraded_reasons.append("oi_ml_shadow_ingestion_degraded")
 
-    status = "ok" if not degraded_reasons else "degraded"
     readiness_contract = _dashboard_readiness_contract(
         runtime=runtime,
         degraded_reasons=readiness_degraded_reasons,
         position_authority=position_authority,
+    )
+    status = (
+        "ok"
+        if not degraded_reasons and bool(readiness_contract.get("ready"))
+        else "degraded"
     )
 
     # OPS-6.6: Per-account staleness + policy state

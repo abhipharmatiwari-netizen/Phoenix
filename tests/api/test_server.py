@@ -339,6 +339,32 @@ def test_dashboard_status_degrades_when_readyz_position_authority_blocks(
     assert "readiness_position_authority_degraded" in payload["alerts"]["firing_rules"]
 
 
+def test_dashboard_status_degrades_when_runtime_not_ready(
+    api_client,
+    monkeypatch,
+):
+    client, runtime = api_client
+    runtime.ready = False
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = True
+    monkeypatch.setattr(
+        server,
+        "get_hub_runtime",
+        lambda: SimpleNamespace(
+            hub=SimpleNamespace(list_runner_ids=lambda: []),
+            state_store=StateStore(),
+        ),
+    )
+
+    resp = client.get("/dashboard/status")
+    payload = resp.json()
+
+    assert resp.status_code == 200
+    assert payload["status"] == "degraded"
+    assert payload["readiness"]["ready"] is False
+    assert payload["readiness"]["reason"] == "runtime_not_ready"
+
+
 def test_health_summary_surfaces_oi_ml_shadow_ingestion_degraded(
     api_client,
     monkeypatch,
