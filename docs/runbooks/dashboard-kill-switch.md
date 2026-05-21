@@ -150,6 +150,12 @@ Paste the returned `token_id` into the Step-up token field in the
 dashboard dialog. The dashboard surfaces an in-line copy of this
 command alongside the input.
 
+Confirm Clear and Rearm are separate LIVE actions. After Confirm
+Clear consumes a `kill_switch_clear` token, issue a second token with
+`action_class=kill_switch_rearm` and the same `resource_id` before
+pressing Rearm. Tokens are single-use and action/resource bound; a
+clear token cannot be reused for rearm.
+
 In **non-LIVE** (PAPER / SHADOW), the dashboard does **not** prompt
 for a token — the backend accepts an empty value and the local
 recovery flow proceeds without ceremony.
@@ -179,6 +185,14 @@ The Safety page's lower table merges:
 Every toggle records `actor`, `timestamp`, `reason`, prior state,
 requested state, broker-side per-account results, and a request id.
 The events are queryable via `GET /admin/audit?resource_type=kill_switch`.
+
+## Dashboard readiness
+
+The Overview page consumes `/dashboard/status`, which mirrors
+`/health/summary`. A live kill switch must make both endpoints report
+`status="degraded"` with `degraded_reasons=["kill_switch_active"]`
+and `readiness.http_status=503`. `/health` remains a liveness probe
+only; do not use it to decide whether live trading is ready.
 
 ## Operator playbook — common scenarios
 

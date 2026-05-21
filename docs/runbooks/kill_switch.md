@@ -263,6 +263,18 @@ X-Admin-Key: <ADMIN_API_KEY>
 
 When divergence is detected and `KILL_SWITCH_DIVERGENCE_FAILS_READY` is truthy (default true), `/readyz` returns HTTP 503 with `reason` of the form `kill_switch_divergence: legacy=True durable_global=False age_s=<seconds>` (`app/server.py:1397-1413`). Monitors should alert on either (a) `ready=false` plus `reason` starting with `kill_switch_divergence:`, or (b) `kill_switch_divergence=true` in the payload regardless of readiness gating.
 
+### Via dashboard health summary
+
+`/health/summary` and `/dashboard/status` are dashboard/readiness summaries, not liveness probes. They must degrade whenever `/readyz` is blocked by an active durable kill switch:
+
+- `status="degraded"`
+- `degraded_reasons` contains `kill_switch_active`
+- `readiness.ready=false`
+- `readiness.http_status=503`
+- `kill_switch.active_count > 0`
+
+This wiring prevents the dashboard Overview from showing green while `/readyz` is 503 because a kill switch is active. If `/readyz` reports `kill_switch_active` but `/health/summary` or `/dashboard/status` reports `status="ok"`, treat that as a dashboard wiring regression and stop deployment.
+
 ### Via health endpoint
 
 ```powershell
