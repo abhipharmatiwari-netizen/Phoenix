@@ -68,6 +68,16 @@ def test_oci_container_healthchecks_use_liveness_not_readiness() -> None:
     assert "/readyz" not in nginx_probe
 
 
+def test_oi_ml_shadow_compose_does_not_blank_proxy_env_file_values() -> None:
+    compose = yaml.safe_load(_read("ops/compose/docker-compose.oi-ml-shadow.yml"))
+    sidecar = compose["services"]["oi-ml-shadow"]
+    environment = sidecar["environment"]
+
+    assert "/opt/phoenix/phoenix-deploy.env" in sidecar["env_file"]
+    assert "ANGEL_HTTPS_PROXY" not in environment
+    assert "HTTPS_PROXY" not in environment
+
+
 def test_optimizer_service_is_profile_only_one_shot_using_backend_image() -> None:
     compose = _oci_compose()
     services = compose["services"]
@@ -186,8 +196,8 @@ def test_redeploy_pulls_and_recreates_nginx_with_backend() -> None:
 def test_oci_runbook_documents_verified_vm_runtime() -> None:
     runbook = _read("docs/runbooks/oci_live_deployment.md")
 
-    assert "phoenix-local-backend:local-349d55f" in runbook
-    assert "phoenix-local-nginx:local-349d55f" in runbook
+    assert "phoenix-local-backend:local-04cf16c" in runbook
+    assert "phoenix-local-nginx:local-04cf16c" in runbook
     assert "phoenix-oci-postgres" in runbook
     assert "VM-local Postgres" in runbook
     assert "source-file bind mounts" in runbook

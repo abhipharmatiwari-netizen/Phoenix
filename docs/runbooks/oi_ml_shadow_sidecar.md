@@ -1,7 +1,7 @@
 # OI/ML Shadow Sidecar Runbook
 
 Status: current progress record for the OI/ML CE seller shadow sidecar as of
-2026-05-20 IST.
+2026-05-21 IST.
 
 This sidecar is a dry-run research and validation process. It must not place,
 modify, cancel, or exit live orders. It runs beside the live OCI stack, publishes
@@ -52,6 +52,11 @@ Recent validation:
   `0` NSE comparable rows, status `MISMATCH/WARN`. This is expected to remain a
   promotion blocker until a market-window run shows fresh Angel IV and NSE
   comparable contracts.
+- 2026-05-21 live investigation found the sidecar had blank proxy env values
+  because compose-time interpolation overrode `/opt/phoenix/phoenix-deploy.env`.
+  The compose file now relies on `env_file` for `ANGEL_HTTPS_PROXY` and
+  `HTTPS_PROXY`; restart with `--env-file /opt/phoenix/phoenix-deploy.env` so
+  image tags and non-secret defaults are also interpolated from the deploy env.
 
 ## Implemented Progress
 
@@ -339,6 +344,11 @@ docker compose -f /opt/phoenix/oi-ml-shadow.yml \
   --env-file /opt/phoenix/phoenix-deploy.env \
   up -d oi-ml-shadow
 ```
+
+Do not add blank `ANGEL_HTTPS_PROXY` or `HTTPS_PROXY` entries under the sidecar
+`environment` block. Those keys come from `/opt/phoenix/phoenix-deploy.env`;
+blank compose interpolation overrides the env file and causes Angel login
+timeouts.
 
 Validate tables:
 
