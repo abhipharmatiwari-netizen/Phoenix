@@ -155,10 +155,13 @@ Expected success evidence:
 
 - backend and web are running; after the 2026-05-21 liveness-healthcheck patch
   they remain Docker-healthy when `/health` is 200 even if `/readyz` is 503
-- backend image was `phoenix-local-backend:local-349d55f` in the latest
-  pre-rectification live review
-- web image is `phoenix-local-nginx:local-349d55f` in the latest verified
+- backend image was `phoenix-local-backend:local-04cf16c` in the latest
+  verified deployment
+- web image is `phoenix-local-nginx:local-04cf16c` in the latest verified
   deployment
+- `/opt/phoenix/phoenix-override.yml` must also use `/health` for nginx
+  Docker health; a VM-local override that still checks `/readyz` will keep the
+  web container unhealthy during an intentional trading-readiness halt.
 - Postgres is `phoenix-oci-postgres`
 - backend command is `python -m app.main`
 
