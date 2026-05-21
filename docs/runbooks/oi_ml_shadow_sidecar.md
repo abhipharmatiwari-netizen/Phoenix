@@ -143,6 +143,12 @@ Repeated provider/login timeouts are logged as compact
 `oi_ml_shadow_ingestion_degraded` warnings with a consecutive-failure count.
 Detailed stack traces are debug-level only on the first failure and every tenth
 failure, so the retry signal stays visible without flooding operator logs.
+If the health payload reports `option_chain_rows_missing` during the snapshot
+window, first check sidecar logs for `ANGEL_LOGIN_RETRY`, provider timeout, and
+proxy/session reuse messages. The health payload includes an `operator_hint`
+field for this path and always carries the dry-run invariant
+`live_order_path_enabled=false`; do not remediate sidecar ingestion by enabling
+any live order path.
 
 The sidecar container has its own Docker healthcheck:
 

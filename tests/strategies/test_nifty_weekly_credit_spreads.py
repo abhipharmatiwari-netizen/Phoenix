@@ -1,6 +1,6 @@
 import importlib
 import types
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 
 from app.brokers.base import OrderResponse
@@ -87,6 +87,33 @@ def _make_strategy(monkeypatch, *, risk_manager=None):
         },
     )
     return mod, strategy
+
+
+def test_current_expiry_reads_universe_builder_expiry_dt(monkeypatch):
+    mod, strategy = _make_strategy(monkeypatch)
+    ist = timezone(timedelta(hours=5, minutes=30))
+    strategy._now_ist = lambda: datetime(2026, 5, 20, 11, 0, tzinfo=ist)  # type: ignore[assignment]
+    strategy.instrument_meta = {
+        "NIFTY_IDX": {"kind": "UNDERLYING", "underlying": "NIFTY"},
+        "NIFTY_OTM_CE_23750": {
+            "symbol": "NIFTY26MAY2623750CE",
+            "underlying": "NIFTY",
+            "kind": "OTM_CE",
+            "exchange": "NFO",
+            "token": "901",
+            "expiry_dt": "2026-05-26",
+        },
+        "NIFTY_OTM_PE_23250": {
+            "symbol": "NIFTY26MAY2623250PE",
+            "underlying": "NIFTY",
+            "kind": "OTM_PE",
+            "exchange": "NFO",
+            "token": "902",
+            "expiry_dt": "2026-05-26",
+        },
+    }
+
+    assert strategy._current_expiry_and_chain() == date(2026, 5, 26)
 
 
 def test_nifty_spread_exit_uses_entry_broker_symbol_when_meta_symbol_missing(monkeypatch):

@@ -55,14 +55,14 @@ def test_live_compose_sslmode_default_is_require():
     )
 
 
-def test_live_deployment_probes_use_readyz():
+def test_live_container_healthchecks_use_liveness_not_readiness():
     compose_text = _read_text(LIVE_COMPOSE_PATH)
     dockerfile_text = _read_text(DOCKERFILE_PATH)
     nginx_template_text = _read_text(NGINX_TEMPLATE_PATH)
 
     assert "/readyz" in dockerfile_text
-    assert 'test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]' in compose_text
-    assert 'test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/readyz >/dev/null 2>&1 || exit 1"]' in compose_text
+    assert 'test: ["CMD", "curl", "-f", "http://localhost:8080/health"]' in compose_text
+    assert 'test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/health >/dev/null 2>&1 || exit 1"]' in compose_text
     assert "location /readyz {" in nginx_template_text
 
 

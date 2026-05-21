@@ -42,6 +42,15 @@ from app.orders.order_state import (
 
 logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
+_INFO_SIGNAL_REASONS = {
+    "no_current_expiry_or_chain",
+    "expiry_out_of_dte_range",
+    "atm_options_unavailable",
+    "atm_quote_unavailable",
+    "vertical_legs_unresolved",
+    "vertical_credit_estimate_failed",
+}
+_INFO_SIGNAL_REASON_INTERVAL_SECONDS = 900.0
 
 
 # Parse a HH:MM time string with a default fallback.
@@ -214,6 +223,7 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
         self._exit_failure_count_by_spread: Dict[str, int] = {}
         self._exit_circuit_open_until_mono_by_spread: Dict[str, float] = {}
         self._exit_last_alert_mono_by_spread: Dict[str, float] = {}
+        self._last_info_signal_reason_mono: Dict[str, float] = {}
 
         logger.info(
             "[NIFTY_SPREAD] Exit protection enabled | max_retries=%d circuit_open_seconds=%.1f alert_interval_seconds=%.1f",
@@ -1153,15 +1163,26 @@ class NiftyWeeklyCreditSpreadStrategy(BaseStrategy):
         ``LOG_LEVEL``, so the rest of the stack stays at INFO. Removing the
         env var on the next restart returns the logger to its default level.
         """
-        if not logger.isEnabledFor(logging.DEBUG):
-            return
         parts = [f"signal_evaluated_with_reason={reason}"]
         for key, value in details.items():
             if isinstance(value, float):
                 parts.append(f"{key}={value:.6g}")
             else:
                 parts.append(f"{key}={value}")
-        logger.debug("[NIFTY_SPREAD] %s", " ".join(parts))
+        message = " ".join(parts)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("[NIFTY_SPREAD] %s", message)
+        if reason not in _INFO_SIGNAL_REASONS:
+            return
+        now_mono = monotonic()
+        last_mono = self._last_info_signal_reason_mono.get(reason)
+        if (
+            last_mono is not None
+            and now_mono - last_mono < _INFO_SIGNAL_REASON_INTERVAL_SECONDS
+        ):
+            return
+        self._last_info_signal_reason_mono[reason] = now_mono
+        logger.info("[NIFTY_SPREAD] %s", message)
 
     def _maybe_enter(self, candle: Any, indicators: Dict[str, Any]) -> None:
         now = candle.start_ts.astimezone(IST)

@@ -271,6 +271,52 @@ def test_lock_auto_releases_on_terminal_fill_then_re_acquire_allowed():
     assert second.reason == "acquired"
 
 
+def test_exit_after_flattened_position_is_rejected():
+    """Issue #317: stale strategy state must not submit a second broker exit
+    after the first terminal fill already flattened Phoenix ownership.
+    """
+    store = PositionOwnershipStore(backend=_MemoryBackend())
+    contract = _ng_contract()
+    _open_short_position(store, contract=contract, qty=1250)
+
+    first = store.try_acquire(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        contract_key=contract,
+        strategy_id="ema20_strategy",
+        is_exit_order=True,
+        unknown_mode="block_entries",
+    )
+    assert first.allowed is True
+
+    store.apply_fill(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        contract_key=contract,
+        strategy_id="ema20_strategy",
+        signed_qty=+1250,
+    )
+    assert (
+        store.get_owner(
+            tenant_id="tenant-1",
+            broker_account_id="A1",
+            contract_key=contract,
+        )
+        is None
+    )
+
+    stale_duplicate = store.try_acquire(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        contract_key=contract,
+        strategy_id="ema20_strategy",
+        is_exit_order=True,
+        unknown_mode="block_entries",
+    )
+    assert stale_duplicate.allowed is False
+    assert stale_duplicate.reason == "no_owned_position_to_exit"
+
+
 def test_lock_auto_releases_on_partial_fill_handoff_then_retry_allowed():
     """A partial exit fill drops the net but doesn't flatten. apply_fill
     decrements pending_by_strategy[strategy] from 1 to 0 (one fill = one

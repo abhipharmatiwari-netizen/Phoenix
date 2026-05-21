@@ -181,6 +181,8 @@ class TestBuiltInRules:
 
     def test_position_authority_readiness_alert_fires(self, monkeypatch):
         monkeypatch.setenv("TRADE_MODE", "LIVE")
+        from app.core.degraded_scope_manager import degraded_scope_manager
+        degraded_scope_manager._scopes.clear()
         monkeypatch.setattr(
             "app.hub.runtime.get_hub_runtime",
             lambda: SimpleNamespace(

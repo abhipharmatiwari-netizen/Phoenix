@@ -423,7 +423,7 @@ services:
       # Example: export PHOENIX_STATE_HOST_PATH=/var/lib/phoenix/state
       - "${PHOENIX_STATE_HOST_PATH:-./state}:/app/state"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -453,7 +453,7 @@ services:
     secrets:
       - admin_api_key
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/readyz >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/health >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -108,6 +108,7 @@ def test_shadow_ingestion_missing_rows_is_visible_degraded():
     assert status["status"] == "degraded"
     assert "option_chain_rows_missing" in status["reason"]
     assert "validation_reports_missing" in status["reason"]
+    assert "Angel login/provider timeout" in status["operator_hint"]
     assert status["option_chain"]["today_row_count"] == 0
     assert status["validation_reports"]["today_report_count"] == 0
     assert status["shadow_intents"]["today_intent_count"] == 0

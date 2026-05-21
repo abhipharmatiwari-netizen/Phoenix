@@ -190,6 +190,19 @@ def test_no_current_expiry_logs_reason(monkeypatch, caplog):
     )
 
 
+def test_current_expiry_failure_logs_throttled_info(monkeypatch, caplog):
+    """Critical option-chain wiring failures are visible at INFO without
+    enabling full per-bar DEBUG signal logging."""
+    mod, strategy = _make_strategy(monkeypatch)
+    candle = _candle(ist_dt=datetime(2026, 5, 8, 11, 0, tzinfo=IST))
+    with caplog.at_level(logging.INFO, logger=MODULE_PATH):
+        strategy._maybe_enter(candle, _ind())
+    assert any(
+        "signal_evaluated_with_reason=no_current_expiry_or_chain" in r.getMessage()
+        for r in caplog.records
+    )
+
+
 def test_expiry_out_of_dte_range_logs_reason(monkeypatch, caplog):
     """An expiry 30 days out exceeds max_days_to_expiry=5."""
     mod, strategy = _make_strategy(monkeypatch)

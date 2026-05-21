@@ -1,6 +1,6 @@
 # Phoenix OCI LIVE Deployment Runbook
 
-Status: current operator runbook for the OCI VM verified on 2026-05-19.
+Status: current operator runbook for the OCI VM verified on 2026-05-21.
 
 This runbook describes what is actually running on the OCI VM. It does not
 describe the older intended OCIR/external-Postgres deployment as current state.
@@ -153,9 +153,10 @@ docker inspect phoenix-oci-postgres --format '{{json .Mounts}}'
 
 Expected success evidence:
 
-- backend and web are `healthy`
-- backend image is `phoenix-local-backend:local-e1f9ddb` in the latest verified
-  deployment
+- backend and web are running; after the 2026-05-21 liveness-healthcheck patch
+  they remain Docker-healthy when `/health` is 200 even if `/readyz` is 503
+- backend image was `phoenix-local-backend:local-349d55f` in the latest
+  pre-rectification live review
 - web image is `phoenix-local-nginx:local-349d55f` in the latest verified
   deployment
 - Postgres is `phoenix-oci-postgres`
@@ -181,12 +182,24 @@ curl -k -sS https://localhost:8443/health
 curl -k -sS https://localhost:8443/readyz
 ```
 
-Expected success evidence:
+Expected normal trading-readiness evidence:
 
 - HTTP status `200` for all commands above.
 - `/health` includes `order_path` equal to `strategy_bridge_order_router`.
 - `/health/summary` includes `operating_mode` equal to `HUB_AUTHORITATIVE`.
 - `/readyz` includes `ready: true`.
+
+Risk-halt or degraded evidence:
+
+- `/health` should still return HTTP `200` so the dashboard remains reachable.
+- `/readyz` may return HTTP `503` with `ready: false` when the kill switch,
+  position authority, stale sync, or another trading-readiness gate is active.
+- Treat non-200 `/readyz` as a block on new live entries. Do not clear the gate
+  just to make Docker health green.
+- If logs show `mark.unavailable` or PnL snapshots with
+  `freshness_source=broker_sync_stale_mark`, treat strategy/account PnL as
+  incomplete until a live LTP-backed broker sync arrives. Do not use stale-mark
+  PnL to clear risk gates or justify new live entries.
 
 Expected warning:
 
@@ -209,9 +222,10 @@ tail -n 200 /opt/phoenix/logs/cert-renewal.log 2>/dev/null || true
 
 Expected warnings:
 
-- `phoenix-oci-watchdog` may log backend fail counts and nginx stop/start
-  recovery. It actively stops/starts nginx in the verified VM runtime. This is
-  current behavior, not observe-only behavior.
+- `phoenix-oci-watchdog` should poll backend `/health` and log fail/recovery
+  counts without stopping or starting nginx. If logs show nginx stop/start
+  actions, the VM is running stale watchdog wiring or an override and must be
+  redeployed before relying on dashboard availability during readiness halts.
 - backend logs contain frequent health probes.
 
 Failure handling:
@@ -362,10 +376,10 @@ The operator owns:
 
 | Drift | Evidence | Risk |
 |---|---|---|
-| Local images instead of OCIR | `phoenix-local-backend:local-e1f9ddb`, `phoenix-local-nginx:local-349d55f` | Old OCIR docs do not describe current deploy/restart behavior |
+| Local images instead of OCIR | `phoenix-local-backend:local-349d55f`, `phoenix-local-nginx:local-349d55f` observed before 2026-05-21 rectification | Old OCIR docs do not describe current deploy/restart behavior |
 | VM-local Postgres | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres` | External DB backup/SSL assumptions are not current |
 | Source bind mounts | backend mounts selected `/opt/phoenix/app/app/...` files | Container image alone is not the full deployed code |
-| Watchdog stops nginx | watchdog command/logs | Nginx availability can change without a manual nginx command |
+| Stale watchdog can stop nginx | watchdog command/logs | Current manifest is observe-only; stop/start logs indicate stale VM wiring or override drift |
 | Optimizer/reload timers absent | `systemctl status` not found | Do not claim scheduled optimizer/reload is installed |
 
 Any change that removes this drift must be verified from the VM before docs are

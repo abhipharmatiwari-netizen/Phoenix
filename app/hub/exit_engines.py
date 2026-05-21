@@ -919,11 +919,6 @@ class ProfitSweepEngine:
                     tenant_id=tenant_id,
                     broker_account_id=broker_account_id,
                 )
-                # Record sweep even with no positions (to enforce daily limit)
-                await self._record_sweep_execution(
-                    tenant_id=tenant_id,
-                    broker_account_id=broker_account_id,
-                )
                 continue
 
             # Exit all positions

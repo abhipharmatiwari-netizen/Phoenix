@@ -1648,6 +1648,31 @@ class PositionOwnershipStore:
                 )
                 record = self._ownership_records.get(scoped)
                 owner = self._owner_for_entry(entry)
+                if bool(is_exit_order) and owner is None:
+                    record_owner = (
+                        record.owner_strategy_id if record is not None else None
+                    )
+                    record_state = record.state if record is not None else None
+                    if record_owner:
+                        owner = record_owner
+                    elif record_state not in {
+                        OwnershipState.RELEASING,
+                        OwnershipState.RECONCILING,
+                        OwnershipState.ORPHAN_REVIEW,
+                    }:
+                        logger.warning(
+                            "exit_without_owned_position_blocked ownership_key=%s "
+                            "requesting_strategy=%s contract=%s",
+                            self._ownership_key_text(scoped),
+                            strategy,
+                            contract_key.as_log_text(),
+                        )
+                        return PositionOwnershipDecision(
+                            allowed=False,
+                            owner=None,
+                            reason="no_owned_position_to_exit",
+                            acquired_pending=False,
+                        )
                 allow_unknown_exit = owner == UNKNOWN_OWNER and bool(is_exit_order)
                 if (
                     not bool(is_exit_order)
@@ -2225,13 +2250,14 @@ class PositionOwnershipStore:
                         and getattr(ownership_rec, "state", None) == OwnershipState.RECONCILING
                     )
                     entry.zero_broker_poll_count = int(entry.zero_broker_poll_count or 0) + 1
-                    if entry.zero_broker_poll_count < 2 or in_reconciling:
+                    required_zero_polls = 3 if in_reconciling else 2
+                    if entry.zero_broker_poll_count < required_zero_polls:
                         logger.info(
                             "PositionOwnershipStore reconcile: zero-position evidence for "
-                            "%s count=%d/%s — deferring cleanup (corroboration required)",
+                            "%s count=%d/%d - deferring cleanup (corroboration required)",
                             contract_storage_key,
                             entry.zero_broker_poll_count,
-                            "2 (RECONCILING — needs extra poll)" if in_reconciling else "2",
+                            required_zero_polls,
                         )
                         continue
                     if not self._entry_empty(entry):

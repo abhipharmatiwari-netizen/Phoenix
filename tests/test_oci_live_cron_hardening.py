@@ -53,6 +53,21 @@ def test_backend_watchdog_base_manifest_has_no_docker_socket_or_actions() -> Non
     assert "no nginx action in base manifest" in watchdog
 
 
+def test_oci_container_healthchecks_use_liveness_not_readiness() -> None:
+    compose = _oci_compose()
+    services = compose["services"]
+
+    assert services["backend"]["healthcheck"]["test"] == [
+        "CMD",
+        "curl",
+        "-f",
+        "http://localhost:8080/health",
+    ]
+    nginx_probe = " ".join(services["nginx"]["healthcheck"]["test"])
+    assert "https://127.0.0.1:8443/health" in nginx_probe
+    assert "/readyz" not in nginx_probe
+
+
 def test_optimizer_service_is_profile_only_one_shot_using_backend_image() -> None:
     compose = _oci_compose()
     services = compose["services"]
@@ -161,6 +176,8 @@ def test_redeploy_pulls_and_recreates_nginx_with_backend() -> None:
 
     assert "pull backend nginx" in script
     assert "up -d --no-deps --no-build --force-recreate backend" in script
+    assert "http://localhost:8080/health" in script
+    assert "Backend /readyz status" in script
     assert "up -d --no-deps --no-build --force-recreate nginx" in script
     assert "docker inspect phoenix-oci-backend" in script
     assert "docker inspect phoenix-oci-web" in script
@@ -169,11 +186,12 @@ def test_redeploy_pulls_and_recreates_nginx_with_backend() -> None:
 def test_oci_runbook_documents_verified_vm_runtime() -> None:
     runbook = _read("docs/runbooks/oci_live_deployment.md")
 
-    assert "phoenix-local-backend:local-29c24f0" in runbook
-    assert "phoenix-local-nginx:local-29c24f0" in runbook
+    assert "phoenix-local-backend:local-349d55f" in runbook
+    assert "phoenix-local-nginx:local-349d55f" in runbook
     assert "phoenix-oci-postgres" in runbook
     assert "VM-local Postgres" in runbook
     assert "source-file bind mounts" in runbook
-    assert "actively stops/starts nginx" in runbook
+    assert "observe-only" in runbook
+    assert "stop/start logs indicate stale VM wiring" in runbook
     assert "optimizer and backend-reload systemd timers" in runbook
     assert "not current" in runbook

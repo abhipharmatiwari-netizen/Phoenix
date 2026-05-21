@@ -505,6 +505,52 @@ class PositionOwnershipInterceptor:
                         owner_decision.acquired_pending
                     )
                     ctx.position_ownership_fill_owner_strategy_id = owner_strategy_id
+                else:
+                    reason = self._reject_message(
+                        owner=owner_decision.owner or owner,
+                        requested=ctx.strategy_id,
+                        contract_text=contract_text,
+                    )
+                    reason = f"{reason} detail={owner_decision.reason}"
+                    log_event(
+                        logger,
+                        event_type="ORDER_REJECTED_CONTRACT_LOCKED",
+                        message=reason,
+                        level=logging.WARNING,
+                        tenant_id=ctx.tenant_id,
+                        broker_account_id=ctx.broker_account_id,
+                        strategy_id=ctx.strategy_id,
+                        correlation_id=ctx.correlation_id,
+                        request_id=ctx.request_id,
+                        instrument=ctx.order_req.symbol,
+                        owner=owner_decision.owner or owner,
+                        contract=contract_text,
+                        reason=owner_decision.reason,
+                    )
+                    return _rejected_response(reason)
+            else:
+                reason = self._reject_message(
+                    owner=owner,
+                    requested=ctx.strategy_id,
+                    contract_text=contract_text,
+                )
+                reason = f"{reason} detail={decision.reason}"
+                log_event(
+                    logger,
+                    event_type="ORDER_REJECTED_CONTRACT_LOCKED",
+                    message=reason,
+                    level=logging.WARNING,
+                    tenant_id=ctx.tenant_id,
+                    broker_account_id=ctx.broker_account_id,
+                    strategy_id=ctx.strategy_id,
+                    correlation_id=ctx.correlation_id,
+                    request_id=ctx.request_id,
+                    instrument=ctx.order_req.symbol,
+                    owner=owner,
+                    contract=contract_text,
+                    reason=decision.reason,
+                )
+                return _rejected_response(reason)
             log_event(
                 logger,
                 event_type="ORDER_POSITION_OWNERSHIP_BYPASS",

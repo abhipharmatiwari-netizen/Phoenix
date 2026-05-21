@@ -164,6 +164,7 @@ def collect_shadow_ingestion_status(
         **base,
         "status": status,
         "reason": reason,
+        "operator_hint": _operator_hint(reasons),
         "snapshot_expected": snapshot_expected,
         "snapshot_window_active": snapshot_window_active,
         "snapshot_window": {
@@ -201,6 +202,21 @@ def collect_shadow_ingestion_status(
 
 def _snapshot_expected(current: datetime, start_time: time) -> bool:
     return current.astimezone(IST).time() >= start_time
+
+
+def _operator_hint(reasons: list[str]) -> str | None:
+    if not reasons:
+        return None
+    if "option_chain_rows_missing" in reasons:
+        return (
+            "check sidecar Angel login/provider timeout logs and proxy/session "
+            "configuration; sidecar remains dry-run only"
+        )
+    if "option_chain_stale" in reasons:
+        return "check sidecar ingestion loop, provider latency, and Postgres writes"
+    if "validation_reports_missing" in reasons:
+        return "check NSE validation loop and option_chain_validation_reports writes"
+    return "check sidecar logs and database evidence"
 
 
 def _within_window(value: datetime, start: time, end: time) -> bool:

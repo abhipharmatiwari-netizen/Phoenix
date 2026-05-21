@@ -36,7 +36,7 @@ def make_sweep_engine(mock_settings):
         from app.hub.sweep_state import SweepStateManager, SweepStateStore
         mock_sweep = MagicMock()
         mock_state_store = MagicMock()
-        mock_state_store.get_positions = MagicMock(return_value=[])
+        mock_state_store.get_positions = MagicMock(return_value=[MagicMock()])
         mock_state_store.get_strategy_signal_valid = MagicMock(return_value=None)
         mock_order_router = MagicMock()
         mock_order_router.submit_order = AsyncMock(

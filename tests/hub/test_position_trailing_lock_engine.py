@@ -462,6 +462,22 @@ async def test_tick_mode_skips_when_strategy_exit_lock_is_active():
     ownership_store = PositionOwnershipStore()
     contract_key, reason = derive_contract_key_from_position(pos)
     assert contract_key is not None, reason
+    entry = ownership_store.try_acquire(
+        tenant_id=TenantId("t-1"),
+        broker_account_id=BrokerAccountId("A1"),
+        contract_key=contract_key,
+        strategy_id=StrategyId("ema20_strategy"),
+        is_exit_order=False,
+        unknown_mode="block_entries",
+    )
+    assert entry.allowed is True
+    ownership_store.apply_fill(
+        tenant_id=TenantId("t-1"),
+        broker_account_id=BrokerAccountId("A1"),
+        contract_key=contract_key,
+        strategy_id=StrategyId("ema20_strategy"),
+        signed_qty=-1250,
+    )
     first_exit = ownership_store.try_acquire(
         tenant_id=TenantId("t-1"),
         broker_account_id=BrokerAccountId("A1"),

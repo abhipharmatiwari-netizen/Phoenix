@@ -2829,7 +2829,7 @@ class RiskManager:
             if floating_drawdown_hit:
                 hit_reasons.append("floating_drawdown")
             logger.error(
-                "[RISK] Kill-switch activated: realized=%.2f unrealized=%.2f total=%.2f realized_dd=%.2f total_dd=%.2f (loss_lim=%.2f, dd_lim=%.2f) source=%s reasons=%s",
+                "[RISK] Kill-switch activated: realized=%.2f unrealized=%.2f total=%.2f realized_dd=%.2f total_dd=%.2f (loss_lim=%.2f, dd_lim=%.2f) evaluation_source=%s open_positions=%s reasons=%s",
                 realized_pnl,
                 unrealized_pnl,
                 total_pnl,
@@ -2838,6 +2838,7 @@ class RiskManager:
                 self.max_daily_loss,
                 self.max_intraday_drawdown,
                 source,
+                ",".join(open_labels) or "none",
                 ",".join(hit_reasons) or "unknown",
             )
             # Issue #218: bridge legacy auto-trip to the durable hub-authoritative

@@ -189,7 +189,9 @@ class TestSimpleSweepStrategy:
 
         await sweep_engine.maybe_sweep_simple([runner])
         assert mock_order_router.submit_order.called
-        sweep_engine.sweep_state_manager.state_store.record_sweep.assert_called_once()
+        sweep_engine.sweep_state_manager.state_store.record_sweep.assert_called_once_with(
+            "tenant_1", "account_1"
+        )
 
     @pytest.mark.asyncio
     async def test_simple_sweep_exits_on_signal_invalid(self, sweep_engine, mock_order_router):
@@ -214,7 +216,9 @@ class TestSimpleSweepStrategy:
         await sweep_engine.maybe_sweep_simple([runner])
 
         assert mock_order_router.submit_order.called
-        sweep_engine.sweep_state_manager.state_store.record_sweep.assert_called_once()
+        sweep_engine.sweep_state_manager.state_store.record_sweep.assert_called_once_with(
+            "tenant_1", "account_1"
+        )
         call_args = mock_order_router.submit_order.call_args
         order_req = call_args.kwargs["order_req"]
         assert order_req.symbol == "SBIN"
@@ -315,7 +319,7 @@ class TestSimpleSweepStrategy:
         
         # Should not submit order when no positions
         assert not mock_order_router.submit_order.called
-        sweep_engine.sweep_state_manager.state_store.record_sweep.assert_called_once()
+        sweep_engine.sweep_state_manager.state_store.record_sweep.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_simple_sweep_mixed_positions(self, sweep_engine, mock_order_router):

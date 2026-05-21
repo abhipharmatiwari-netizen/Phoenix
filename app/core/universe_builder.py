@@ -124,6 +124,35 @@ def _format_strike(strike: float) -> str:
     return f"{strike:.0f}" if abs(strike - int(strike)) < 1e-6 else f"{strike:.2f}"
 
 
+def _format_expiry_value(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    date_func = getattr(value, "date", None)
+    if callable(date_func):
+        try:
+            return str(date_func().isoformat())
+        except Exception:
+            pass
+    iso_func = getattr(value, "isoformat", None)
+    if callable(iso_func):
+        try:
+            text = str(iso_func())
+            return text.split("T", 1)[0].split(" ", 1)[0]
+        except Exception:
+            pass
+    text = str(value).strip()
+    if not text:
+        return None
+    return text.split("T", 1)[0].split(" ", 1)[0]
+
+
+def _option_expiry_fields(opts: Dict[str, Any]) -> Dict[str, str]:
+    expiry = _format_expiry_value(opts.get("expiry") or opts.get("expiry_dt"))
+    if not expiry:
+        return {}
+    return {"expiry": expiry, "expiry_dt": expiry}
+
+
 # Allow token overrides via environment variables.
 def _override_token(label: str, default_token: Any, extra_env: Iterable[str] = ()):
     """
@@ -429,6 +458,7 @@ def _build_future_underlying(
         opts["atm_ce"].get("exch_seg", fut_meta["exch_seg"]) or fut_meta["exch_seg"]
     )
     option_exchange_type = _exchange_type_for_segment(option_exchange)
+    option_expiry = _option_expiry_fields(opts)
 
     if use_atm:
         instruments.extend(
@@ -437,6 +467,7 @@ def _build_future_underlying(
                     "label": f"{name}_ATM_CE_{_format_strike(opts['atm_ce']['strike'])}",
                     "underlying": name,
                     "kind": "ATM_CE",
+                    **option_expiry,
                     "exchangeType": option_exchange_type,
                     "exchange": option_exchange,
                     "token": opts["atm_ce"]["token"],
@@ -450,6 +481,7 @@ def _build_future_underlying(
                     "label": f"{name}_ATM_PE_{_format_strike(opts['atm_pe']['strike'])}",
                     "underlying": name,
                     "kind": "ATM_PE",
+                    **option_expiry,
                     "exchangeType": option_exchange_type,
                     "exchange": option_exchange,
                     "token": opts["atm_pe"]["token"],
@@ -475,6 +507,7 @@ def _build_future_underlying(
                         "label": f"{name}_OTM_CE_{_format_strike(ce['strike'])}",
                         "underlying": name,
                         "kind": "OTM_CE",
+                        **option_expiry,
                         "exchangeType": option_exchange_type,
                         "exchange": option_exchange,
                         "token": ce["token"],
@@ -488,6 +521,7 @@ def _build_future_underlying(
                         "label": f"{name}_OTM_PE_{_format_strike(pe['strike'])}",
                         "underlying": name,
                         "kind": "OTM_PE",
+                        **option_expiry,
                         "exchangeType": option_exchange_type,
                         "exchange": option_exchange,
                         "token": pe["token"],
@@ -581,6 +615,7 @@ def _build_index_underlying(
 
     option_exchange = opts["atm_ce"].get("exch_seg", "NFO") or "NFO"
     option_exchange_type = _exchange_type_for_segment(option_exchange)
+    option_expiry = _option_expiry_fields(opts)
 
     start_time, end_time = _get_trading_hours(f"{name}_IDX")
 
@@ -607,6 +642,7 @@ def _build_index_underlying(
                     "label": f"{name}_ATM_CE_{_format_strike(opts['atm_ce']['strike'])}",
                     "underlying": name,
                     "kind": "ATM_CE",
+                    **option_expiry,
                     "exchangeType": option_exchange_type,
                     "exchange": option_exchange,
                     "token": opts["atm_ce"]["token"],
@@ -620,6 +656,7 @@ def _build_index_underlying(
                     "label": f"{name}_ATM_PE_{_format_strike(opts['atm_pe']['strike'])}",
                     "underlying": name,
                     "kind": "ATM_PE",
+                    **option_expiry,
                     "exchangeType": option_exchange_type,
                     "exchange": option_exchange,
                     "token": opts["atm_pe"]["token"],
@@ -645,6 +682,7 @@ def _build_index_underlying(
                         "label": f"{name}_OTM_CE_{_format_strike(ce['strike'])}",
                         "underlying": name,
                         "kind": "OTM_CE",
+                        **option_expiry,
                         "exchangeType": option_exchange_type,
                         "exchange": option_exchange,
                         "token": ce["token"],
@@ -658,6 +696,7 @@ def _build_index_underlying(
                         "label": f"{name}_OTM_PE_{_format_strike(pe['strike'])}",
                         "underlying": name,
                         "kind": "OTM_PE",
+                        **option_expiry,
                         "exchangeType": option_exchange_type,
                         "exchange": option_exchange,
                         "token": pe["token"],
@@ -677,6 +716,7 @@ def _build_index_underlying(
                     "label": f"{name}_ITM_CE_{_format_strike(opts['itm_ce']['strike'])}",
                     "underlying": name,
                     "kind": "ITM_CE",
+                    **option_expiry,
                     "exchangeType": option_exchange_type,
                     "exchange": option_exchange,
                     "token": opts["itm_ce"]["token"],
@@ -690,6 +730,7 @@ def _build_index_underlying(
                     "label": f"{name}_ITM_PE_{_format_strike(opts['itm_pe']['strike'])}",
                     "underlying": name,
                     "kind": "ITM_PE",
+                    **option_expiry,
                     "exchangeType": option_exchange_type,
                     "exchange": option_exchange,
                     "token": opts["itm_pe"]["token"],

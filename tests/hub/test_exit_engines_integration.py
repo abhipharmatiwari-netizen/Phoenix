@@ -241,7 +241,7 @@ class TestSimpleStrategyIntegration:
         profit_sweep_engine.sweep_state_manager.state_store.record_sweep.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_simple_sweep_records_even_with_no_positions(
+    async def test_simple_sweep_does_not_record_with_no_positions(
         self,
         profit_sweep_engine,
         mock_pnl_engine,
@@ -249,7 +249,9 @@ class TestSimpleStrategyIntegration:
         mock_runner,
         settings,
     ):
-        """Test SIMPLE sweep records state even when no positions exist."""
+        """Issue #319: a stale profit lock must not consume the daily sweep
+        when there are no positions to exit.
+        """
         profit_sweep_engine.sweep_state_manager.state_store.can_sweep_now = MagicMock(
             return_value=(True, None)
         )
@@ -261,8 +263,7 @@ class TestSimpleStrategyIntegration:
         
         await profit_sweep_engine.maybe_sweep_simple([mock_runner])
         
-        # Should still record sweep (to enforce daily limit)
-        profit_sweep_engine.sweep_state_manager.state_store.record_sweep.assert_called_once()
+        profit_sweep_engine.sweep_state_manager.state_store.record_sweep.assert_not_called()
 
 
 # ============================================================================

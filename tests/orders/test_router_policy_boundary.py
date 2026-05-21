@@ -960,6 +960,25 @@ async def test_router_position_ownership_system_exit_bypass_uses_owner_lock(monk
         )
         assert bypass_exit.status == "FILLED"
 
+        _, stale_bypass_exit = await router.submit_order(
+            tenant_id=TenantId("tenant-1"),
+            broker_account_id=BrokerAccountId("account-1"),
+            strategy_id=StrategyId("eod_exit"),
+            order_req=OrderRequest(
+                symbol="NIFTY17FEB2625750CE",
+                symbol_token="12345",
+                quantity=1,
+                side=OrderSide.BUY,
+                order_type=OrderType.MARKET,
+                product_type=ProductType.INTRADAY,
+                time_in_force=TimeInForce.DAY,
+                purpose=OrderPurpose.EXIT,
+                position_ownership_bypass=True,
+            ),
+        )
+        assert stale_bypass_exit.status == "REJECTED"
+        assert "no_owned_position_to_exit" in str(stale_bypass_exit.message)
+
         _, next_entry = await router.submit_order(
             tenant_id=TenantId("tenant-1"),
             broker_account_id=BrokerAccountId("account-1"),

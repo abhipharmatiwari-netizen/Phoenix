@@ -4,6 +4,13 @@ Use this workflow only when broker/current-position evidence proves the contract
 is flat but Phoenix still reports a degraded or reconciling internal position
 record.
 
+Ownership cleanup is automatic after corroborated broker-flat evidence. Normal
+owned records clear after two consecutive zero-position broker polls. Records
+that are already `RECONCILING` get one extra confirmation and clear on the third
+consecutive zero-position poll. If the same ownership row remains beyond that,
+treat it as stale VM code, a persistence failure, or an authority-path mismatch
+before using manual recovery.
+
 1. Check the dashboard status contract:
 
    ```bash

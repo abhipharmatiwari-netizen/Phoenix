@@ -594,8 +594,9 @@ def test_position_ownership_state_machine_tracks_pending_owned_and_releasing():
     assert releasing_record.state == OwnershipState.RELEASING
 
 
-def test_single_zero_poll_does_not_delete_with_reconciling_state():
-    """Regression #69: RECONCILING ownership records must be protected even with 2 zero polls.
+def test_reconciling_zero_poll_cleanup_uses_extra_confirmation():
+    """Issue #318: RECONCILING ownership records get one extra zero-position
+    confirmation, but broker-flat evidence must not be deferred forever.
 
     A record in RECONCILING state (set during startup recovery marking) needs
     additional corroboration before destructive cleanup is allowed.
@@ -634,7 +635,7 @@ def test_single_zero_poll_does_not_delete_with_reconciling_state():
     assert rec is not None
     assert rec.state == OwnershipState.RECONCILING
 
-    # Even after 2 zero-polls, RECONCILING records must not be destroyed.
+    # Two zero-polls are not enough for a RECONCILING record.
     result1 = store.reconcile_broker_positions(
         tenant_id="t1", broker_account_id="a1", positions=[]
     )
@@ -643,5 +644,19 @@ def test_single_zero_poll_does_not_delete_with_reconciling_state():
     )
     assert result1.removed_stale == 0
     assert result2.removed_stale == 0, (
-        "RECONCILING record must not be cleaned up even after 2 consecutive zero polls"
+        "RECONCILING record needs one extra zero-position confirmation"
+    )
+
+    # The third consecutive zero-poll confirms broker flat and clears the row.
+    result3 = store.reconcile_broker_positions(
+        tenant_id="t1", broker_account_id="a1", positions=[]
+    )
+    assert result3.removed_stale == 1
+    assert (
+        store.get_owner(
+            tenant_id="t1",
+            broker_account_id="a1",
+            contract_key=contract_key,
+        )
+        is None
     )

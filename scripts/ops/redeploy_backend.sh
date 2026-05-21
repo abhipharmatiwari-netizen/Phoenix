@@ -60,24 +60,31 @@ CONTROL_PLANE_PG_PASSWORD_HOST=dummy \
     up -d --no-deps --no-build --force-recreate backend
 
 echo
-echo "=== Wait for /readyz (up to ${HEALTH_TIMEOUT}s) ==="
+echo "=== Wait for backend /health liveness (up to ${HEALTH_TIMEOUT}s) ==="
 elapsed=0
 while [ "$elapsed" -lt "$HEALTH_TIMEOUT" ]; do
   STATUS=$(docker exec phoenix-oci-backend \
-    curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/readyz 2>/dev/null || echo "000")
+    curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health 2>/dev/null || echo "000")
   if [ "$STATUS" = "200" ]; then
-    echo "  /readyz OK after ${elapsed}s"
+    echo "  /health OK after ${elapsed}s"
     break
   fi
-  printf "  %ds — /readyz returned %s, waiting...\n" "$elapsed" "$STATUS"
+  printf "  %ds - /health returned %s, waiting...\n" "$elapsed" "$STATUS"
   sleep "$HEALTH_INTERVAL"
   elapsed=$((elapsed + HEALTH_INTERVAL))
 done
 
 if [ "$STATUS" != "200" ]; then
-  echo "ERROR: /readyz did not return 200 within ${HEALTH_TIMEOUT}s (last: $STATUS)."
+  echo "ERROR: /health did not return 200 within ${HEALTH_TIMEOUT}s (last: $STATUS)."
   echo "Check logs: docker logs --tail 100 phoenix-oci-backend"
   exit 1
+fi
+
+READYZ_STATUS=$(docker exec phoenix-oci-backend \
+  curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/readyz 2>/dev/null || echo "000")
+echo "=== Backend /readyz status: ${READYZ_STATUS} ==="
+if [ "$READYZ_STATUS" != "200" ]; then
+  echo "NOTE: /readyz is trading readiness and may remain non-200 during a kill-switch or position-authority halt."
 fi
 
 echo
