@@ -20,6 +20,7 @@
 #   control_plane_pg_password → CONTROL_PLANE_PG_PASSWORD
 #   angel_postback_token      → ANGEL_POSTBACK_TOKEN
 #   dashboard_hmac_secret     → DASHBOARD_HMAC_SECRET
+#   admin_kill_switch_override → /run/secrets/admin_kill_switch_override only
 #
 # OCI Vault secret names follow the convention: phoenix-<secret_name>
 # e.g. phoenix-auth_token_secret, phoenix-admin_api_key, etc.
@@ -74,13 +75,18 @@ fetch_secret() {
   fi
 
   mv "$tmp_path" "$out_path"
-  chmod 644 "$out_path"
+  if [ "$secret_name" = "admin_kill_switch_override" ]; then
+    chmod 600 "$out_path"
+  else
+    chmod 644 "$out_path"
+  fi
 }
 
 fetch_secret "admin_api_key"
 fetch_secret "control_plane_pg_password"
 fetch_secret "angel_postback_token"
 fetch_secret "dashboard_hmac_secret"
+fetch_secret "admin_kill_switch_override"
 # 2026-05-12: auth_token_secret was previously stored in the vault under the
 # legacy name ``phoenix-auth_token_secret`` (underscore in the second segment),
 # which required a special-case fetch helper to bypass the hyphen translation.

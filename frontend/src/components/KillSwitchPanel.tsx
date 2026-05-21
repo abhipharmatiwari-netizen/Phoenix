@@ -36,8 +36,14 @@ interface ConfirmDialog {
   // ``requireStepUpToken`` is true the dialog renders a token-input
   // field and refuses to confirm until it is filled.
   requireStepUpToken?: boolean;
+  requireAdminPassword?: boolean;
   stepUpInstructions?: string;
-  onConfirm: (reason: string, hard: boolean, stepUpToken: string) => Promise<void>;
+  onConfirm: (
+    reason: string,
+    hard: boolean,
+    stepUpToken: string,
+    adminPassword: string,
+  ) => Promise<void>;
 }
 
 const KillSwitchPanel: React.FC = () => {
@@ -51,6 +57,7 @@ const KillSwitchPanel: React.FC = () => {
   const [reasonInput, setReasonInput] = useState('');
   const [hardInput, setHardInput] = useState(false);
   const [stepUpTokenInput, setStepUpTokenInput] = useState('');
+  const [adminPasswordInput, setAdminPasswordInput] = useState('');
 
   const fetchState = useCallback(async () => {
     try {
@@ -93,8 +100,8 @@ const KillSwitchPanel: React.FC = () => {
   // disagrees with the legacy stream-path kill switch (issue #222
   // divergence), surface a distinct "DIVERGENT" pill rather than
   // either INACTIVE (misleading — protection IS partly in place) or
-  // TRIPPED (misleading — operators would then hit Request Clear or
-  // Cancel All, which the durable endpoints reject because there is
+  // TRIPPED (misleading — operators would then try active-state
+  // controls, which the durable endpoints reject because there is
   // no actual durable record). The divergent panel keeps the Trip
   // button available so the operator can create the durable trip
   // needed to repair state.
@@ -149,17 +156,12 @@ const KillSwitchPanel: React.FC = () => {
       ? UNKNOWN_COLOURS
       : STATE_COLOURS[globalState as KillSwitchRecord['state']];
 
-  // PR #240 round-3 review P2: only require a step-up token when the
-  // backend will actually enforce it (LIVE mode). In PAPER/SHADOW the
-  // backend explicitly accepts an empty token, so the UI must not
-  // block the operator's recovery flow.
-  const isLive = String(stateResp?.trade_mode || '').toUpperCase() === 'LIVE';
-
   const closeDialog = () => {
     setConfirmDialog(null);
     setReasonInput('');
     setHardInput(false);
     setStepUpTokenInput('');
+    setAdminPasswordInput('');
   };
 
   const runDialog = async () => {
@@ -177,11 +179,16 @@ const KillSwitchPanel: React.FC = () => {
       );
       return;
     }
+    const adminPassword = adminPasswordInput;
+    if (confirmDialog.requireAdminPassword && !adminPassword) {
+      setError('Override password is required for this action.');
+      return;
+    }
     setBusy(true);
     setError(null);
     setActionFeedback(null);
     try {
-      await confirmDialog.onConfirm(trimmed, hardInput, trimmedToken);
+      await confirmDialog.onConfirm(trimmed, hardInput, trimmedToken, adminPassword);
       await fetchState();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Action failed');
@@ -198,6 +205,7 @@ const KillSwitchPanel: React.FC = () => {
   // operator's token causes an actor-mismatch rejection. The curl
   // must also include ``Content-Type: application/json`` because the
   // ``-d`` flag defaults to form-encoded.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const stepUpInstructions = (actionClass: string) =>
     `In LIVE mode this action requires a separately-issued step-up token.
 Obtain one via the operator runbook — use YOUR OWN admin token
@@ -251,67 +259,24 @@ Paste the returned token_id below.`;
     });
   };
 
-  const onRequestClear = () => {
+  const onClearWithPassword = () => {
     setConfirmDialog({
-      title: 'Request CLEAR for GLOBAL kill switch',
-      prompt: 'Moves the kill switch from TRIPPED → CLEAR_PENDING. A separate confirmation step is required to fully clear.',
-      reasonLabel: 'Reason code',
-      onConfirm: async (reason) => {
-        await KillSwitchService.requestClear({
+      title: 'Clear GLOBAL kill switch',
+      prompt: 'Enter the vault-backed kill-switch override password. The server will still run safety checks before clearing.',
+      reasonLabel: 'Clear reason',
+      requireAdminPassword: true,
+      onConfirm: async (reason, _hard, _stepUpToken, adminPassword) => {
+        const resp = await KillSwitchService.clearWithPassword({
           scope: 'GLOBAL',
           scope_id: 'GLOBAL',
-          reason_code: reason,
-        });
-        setActionFeedback('Clear requested. State now CLEAR_PENDING.');
-      },
-    });
-  };
-
-  const onConfirmClear = () => {
-    // PR #240 round-2/round-3 review P1+P2: confirm-clear restores
-    // LIVE entry eligibility, so LIVE requires a separately-issued
-    // step-up token. In PAPER/SHADOW the backend accepts an empty
-    // token; gate the UI requirement on the actual ``trade_mode``
-    // returned by the state endpoint.
-    setConfirmDialog({
-      title: 'Confirm CLEAR for GLOBAL kill switch',
-      prompt: isLive
-        ? 'Moves CLEAR_PENDING → CLEARED. This re-allows new entry orders in LIVE mode and requires a separately-issued step-up token.'
-        : 'Moves CLEAR_PENDING → CLEARED. After this, rearm to return to INACTIVE.',
-      reasonLabel: 'Reason / acknowledgement',
-      requireStepUpToken: isLive,
-      stepUpInstructions: isLive ? stepUpInstructions('kill_switch_clear') : undefined,
-      onConfirm: async (reason, _hard, stepUpToken) => {
-        // PR #240 round-3 review P2: send the operator-entered
-        // reason so the audit event records the typed justification.
-        await KillSwitchService.confirmClear({
-          scope: 'GLOBAL',
-          scope_id: 'GLOBAL',
-          step_up_token: stepUpToken || null,
+          password: adminPassword,
           reason,
         });
-        setActionFeedback('Clear confirmed. State now CLEARED. Use Rearm to return to INACTIVE.');
-      },
-    });
-  };
-
-  const onRearm = () => {
-    setConfirmDialog({
-      title: 'Rearm GLOBAL kill switch',
-      prompt: isLive
-        ? 'Moves CLEARED → INACTIVE. In LIVE mode this requires a separately-issued step-up token.'
-        : 'Moves CLEARED → INACTIVE.',
-      reasonLabel: 'Reason / acknowledgement',
-      requireStepUpToken: isLive,
-      stepUpInstructions: isLive ? stepUpInstructions('kill_switch_rearm') : undefined,
-      onConfirm: async (reason, _hard, stepUpToken) => {
-        await KillSwitchService.rearm({
-          scope: 'GLOBAL',
-          scope_id: 'GLOBAL',
-          step_up_token: stepUpToken || null,
-          reason,
-        });
-        setActionFeedback('Rearmed. State now INACTIVE.');
+        setActionFeedback(
+          resp.status === 'inactive'
+            ? `Kill switch cleared. Transitions: ${resp.transitions.join(' -> ') || 'none'}.`
+            : `Kill switch clear partially completed. Current state: ${resp.state}.`,
+        );
       },
     });
   };
@@ -530,32 +495,32 @@ Paste the returned token_id below.`;
             )}
             <button
               type="button"
-              onClick={onRequestClear}
+              onClick={onClearWithPassword}
               disabled={busy}
-              style={btnStyle('#f59e0b')}
+              style={btnStyle('#16a34a')}
             >
-              Request Clear
+              Clear Kill Switch
             </button>
           </>
         )}
         {globalState === 'CLEAR_PENDING' && (
           <button
             type="button"
-            onClick={onConfirmClear}
+            onClick={onClearWithPassword}
             disabled={busy}
-            style={btnStyle('#2563eb')}
+            style={btnStyle('#16a34a')}
           >
-            Confirm Clear
+            Clear Kill Switch
           </button>
         )}
         {globalState === 'CLEARED' && (
           <button
             type="button"
-            onClick={onRearm}
+            onClick={onClearWithPassword}
             disabled={busy}
             style={btnStyle('#16a34a')}
           >
-            Rearm (→ INACTIVE)
+            Clear Kill Switch
           </button>
         )}
         {/* PR #240 round-2 review P2: only enable cancel-all when the
@@ -776,6 +741,26 @@ Paste the returned token_id below.`;
                 />
               </div>
             )}
+            {confirmDialog.requireAdminPassword && (
+              <div style={{ marginBottom: '0.75rem' }}>
+                <label style={{ display: 'block', fontSize: '0.875rem', color: '#374151', marginBottom: '0.25rem' }}>
+                  Override password
+                </label>
+                <input
+                  type="password"
+                  value={adminPasswordInput}
+                  onChange={(e) => setAdminPasswordInput(e.target.value)}
+                  autoComplete="off"
+                  style={{
+                    width: '100%',
+                    padding: '0.5rem',
+                    borderRadius: 6,
+                    border: '1px solid #d1d5db',
+                    fontSize: '0.875rem',
+                  }}
+                />
+              </div>
+            )}
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
               <button
                 type="button"
@@ -794,6 +779,10 @@ Paste the returned token_id below.`;
                   || (
                     !!confirmDialog.requireStepUpToken
                     && !stepUpTokenInput.trim()
+                  )
+                  || (
+                    !!confirmDialog.requireAdminPassword
+                    && !adminPasswordInput
                   )
                 }
                 style={btnStyle('#dc2626')}

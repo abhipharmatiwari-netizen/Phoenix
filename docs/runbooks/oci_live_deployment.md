@@ -120,7 +120,11 @@ Runtime secret file names:
 /run/secrets/auth_token_secret
 /run/secrets/control_plane_pg_password
 /run/secrets/angel_postback_token
+/run/secrets/admin_kill_switch_override
 ```
+
+`/run/secrets/admin_kill_switch_override` is file-only. The entrypoint
+must not export it into the backend process environment.
 
 ## Secret Redaction Rule
 

@@ -474,6 +474,7 @@ services:
       - auth_token_secret
       - control_plane_pg_password
       - angel_postback_token
+      - admin_kill_switch_override
     volumes:
       - "${PHOENIX_LOG_HOST_PATH:-/opt/phoenix/logs}:/app/logs"
       - "${PHOENIX_STATE_HOST_PATH:-/opt/phoenix/state}:/app/state"
@@ -596,3 +597,5 @@ secrets:
     file: "/run/secrets/control_plane_pg_password"
   angel_postback_token:
     file: "/run/secrets/angel_postback_token"
+  admin_kill_switch_override:
+    file: "/run/secrets/admin_kill_switch_override"

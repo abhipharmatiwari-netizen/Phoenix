@@ -25,7 +25,7 @@ OCI VM.
 | Strategy is placing orders that look obviously wrong (wrong side, wrong qty, wrong symbol). | **Trip SOFT** — blocks new entries; trailing-lock can still close. |
 | Operator wants to immediately stop everything including exit attempts. | **Trip HARD** — blocks all orders; you'll have to manually flatten via broker UI. |
 | Multiple unwanted broker orders are already open. | After tripping, **Cancel ALL Open Orders** to drain them. |
-| Burst behaviour stopped, ready to resume normal trading. | **Request Clear → Confirm Clear → Rearm** (in that order). |
+| Burst behaviour stopped, ready to resume normal trading. | **Clear Kill Switch** with the vault-backed override password after broker-side flat and safety checks are confirmed. |
 
 ## Where it lives
 
@@ -36,32 +36,34 @@ with READONLY/OPERATOR roles see the audit trail only.
 ## State machine
 
 ```
-INACTIVE ──(Trip)──▶ TRIPPED ──(Request Clear)──▶ CLEAR_PENDING
-   ▲                                                    │
-   │                                                    ▼
-   │                                                CLEARED
-   │                                                    │
-   │                                                    ▼
-   │                                            (Rearm + step-up)
-   │                                                    │
-   └────────────────────────────────────────────────────┘
-                       (INACTIVE)
+INACTIVE --(Trip)--> TRIPPED --(request_clear)--> CLEAR_PENDING
+   ^                                                    |
+   |                                                    v
+   |                                                CLEARED
+   |                                                    |
+   |                                                    v
+   +--------------------(rearm)------------------- INACTIVE
 ```
 
 **Important:** ``KillSwitchManager.trip()`` rejects any existing
 non-INACTIVE record, so you cannot re-trip directly from CLEARED.
-The correct sequence after a clear cycle is **Confirm Clear →
-Rearm (returns to INACTIVE) → Trip** if another incident needs the
-switch active again. The dashboard buttons surface only the
-state-appropriate action.
+The dashboard's **Clear Kill Switch** button drives the clear cycle
+server-side: it verifies the vault-backed override password, runs
+the pre-clear safety checks, then advances any TRIPPED /
+CLEAR_PENDING / CLEARED global record to INACTIVE. If another
+incident needs the switch active again, wait for this clear call to
+return INACTIVE before tripping again.
 
 The dashboard renders the current state as a coloured pill at the top
 right of the panel:
 
 - 🟩 **INACTIVE** — normal operation
 - 🟥 **TRIPPED** — new orders blocked (HARD also blocks exits)
-- 🟧 **CLEAR_PENDING** — clear requested, awaiting confirmation
-- 🟦 **CLEARED** — confirmed, ready to rearm
+- 🟧 **CLEAR_PENDING** — clear requested; use **Clear Kill Switch**
+  to complete the server-side clear/rearm flow
+- 🟦 **CLEARED** — router entry block has been released, but the
+  record still needs the server-side rearm step that **Clear Kill
+  Switch** performs
 
 ## Required input
 
@@ -72,6 +74,12 @@ atomically by `emit_audit_event` on every toggle attempt.
 
 Trip also exposes a checkbox for **HARD trip (block exits too)**.
 Default is SOFT.
+
+Clear requires the vault-backed kill-switch override password. The
+backend reads it only from `/run/secrets/admin_kill_switch_override`
+or the path named by `ADMIN_KILL_SWITCH_OVERRIDE_FILE`; it does not
+accept the password from a process environment variable. The password
+entered in the dashboard is never persisted, audited, or logged.
 
 ## Cancel ALL Open Orders
 
@@ -117,48 +125,32 @@ A1: ok       (att=2, ok=2, fail=0, skip=0, raced_filled=0)
 A2: ok       (att=1, ok=0, fail=0, skip=1, raced_filled=0)
 ```
 
-## Step-up token (LIVE only)
+## Override Password Clear
 
-In LIVE mode both **Confirm Clear** and **Rearm** require a
-single-use, 5-minute, actor-bound step-up token. PR #240 round-2/3
-explicitly removed the dashboard auto-mint — the operator must
-obtain a token via a **separate ceremony** and paste it into the
-dialog. Auto-minting from the already-authenticated admin session
-defeated the protection step-up was meant to add.
+The dashboard clear path is `POST /admin/kill-switch/clear-with-password`.
+It is available only to an authenticated ADMIN bearer session; an
+admin API key is not enough for this endpoint. The operator enters:
 
-### How to obtain a step-up token (LIVE)
+- a non-empty reason, persisted to audit metadata
+- the vault-backed override password from the incident credential
+  ceremony
 
-Tokens are bound to:
-- the **actor** consuming them (i.e. the admin logged into the
-  dashboard — use **your own** admin bearer token to issue, not a
-  shared / different operator's token, otherwise the consume call
-  will fail with an actor mismatch),
-- the **action class** (`kill_switch_clear` for Confirm Clear,
-  `kill_switch_rearm` for Rearm), and
-- the **resource_id** (`GLOBAL` for the GLOBAL scope; a tenant id /
-  account id for narrower scopes).
+The password is compared with the file-mounted secret using constant
+time comparison. If `/run/secrets/admin_kill_switch_override` is
+missing, unreadable, or empty, the endpoint fails closed with HTTP
+503. If the entered password is wrong, it returns HTTP 403.
 
-```bash
-curl -X POST $PHOENIX/admin/step-up/issue \
-     -H "Authorization: Bearer $YOUR_ADMIN_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"action_class": "kill_switch_clear", "resource_id": "GLOBAL"}'
-# → {"token_id": "...", "expires_at": "...", "action_class": "kill_switch_clear"}
-```
+The backend still refuses to clear while the system is unsafe. The
+call returns HTTP 409 if position authority is degraded, if legacy
+kill-switch state is still active, if legacy and durable state
+diverge, or if the normal order-lifecycle clear checks find
+`RECONCILING` / `MANUAL_REVIEW` records. These failures are expected
+during an incident; investigate and retry only after the reported
+condition is resolved.
 
-Paste the returned `token_id` into the Step-up token field in the
-dashboard dialog. The dashboard surfaces an in-line copy of this
-command alongside the input.
-
-Confirm Clear and Rearm are separate LIVE actions. After Confirm
-Clear consumes a `kill_switch_clear` token, issue a second token with
-`action_class=kill_switch_rearm` and the same `resource_id` before
-pressing Rearm. Tokens are single-use and action/resource bound; a
-clear token cannot be reused for rearm.
-
-In **non-LIVE** (PAPER / SHADOW), the dashboard does **not** prompt
-for a token — the backend accepts an empty value and the local
-recovery flow proceeds without ceremony.
+The older `request-clear`, `confirm-clear`, `rearm`, and step-up-token
+endpoints remain available for advanced API compatibility. They are
+not the dashboard SOP.
 
 ## LIVE durability
 
@@ -178,7 +170,7 @@ In LIVE mode (`TRADE_MODE=LIVE`):
 
 The Safety page's lower table merges:
 
-- `resource_type=kill_switch` events (trip, request-clear, confirm-clear, rearm)
+- `resource_type=kill_switch` events (trip, clear-with-password, legacy request-clear / confirm-clear / rearm)
 - `resource_type=broker_orders` events (cancel-all bulk attempts)
 - `action=break_glass` events (existing flatten flow)
 
@@ -201,7 +193,8 @@ only; do not use it to decide whether live trading is ready.
 1. **Trip SOFT** with reason `"strategy XYZ mis-firing — bursts seen at 10:23"`.
 2. Verify state pill shows **TRIPPED · SOFT**.
 3. Optionally **Cancel ALL Open Orders** to drain pending entries.
-4. Investigate. Once safe, **Request Clear → Confirm Clear → Rearm**.
+4. Investigate. Once safe, press **Clear Kill Switch** and enter the
+   vault-backed override password.
 
 ### Scenario 2: Need to stop everything
 
@@ -209,7 +202,8 @@ only; do not use it to decide whether live trading is ready.
 2. Verify state pill shows **TRIPPED · HARD**.
 3. **Cancel ALL Open Orders** with reason `"panic stop"`.
 4. Manually flatten broker-side positions in your broker UI / phone.
-5. Once positions are flat, **Request Clear → Confirm Clear → Rearm**.
+5. Once positions are flat, press **Clear Kill Switch** and enter the
+   vault-backed override password.
 
 ### Scenario 3: Postgres outage during a trip
 

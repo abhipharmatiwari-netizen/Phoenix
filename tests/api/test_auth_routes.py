@@ -124,6 +124,75 @@ def test_login_returns_signed_token_and_me_validates_it(auth_client):
     assert me.json()["tenant_ids"] == ["tenant-123"]
 
 
+def test_cookie_session_login_sets_httponly_refresh_cookie(auth_client, monkeypatch):
+    client, _users_db = auth_client
+    monkeypatch.setattr(
+        "app.core.session_store.issue_refresh_token",
+        lambda **_: ("refresh-cookie-value", None),
+    )
+    response = client.post(
+        "/auth/register",
+        json={
+            "name": "Cookie User",
+            "email": "cookie@example.com",
+            "password": "password-123",
+        },
+    )
+    assert response.status_code == 200
+
+    login = client.post(
+        "/auth/login",
+        json={
+            "email": "cookie@example.com",
+            "password": "password-123",
+            "cookie_session": True,
+        },
+    )
+
+    assert login.status_code == 200
+    payload = login.json()
+    assert payload["token"]
+    assert payload["refresh_token"] is None
+    set_cookie = login.headers.get("set-cookie", "")
+    assert "phoenix_refresh_token=" in set_cookie
+    assert "HttpOnly" in set_cookie
+
+
+def test_refresh_accepts_cookie_session_without_body_token(auth_client, monkeypatch):
+    client, users_db = auth_client
+    users_db["refresh@example.com"] = {
+        "id": "user-refresh",
+        "email": "refresh@example.com",
+        "name": "Refresh User",
+        "password_hash": auth_routes._hash_password("unused"),
+        "role": Role.ADMIN,
+    }
+    monkeypatch.setattr(
+        "app.core.session_store.consume_refresh_token",
+        lambda token: {
+            "user_id": "user-refresh",
+            "email": "refresh@example.com",
+            "role": Role.ADMIN.value,
+        } if token == "refresh-in" else None,
+    )
+    monkeypatch.setattr(
+        "app.core.session_store.issue_refresh_token",
+        lambda **_: ("refresh-out", None),
+    )
+
+    response = client.post(
+        "/auth/refresh",
+        json={"cookie_session": True},
+        cookies={"phoenix_refresh_token": "refresh-in"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["token"]
+    assert payload["refresh_token"] is None
+    assert "phoenix_refresh_token=" in response.headers.get("set-cookie", "")
+
+
 
 def test_me_rejects_invalid_token(auth_client):
     client, _users_db = auth_client

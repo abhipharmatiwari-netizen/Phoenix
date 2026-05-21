@@ -19,6 +19,7 @@ export const AUTH_SESSION_CHANGED_EVENT = 'phoenix-auth-session-changed';
 interface LoginPayload {
   email: string;
   password: string;
+  cookie_session?: boolean;
 }
 
 interface LoginResponse {
@@ -169,6 +170,8 @@ function inferBackendBaseUrl(): string {
 }
 
 const BACKEND_BASE_URL = inferBackendBaseUrl();
+let inMemoryAuthToken: string | null = null;
+let legacyAuthCleanupStarted = false;
 
 function buildUrl(
   baseUrl: string,
@@ -218,20 +221,86 @@ function dispatchAuthSessionChanged(): void {
   window.dispatchEvent(new Event(AUTH_SESSION_CHANGED_EVENT));
 }
 
+function purgeLegacyStoredAuthSession(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  const legacyToken = window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+  const legacyRefreshToken = window.localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY);
+  window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+  window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+  if ((legacyToken || legacyRefreshToken) && !legacyAuthCleanupStarted) {
+    legacyAuthCleanupStarted = true;
+    void revokeLegacyStoredSession(legacyToken, legacyRefreshToken);
+  }
+}
+
+async function revokeLegacyStoredSession(
+  legacyToken: string | null,
+  legacyRefreshToken: string | null,
+): Promise<void> {
+  const logoutWithToken = async (token: string): Promise<boolean> => {
+    if (!token.trim()) {
+      return false;
+    }
+    try {
+      const response = await fetch(buildUrl(BACKEND_BASE_URL, '/auth/logout'), {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${token.trim()}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({}),
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  };
+
+  if (legacyToken && await logoutWithToken(legacyToken)) {
+    return;
+  }
+
+  const refreshToken = String(legacyRefreshToken || '').trim();
+  if (!refreshToken) {
+    return;
+  }
+
+  try {
+    const response = await fetch(buildUrl(BACKEND_BASE_URL, '/auth/refresh'), {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ refresh_token: refreshToken, cookie_session: false }),
+    });
+    const raw = await response.text();
+    if (!response.ok) {
+      return;
+    }
+    const payload = raw ? safeJsonParse(raw) : null;
+    const refreshedToken = typeof payload === 'object' && payload !== null
+      ? String((payload as RefreshResponse).token || '').trim()
+      : '';
+    if (refreshedToken) {
+      await logoutWithToken(refreshedToken);
+    }
+  } catch {
+    // Best-effort legacy session revocation only.
+  }
+}
+
 export function getStoredAuthToken(): string | null {
   if (typeof window === 'undefined') {
     return null;
   }
-  const token = window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
-  return token ? token.trim() : null;
-}
-
-function readStoredRefreshToken(): string | null {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-  const token = window.localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY);
-  return token ? token.trim() : null;
+  purgeLegacyStoredAuthSession();
+  return inMemoryAuthToken;
 }
 
 export function storeAuthSession(
@@ -243,20 +312,8 @@ export function storeAuthSession(
   }
 
   const normalizedToken = token.trim();
-  if (normalizedToken) {
-    window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, normalizedToken);
-  } else {
-    window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
-  }
-
-  if (refreshToken !== undefined) {
-    const normalizedRefresh = String(refreshToken || '').trim();
-    if (normalizedRefresh) {
-      window.localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, normalizedRefresh);
-    } else {
-      window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
-    }
-  }
+  inMemoryAuthToken = normalizedToken || null;
+  purgeLegacyStoredAuthSession();
 
   dispatchAuthSessionChanged();
 }
@@ -265,9 +322,13 @@ export function clearAuthSession(): void {
   if (typeof window === 'undefined') {
     return;
   }
-  window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
-  window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+  inMemoryAuthToken = null;
+  purgeLegacyStoredAuthSession();
   dispatchAuthSessionChanged();
+}
+
+export async function restoreAuthSession(): Promise<string | null> {
+  return refreshStoredSession();
 }
 
 function bffPath(path: string): string {
@@ -293,20 +354,16 @@ async function refreshStoredSession(): Promise<string | null> {
 }
 
 async function refreshStoredSessionOnce(): Promise<string | null> {
-  const refreshToken = readStoredRefreshToken();
-  if (!refreshToken) {
-    return null;
-  }
-
   let response: Response;
   try {
     response = await fetch(buildUrl(BACKEND_BASE_URL, '/auth/refresh'), {
       method: 'POST',
+      credentials: 'include',
       headers: {
         Accept: 'application/json',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ refresh_token: refreshToken }),
+      body: JSON.stringify({ cookie_session: true }),
     });
   } catch {
     return null;
@@ -368,6 +425,7 @@ async function request<T>({
   const encodedBody = body === undefined ? undefined : JSON.stringify(body);
   const send = () => fetch(url, {
     method,
+    credentials: 'include',
     headers: requestHeaders,
     body: encodedBody,
   });
@@ -391,10 +449,37 @@ async function request<T>({
     if (response.status === 401 && attachedStoredToken && !isAuthPath(path)) {
       clearAuthSession();
     }
-    throw new Error(String(detail || `${response.status} ${response.statusText}`));
+    throw new Error(formatErrorDetail(detail, `${response.status} ${response.statusText}`));
   }
 
   return payload as T;
+}
+
+function formatErrorDetail(detail: unknown, fallback: string): string {
+  if (typeof detail === 'string') {
+    return detail || fallback;
+  }
+  if (Array.isArray(detail)) {
+    const parts = detail.map((item) => formatErrorDetail(item, '')).filter(Boolean);
+    return parts.join('; ') || fallback;
+  }
+  if (detail && typeof detail === 'object') {
+    const obj = detail as { message?: unknown; failures?: unknown };
+    const message = typeof obj.message === 'string' ? obj.message : '';
+    const failures = Array.isArray(obj.failures)
+      ? obj.failures.map((item) => String(item)).filter(Boolean)
+      : [];
+    const joined = [message, failures.join('; ')].filter(Boolean).join(' ');
+    if (joined) {
+      return joined;
+    }
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return fallback;
+    }
+  }
+  return detail == null ? fallback : String(detail);
 }
 
 function safeJsonParse(raw: string): unknown {
@@ -437,12 +522,20 @@ export const AuthService = {
     return request<LoginResponse>({
       path: '/auth/login',
       method: 'POST',
-      body: payload,
+      body: { ...payload, cookie_session: true },
     });
   },
 
   me(): Promise<AuthenticatedUserResponse> {
     return request<AuthenticatedUserResponse>({ path: '/auth/me' });
+  },
+
+  logout(): Promise<{ message: string }> {
+    return request<{ message: string }>({
+      path: '/auth/logout',
+      method: 'POST',
+      body: {},
+    });
   },
 };
 
@@ -562,6 +655,21 @@ export interface KillSwitchRearmPayload {
   reason?: string | null;
 }
 
+export interface KillSwitchPasswordClearPayload {
+  scope: 'GLOBAL' | 'TENANT' | 'ACCOUNT' | 'STRATEGY';
+  scope_id: string;
+  password: string;
+  reason: string;
+}
+
+export interface KillSwitchPasswordClearResponse {
+  status: 'inactive' | 'partial';
+  record_id?: number;
+  state: string;
+  transitions: string[];
+  message?: string;
+}
+
 export interface KillSwitchCancelAllPayload {
   reason: string;
   broker_account_id?: string | null;
@@ -650,6 +758,16 @@ export const KillSwitchService = {
   ): Promise<{ status: string; record_id: number; state: string }> {
     return request({
       path: bffPath('/admin/kill-switch/rearm'),
+      method: 'POST',
+      body: payload,
+    });
+  },
+
+  clearWithPassword(
+    payload: KillSwitchPasswordClearPayload,
+  ): Promise<KillSwitchPasswordClearResponse> {
+    return request<KillSwitchPasswordClearResponse>({
+      path: bffPath('/admin/kill-switch/clear-with-password'),
       method: 'POST',
       body: payload,
     });

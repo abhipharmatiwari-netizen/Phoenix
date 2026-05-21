@@ -23,8 +23,10 @@ from app.brokers.base import OrderResponse
 from app.dashboard import admin_routes
 from app.dashboard.admin_routes import (
     KillSwitchCancelAllRequest,
+    KillSwitchPasswordClearRequest,
     _save_kill_switch_state,
     kill_switch_cancel_all,
+    kill_switch_clear_with_password,
 )
 from app.dashboard.auth import AdminContext, AdminRole
 
@@ -46,6 +48,17 @@ def _mk_request() -> Any:
     return SimpleNamespace(
         headers={"X-Request-Id": "req-test-1"},
         client=SimpleNamespace(host="127.0.0.1"),
+    )
+
+
+def _mk_bearer_admin() -> AdminContext:
+    return AdminContext(
+        caller="admin@phoenix.com",
+        role=AdminRole.ADMIN,
+        user_id="admin-user-1",
+        email="admin@phoenix.com",
+        auth_source="bearer",
+        all_tenants=True,
     )
 
 
@@ -73,6 +86,149 @@ def _patch_cancel_all_preconditions(monkeypatch):
         admin_routes, "_get_kill_switch_manager",
         lambda: fake_ksm,
     )
+
+
+def test_kill_switch_password_clear_uses_vault_override_and_rearms(monkeypatch, tmp_path):
+    from app.risk.kill_switch import (
+        KillSwitchClearValidation,
+        KillSwitchManager,
+        KillSwitchScope,
+        KillSwitchState,
+    )
+
+    ksm = KillSwitchManager(audit_fn=lambda **_: None)
+    ksm.trip(KillSwitchScope.GLOBAL, "GLOBAL", "auto-trip", actor="risk_manager_auto")
+    save_calls: list[str] = []
+    secret_file = tmp_path / "admin_kill_switch_override"
+    secret_file.write_text("vault-override-password", encoding="utf-8")
+
+    monkeypatch.setattr("app.dashboard.admin_routes.check_rate_limit", lambda _request: None)
+    monkeypatch.setenv("ADMIN_KILL_SWITCH_OVERRIDE_FILE", str(secret_file))
+    monkeypatch.setattr(admin_routes, "_get_kill_switch_manager", lambda: ksm)
+    monkeypatch.setattr(
+        admin_routes,
+        "_kill_switch_clear_validation",
+        lambda _req, *, fail_closed: KillSwitchClearValidation(passed=True, failures=[]),
+    )
+    monkeypatch.setattr(
+        admin_routes,
+        "_save_kill_switch_state",
+        lambda *_args, **_kwargs: save_calls.append(
+            ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL").state.value
+        ),
+    )
+    monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **_kw: None)
+
+    result = kill_switch_clear_with_password(
+        KillSwitchPasswordClearRequest(
+            scope="GLOBAL",
+            scope_id="GLOBAL",
+            password="vault-override-password",
+            reason="broker flat verified",
+        ),
+        _mk_request(),
+        _mk_bearer_admin(),
+    )
+
+    assert result["status"] == "inactive"
+    assert result["transitions"] == ["CLEAR_PENDING", "CLEARED", "INACTIVE"]
+    assert ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL").state == KillSwitchState.INACTIVE
+    assert save_calls == ["CLEAR_PENDING", "CLEARED", "INACTIVE"]
+
+
+def test_kill_switch_password_clear_rejects_bad_vault_override(monkeypatch, tmp_path):
+    from app.risk.kill_switch import KillSwitchManager, KillSwitchScope, KillSwitchState
+
+    ksm = KillSwitchManager(audit_fn=lambda **_: None)
+    ksm.trip(KillSwitchScope.GLOBAL, "GLOBAL", "auto-trip", actor="risk_manager_auto")
+    secret_file = tmp_path / "admin_kill_switch_override"
+    secret_file.write_text("vault-override-password", encoding="utf-8")
+
+    monkeypatch.setattr("app.dashboard.admin_routes.check_rate_limit", lambda _request: None)
+    monkeypatch.setenv("ADMIN_KILL_SWITCH_OVERRIDE_FILE", str(secret_file))
+    monkeypatch.setattr(admin_routes, "_get_kill_switch_manager", lambda: ksm)
+
+    with pytest.raises(HTTPException) as exc_info:
+        kill_switch_clear_with_password(
+            KillSwitchPasswordClearRequest(
+                scope="GLOBAL",
+                scope_id="GLOBAL",
+                password="wrong-password",
+                reason="broker flat verified",
+            ),
+            _mk_request(),
+            _mk_bearer_admin(),
+        )
+
+    assert exc_info.value.status_code == 403
+    assert ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL").state == KillSwitchState.TRIPPED
+
+
+def test_kill_switch_password_clear_fails_closed_without_vault_secret(monkeypatch, tmp_path):
+    from app.risk.kill_switch import KillSwitchManager, KillSwitchScope, KillSwitchState
+
+    ksm = KillSwitchManager(audit_fn=lambda **_: None)
+    ksm.trip(KillSwitchScope.GLOBAL, "GLOBAL", "auto-trip", actor="risk_manager_auto")
+
+    monkeypatch.setattr("app.dashboard.admin_routes.check_rate_limit", lambda _request: None)
+    monkeypatch.setenv(
+        "ADMIN_KILL_SWITCH_OVERRIDE_FILE",
+        str(tmp_path / "missing-admin-kill-switch-override"),
+    )
+    monkeypatch.setenv("ADMIN_KILL_SWITCH_OVERRIDE", "must-not-be-used")
+    monkeypatch.setattr(admin_routes, "_get_kill_switch_manager", lambda: ksm)
+
+    with pytest.raises(HTTPException) as exc_info:
+        kill_switch_clear_with_password(
+            KillSwitchPasswordClearRequest(
+                scope="GLOBAL",
+                scope_id="GLOBAL",
+                password="any-password",
+                reason="broker flat verified",
+            ),
+            _mk_request(),
+            _mk_bearer_admin(),
+        )
+
+    assert exc_info.value.status_code == 503
+    assert ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL").state == KillSwitchState.TRIPPED
+
+
+def test_kill_switch_password_clear_fails_closed_when_legacy_active(monkeypatch, tmp_path):
+    from app.risk.kill_switch import KillSwitchManager, KillSwitchScope, KillSwitchState
+
+    ksm = KillSwitchManager(audit_fn=lambda **_: None)
+    ksm.trip(KillSwitchScope.GLOBAL, "GLOBAL", "auto-trip", actor="risk_manager_auto")
+    secret_file = tmp_path / "admin_kill_switch_override"
+    secret_file.write_text("vault-override-password", encoding="utf-8")
+
+    monkeypatch.setattr("app.dashboard.admin_routes.check_rate_limit", lambda _request: None)
+    monkeypatch.setenv("ADMIN_KILL_SWITCH_OVERRIDE_FILE", str(secret_file))
+    monkeypatch.setattr(admin_routes, "_get_kill_switch_manager", lambda: ksm)
+    monkeypatch.setattr(
+        admin_routes,
+        "_collect_position_authority_clear_failures",
+        lambda *, fail_closed: [],
+    )
+    monkeypatch.setattr(
+        "app.risk.kill_switch.get_kill_switch_state",
+        lambda: {"source": "risk_manager", "kill_switch_activated": True},
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        kill_switch_clear_with_password(
+            KillSwitchPasswordClearRequest(
+                scope="GLOBAL",
+                scope_id="GLOBAL",
+                password="vault-override-password",
+                reason="broker flat verified",
+            ),
+            _mk_request(),
+            _mk_bearer_admin(),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL").state == KillSwitchState.TRIPPED
 
 
 class _FakeBroker:

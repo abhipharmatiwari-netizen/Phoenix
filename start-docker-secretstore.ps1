@@ -367,11 +367,23 @@ try {
         Write-Host "  To configure: Set-Secret -Name ANGEL_POSTBACK_TOKEN -Secret '<your-token>'" -ForegroundColor Cyan
     }
 
+    try {
+        $killSwitchOverride = Get-Secret -Name "ADMIN_KILL_SWITCH_OVERRIDE" -AsPlainText -ErrorAction Stop
+    }
+    catch {
+        $killSwitchOverride = ""
+    }
+    if ([string]::IsNullOrWhiteSpace($killSwitchOverride)) {
+        throw "ADMIN_KILL_SWITCH_OVERRIDE must be configured in SecretStore before starting the live Docker stack."
+    }
+    Write-SecretFile -Path (Join-Path $secretDir "admin_kill_switch_override") -Value $killSwitchOverride
+    Write-Host "  admin_kill_switch_override: loaded into file-only Docker secret" -ForegroundColor Green
+
     # Export the directory path so docker-compose can resolve ${PHX_SECRET_DIR}
     $env:PHX_SECRET_DIR = $secretDir
     Write-Host ""
     Write-Host "Docker secret files written to: $secretDir"
-    Write-Host "  (admin_api_key, demo_auth_token_secret, control_plane_pg_password, angel_postback_token)"
+    Write-Host "  (admin_api_key, demo_auth_token_secret, control_plane_pg_password, angel_postback_token, admin_kill_switch_override)"
     Write-Host "  These files are read by Docker Compose secrets - not baked into container env."
 
     Write-Host ""

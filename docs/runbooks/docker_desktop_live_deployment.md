@@ -132,7 +132,11 @@ directory only after `docker compose down`.
 Do not use raw `docker compose up` directly unless the current PowerShell
 session has already exported all required non-secret env vars and
 `PHX_SECRET_DIR` points at existing `admin_api_key`, `demo_auth_token_secret`,
-`control_plane_pg_password`, and `angel_postback_token` files.
+`control_plane_pg_password`, `angel_postback_token`, and
+`admin_kill_switch_override` files.
+
+`admin_kill_switch_override` is file-only. The entrypoint must not
+export it into the backend process environment.
 
 ---
 

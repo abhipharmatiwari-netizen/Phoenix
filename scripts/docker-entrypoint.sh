@@ -2,7 +2,8 @@
 # Load Docker secrets into environment variables before the main process starts.
 #
 # Each file under /run/secrets/ becomes an env var named after the file
-# (upper-cased, hyphens → underscores).
+# (upper-cased, hyphens → underscores), except secrets that are explicitly
+# marked file-only below.
 #
 # Security note: secrets are exported as env vars so that pydantic-settings and
 # os.getenv() callers throughout the app can read them without file I/O at every
@@ -23,6 +24,14 @@ if [ -d "$SECRETS_DIR" ]; then
     for f in "$SECRETS_DIR"/*; do
         [ -f "$f" ] || continue
         varname=$(basename "$f" | tr '[:lower:]' '[:upper:]' | tr '-' '_')
+        case "$varname" in
+            ADMIN_KILL_SWITCH_OVERRIDE)
+                # File-only: the backend reads /run/secrets/admin_kill_switch_override
+                # directly so this break-glass password is not copied into
+                # the process environment.
+                continue
+                ;;
+        esac
         val=$(cat "$f")
         if [ -n "$val" ]; then
             export "$varname=$val"

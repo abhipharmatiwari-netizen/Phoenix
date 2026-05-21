@@ -5,6 +5,7 @@ import {
   AuthService,
   clearAuthSession,
   getStoredAuthToken,
+  restoreAuthSession,
   storeAuthSession,
 } from '../client';
 import { User, Role, normalizeRole } from '../lib/rbac';
@@ -22,6 +23,7 @@ interface AuthContextType {
   login: (token: string, refreshToken?: string | null) => void;
   logout: () => void;
   isAuthenticated: boolean;
+  isLoading: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -57,6 +59,7 @@ function isAuthError(error: unknown): boolean {
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [token, setToken] = useState<string | null>(() => readStoredToken());
   const [user, setUser] = useState<User | null>(() => decodeToken(readStoredToken()));
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -77,6 +80,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => {
       window.removeEventListener(AUTH_SESSION_CHANGED_EVENT, syncSession);
       window.removeEventListener('storage', syncStorageSession);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const currentToken = readStoredToken();
+    if (currentToken) {
+      setIsLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+    restoreAuthSession()
+      .then((restoredToken) => {
+        if (cancelled || !restoredToken) {
+          return;
+        }
+        setToken(restoredToken);
+        setUser(decodeToken(restoredToken));
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -134,6 +164,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const logout = () => {
+    void AuthService.logout().catch(() => undefined);
     setToken(null);
     setUser(null);
     clearAuthSession();
@@ -142,7 +173,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const isAuthenticated = !!user;
 
   return (
-    <AuthContext.Provider value={{ token, user, login, logout, isAuthenticated }}>
+    <AuthContext.Provider value={{ token, user, login, logout, isAuthenticated, isLoading }}>
       {children}
     </AuthContext.Provider>
   );

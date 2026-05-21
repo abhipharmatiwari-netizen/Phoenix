@@ -3,6 +3,8 @@
 from __future__ import annotations
 import ast
 import asyncio
+import hmac
+import os
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -59,6 +61,8 @@ _POSITION_AUTHORITY_RECOVERY_STATES = {
     "MANUAL_REVIEW",
     "FORCED_FLATTENING",
 }
+_KILL_SWITCH_OVERRIDE_SECRET_FILE_ENV = "ADMIN_KILL_SWITCH_OVERRIDE_FILE"
+_KILL_SWITCH_OVERRIDE_SECRET_FILE = "/run/secrets/admin_kill_switch_override"
 
 
 # Payload for tenant upsert operations.
@@ -2004,6 +2008,17 @@ class KillSwitchRearmRequest(BaseModel):
     )
 
 
+class KillSwitchPasswordClearRequest(BaseModel):
+    scope: str = Field("GLOBAL", description="GLOBAL | TENANT | ACCOUNT | STRATEGY")
+    scope_id: str = Field("GLOBAL", description="Scope identifier")
+    password: str = Field(
+        ...,
+        min_length=1,
+        description="Kill-switch override password from the vault-backed secret.",
+    )
+    reason: str = Field(..., description="Operator-entered clear reason")
+
+
 class StepUpIssueRequest(BaseModel):
     action_class: str = Field(
         ...,
@@ -2018,6 +2033,124 @@ class StepUpIssueRequest(BaseModel):
         "",
         description="Optional resource scoping (e.g. scope_id for kill switch, contract for break-glass).",
     )
+
+
+def _load_kill_switch_override_password() -> str:
+    """Load the kill-switch override password from the mounted vault secret."""
+    path = (
+        os.getenv(_KILL_SWITCH_OVERRIDE_SECRET_FILE_ENV, "").strip()
+        or _KILL_SWITCH_OVERRIDE_SECRET_FILE
+    )
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = handle.read().strip()
+    except FileNotFoundError as exc:
+        raise RuntimeError("kill-switch override secret is not configured") from exc
+    except OSError as exc:
+        raise RuntimeError("kill-switch override secret is not readable") from exc
+    if not value:
+        raise RuntimeError("kill-switch override secret is empty")
+    return value
+
+
+def _verify_kill_switch_override_password(ctx: AdminContext, password: str) -> None:
+    """Require a bearer-authenticated admin plus the vault override password."""
+    if ctx.auth_source != "bearer" or not (ctx.user_id or ctx.email):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Password clear requires a logged-in admin user session.",
+        )
+    candidate = str(password or "")
+    if not candidate:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="override password is required",
+        )
+    try:
+        expected = _load_kill_switch_override_password()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Kill-switch override secret is unavailable.",
+        ) from exc
+    if not hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8")):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid override password.",
+        )
+
+
+def _collect_position_authority_clear_failures(*, fail_closed: bool) -> list[str]:
+    failures: list[str] = []
+    try:
+        from app.core.degraded_scope_manager import degraded_scope_manager
+        active_scopes = list(degraded_scope_manager.active_scopes())
+        if active_scopes:
+            failures.append(
+                "position authority has active degraded scope(s): "
+                + ", ".join(str(scope) for scope in active_scopes[:5])
+            )
+    except Exception as exc:
+        if fail_closed:
+            failures.append(f"could not inspect degraded scopes: {exc}")
+
+    try:
+        hub = get_hub_runtime().hub
+        runners = getattr(hub, "_runners", {})
+        for runner in runners.values():
+            lifecycle = getattr(runner, "_order_lifecycle", None)
+            if lifecycle is None:
+                continue
+            for rec in getattr(lifecycle, "_position_records", {}).values():
+                raw_state = (
+                    getattr(getattr(rec, "position_state", None), "value", None)
+                    or getattr(getattr(rec, "state", None), "value", None)
+                    or getattr(rec, "position_state", None)
+                    or getattr(rec, "state", None)
+                    or ""
+                )
+                state_val = str(raw_state).upper()
+                if state_val in _POSITION_AUTHORITY_RECOVERY_STATES:
+                    ownership_key = (
+                        getattr(rec, "ownership_key", None)
+                        or getattr(rec, "scope_key", None)
+                        or "<unknown>"
+                    )
+                    failures.append(f"position {ownership_key!r} is in {state_val}")
+    except Exception as exc:
+        if fail_closed:
+            failures.append(f"could not inspect position records: {exc}")
+    return failures
+
+
+def _collect_legacy_kill_switch_clear_failures(*, fail_closed: bool) -> list[str]:
+    failures: list[str] = []
+    try:
+        from app.risk.kill_switch import get_kill_switch_state
+        state = get_kill_switch_state()
+        legacy = state.get("legacy_kill_switch") or {}
+        divergence = state.get("divergence") or {}
+        if bool(legacy.get("active")):
+            reason = str(legacy.get("reason") or "unknown")
+            failures.append(f"legacy kill switch is still active: {reason}")
+        elif bool(state.get("kill_switch_activated")):
+            failures.append("legacy risk manager kill switch is still active")
+        if bool(divergence.get("divergent")):
+            failures.append("legacy and durable kill-switch state are divergent")
+        elif fail_closed and state.get("source") == "unavailable":
+            failures.append("could not inspect legacy kill-switch state")
+    except Exception as exc:
+        if fail_closed:
+            failures.append(f"could not inspect legacy kill-switch state: {exc}")
+    return failures
+
+
+def _kill_switch_clear_validation(req: Any, *, fail_closed: bool):
+    from app.risk.kill_switch import KillSwitchClearValidation
+    failures = _collect_position_authority_clear_failures(fail_closed=fail_closed)
+    if fail_closed:
+        failures.extend(_collect_legacy_kill_switch_clear_failures(fail_closed=True))
+    return KillSwitchClearValidation(passed=len(failures) == 0, failures=failures)
 
 
 @router.post("/kill-switch/trip")
@@ -2171,22 +2304,7 @@ def kill_switch_request_clear(
     def _validation_fn(req: KillSwitchClearRequest) -> KillSwitchClearValidation:
         if req.break_glass:
             return KillSwitchClearValidation(passed=True, failures=[])
-        # Minimal validation: no RECONCILING/ORPHAN_REVIEW positions for this scope
-        failures = []
-        try:
-            hub = get_hub_runtime().hub
-            runners = getattr(hub, "_runners", {})
-            for runner in runners.values():
-                ol = getattr(runner, "_order_lifecycle", None)
-                if ol is None:
-                    continue
-                for rec in getattr(ol, "_position_records", {}).values():
-                    state_val = str(getattr(rec, "position_state", "")).upper()
-                    if state_val in {"RECONCILING", "MANUAL_REVIEW"}:
-                        failures.append(f"position {rec.ownership_key!r} is in {state_val}")
-        except Exception:
-            pass
-        return KillSwitchClearValidation(passed=len(failures) == 0, failures=failures)
+        return _kill_switch_clear_validation(req, fail_closed=False)
 
     rollback = _kill_switch_rollback_factory(ksm, scope, payload.scope_id)
     try:
@@ -2377,6 +2495,134 @@ def kill_switch_rearm(
         },
     )
     return {"status": "inactive", "record_id": record.id, "state": record.state.value}
+
+
+@router.post("/kill-switch/clear-with-password")
+def kill_switch_clear_with_password(
+    payload: KillSwitchPasswordClearRequest,
+    request: Request,
+    ctx: AdminContext = Depends(get_admin_context),
+) -> dict:
+    """Clear and rearm a kill switch after vault override verification.
+
+    This is the dashboard-friendly replacement for the manual step-up-token
+    ceremony. It requires an authenticated admin session plus the file-only
+    override secret mounted from OCI Vault, then performs server-side validation
+    before restoring entry eligibility. It fails closed if position authority or
+    legacy kill-switch state cannot be verified.
+    """
+    ctx.require_role(AdminRole.ADMIN)
+    check_rate_limit(request)
+    _require_scope_entitlement(ctx, payload.scope, payload.scope_id)
+    if not str(payload.reason or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="reason is required and must be non-empty",
+        )
+    _verify_kill_switch_override_password(ctx, payload.password)
+
+    from app.risk.kill_switch import (
+        KillSwitchClearRequest,
+        KillSwitchScope,
+        KillSwitchState,
+    )
+    try:
+        scope = KillSwitchScope(payload.scope.upper())
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
+
+    ksm = _get_kill_switch_manager()
+    record = ksm.get_record(scope, payload.scope_id)
+    if record is None or record.state == KillSwitchState.INACTIVE:
+        return {
+            "status": "inactive",
+            "state": "INACTIVE",
+            "transitions": [],
+            "message": "Kill switch is already inactive.",
+        }
+
+    # If the record is already part-way through an operator clear flow, still
+    # re-run the fail-closed validation before moving to CLEARED/INACTIVE.
+    validation = _kill_switch_clear_validation(record, fail_closed=True)
+    if not validation.passed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "Kill switch clear blocked by safety validation.",
+                "failures": validation.failures,
+            },
+        )
+
+    transitions: list[str] = []
+
+    if record.state == KillSwitchState.TRIPPED:
+        import uuid as _uuid
+        clear_req = KillSwitchClearRequest(
+            scope=scope,
+            scope_id=payload.scope_id,
+            actor=ctx.caller,
+            reason_code=payload.reason,
+            request_id=_uuid.uuid4().hex,
+            break_glass=False,
+        )
+        rollback = _kill_switch_rollback_factory(ksm, scope, payload.scope_id)
+        try:
+            record, request_validation = ksm.request_clear(
+                clear_req,
+                lambda req: _kill_switch_clear_validation(req, fail_closed=True),
+            )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        if not request_validation.passed:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "Kill switch clear blocked by safety validation.",
+                    "failures": request_validation.failures,
+                },
+            )
+        rollback.set_expected_post_record(record)  # type: ignore[attr-defined]
+        _save_kill_switch_state(ksm, rollback=rollback)
+        transitions.append("CLEAR_PENDING")
+
+    if record.state == KillSwitchState.CLEAR_PENDING:
+        rollback = _kill_switch_rollback_factory(ksm, scope, payload.scope_id)
+        try:
+            record = ksm.confirm_clear(scope, payload.scope_id)
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        rollback.set_expected_post_record(record)  # type: ignore[attr-defined]
+        _save_kill_switch_state(ksm, rollback=rollback)
+        transitions.append("CLEARED")
+
+    if record.state == KillSwitchState.CLEARED:
+        rollback = _kill_switch_rollback_factory(ksm, scope, payload.scope_id)
+        try:
+            record = ksm.rearm(scope, payload.scope_id, actor=ctx.caller)
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        rollback.set_expected_post_record(record)  # type: ignore[attr-defined]
+        _save_kill_switch_state(ksm, rollback=rollback)
+        transitions.append("INACTIVE")
+
+    emit_audit_event(
+        actor=ctx.caller,
+        action="kill_switch_password_clear",
+        resource_type="kill_switch",
+        resource_id=str(payload.scope_id),
+        metadata={
+            "scope": payload.scope,
+            "scope_id": payload.scope_id,
+            "reason": payload.reason,
+            "transitions": transitions,
+        },
+    )
+    return {
+        "status": "inactive" if record.state == KillSwitchState.INACTIVE else "partial",
+        "record_id": record.id,
+        "state": record.state.value,
+        "transitions": transitions,
+    }
 
 
 @router.get("/kill-switch/state")
@@ -3174,6 +3420,7 @@ __all__ = [
     "AdminTestOrderRequest",
     "BreakGlassFlattenRequest",
     "BrokerAccountUpsertRequest",
+    "KillSwitchPasswordClearRequest",
     "StepUpIssueRequest",
     "SubscriptionUpsertRequest",
     "TenantUpsertRequest",
@@ -3185,6 +3432,7 @@ __all__ = [
     "list_broker_accounts",
     "list_runners",
     "kill_switch_rearm",
+    "kill_switch_clear_with_password",
     "list_tenants",
     "manual_eod_exit",
     "manual_sweep",

@@ -7,14 +7,14 @@ const Login: React.FC = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const { isAuthenticated, login } = useAuth();
+  const { isAuthenticated, isLoading, login } = useAuth();
   const navigate = useNavigate();
 
   useEffect(() => {
-    if (isAuthenticated) {
+    if (!isLoading && isAuthenticated) {
       navigate('/', { replace: true });
     }
-  }, [isAuthenticated, navigate]);
+  }, [isAuthenticated, isLoading, navigate]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();

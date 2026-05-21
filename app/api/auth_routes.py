@@ -17,7 +17,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 
 try:  # pragma: no cover - optional in lightweight test environments
     from psycopg.rows import dict_row  # type: ignore
@@ -66,6 +66,7 @@ class LoginRequest(BaseModel):
 
     email: EmailStr
     password: str
+    cookie_session: bool = False
 
 
 class LoginResponse(BaseModel):
@@ -75,6 +76,34 @@ class LoginResponse(BaseModel):
     refresh_token: Optional[str] = None
     expires_in: int = _TOKEN_TTL_SECONDS
     user: dict[str, Any]
+
+
+_REFRESH_COOKIE_NAME = "phoenix_refresh_token"
+
+
+def _cookie_secure_default() -> bool:
+    return _app_env() not in ("local", "dev", "test")
+
+
+def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
+    response.set_cookie(
+        key=_REFRESH_COOKIE_NAME,
+        value=refresh_token,
+        httponly=True,
+        secure=_cookie_secure_default(),
+        samesite="strict",
+        max_age=60 * 60 * 24 * 30,
+        path="/",
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=_REFRESH_COOKIE_NAME,
+        path="/",
+        secure=_cookie_secure_default(),
+        samesite="strict",
+    )
 
 
 @contextmanager
@@ -429,7 +458,7 @@ async def register(request: SignupRequest) -> SignupResponse:
 
 
 @router.post("/login", response_model=LoginResponse)
-async def login(request: LoginRequest) -> LoginResponse:
+async def login(request: LoginRequest, response: Response) -> LoginResponse:
     """Login user. Returns a short-lived access token and a long-lived refresh token."""
     user = _get_user_by_email(request.email)
     if not user or not _verify_password(request.password, str(user.get("password_hash", ""))):
@@ -454,9 +483,12 @@ async def login(request: LoginRequest) -> LoginResponse:
         except Exception:
             logger.debug("Refresh token issuance skipped", exc_info=True)
 
+    if request.cookie_session and refresh_token:
+        _set_refresh_cookie(response, refresh_token)
+
     return LoginResponse(
         token=token,
-        refresh_token=refresh_token,
+        refresh_token=None if request.cookie_session else refresh_token,
         expires_in=_TOKEN_TTL_SECONDS,
         user={
             "id": user["id"],
@@ -469,10 +501,17 @@ async def login(request: LoginRequest) -> LoginResponse:
 
 @router.post("/refresh")
 async def refresh_access_token(
-    body: dict,
+    request: Request,
+    response: Response,
+    body: Optional[dict[str, Any]] = None,
 ) -> dict:
     """Exchange a refresh token for a new access token (PHX-SEC-005)."""
-    refresh_token = str(body.get("refresh_token") or "").strip()
+    body = body or {}
+    refresh_token = str(
+        body.get("refresh_token")
+        or request.cookies.get(_REFRESH_COOKIE_NAME)
+        or ""
+    ).strip()
     if not refresh_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -509,16 +548,23 @@ async def refresh_access_token(
         email=str(user["email"]),
         role=role.value,
     )
+    cookie_session = (
+        bool(request.cookies.get(_REFRESH_COOKIE_NAME))
+        or bool(body.get("cookie_session"))
+    )
+    if cookie_session:
+        _set_refresh_cookie(response, new_refresh)
     logger.info("Token refreshed for user: %s", user["email"])
     return {
         "token": new_token,
-        "refresh_token": new_refresh,
+        "refresh_token": None if cookie_session else new_refresh,
         "expires_in": _TOKEN_TTL_SECONDS,
     }
 
 
 @router.post("/logout")
 async def logout(
+    response: Response,
     current_user: dict[str, Any] = Depends(require_authenticated_user),
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ) -> dict:
@@ -543,6 +589,8 @@ async def logout(
         revoke_all_for_user(str(current_user["id"]))
     except Exception:
         logger.debug("Refresh token revocation failed", exc_info=True)
+
+    _clear_refresh_cookie(response)
 
     emit_audit_event(
         actor=str(current_user["email"]),
