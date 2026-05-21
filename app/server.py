@@ -300,16 +300,68 @@ def _oi_ml_shadow_ingestion_status() -> dict[str, Any]:
         }
 
 
+def _kill_switch_readiness_snapshot() -> dict[str, Any]:
+    if _readiness_trade_mode() != "LIVE":
+        return {
+            "ready": True,
+            "reason": None,
+            "degraded_reason": None,
+            "active_count": 0,
+            "source": "not_live",
+            "divergent": False,
+            "legacy_active": False,
+        }
+    try:
+        from app.risk.kill_switch import get_kill_switch_state
+
+        state = get_kill_switch_state()
+        active_count = int(state.get("active_count", 0) or 0)
+        divergence = state.get("divergence") or {}
+        legacy = state.get("legacy_kill_switch") or {}
+        divergent = bool(divergence.get("divergent", False))
+        reason = None
+        degraded_reason = None
+        if active_count > 0:
+            reason = f"kill_switch_active: {active_count} non-INACTIVE kill switch(es)"
+            degraded_reason = "kill_switch_active"
+        elif divergent:
+            reason = "kill_switch_divergence: legacy=True durable_global=False"
+            degraded_reason = "kill_switch_divergence"
+        return {
+            "ready": reason is None,
+            "reason": reason,
+            "degraded_reason": degraded_reason,
+            "active_count": active_count,
+            "source": state.get("source", "unavailable"),
+            "divergent": divergent,
+            "legacy_active": bool(legacy.get("active", False)),
+        }
+    except Exception as exc:
+        return {
+            "ready": False,
+            "reason": f"kill_switch_unavailable: {exc}",
+            "degraded_reason": "kill_switch_unavailable",
+            "active_count": -1,
+            "source": "unavailable",
+            "divergent": False,
+            "legacy_active": False,
+        }
+
+
 def _dashboard_readiness_contract(
     *,
     runtime: Any,
     degraded_reasons: list[str],
     position_authority: dict[str, Any],
+    kill_switch: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ready = bool(getattr(runtime, "ready", False))
     reason: str | None = None
     if not ready:
         reason = "runtime_not_ready"
+    if kill_switch is not None and not bool(kill_switch.get("ready", True)):
+        ready = False
+        reason = str(kill_switch.get("reason") or "kill_switch_unavailable")
     if _readiness_trade_mode() == "LIVE" and int(position_authority.get("blocking_count", 0) or 0) > 0:
         ready = False
         reason = "position_authority_degraded"
@@ -1057,6 +1109,13 @@ def _build_docker_health_summary() -> dict[str, Any]:
         and int(position_authority.get("blocking_count", 0) or 0) > 0
     ):
         degraded_reasons.append("position_authority_degraded")
+    kill_switch_readiness = _kill_switch_readiness_snapshot()
+    kill_switch_degraded_reason = kill_switch_readiness.get("degraded_reason")
+    if (
+        _readiness_trade_mode() == "LIVE"
+        and kill_switch_degraded_reason
+    ):
+        degraded_reasons.append(str(kill_switch_degraded_reason))
 
     readiness_degraded_reasons = list(degraded_reasons)
     oi_ml_shadow_ingestion = _oi_ml_shadow_ingestion_status()
@@ -1070,6 +1129,7 @@ def _build_docker_health_summary() -> dict[str, Any]:
         runtime=runtime,
         degraded_reasons=readiness_degraded_reasons,
         position_authority=position_authority,
+        kill_switch=kill_switch_readiness,
     )
     status = (
         "ok"
@@ -1145,6 +1205,7 @@ def _build_docker_health_summary() -> dict[str, Any]:
             "terminal_nonzero_net_qty_count": terminal_nonzero_count,
             "error": terminal_nonzero_error,
         },
+        "kill_switch": kill_switch_readiness,
         "oi_ml_shadow_ingestion": oi_ml_shadow_ingestion,
         "watchdog": watchdog_snapshot,
         "leader_lease": leader_lease_snapshot,

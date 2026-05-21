@@ -339,6 +339,45 @@ def test_dashboard_status_degrades_when_readyz_position_authority_blocks(
     assert "readiness_position_authority_degraded" in payload["alerts"]["firing_rules"]
 
 
+def test_dashboard_status_degrades_when_kill_switch_active(
+    api_client,
+    monkeypatch,
+):
+    client, runtime = api_client
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = True
+    monkeypatch.setattr(server, "_readiness_trade_mode", lambda: "LIVE")
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    monkeypatch.setattr(
+        server,
+        "get_hub_runtime",
+        lambda: SimpleNamespace(
+            hub=SimpleNamespace(list_runner_ids=lambda: []),
+            state_store=StateStore(),
+        ),
+    )
+    monkeypatch.setattr(
+        "app.risk.kill_switch.get_kill_switch_state",
+        lambda: {
+            "source": "kill_switch_manager",
+            "active_count": 1,
+            "legacy_kill_switch": {"active": False},
+            "divergence": {"divergent": False},
+        },
+    )
+
+    resp = client.get("/dashboard/status")
+    payload = resp.json()
+
+    assert resp.status_code == 200
+    assert payload["status"] == "degraded"
+    assert "kill_switch_active" in payload["degraded_reasons"]
+    assert payload["readiness"]["ready"] is False
+    assert payload["readiness"]["http_status"] == 503
+    assert payload["readiness"]["reason"].startswith("kill_switch_active")
+    assert payload["kill_switch"]["active_count"] == 1
+
+
 def test_dashboard_status_degrades_when_runtime_not_ready(
     api_client,
     monkeypatch,
