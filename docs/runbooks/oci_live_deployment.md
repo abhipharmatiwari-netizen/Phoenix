@@ -124,7 +124,9 @@ Runtime secret file names:
 ```
 
 `/run/secrets/admin_kill_switch_override` is file-only. The entrypoint
-must not export it into the backend process environment.
+must not export it into the backend process environment. The fetch
+script owns this file to the backend app user and uses mode `0400` so
+the non-root backend can read it without making it world-readable.
 
 ## Secret Redaction Rule
 

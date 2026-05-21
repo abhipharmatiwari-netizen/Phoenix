@@ -76,7 +76,11 @@ fetch_secret() {
 
   mv "$tmp_path" "$out_path"
   if [ "$secret_name" = "admin_kill_switch_override" ]; then
-    chmod 600 "$out_path"
+    # Backend runs as appuser inside the container. Keep this file-only
+    # override out of env, but make the bind-mounted file readable by that
+    # non-root process. Defaults match the current Dockerfile-created appuser.
+    chown "${ADMIN_KILL_SWITCH_OVERRIDE_UID:-100}:${ADMIN_KILL_SWITCH_OVERRIDE_GID:-101}" "$out_path"
+    chmod 400 "$out_path"
   else
     chmod 644 "$out_path"
   fi
