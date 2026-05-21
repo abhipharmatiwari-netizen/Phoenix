@@ -770,6 +770,26 @@ class AppRuntime:
                     "Leader lease not acquired; trading workers will remain disabled on this instance."
                 )
 
+        hub_runtime_for_startup = None
+        if bool(getattr(settings, "enable_multi_hub", False)) and self._is_leader:
+            try:
+                # Materialize the singleton before the stream worker can touch it.
+                # Otherwise concurrent first access can create a second HubRuntime.
+                hub_runtime_for_startup = self._hub_runtime_getter()
+            except Exception as exc:
+                if bool(
+                    getattr(
+                        settings,
+                        "order_lifecycle_persist_markers_required",
+                        False,
+                    )
+                ):
+                    logger.error(
+                        "AppRuntime startup aborted: required order lifecycle durable marker backend unavailable: %s",
+                        exc,
+                    )
+                raise
+
         if disable_worker:
             logger.info("Stream worker disabled via DISABLE_STREAM_WORKER")
         elif self._is_leader:
@@ -789,21 +809,7 @@ class AppRuntime:
                 logger.warning("Failed to start BQ async writer: %s", exc)
                 self._bq_async_writer_started = False
         if bool(getattr(settings, "enable_multi_hub", False)) and self._is_leader:
-            try:
-                runtime = self._hub_runtime_getter()
-            except Exception as exc:
-                if bool(
-                    getattr(
-                        settings,
-                        "order_lifecycle_persist_markers_required",
-                        False,
-                    )
-                ):
-                    logger.error(
-                        "AppRuntime startup aborted: required order lifecycle durable marker backend unavailable: %s",
-                        exc,
-                    )
-                raise
+            runtime = hub_runtime_for_startup or self._hub_runtime_getter()
             # Architecture startup contract (§11.1 / §64):
             # restore authoritative state → mark RECOVERY_PENDING
             # → broker reconciliation → replay evaluation.

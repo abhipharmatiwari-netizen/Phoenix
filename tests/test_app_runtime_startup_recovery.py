@@ -74,6 +74,12 @@ def _boot_config(trade_mode: str = "PAPER"):
     )
 
 
+def _boot_config_with_stream_worker(trade_mode: str = "PAPER"):
+    cfg = _boot_config(trade_mode=trade_mode)
+    cfg.runtime.disable_stream_worker = False
+    return cfg
+
+
 def _settings():
     return SimpleNamespace(
         app_runtime_startup_validate=False,
@@ -127,6 +133,84 @@ def _patch_runtime_dependencies(monkeypatch, *, strict_mode: bool, trade_mode: s
         monkeypatch.setenv("LIVE_PG_SSL_SKIP_CHECK", "true")
         monkeypatch.setenv("ADMIN_API_KEY", "live-test-key-injected-by-test")
         monkeypatch.setenv("DEMO_AUTH_TOKEN_SECRET", "live-test-secret-injected-by-test")
+
+
+class _FakeWorker:
+    def __init__(self, events: list[str], on_start=None) -> None:
+        self.events = events
+        self.on_start = on_start
+        self.started = False
+
+    def start(self) -> None:
+        self.events.append("stream_worker.start")
+        self.started = True
+        if self.on_start is not None:
+            self.on_start()
+
+    def stop(self) -> None:
+        self.events.append("stream_worker.stop")
+        self.started = False
+
+    def running(self) -> bool:
+        return self.started
+
+
+class _FakeBackgroundWorker:
+    def __init__(self) -> None:
+        self.started = False
+        self.interval_seconds = None
+
+    def configure_interval(self, interval_seconds: float) -> None:
+        self.interval_seconds = interval_seconds
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        self.started = False
+
+    def running(self) -> bool:
+        return self.started
+
+    def status_snapshot(self) -> dict[str, object]:
+        return {"running": self.started}
+
+
+@pytest.mark.asyncio
+async def test_app_runtime_materializes_hub_before_stream_worker(monkeypatch):
+    _patch_runtime_dependencies(monkeypatch, strict_mode=False)
+    monkeypatch.setattr(
+        app_runtime_module,
+        "initialize_boot_config",
+        lambda force=True: _boot_config_with_stream_worker(),
+    )
+
+    events: list[str] = []
+    hub_runtime = SimpleNamespace(
+        hub=_FakeHub(),
+        order_lifecycle=_FakeOrderLifecycle(),
+        order_router=_FakeOrderRouter({"failed": 0, "unresolved_active": 0}),
+    )
+
+    def hub_runtime_getter():
+        events.append("hub_runtime_getter")
+        return hub_runtime
+
+    runtime = AppRuntime(
+        settings_getter=lambda: _settings(),
+        hub_runtime_getter=hub_runtime_getter,
+    )
+    runtime.stream_worker = _FakeWorker(events, on_start=hub_runtime_getter)
+    runtime.watchdog = _FakeBackgroundWorker()
+    runtime.alert_evaluator = _FakeBackgroundWorker()
+
+    await runtime.start()
+
+    assert events[:2] == ["hub_runtime_getter", "stream_worker.start"]
+    assert hub_runtime.hub.initialized is True
+    assert hub_runtime.hub.started is True
+
+    await runtime.stop()
 
 
 @pytest.mark.asyncio
