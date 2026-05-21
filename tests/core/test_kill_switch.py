@@ -262,6 +262,100 @@ def test_kill_switch_disabled_when_limits_are_zero(tmp_path):
     assert rm.kill_switch_activated is False
 
 
+class _FakeFlatPnLEngine:
+    def __init__(self, realized_pnl: float):
+        self.realized_pnl = realized_pnl
+        self._state_store = SimpleNamespace(
+            list_account_snapshots=lambda **_: [
+                SimpleNamespace(net_open_qty=0, control_open_qty=0)
+            ]
+        )
+
+    def get_display_realized_pnl_account(self, tenant_id, broker_account_id):
+        return self.realized_pnl
+
+
+def _patch_cached_hub_runtime(monkeypatch, runtime):
+    hub_runtime = importlib.import_module("app.hub.runtime")
+
+    def fake_get_hub_runtime():
+        return runtime
+
+    fake_get_hub_runtime.cache_info = lambda: SimpleNamespace(currsize=1)
+    monkeypatch.setattr(hub_runtime, "get_hub_runtime", fake_get_hub_runtime)
+
+
+def _make_hub_live_risk_manager(tmp_path):
+    mod = importlib.import_module("app.core.risk_manager")
+    rm = mod.RiskManager(
+        instrument_meta={},
+        order_client=SimpleNamespace(),
+        max_daily_loss=10000.0,
+        max_intraday_drawdown=2000.0,
+        kill_switch_square_off_open_positions=False,
+        state_path=str(tmp_path / "risk_state.json"),
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+    )
+    rm.current_trade_mode = "LIVE"
+    rm.set_operating_mode("HUB_AUTHORITATIVE")
+    return rm
+
+
+def test_hub_authoritative_flat_account_pnl_overrides_legacy_mark_pnl(
+    tmp_path, monkeypatch
+):
+    rm = _make_hub_live_risk_manager(tmp_path)
+    runtime = SimpleNamespace(
+        pnl_engine=_FakeFlatPnLEngine(realized_pnl=-1556.75),
+        state_store=SimpleNamespace(get_positions=lambda account_id: []),
+    )
+    _patch_cached_hub_runtime(monkeypatch, runtime)
+
+    now = dt.datetime(2026, 5, 21, 13, 20, tzinfo=dt.timezone.utc)
+    ist = dt.timezone(dt.timedelta(hours=5, minutes=30))
+    rm.kill_switch_date = now.astimezone(ist).date()
+    rm.daily_peak_equity = 0.0
+    rm.daily_peak_total_pnl = 0.0
+    rm.realized_pnl = -2054.0
+    rm.daily_realized_pnl = -2054.0
+    rm.last_total_pnl = -2054.0
+
+    result = rm.evaluate_account_loss(now=now, source="test", force=True)
+
+    assert rm.kill_switch_activated is False
+    assert result["daily_realized_pnl"] == pytest.approx(-1556.75)
+    assert result["daily_total_pnl"] == pytest.approx(-1556.75)
+    assert result["realized_drawdown"] == pytest.approx(1556.75)
+    assert rm.daily_realized_pnl == pytest.approx(-1556.75)
+
+
+def test_hub_authoritative_pnl_override_requires_flat_broker_positions(
+    tmp_path, monkeypatch
+):
+    rm = _make_hub_live_risk_manager(tmp_path)
+    runtime = SimpleNamespace(
+        pnl_engine=_FakeFlatPnLEngine(realized_pnl=-1556.75),
+        state_store=SimpleNamespace(
+            get_positions=lambda account_id: [{"netqty": "65"}]
+        ),
+    )
+    _patch_cached_hub_runtime(monkeypatch, runtime)
+
+    now = dt.datetime(2026, 5, 21, 13, 20, tzinfo=dt.timezone.utc)
+    ist = dt.timezone(dt.timedelta(hours=5, minutes=30))
+    rm.kill_switch_date = now.astimezone(ist).date()
+    rm.daily_peak_equity = 0.0
+    rm.daily_peak_total_pnl = 0.0
+    rm.realized_pnl = -2054.0
+    rm.daily_realized_pnl = -2054.0
+
+    result = rm.evaluate_account_loss(now=now, source="test", force=True)
+
+    assert rm.kill_switch_activated is True
+    assert result["daily_realized_pnl"] == pytest.approx(-2054.0)
+
+
 def test_kill_switch_no_square_off_when_disabled(risk_manager_with_kill_switch):
     """Test kill switch doesn't square off when kill_switch_square_off_open_positions is False."""
     ist = dt.timezone(dt.timedelta(hours=5, minutes=30))

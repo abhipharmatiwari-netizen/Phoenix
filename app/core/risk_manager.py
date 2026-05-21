@@ -529,6 +529,15 @@ class RiskDecision:
     status: str
     reason: str
 
+
+@dataclass(frozen=True)
+class _AuthoritativeAccountPnL:
+    realized_pnl: float
+    unrealized_pnl: float
+    total_pnl: float
+    source: str
+
+
 # Manage risk checks, order submission, and position state.
 class RiskManager:
     # Initialize risk limits, dependencies, and persisted state.
@@ -2712,6 +2721,121 @@ class RiskManager:
             )
         return float(unrealized_total)
 
+    @staticmethod
+    def _position_net_qty_for_flat_check(position: Any) -> Optional[int]:
+        for key in ("netqty", "net", "quantity", "qty", "net_qty"):
+            if isinstance(position, dict):
+                value = position.get(key)
+            else:
+                value = getattr(position, key, None)
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def _load_hub_authoritative_flat_account_pnl(
+        self,
+    ) -> Optional[_AuthoritativeAccountPnL]:
+        """Use hub PnL only when LIVE hub mode and broker positions are flat."""
+        if str(self.current_trade_mode or "").strip().upper() != "LIVE":
+            return None
+        if str(self._operating_mode or "").strip().upper() not in {
+            "HUB",
+            "HUB_AUTHORITATIVE",
+        }:
+            return None
+        if not self.tenant_id or not self.broker_account_id:
+            return None
+        with self._state_lock:
+            if self.open_positions:
+                return None
+        try:
+            from app.hub.runtime import get_hub_runtime
+
+            cache_info = getattr(get_hub_runtime, "cache_info", None)
+            if not callable(cache_info) or cache_info().currsize == 0:
+                return None
+            runtime = get_hub_runtime()
+        except Exception:
+            return None
+
+        state_store = getattr(runtime, "state_store", None)
+        get_positions = getattr(state_store, "get_positions", None)
+        if not callable(get_positions):
+            return None
+        try:
+            broker_positions = get_positions(self.broker_account_id) or []
+        except Exception as exc:
+            logger.warning(
+                "risk_manager.authoritative_pnl_unavailable: account=%s "
+                "position_store_read_failed=%s",
+                self.broker_account_id,
+                exc,
+            )
+            return None
+        for position in broker_positions:
+            net_qty = self._position_net_qty_for_flat_check(position)
+            if net_qty is None or net_qty != 0:
+                return None
+
+        pnl_engine = getattr(runtime, "pnl_engine", None)
+        pnl_state_store = getattr(pnl_engine, "_state_store", None)
+        list_snapshots = getattr(pnl_state_store, "list_account_snapshots", None)
+        if not callable(list_snapshots):
+            return None
+        try:
+            snapshots = list_snapshots(
+                tenant_id=TenantId(self.tenant_id),
+                broker_account_id=BrokerAccountId(self.broker_account_id),
+            )
+        except Exception as exc:
+            logger.warning(
+                "risk_manager.authoritative_pnl_unavailable: account=%s "
+                "pnl_snapshot_read_failed=%s",
+                self.broker_account_id,
+                exc,
+            )
+            return None
+        if not snapshots:
+            return None
+        for snapshot in snapshots:
+            try:
+                net_open_qty = int(float(getattr(snapshot, "net_open_qty", 0) or 0))
+                control_open_qty = int(
+                    float(getattr(snapshot, "control_open_qty", 0) or 0)
+                )
+            except (TypeError, ValueError):
+                return None
+            if net_open_qty != 0 or control_open_qty != 0:
+                return None
+
+        get_realized = getattr(pnl_engine, "get_display_realized_pnl_account", None)
+        if not callable(get_realized):
+            return None
+        try:
+            tenant_id = TenantId(self.tenant_id)
+            broker_account_id = BrokerAccountId(self.broker_account_id)
+            realized_pnl = float(get_realized(tenant_id, broker_account_id))
+        except Exception as exc:
+            logger.warning(
+                "risk_manager.authoritative_pnl_unavailable: account=%s "
+                "pnl_read_failed=%s",
+                self.broker_account_id,
+                exc,
+            )
+            return None
+        return _AuthoritativeAccountPnL(
+            realized_pnl=realized_pnl,
+            unrealized_pnl=0.0,
+            total_pnl=realized_pnl,
+            source="hub_pnl_engine_flat_account",
+        )
+
     def evaluate_account_loss(
         self,
         *,
@@ -2744,15 +2868,27 @@ class RiskManager:
                     "daily_peak_total_pnl": float(self.daily_peak_total_pnl),
                 }
         self._last_account_loss_eval_mono = now_mono
-        unrealized_pnl = self._compute_open_unrealized_pnl()
+        legacy_unrealized_pnl = self._compute_open_unrealized_pnl()
+        authoritative_pnl = self._load_hub_authoritative_flat_account_pnl()
+        authoritative_source: Optional[str] = None
         with self._state_lock:
+            prior_realized_pnl = float(self.daily_realized_pnl)
             prior_realized_peak = float(self.daily_peak_equity)
             prior_total_peak = float(self.daily_peak_total_pnl)
             prior_unrealized = float(self.last_unrealized_pnl)
             prior_total = float(self.last_total_pnl)
 
-            realized_pnl = float(self.daily_realized_pnl)
-            total_pnl = float(realized_pnl + unrealized_pnl)
+            if authoritative_pnl is not None:
+                realized_pnl = float(authoritative_pnl.realized_pnl)
+                unrealized_pnl = float(authoritative_pnl.unrealized_pnl)
+                total_pnl = float(authoritative_pnl.total_pnl)
+                authoritative_source = authoritative_pnl.source
+                self.realized_pnl = realized_pnl
+                self.daily_realized_pnl = realized_pnl
+            else:
+                realized_pnl = float(self.daily_realized_pnl)
+                unrealized_pnl = float(legacy_unrealized_pnl)
+                total_pnl = float(realized_pnl + unrealized_pnl)
             self.last_unrealized_pnl = float(unrealized_pnl)
             self.last_total_pnl = float(total_pnl)
             self.daily_peak_equity = max(float(self.daily_peak_equity), realized_pnl)
@@ -2796,11 +2932,26 @@ class RiskManager:
             open_labels = list(self.open_positions.keys()) if has_open_positions else []
 
         state_changed = (
-            abs(prior_realized_peak - realized_peak) > 0.0001
+            abs(prior_realized_pnl - realized_pnl) > 0.0001
+            or abs(prior_realized_peak - realized_peak) > 0.0001
             or abs(prior_total_peak - total_peak) > 0.0001
             or abs(prior_unrealized - unrealized_pnl) > 0.0001
             or abs(prior_total - total_pnl) > 0.0001
         )
+        if (
+            authoritative_source is not None
+            and abs(prior_realized_pnl - realized_pnl) > 0.0001
+        ):
+            logger.warning(
+                "risk_manager.authoritative_pnl_override: account=%s source=%s "
+                "legacy_daily_realized=%.2f authoritative_realized=%.2f "
+                "authoritative_total=%.2f",
+                self.broker_account_id,
+                authoritative_source,
+                prior_realized_pnl,
+                realized_pnl,
+                total_pnl,
+            )
         self._publish_account_loss_guard(
             source=source,
             unrealized_pnl=unrealized_pnl,

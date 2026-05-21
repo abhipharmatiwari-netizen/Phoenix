@@ -208,7 +208,9 @@ This subsection documents the status-quo behaviour of the automated exit engines
 
 ### Automatic — daily loss threshold
 
-When realized plus unrealized PnL crosses `-abs(RISK_MAX_DAILY_LOSS)`, the system automatically activates the durable kill switch (Codex #256 round-1 P2 correction). **The auto-trip is always GLOBAL** — the bridge in `app/core/risk_manager.py:572-576` calls `ksm.trip(KillSwitchScope.GLOBAL, "GLOBAL", ...)` unconditionally, irrespective of which account / strategy crossed the threshold. There is no per-account or per-strategy durable record produced on this path. Operators clearing a daily-loss auto-trip must therefore look up and clear the `GLOBAL` record (one durable trip blocks the whole hub), not a per-account scope.
+When realized plus unrealized PnL crosses `-abs(RISK_MAX_DAILY_LOSS)`, the system automatically activates the durable kill switch (Codex #256 round-1 P2 correction). **The auto-trip is always GLOBAL** — the bridge in `RiskManager.evaluate_account_loss()` calls `ksm.trip(KillSwitchScope.GLOBAL, "GLOBAL", ...)` unconditionally, irrespective of which account / strategy crossed the threshold. There is no per-account or per-strategy durable record produced on this path. Operators clearing a daily-loss auto-trip must therefore look up and clear the `GLOBAL` record (one durable trip blocks the whole hub), not a per-account scope.
+
+In `LIVE` + `HUB_AUTHORITATIVE` mode, a flat account's loss check uses the hub `PnLEngine` display-realized PnL when both the hub `StateStore` and PnL snapshots confirm there is no open broker quantity. The legacy `risk_positions.json` PnL is then treated as a stream-runtime shadow, not the authority. If the hub position/PnL read fails or any open quantity remains, the legacy path is used fail-closed. This prevents stale mark-based legacy close PnL from re-tripping the kill switch after broker fills have flattened the account while keeping conservative behavior when position authority is uncertain.
 
 See [Capital Limits Configuration](capital_limits_configuration.md) for daily-loss
 and capital-limit sizing guidance.
