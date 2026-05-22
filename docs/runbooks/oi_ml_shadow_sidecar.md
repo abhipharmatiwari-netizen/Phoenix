@@ -1,7 +1,7 @@
 # OI/ML Shadow Sidecar Runbook
 
 Status: current progress record for the OI/ML CE seller shadow sidecar as of
-2026-05-21 IST.
+2026-05-23 IST.
 
 This sidecar is a dry-run research and validation process. It must not place,
 modify, cancel, or exit live orders. It runs beside the live OCI stack, publishes
@@ -13,10 +13,10 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 | Area | State |
 |---|---|
 | Branch | `oi-ml-shadow-sidecar` |
-| Latest deployed sidecar commit | `50513ec` |
+| Latest deployed sidecar commit | `bd999cd` |
 | OCI checkout | `/opt/phoenix/oi-ml-shadow-src` |
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
-| Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-50513ec` |
+| Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd` |
 | Container | `phoenix-oi-ml-shadow` |
 | Database tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`, `public.option_chain_validation_reports` |
 | Default scorer | `missing` in compose; deployed smoke override uses `constant` |
@@ -34,6 +34,15 @@ Recent validation:
   backend `phoenix-local-backend:local-e1f9ddb`, nginx
   `phoenix-local-nginx:local-349d55f`, sidecar
   `phoenix-oi-ml-shadow:oi-ml-shadow-50513ec`.
+- 2026-05-23 00:12 IST NSE-validation fix deployment: sidecar image
+  `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd` is healthy. From inside the
+  sidecar, the classic NSE option-chain API returned no usable reference rows,
+  while the live-derivatives fallback returned `288` NIFTY `2026-05-26`
+  reference rows. A read-only compare against the latest stored Angel snapshot
+  showed `814` Angel rows, `288` NSE fallback rows, `288` compared contracts,
+  `526` Angel-only contracts, `0` NSE-only contracts, and `215` common-contract
+  mismatches. Remaining mismatch fields were OI, LTP, and volume; IV/bid/ask
+  were skipped because the fallback endpoint does not publish them.
 - Post-rectification `/readyz` returned `ready=true`, backend/nginx were
   healthy, and `/health/summary` reported `status=degraded` with
   `oi_ml_shadow_ingestion_degraded` because 2026-05-20 IST sidecar evidence was
@@ -49,9 +58,10 @@ Recent validation:
   because scorer was fail-closed for the smoke run.
 - Off-market validation smoke on 2026-05-18 22:13 IST proved automatic
   NSE-validation report persistence: `report_id=1`, `220` Angel rows,
-  `0` NSE comparable rows, status `MISMATCH/WARN`. This is expected to remain a
-  promotion blocker until a market-window run shows fresh Angel IV and NSE
-  comparable contracts.
+  `0` NSE comparable rows, status `MISMATCH/WARN`. This old zero-reference
+  condition is no longer treated as a provider mismatch: empty reference pulls
+  now persist `ERROR/ERROR`, and NIFTY validation falls back to NSE
+  live-derivatives rows when available.
 - 2026-05-21 live investigation found the sidecar had blank proxy env values
   because compose-time interpolation overrode `/opt/phoenix/phoenix-deploy.env`.
   The compose file now relies on `env_file` for `ANGEL_HTTPS_PROXY` and
@@ -74,7 +84,7 @@ Recent validation:
 | Sidecar compose | `ops/compose/docker-compose.oi-ml-shadow.yml` | Done |
 | Broker proxy/session reuse | `ops/compose/docker-compose.oi-ml-shadow.yml`, `app/data/oi_snapshotter_runtime.py` | Done |
 | Provider-filter SQL typing | `app/data/option_chain_repository.py` | Done |
-| NSE web validation adapter | `app/data/nse_option_chain_provider.py`, `app/data/option_chain_validation.py`, `scripts/data/validate_nse_vs_angel_option_chain.py` | Done, validation-only |
+| NSE web validation adapter | `app/data/nse_option_chain_provider.py`, `app/data/option_chain_validation.py`, `scripts/data/validate_nse_vs_angel_option_chain.py` | Done, validation-only; NIFTY falls back to NSE live-derivatives rows if the classic option-chain JSON is empty |
 | Continuous NSE validation loop | `app/data/option_chain_realtime_validator.py`, `app/data/option_chain_validation_store.py`, `migrations/023_option_chain_validation_reports.sql` | Done, opt-in via env |
 | Read-time NSE IV enrichment | `app/data/option_chain_repository.py` | Done, exact-contract enrichment for Angel reads from recent `provider='nse_web'` rows |
 | Strategy scaffold | `app/strategies/oi_ml_ce_seller.py` | Done, fail-closed and disabled by default |
@@ -194,7 +204,7 @@ SELECT
   ) AS flagged_angel_rows
 FROM public.option_chain_1m
 WHERE underlying = 'NIFTY'
-  AND expiry = DATE '2026-05-19'
+  AND expiry = DATE '2026-05-26'
   AND snapshot_ts >= now() - interval '1 day';
 ```
 
@@ -205,7 +215,8 @@ Expected result before promotion:
   and `vix_rows` should be close to `angel_rows`.
 - `direct_angel_iv_rows` may be low if Angel omits IV. In that case, confirm
   `nse_iv_rows` exists for matching fresh rows and repository-returned quotes
-  carry `iv_enrichment_mode=read_time`.
+  carry `iv_enrichment_mode=read_time`. NSE live-derivatives fallback rows do
+  not contain IV and do not satisfy this promotion proof.
 - Any `flagged_angel_rows` must be explained and must not include required candidate
   strikes.
 
@@ -213,13 +224,17 @@ Earlier sidecar login timeouts were fixed by forwarding the same broker proxy
 environment used by the live backend and by reusing a read-only Angel quote
 session. The field-completeness gate is still open until a live market-window
 snapshot shows fresh source timestamps and usable IV, either direct from Angel
-or enriched from stored NSE validation rows.
+or enriched from stored NSE validation rows that include IV.
 
 ## NSE Cross-Validation
 
-NSE's public option-chain page can be used as an operator-triggered validation
-source for OI, volume, IV, bid, ask, and LTP. It must not be used as a live
-trading feed or order-routing dependency.
+NSE's public option-chain data can be used as an operator-triggered validation
+source. It must not be used as a live trading feed or order-routing dependency.
+The preferred classic NSE option-chain JSON can validate OI, volume, IV, bid,
+ask, and LTP. On the OCI VM, that endpoint has been observed returning HTTP 200
+with an empty JSON object; for NIFTY only, the adapter then falls back to NSE's
+live-derivatives endpoint and validates the fields that endpoint publishes:
+OI, volume, and LTP.
 
 Automatic continuous validation is available inside the OI/ML sidecar and the
 sidecar compose defaults `OI_ML_ENABLE_NSE_VALIDATION=true`. When enabled, each
@@ -227,18 +242,30 @@ captured Angel snapshot triggers validation. The snapshot/validation window is
 separate from the entry window: data capture runs from `09:15` to `15:30` IST,
 while shadow trade decisions remain restricted to `09:45` to `14:30` IST.
 
-- an NSE web option-chain pull for the same underlying/expiry;
+- an NSE web option-chain pull for the same underlying/expiry, with NIFTY
+  fallback to `liveEquity-derivatives` when the classic payload is empty;
 - optional NSE quote persistence as `provider='nse_web'`;
-- an Angel-vs-NSE comparison for OI, volume, IV, bid, ask, and LTP;
+- an Angel-vs-NSE comparison for comparable fields;
 - one compact container-log observation per snapshot, with warnings for
   mismatches, provider-only contracts, missing IV, or fetch errors;
 - a full JSON report in `public.option_chain_validation_reports` for EOD review.
 
+When the live-derivatives fallback is used, reference quotes are tagged with
+`nse_source=live_equity_derivatives`. The realtime validator records
+`reference_sources=["live_equity_derivatives"]` and
+`skipped_missing_reference_fields=["ask","bid","iv"]` in report metadata. The
+fallback normalizes NSE open interest into the broker-unit convention used by
+stored Angel rows. If NSE still returns no comparable rows, the validator records
+`ERROR/ERROR` with `nse_reference_quotes_empty` instead of a misleading
+`MISMATCH/WARN` zero-reference report.
+
 The strategy repository may use stored `nse_web` rows only to fill missing IV in
-the returned in-memory Angel quote. It requires the same underlying, expiry,
-strike, and option type, and the reference snapshot must be no more than 120
-seconds older than the Angel snapshot. This is enrichment for shadow analytics,
-not an order-routing dependency, and raw stored provider rows remain separate.
+the returned in-memory Angel quote when those rows actually contain IV. It
+requires the same underlying, expiry, strike, and option type, and the reference
+snapshot must be no more than 120 seconds older than the Angel snapshot. This is
+enrichment for shadow analytics, not an order-routing dependency, and raw stored
+provider rows remain separate. The live-derivatives fallback does not contain
+IV, so it is validation evidence for OI/volume/LTP only.
 
 Sidecar env:
 
@@ -336,7 +363,7 @@ Restart the sidecar with smoke constants:
 
 ```bash
 cd /opt/phoenix
-IMAGE_TAG=oi-ml-shadow-50513ec \
+IMAGE_TAG=oi-ml-shadow-bd999cd \
 OI_ML_SHADOW_SCORER=constant \
 OI_ML_SHADOW_CONSTANT_PROBABILITY=0.64 \
 OI_ML_SHADOW_CONSTANT_MAE_PREMIUM=40 \

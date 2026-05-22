@@ -44,12 +44,13 @@ dry-run only, publishes no host ports, and records option-chain snapshots plus
 shadow order intents in Postgres. It must not be used as evidence that live order
 routing is enabled.
 
-Current sidecar evidence as of 2026-05-20 IST:
+Current sidecar evidence as of 2026-05-23 IST:
 
-- image: `phoenix-oi-ml-shadow:oi-ml-shadow-50513ec`
+- image: `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd`
 - checkout: `/opt/phoenix/oi-ml-shadow-src`
 - compose: `/opt/phoenix/oi-ml-shadow.yml`
-- tables: `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`
+- tables: `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`,
+  `public.option_chain_validation_reports`
 - scorer: smoke deployment uses `OI_ML_SHADOW_SCORER=constant`
 - broker access: sidecar forwards backend broker proxy env and reuses the Angel
   quote session during snapshotting
@@ -57,8 +58,13 @@ Current sidecar evidence as of 2026-05-20 IST:
   `OI_ML_SHADOW_HEALTH_ENABLED=true` to observe the external sidecar without
   enabling the runner inside the live backend; the sidecar also has a Docker
   healthcheck
-- IV handling: missing Angel IV is enriched at read time from fresh exact-contract
-  `nse_web` validation rows; raw provider rows remain separate
+- NSE validation: the sidecar falls back to NSE live-derivatives rows when the
+  classic NSE option-chain JSON endpoint returns an empty payload; this fallback
+  validates OI/volume/LTP only and records skipped IV/bid/ask fields in report
+  metadata
+- IV handling: missing Angel IV is enriched at read time only when fresh
+  exact-contract `nse_web` rows contain IV; the live-derivatives fallback does
+  not supply IV, so it is not promotion evidence for IV enrichment
 - promotion blocker: market-session hard-field completeness and fresh source
   timestamps still must be proven
 
