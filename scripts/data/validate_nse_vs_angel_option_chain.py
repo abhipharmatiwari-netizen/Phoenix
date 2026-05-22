@@ -29,6 +29,7 @@ from app.data.option_chain_store import OptionChainStore  # noqa: E402
 from app.data.option_chain_validation import (  # noqa: E402
     OptionChainValidationConfig,
     compare_angel_to_nse,
+    expected_missing_reference_fields,
 )
 from app.data.postgres import connect_with_retry, get_control_plane_dsn  # noqa: E402
 
@@ -122,6 +123,9 @@ def main(argv: list[str] | None = None) -> int:
         "nse_rows_stored": stored_nse_rows,
         "validation_only": True,
     }
+    skipped_reference_fields = expected_missing_reference_fields(nse_quotes)
+    if skipped_reference_fields:
+        metadata["skipped_missing_reference_fields"] = list(skipped_reference_fields)
     if not angel_quotes:
         payload = _empty_report(
             underlying=underlying,
@@ -144,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
             price_pct_tolerance=args.price_pct_tolerance,
             iv_abs_tolerance=args.iv_abs_tolerance,
             iv_pct_tolerance=args.iv_pct_tolerance,
+            skip_missing_reference_fields=skipped_reference_fields,
         ),
         metadata=metadata,
     )

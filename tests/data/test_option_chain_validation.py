@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 
 from app.data.option_chain_provider import OptionQuote
-from app.data.option_chain_validation import compare_angel_to_nse
+from app.data.option_chain_validation import (
+    OptionChainValidationConfig,
+    compare_angel_to_nse,
+    expected_missing_reference_fields,
+)
 
 
 def _quote(**overrides):
@@ -87,3 +91,30 @@ def test_compare_angel_to_nse_counts_missing_iv_by_provider():
     assert report.missing_angel_iv == 1
     assert report.missing_nse_iv == 0
     assert report.to_dict()["mismatches"][0]["field_diffs"][0]["field"] == "iv"
+
+
+def test_compare_angel_to_nse_can_skip_expected_missing_reference_fields():
+    angel = [_quote()]
+    nse = [
+        _quote(
+            provider="nse_web",
+            iv=None,
+            bid=None,
+            ask=None,
+            quality_flags={
+                "missing_reference_fields_expected": ["ask", "bid", "iv"],
+            },
+        )
+    ]
+    skipped = expected_missing_reference_fields(nse)
+
+    report = compare_angel_to_nse(
+        angel,
+        nse,
+        config=OptionChainValidationConfig(skip_missing_reference_fields=skipped),
+    )
+
+    assert skipped == ("ask", "bid", "iv")
+    assert report.ok is True
+    assert report.missing_nse_iv == 0
+    assert report.to_dict()["mismatches"] == []

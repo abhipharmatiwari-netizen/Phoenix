@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 import logging
 from typing import Any, Mapping, Protocol, Sequence
@@ -11,6 +11,7 @@ from app.data.option_chain_provider import OptionChainProvider, OptionQuote
 from app.data.option_chain_validation import (
     OptionChainValidationConfig,
     compare_angel_to_nse,
+    expected_missing_reference_fields,
 )
 from app.data.option_chain_validation_store import (
     OptionChainValidationReportStore,
@@ -88,25 +89,68 @@ class RealtimeOptionChainValidator:
                     snapshot_ts=snapshot_ts,
                 )
             )
+            if primary_quotes and not reference_quotes:
+                error = (
+                    "nse_reference_quotes_empty: no comparable NSE rows "
+                    f"underlying={normalized_underlying} expiry={expiry.isoformat()}"
+                )
+                logger.warning(
+                    "oi_chain_validation reference feed empty underlying=%s expiry=%s "
+                    "snapshot_ts=%s primary_quotes=%d",
+                    normalized_underlying,
+                    expiry.isoformat(),
+                    snapshot_ts.isoformat(),
+                    len(primary_quotes),
+                )
+                if self.config.fail_on_error:
+                    raise RuntimeError(error)
+                result = self._record_error(
+                    underlying=normalized_underlying,
+                    expiry=expiry,
+                    snapshot_ts=snapshot_ts,
+                    validation_ts=validation_ts,
+                    error=error,
+                    primary_quote_count=len(primary_quotes),
+                )
+                return result
             stored_reference_rows = 0
             if self.config.store_reference_quotes and self.reference_quote_store is not None:
                 stored_reference_rows = int(self.reference_quote_store.upsert_quotes(reference_quotes))
 
+            skipped_reference_fields = expected_missing_reference_fields(reference_quotes)
+            validation_config = self.config.validation_config
+            if skipped_reference_fields:
+                validation_config = replace(
+                    validation_config,
+                    skip_missing_reference_fields=tuple(
+                        sorted(
+                            set(validation_config.skip_missing_reference_fields)
+                            | set(skipped_reference_fields)
+                        )
+                    ),
+                )
+            metadata = {
+                "auto_realtime_validation": True,
+                "validation_only": True,
+                "snapshot_ts": snapshot_ts.isoformat(),
+                "validation_ts": validation_ts.isoformat(),
+                "primary_provider": self.primary_provider_name,
+                "reference_provider": self.reference_provider_name,
+                "primary_quote_count": len(primary_quotes),
+                "reference_quote_count": len(reference_quotes),
+                "stored_reference_rows": stored_reference_rows,
+            }
+            reference_sources = _reference_sources(reference_quotes)
+            if reference_sources:
+                metadata["reference_sources"] = reference_sources
+            if skipped_reference_fields:
+                metadata["skipped_missing_reference_fields"] = list(skipped_reference_fields)
+
             report = compare_angel_to_nse(
                 list(primary_quotes),
                 reference_quotes,
-                config=self.config.validation_config,
-                metadata={
-                    "auto_realtime_validation": True,
-                    "validation_only": True,
-                    "snapshot_ts": snapshot_ts.isoformat(),
-                    "validation_ts": validation_ts.isoformat(),
-                    "primary_provider": self.primary_provider_name,
-                    "reference_provider": self.reference_provider_name,
-                    "primary_quote_count": len(primary_quotes),
-                    "reference_quote_count": len(reference_quotes),
-                    "stored_reference_rows": stored_reference_rows,
-                },
+                config=validation_config,
+                metadata=metadata,
             )
             payload = report.to_dict()
             status, severity = _status_and_severity(payload)
@@ -258,6 +302,16 @@ def _status_and_severity(payload: Mapping[str, Any]) -> tuple[str, str]:
     if payload.get("metadata", {}).get("error"):
         return "ERROR", "ERROR"
     return "MISMATCH", "WARN"
+
+
+def _reference_sources(quotes: Sequence[OptionQuote]) -> list[str]:
+    sources: set[str] = set()
+    for quote in quotes:
+        flags = dict(getattr(quote, "quality_flags", None) or {})
+        source = str(flags.get("nse_source") or "").strip()
+        if source:
+            sources.add(source)
+    return sorted(sources)
 
 
 def _has_missing_iv(payload: Mapping[str, Any]) -> bool:

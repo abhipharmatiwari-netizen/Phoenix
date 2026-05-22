@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
@@ -18,6 +19,7 @@ class OptionChainValidationConfig:
     price_pct_tolerance: float = 0.01
     iv_abs_tolerance: float = 0.50
     iv_pct_tolerance: float = 0.05
+    skip_missing_reference_fields: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -105,9 +107,19 @@ def compare_angel_to_nse(
     nse_keys = set(nse)
     common_keys = sorted(angel_keys & nse_keys)
 
+    skip_missing_reference_fields = {
+        str(field_name).strip().lower()
+        for field_name in cfg.skip_missing_reference_fields
+        if str(field_name).strip()
+    }
     mismatches: list[OptionChainContractDiff] = []
     for key in common_keys:
-        diffs = _compare_quote_fields(angel[key], nse[key], cfg)
+        diffs = _compare_quote_fields(
+            angel[key],
+            nse[key],
+            cfg,
+            skip_missing_reference_fields=skip_missing_reference_fields,
+        )
         if diffs:
             strike, option_type = key
             mismatches.append(
@@ -128,7 +140,9 @@ def compare_angel_to_nse(
         nse_only_contracts=tuple(sorted(nse_keys - angel_keys)),
         mismatches=tuple(mismatches),
         missing_angel_iv=sum(1 for quote in angel.values() if quote.iv is None),
-        missing_nse_iv=sum(1 for quote in nse.values() if quote.iv is None),
+        missing_nse_iv=0
+        if "iv" in skip_missing_reference_fields
+        else sum(1 for quote in nse.values() if quote.iv is None),
         metadata=metadata or {},
     )
 
@@ -137,6 +151,8 @@ def _compare_quote_fields(
     angel: OptionQuote,
     nse: OptionQuote,
     cfg: OptionChainValidationConfig,
+    *,
+    skip_missing_reference_fields: set[str],
 ) -> list[OptionChainFieldDiff]:
     diffs: list[OptionChainFieldDiff] = []
     field_specs = (
@@ -154,10 +170,38 @@ def _compare_quote_fields(
             getattr(nse, field_name),
             abs_tolerance=abs_tolerance,
             pct_tolerance=pct_tolerance,
+            skip_missing_reference=field_name in skip_missing_reference_fields,
         )
         if diff is not None:
             diffs.append(diff)
     return diffs
+
+
+def expected_missing_reference_fields(quotes: Sequence[OptionQuote]) -> tuple[str, ...]:
+    """Return reference fields explicitly marked unavailable by the provider."""
+    expected_sets: list[set[str]] = []
+    for quote in quotes:
+        flags = dict(getattr(quote, "quality_flags", None) or {})
+        fields = flags.get("missing_reference_fields_expected") or ()
+        if isinstance(fields, str) or not isinstance(fields, Iterable):
+            continue
+        expected = {
+            str(field_name).strip().lower()
+            for field_name in fields
+            if str(field_name).strip()
+        }
+        if expected:
+            expected_sets.append(expected)
+    if not expected_sets:
+        return ()
+    common_expected = set.intersection(*expected_sets)
+    normalized_quotes = [quote.normalized() for quote in quotes]
+    skipped = [
+        field_name
+        for field_name in common_expected
+        if all(getattr(quote, field_name, None) is None for quote in normalized_quotes)
+    ]
+    return tuple(sorted(skipped))
 
 
 def _compare_field(
@@ -167,9 +211,12 @@ def _compare_field(
     *,
     abs_tolerance: Decimal,
     pct_tolerance: Decimal | None,
+    skip_missing_reference: bool = False,
 ) -> OptionChainFieldDiff | None:
     angel_decimal = _decimal(angel_value)
     nse_decimal = _decimal(nse_value)
+    if skip_missing_reference and nse_decimal is None:
+        return None
     if angel_decimal is None or nse_decimal is None:
         if angel_decimal == nse_decimal:
             return None
@@ -240,4 +287,5 @@ __all__ = [
     "OptionChainValidationConfig",
     "OptionChainValidationReport",
     "compare_angel_to_nse",
+    "expected_missing_reference_fields",
 ]

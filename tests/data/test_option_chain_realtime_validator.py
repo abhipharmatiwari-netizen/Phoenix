@@ -130,6 +130,66 @@ def test_realtime_validator_warns_and_persists_mismatch(caplog):
     assert "mismatches=1" in caplog.text
 
 
+def test_realtime_validator_skips_fallback_reference_fields_missing_by_design():
+    primary = [_quote()]
+    reference = [
+        _quote(
+            provider="nse_web",
+            iv=None,
+            bid=None,
+            ask=None,
+            quality_flags={
+                "nse_source": "live_equity_derivatives",
+                "missing_reference_fields_expected": ["ask", "bid", "iv"],
+            },
+        )
+    ]
+    report_store = FakeReportStore()
+    validator = RealtimeOptionChainValidator(
+        reference_provider=FakeReferenceProvider(reference),
+        report_store=report_store,
+        config=RealtimeOptionChainValidationConfig(enabled=True),
+    )
+
+    result = validator.validate(
+        primary_quotes=primary,
+        underlying="NIFTY",
+        expiry=date(2026, 5, 19),
+        snapshot_ts=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+    )
+
+    assert result is not None
+    assert result.status == "OK"
+    assert result.severity == "INFO"
+    metadata = report_store.calls[0]["payload"]["metadata"]
+    assert metadata["reference_sources"] == ["live_equity_derivatives"]
+    assert metadata["skipped_missing_reference_fields"] == ["ask", "bid", "iv"]
+
+
+def test_realtime_validator_records_error_when_reference_feed_returns_no_rows():
+    report_store = FakeReportStore()
+    validator = RealtimeOptionChainValidator(
+        reference_provider=FakeReferenceProvider([]),
+        report_store=report_store,
+        config=RealtimeOptionChainValidationConfig(enabled=True),
+    )
+
+    result = validator.validate(
+        primary_quotes=[_quote()],
+        underlying="NIFTY",
+        expiry=date(2026, 5, 19),
+        snapshot_ts=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+    )
+
+    assert result is not None
+    assert result.status == "ERROR"
+    assert result.severity == "ERROR"
+    assert result.error is not None
+    assert "nse_reference_quotes_empty" in result.error
+    assert report_store.calls[0]["reference_quote_count"] == 0
+    assert report_store.calls[0]["payload"]["metadata"]["reference_quote_count"] == 0
+
+
 def test_realtime_validator_records_error_without_raising_by_default():
     report_store = FakeReportStore()
     validator = RealtimeOptionChainValidator(

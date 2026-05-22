@@ -27,6 +27,14 @@ logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 NSE_OPTION_CHAIN_URL = "https://www.nseindia.com/option-chain"
 NSE_OPTION_CHAIN_API_URL = "https://www.nseindia.com/api/option-chain-indices"
+NSE_MARKET_OPTION_CHAIN_URL = "https://www.nseindia.com/market-data/option-chain"
+NSE_LIVE_EQUITY_DERIVATIVES_API_URL = (
+    "https://www.nseindia.com/api/liveEquity-derivatives"
+)
+NSE_LIVE_EQUITY_INDEX_PARAMS = {
+    "NIFTY": "nse50_opt",
+}
+NSE_LIVE_EQUITY_SOURCE = "live_equity_derivatives"
 
 
 class NseOptionChainClient(Protocol):
@@ -69,7 +77,60 @@ class NseWebOptionChainClient:
             payload = json.loads(response.read().decode("utf-8", errors="replace"))
         if not isinstance(payload, Mapping):
             raise ValueError(f"NSE option-chain payload type={type(payload).__name__} is invalid")
-        return payload
+        if _has_option_chain_rows(payload):
+            return payload
+
+        fallback_payload = self._fetch_live_equity_derivatives(
+            opener,
+            symbol=resolved_symbol,
+        )
+        if fallback_payload is not None:
+            return fallback_payload
+        raise ValueError(
+            f"NSE option-chain payload contained no comparable rows for symbol={resolved_symbol}"
+        )
+
+    def _fetch_live_equity_derivatives(
+        self,
+        opener: Any,
+        *,
+        symbol: str,
+    ) -> Mapping[str, Any] | None:
+        index_param = NSE_LIVE_EQUITY_INDEX_PARAMS.get(symbol)
+        if not index_param:
+            return None
+        try:
+            opener.open(
+                Request(
+                    NSE_MARKET_OPTION_CHAIN_URL,
+                    headers=self._headers(referer=NSE_MARKET_OPTION_CHAIN_URL),
+                ),
+                timeout=float(self.timeout_seconds),
+            ).close()
+        except Exception as exc:  # noqa: BLE001 - fallback API may still work.
+            logger.debug("NSE market option-chain warmup failed: %s", exc)
+        fallback_url = (
+            f"{NSE_LIVE_EQUITY_DERIVATIVES_API_URL}?"
+            f"{urlencode({'index': index_param})}"
+        )
+        with opener.open(
+            Request(
+                fallback_url,
+                headers=self._headers(referer=NSE_MARKET_OPTION_CHAIN_URL),
+            ),
+            timeout=float(self.timeout_seconds),
+        ) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        if not isinstance(payload, Mapping):
+            raise ValueError(
+                f"NSE live-derivatives payload type={type(payload).__name__} is invalid"
+            )
+        if not _has_live_equity_rows(payload):
+            return None
+        tagged_payload = dict(payload)
+        tagged_payload["__phoenix_nse_source"] = NSE_LIVE_EQUITY_SOURCE
+        tagged_payload["__phoenix_nse_symbol"] = symbol
+        return tagged_payload
 
     def _headers(self, *, referer: str) -> dict[str, str]:
         return {
@@ -134,6 +195,17 @@ def parse_nse_option_chain_payload(
     normalized_provider = str(provider or "").strip().lower() or "nse_web"
     snapshot = _aware_utc(snapshot_ts)
 
+    live_rows = _live_equity_rows(payload)
+    if not rows and live_rows:
+        return _parse_live_equity_derivatives_rows(
+            live_rows,
+            payload=payload,
+            underlying=normalized_underlying,
+            expiry=expiry,
+            snapshot=snapshot,
+            provider=normalized_provider,
+        )
+
     quotes: list[OptionQuote] = []
     for row in rows:
         if not isinstance(row, Mapping):
@@ -185,11 +257,104 @@ def parse_nse_option_chain_payload(
     return sorted(quotes, key=lambda q: (q.strike, q.option_type))
 
 
+def _parse_live_equity_derivatives_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    payload: Mapping[str, Any],
+    underlying: str,
+    expiry: date,
+    snapshot: datetime,
+    provider: str,
+) -> list[OptionQuote]:
+    source_ts = _parse_nse_timestamp(_first(payload, "timestamp", "timeStamp"))
+    quotes: list[OptionQuote] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        row_expiry = _parse_expiry(_first(row, "expiryDate", "expiry"))
+        if row_expiry != expiry:
+            continue
+        row_underlying = str(_first(row, "underlying", "symbol") or "").strip().upper()
+        identifier = _optional_text(_first(row, "identifier"))
+        if row_underlying and row_underlying != underlying:
+            continue
+        if (
+            not row_underlying
+            and identifier
+            and not identifier.upper().startswith(f"OPTIDX{underlying}")
+        ):
+            continue
+        strike = _parse_strike(_first(row, "strikePrice", "strike"))
+        if strike <= 0:
+            continue
+        option_type = _parse_live_equity_option_type(
+            _first(row, "optionType", "option_type")
+        )
+        if option_type is None:
+            continue
+        symbol = identifier or _fallback_symbol(
+            underlying=underlying,
+            expiry=expiry,
+            strike=strike,
+            option_type=option_type,
+        )
+        quotes.append(
+            OptionQuote(
+                snapshot_ts=snapshot,
+                source_ts=source_ts,
+                underlying=underlying,
+                expiry=expiry,
+                strike=strike,
+                option_type=option_type,
+                trading_symbol=symbol,
+                exchange="NFO",
+                symbol_token=identifier,
+                provider=provider,
+                oi=_first(row, "openInterest", "oi"),
+                volume=_first(row, "totalTradedVolume", "volume"),
+                iv=None,
+                bid=None,
+                ask=None,
+                ltp=_first(row, "lastPrice", "ltp"),
+                underlying_ltp=_first(row, "underlyingValue", "underlying_ltp"),
+                raw_hash=_raw_hash(row),
+                quality_flags={
+                    "validation_source_only": True,
+                    "nse_source": NSE_LIVE_EQUITY_SOURCE,
+                    "missing_reference_fields_expected": ["ask", "bid", "iv"],
+                },
+            )
+        )
+    return sorted(quotes, key=lambda q: (q.strike, q.option_type))
+
+
 def _data_rows(section: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     data = section.get("data")
     if isinstance(data, Sequence) and not isinstance(data, (str, bytes)):
         return [row for row in data if isinstance(row, Mapping)]
     return []
+
+
+def _live_equity_rows(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    if payload.get("__phoenix_nse_source") != NSE_LIVE_EQUITY_SOURCE:
+        return []
+    data = payload.get("data")
+    if isinstance(data, Sequence) and not isinstance(data, (str, bytes)):
+        return [row for row in data if isinstance(row, Mapping)]
+    return []
+
+
+def _has_option_chain_rows(payload: Mapping[str, Any]) -> bool:
+    records = payload.get("records")
+    filtered = payload.get("filtered")
+    record_map = records if isinstance(records, Mapping) else {}
+    filtered_map = filtered if isinstance(filtered, Mapping) else {}
+    return bool(_data_rows(record_map) or _data_rows(filtered_map))
+
+
+def _has_live_equity_rows(payload: Mapping[str, Any]) -> bool:
+    data = payload.get("data")
+    return isinstance(data, Sequence) and not isinstance(data, (str, bytes)) and bool(data)
 
 
 def _first(payload: Mapping[str, Any], *keys: str) -> Any:
@@ -241,6 +406,15 @@ def _parse_expiry(value: Any) -> date | None:
         return None
 
 
+def _parse_live_equity_option_type(value: Any) -> str | None:
+    text = str(value or "").strip().upper()
+    if text in {"CE", "CALL"}:
+        return "CE"
+    if text in {"PE", "PUT"}:
+        return "PE"
+    return None
+
+
 def _parse_strike(value: Any) -> int:
     parsed = _decimal(value)
     if parsed is None:
@@ -284,6 +458,9 @@ def _aware_utc(value: datetime) -> datetime:
 
 
 __all__ = [
+    "NSE_LIVE_EQUITY_DERIVATIVES_API_URL",
+    "NSE_LIVE_EQUITY_SOURCE",
+    "NSE_MARKET_OPTION_CHAIN_URL",
     "NSE_OPTION_CHAIN_API_URL",
     "NSE_OPTION_CHAIN_URL",
     "NseOptionChainProvider",
