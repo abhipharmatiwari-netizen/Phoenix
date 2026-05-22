@@ -34,6 +34,9 @@ NSE_LIVE_EQUITY_DERIVATIVES_API_URL = (
 NSE_LIVE_EQUITY_INDEX_PARAMS = {
     "NIFTY": "nse50_opt",
 }
+NSE_LIVE_EQUITY_OI_LOT_SIZE = {
+    "NIFTY": 75,
+}
 NSE_LIVE_EQUITY_SOURCE = "live_equity_derivatives"
 
 
@@ -310,7 +313,10 @@ def _parse_live_equity_derivatives_rows(
                 exchange="NFO",
                 symbol_token=identifier,
                 provider=provider,
-                oi=_first(row, "openInterest", "oi"),
+                oi=_scale_live_equity_open_interest(
+                    _first(row, "openInterest", "oi"),
+                    underlying=underlying,
+                ),
                 volume=_first(row, "totalTradedVolume", "volume"),
                 iv=None,
                 bid=None,
@@ -321,6 +327,10 @@ def _parse_live_equity_derivatives_rows(
                 quality_flags={
                     "validation_source_only": True,
                     "nse_source": NSE_LIVE_EQUITY_SOURCE,
+                    "nse_open_interest_unit": "underlying_units",
+                    "nse_open_interest_lot_size": NSE_LIVE_EQUITY_OI_LOT_SIZE.get(
+                        underlying
+                    ),
                     "missing_reference_fields_expected": ["ask", "bid", "iv"],
                 },
             )
@@ -415,11 +425,33 @@ def _parse_live_equity_option_type(value: Any) -> str | None:
     return None
 
 
+def _scale_live_equity_open_interest(value: Any, *, underlying: str) -> int | None:
+    oi = _optional_int(value)
+    if oi is None:
+        return None
+    lot_size = NSE_LIVE_EQUITY_OI_LOT_SIZE.get(underlying)
+    if lot_size is None:
+        return oi
+    return oi * int(lot_size)
+
+
 def _parse_strike(value: Any) -> int:
     parsed = _decimal(value)
     if parsed is None:
         return 0
     return int(parsed.to_integral_value())
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except Exception:
+        try:
+            return int(float(value))
+        except Exception:
+            return None
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -459,6 +491,7 @@ def _aware_utc(value: datetime) -> datetime:
 
 __all__ = [
     "NSE_LIVE_EQUITY_DERIVATIVES_API_URL",
+    "NSE_LIVE_EQUITY_OI_LOT_SIZE",
     "NSE_LIVE_EQUITY_SOURCE",
     "NSE_MARKET_OPTION_CHAIN_URL",
     "NSE_OPTION_CHAIN_API_URL",
