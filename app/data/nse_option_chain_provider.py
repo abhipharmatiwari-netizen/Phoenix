@@ -35,7 +35,7 @@ NSE_LIVE_EQUITY_INDEX_PARAMS = {
     "NIFTY": "nse50_opt",
 }
 NSE_LIVE_EQUITY_OI_LOT_SIZE = {
-    "NIFTY": 75,
+    "NIFTY": 65,
 }
 NSE_LIVE_EQUITY_SOURCE = "live_equity_derivatives"
 

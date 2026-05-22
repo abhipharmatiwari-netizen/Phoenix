@@ -147,7 +147,7 @@ def test_parse_nse_live_equity_derivatives_fallback_payload():
     ce, pe = [quote.normalized() for quote in quotes]
     assert ce.option_type == "CE"
     assert ce.symbol_token == "OPTIDXNIFTY26-05-2026CE23800.00"
-    assert ce.oi == 8218500
+    assert ce.oi == 7122700
     assert ce.volume == 331429735
     assert str(ce.ltp) == "128.4"
     assert str(ce.underlying_ltp) == "23719.3"
@@ -157,7 +157,7 @@ def test_parse_nse_live_equity_derivatives_fallback_payload():
     assert ce.source_ts.isoformat() == "2026-05-22T10:00:00+00:00"
     assert ce.quality_flags["nse_source"] == NSE_LIVE_EQUITY_SOURCE
     assert ce.quality_flags["nse_open_interest_unit"] == "underlying_units"
-    assert ce.quality_flags["nse_open_interest_lot_size"] == 75
+    assert ce.quality_flags["nse_open_interest_lot_size"] == 65
     assert ce.quality_flags["missing_reference_fields_expected"] == ["ask", "bid", "iv"]
     assert pe.option_type == "PE"
 
