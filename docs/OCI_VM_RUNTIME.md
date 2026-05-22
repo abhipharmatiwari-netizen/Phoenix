@@ -61,6 +61,30 @@ were emitted. Final evidence after backend restart:
 - `kill_switch_active_count=0`.
 - `terminal_position_records_nonzero_net_qty_count=0`.
 
+## 2026-05-22 BANKNIFTY Position-Authority Recovery
+
+Live evidence on 2026-05-22 showed `A1 BANKNIFTY 2026-05-26 54100 CE`
+broker position was flat while Phoenix still had two internal records for the
+same contract:
+
+- `ema20_strategy` entry record: `OPEN`, side `SELL`, `net_qty=-30`.
+- `system::position_trailing_lock` exit record: `DEGRADED`, side `BUY`,
+  `net_qty=30`, reason
+  `illegal_transition_blocked:RECONCILING_to_PARTIALLY_EXITED:partial_exit_fill_observed`.
+
+Broker-flat recovery evidence allowed both records to be cleared with
+`POST /admin/state/clear-position-record` using `force=false`. Audit events
+recorded `broker_net_qty_at_clear=0.0`. The backend was restarted only because
+the deployed endpoint did not yet recover the in-memory degraded-scope marker;
+after restart, `/health/summary` returned `status=ok`, `readiness.ready=true`,
+`degraded_scope_count=0`, no degraded reasons, and zero firing alerts.
+
+The displayed kill-switch reason
+`risk_manager_auto: floating_drawdown source=tick:NG_OTM_CE_340` was from a
+separate historical global kill-switch trip at `2026-05-21T14:35:54Z`, cleared
+and rearmed at `2026-05-21T18:47:42Z`. It was not the cause of the BANKNIFTY
+position-authority degradation on 2026-05-22.
+
 ## OI/ML Shadow Sidecar Evidence
 
 Verified on 2026-05-20 IST:

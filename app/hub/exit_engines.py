@@ -2110,52 +2110,138 @@ class PositionTrailingLockEngine:
         broker_account_id: Any,
         pos: Any,
     ) -> Optional[str]:
+        def _usable_owner(raw: Any) -> Optional[str]:
+            token = str(raw or "").strip()
+            if token and token != UNKNOWN_OWNER and not token.startswith("system::"):
+                return token
+            return None
+
         for attr_name in (
             "owner_strategy_id",
             "ownership_strategy_id",
             "position_owner_strategy_id",
             "strategy_id",
         ):
-            raw = _position_value(pos, attr_name)
-            token = str(raw or "").strip()
-            if token and token != UNKNOWN_OWNER and not token.startswith("system::"):
-                return token
+            owner = _usable_owner(_position_value(pos, attr_name))
+            if owner:
+                return owner
 
         store = getattr(self.order_router, "_position_ownership_store", None)
-        if store is None:
-            return None
+        contract_key = None
         try:
-            contract_key, _reason = derive_contract_key_from_position(pos)
+            contract_key, _contract_reason = derive_contract_key_from_position(pos)
             if contract_key is None:
                 return None
-            owner: Optional[str] = None
-            get_owner = getattr(store, "get_owner", None)
-            if callable(get_owner):
-                owner = get_owner(
-                    tenant_id=TenantId(str(tenant_id)),
-                    broker_account_id=BrokerAccountId(str(broker_account_id)),
-                    contract_key=contract_key,
-                )
-            if owner in (None, UNKNOWN_OWNER):
-                get_record = getattr(store, "get_ownership_record", None)
-                if callable(get_record):
-                    record = get_record(
-                        tenant_id=TenantId(str(tenant_id)),
-                        broker_account_id=BrokerAccountId(str(broker_account_id)),
-                        contract_key=contract_key,
-                    )
-                    owner = getattr(record, "owner_strategy_id", None)
-            owner_text = str(owner or "").strip()
-            if owner_text and owner_text != UNKNOWN_OWNER and not owner_text.startswith("system::"):
-                return owner_text
         except Exception as exc:
             if self._is_live_mode():
                 log_event(
                     logger,
-                    event_type="POSITION_TRAILING_LOCK_OWNER_LOOKUP_FAILED",
+                    event_type="POSITION_TRAILING_LOCK_CONTRACT_LOOKUP_FAILED",
                     message=(
-                        "Trailing-lock owner lookup failed in LIVE; exit will "
-                        "still route as system actor but cannot pre-bind owner."
+                        "Trailing-lock could not derive a contract key for "
+                        "owner lookup; exit will route as system actor."
+                    ),
+                    level=logging.WARNING,
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    symbol=str(_position_value(pos, "symbol", "") or ""),
+                    error=repr(exc),
+                )
+            return None
+
+        if store is not None:
+            try:
+                owner: Optional[str] = None
+                get_owner = getattr(store, "get_owner", None)
+                if callable(get_owner):
+                    owner = get_owner(
+                        tenant_id=TenantId(str(tenant_id)),
+                        broker_account_id=BrokerAccountId(str(broker_account_id)),
+                        contract_key=contract_key,
+                    )
+                if owner in (None, UNKNOWN_OWNER):
+                    get_record = getattr(store, "get_ownership_record", None)
+                    if callable(get_record):
+                        record = get_record(
+                            tenant_id=TenantId(str(tenant_id)),
+                            broker_account_id=BrokerAccountId(str(broker_account_id)),
+                            contract_key=contract_key,
+                        )
+                        owner = getattr(record, "owner_strategy_id", None)
+                owner_text = _usable_owner(owner)
+                if owner_text:
+                    return owner_text
+            except Exception as exc:
+                if self._is_live_mode():
+                    log_event(
+                        logger,
+                        event_type="POSITION_TRAILING_LOCK_OWNER_LOOKUP_FAILED",
+                        message=(
+                            "Trailing-lock ownership-store lookup failed in "
+                            "LIVE; falling back to internal position records."
+                        ),
+                        level=logging.WARNING,
+                        tenant_id=tenant_id,
+                        broker_account_id=broker_account_id,
+                        symbol=str(_position_value(pos, "symbol", "") or ""),
+                        error=repr(exc),
+                    )
+
+        lifecycle = getattr(self.order_router, "_order_lifecycle", None)
+        if lifecycle is None:
+            return None
+        try:
+            list_records = getattr(lifecycle, "list_position_records", None)
+            if callable(list_records):
+                records = list_records()
+            else:
+                raw_records = getattr(lifecycle, "_position_records", {})
+                records = (
+                    list(raw_records.values())
+                    if isinstance(raw_records, dict)
+                    else list(raw_records or [])
+                )
+            target_contract = repr(contract_key.as_storage_key())
+            candidates: list[tuple[float, str]] = []
+            for record in records or []:
+                if str(getattr(record, "tenant_id", "") or "") != str(tenant_id):
+                    continue
+                if (
+                    str(getattr(record, "account_id", "") or "")
+                    != str(broker_account_id)
+                ):
+                    continue
+                if str(getattr(record, "contract_key", "") or "") != target_contract:
+                    continue
+                state_raw = getattr(record, "position_state", None)
+                state_text = str(getattr(state_raw, "value", state_raw) or "").upper()
+                if state_text in {"NONE", "FLAT"}:
+                    continue
+                owner = _usable_owner(getattr(record, "strategy_id", None))
+                if not owner:
+                    continue
+                try:
+                    net_qty = abs(float(getattr(record, "net_qty", 0.0) or 0.0))
+                except (TypeError, ValueError):
+                    net_qty = 0.0
+                priority = (
+                    1.0
+                    if state_text in {"OPEN", "PARTIALLY_EXITED", "EXIT_PENDING"}
+                    else 0.0
+                )
+                candidates.append((priority + net_qty, owner))
+            if not candidates:
+                return None
+            candidates.sort(reverse=True)
+            return candidates[0][1]
+        except Exception as exc:
+            if self._is_live_mode():
+                log_event(
+                    logger,
+                    event_type="POSITION_TRAILING_LOCK_LIFECYCLE_OWNER_LOOKUP_FAILED",
+                    message=(
+                        "Trailing-lock internal position owner lookup failed "
+                        "in LIVE; exit will route as system actor."
                     ),
                     level=logging.WARNING,
                     tenant_id=tenant_id,

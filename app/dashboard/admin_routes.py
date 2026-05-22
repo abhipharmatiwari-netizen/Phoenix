@@ -1052,9 +1052,9 @@ def clear_position_record(
 
     # Safety check: broker must be flat for this contract unless force=True.
     broker_net_qty: float | None = None
+    broker_evidence = _broker_flat_evidence(runtime, prior)
+    broker_net_qty = _safe_float(broker_evidence.get("net_qty"))
     if not payload.force:
-        broker_evidence = _broker_flat_evidence(runtime, prior)
-        broker_net_qty = _safe_float(broker_evidence.get("net_qty"))
         if broker_evidence.get("status") == "unknown":
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1141,6 +1141,27 @@ def clear_position_record(
             request_id=_request_id_from_request(request),
         )
 
+    degraded_scope_recovery_attempted = False
+    degraded_scope_recovered: bool | None = None
+    degraded_scope_recovery_error: str | None = None
+    if broker_evidence.get("status") == "flat":
+        degraded_scope_recovery_attempted = True
+        try:
+            from app.core.degraded_scope_manager import degraded_scope_manager
+
+            degraded_scope_recovered = degraded_scope_manager.try_recover(
+                scope_key=payload.scope_key,
+                ownership_key_valid=True,
+                broker_evidence_fresh=True,
+                lifecycle_resolved=True,
+                position_state_clean=True,
+                actor=ctx.caller,
+                require_operator_approval=False,
+                operator_approved=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            degraded_scope_recovery_error = repr(exc)
+
     emit_audit_event(
         actor=ctx.caller,
         action="clear_position_record",
@@ -1164,6 +1185,9 @@ def clear_position_record(
             "force": payload.force,
             "broker_net_qty_at_clear": broker_net_qty,
             "ledger_rows_deleted": ledger_deleted,
+            "degraded_scope_recovery_attempted": degraded_scope_recovery_attempted,
+            "degraded_scope_recovered": degraded_scope_recovered,
+            "degraded_scope_recovery_error": degraded_scope_recovery_error,
         },
         request_id=_request_id_from_request(request),
     )
@@ -1174,6 +1198,9 @@ def clear_position_record(
         "prior_state": prior.position_state.value if hasattr(prior.position_state, "value") else str(prior.position_state),
         "ledger_rows_deleted": ledger_deleted,
         "post_clear_recheck_endpoints": ["/dashboard/status", "/readyz"],
+        "degraded_scope_recovery_attempted": degraded_scope_recovery_attempted,
+        "degraded_scope_recovered": degraded_scope_recovered,
+        "degraded_scope_recovery_error": degraded_scope_recovery_error,
         "position_state_counts_after_clear": (
             lifecycle.count_positions_by_state()
             if callable(getattr(lifecycle, "count_positions_by_state", None))

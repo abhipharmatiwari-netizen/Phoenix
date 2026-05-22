@@ -347,6 +347,62 @@ async def test_trailing_lock_exit_carries_original_owner_strategy_hint():
 
 
 @pytest.mark.asyncio
+async def test_trailing_lock_owner_falls_back_to_internal_position_records():
+    state_store = StateStore()
+    symbol = "NATURALGAS22MAY26295CE"
+    pos = Position(
+        symbol=symbol,
+        quantity=-1250,
+        avg_price=6.75,
+        product_type=ProductType.INTRADAY,
+    )
+    state_store.set_positions("A1", [pos])
+    _seed_label_meta("NG_ATM_CE_295", symbol=symbol, token="555295")
+
+    contract_key, reason = derive_contract_key_from_position(pos)
+    assert contract_key is not None, reason
+
+    router = _RecordingOrderRouter()
+    router._order_lifecycle = SimpleNamespace(
+        list_position_records=lambda: [
+            SimpleNamespace(
+                tenant_id="t-1",
+                account_id="A1",
+                strategy_id="ema20_strategy",
+                contract_key=repr(contract_key.as_storage_key()),
+                net_qty=-1250,
+                position_state="OPEN",
+            )
+        ]
+    )
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(position_trailing_lock_tick_enabled=True),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+
+    await engine.evaluate_tick(
+        [_runner("t-1", "A1")],
+        tick_label="NG_ATM_CE_295",
+        tick_token="555295",
+        price=5.70,
+    )
+    await engine.evaluate_tick(
+        [_runner("t-1", "A1")],
+        tick_label="NG_ATM_CE_295",
+        tick_token="555295",
+        price=6.05,
+    )
+
+    assert len(router.calls) == 1
+    call = router.calls[0]
+    assert call["strategy_id"] == "system::position_trailing_lock"
+    assert call["order_strategy_id"] == "ema20_strategy"
+    assert call["strategy_context"]["position_owner_strategy_id"] == "ema20_strategy"
+
+
+@pytest.mark.asyncio
 async def test_tick_mode_evaluates_each_matching_shadow_runner_independently():
     state_store = StateStore()
     symbol = "NATURALGAS22MAY26295CE"

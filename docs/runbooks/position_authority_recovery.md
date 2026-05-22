@@ -42,6 +42,10 @@ before using manual recovery.
 
    The endpoint refuses nonzero broker evidence with HTTP 409. `force=true` is a
    break-glass override and is recorded in the audit event.
+   When `force=false` succeeds with `broker_evidence.status = "flat"`, the
+   endpoint also attempts to recover the matching in-memory degraded scope. A
+   backend restart should not be required just to remove the recovered scope
+   from readiness.
 
 4. Recheck readiness from the same workflow:
 
@@ -51,5 +55,6 @@ before using manual recovery.
    ```
 
    Readiness should recover once no degraded scopes or DEGRADED/RECONCILING
-   position records remain. If it does not, fetch recovery evidence again and
-   review the remaining record or degraded scope.
+   position records remain. If it does not, inspect the clear response's
+   `degraded_scope_recovered` / `degraded_scope_recovery_error` fields, fetch
+   recovery evidence again, and review the remaining record or degraded scope.

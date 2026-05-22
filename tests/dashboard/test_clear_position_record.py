@@ -16,6 +16,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.core.position_state import InternalPosition, PositionState
+from app.core.degraded_scope_manager import DegradedReason, degraded_scope_manager
 from app.dashboard.admin_routes import (
     ClearPositionRecordRequest,
     clear_position_record,
@@ -24,6 +25,13 @@ from app.dashboard.admin_routes import (
 from app.dashboard.auth import AdminContext, AdminRole
 from app.orders.order_lifecycle import OrderLifecycleService
 from app.orders.trade_processed_store import InMemoryProcessedTradeStore
+
+
+@pytest.fixture(autouse=True)
+def _reset_degraded_scope_manager():
+    degraded_scope_manager._scopes.clear()
+    yield
+    degraded_scope_manager._scopes.clear()
 
 
 # ---- service-layer (force_clear_position_record) -----------------------
@@ -253,6 +261,42 @@ def test_clear_route_clean_path_when_broker_is_flat(monkeypatch):
     assert rec.position_state == PositionState.FLAT
     assert rec.net_qty == 0.0
     assert any("net_qty = 0" in sql for sql in conn.executed_sql)
+
+
+def test_clear_route_recovers_matching_degraded_scope_when_broker_is_flat(monkeypatch):
+    svc = _mk_lifecycle()
+    scope = "tenant-1:A1:ema20_strategy:INTRADAY:('NG', '2026-05-22', '255', 'CE', 'INTRADAY')"
+    _seed_record(svc, scope_key=scope)
+    degraded_scope_manager.enter_degraded(
+        scope_key=scope,
+        reason=DegradedReason.LIFECYCLE_STUCK,
+    )
+
+    runtime = SimpleNamespace(
+        order_lifecycle=svc,
+        state_store=_RecordingStateStore([]),
+    )
+    monkeypatch.setattr(
+        "app.dashboard.admin_routes.get_hub_runtime", lambda: runtime
+    )
+    _patch_rate_limit(monkeypatch)
+    conn = _StubConn()
+    monkeypatch.setattr(
+        "app.data.postgres.connect_with_retry",
+        lambda *_a, **_kw: conn,
+    )
+    monkeypatch.setattr(
+        "app.data.postgres.get_control_plane_dsn",
+        lambda *_a, **_kw: "postgresql://stub",
+    )
+
+    payload = ClearPositionRecordRequest(scope_key=scope, reason="broker_flat", force=False)
+    out = clear_position_record(_mk_request_stub(), payload, _mk_admin_ctx())
+
+    assert out["status"] == "ok"
+    assert out["degraded_scope_recovery_attempted"] is True
+    assert out["degraded_scope_recovered"] is True
+    assert degraded_scope_manager.active_scopes() == []
 
 
 def test_position_authority_recovery_exposes_flat_broker_evidence(monkeypatch):
