@@ -100,7 +100,9 @@ def collect_shadow_ingestion_status(
         if conn_factory is None:
             from app.data.postgres import connect_with_retry, get_control_plane_dsn
 
-            conn_factory = lambda: connect_with_retry(get_control_plane_dsn())
+            def conn_factory():
+                return connect_with_retry(get_control_plane_dsn())
+
         with conn_factory() as conn:
             option_rows = _fetch_one(conn, _OPTION_CHAIN_STATUS_SQL, params)
             validation_rows = _fetch_one(conn, _VALIDATION_STATUS_SQL, params)

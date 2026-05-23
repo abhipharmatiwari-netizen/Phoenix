@@ -48,10 +48,11 @@ See [OCI VM Runtime Evidence](docs/OCI_VM_RUNTIME.md) for the evidence table.
 6. [OCI Runtime Hardening](docs/runbooks/oci_runtime_hardening.md)
 7. [Strategy Runtime Diagnostics](docs/runbooks/strategy_runtime_diagnostics.md)
 8. [OI/ML Shadow Sidecar](docs/runbooks/oi_ml_shadow_sidecar.md)
-9. [OI/ML CE Seller Rollout](docs/runbooks/oi_ml_ce_seller_rollout.md)
-10. [Kill Switch](docs/runbooks/kill_switch.md)
-11. [Broker Credential Update](docs/runbooks/update_broker_credentials.md)
-12. [Restore Drill](docs/runbooks/restore_drill.md)
+9. [OI/ML Data Source Approval](docs/runbooks/oi_ml_data_source_approval.md)
+10. [OI/ML CE Seller Rollout](docs/runbooks/oi_ml_ce_seller_rollout.md)
+11. [Kill Switch](docs/runbooks/kill_switch.md)
+12. [Broker Credential Update](docs/runbooks/update_broker_credentials.md)
+13. [Restore Drill](docs/runbooks/restore_drill.md)
 
 Docker Desktop, Cloud Run, GCP, Firestore, BigQuery, and local development
 material are not current production operating models unless a future VM audit
@@ -92,6 +93,7 @@ tests/                            Pytest suite
 docs/OCI_VM_RUNTIME.md            Current VM evidence snapshot
 docs/runbooks/oci_live_deployment.md Current OCI VM operator runbook
 docs/runbooks/oi_ml_shadow_sidecar.md OI/ML shadow sidecar progress and gates
+docs/runbooks/oi_ml_data_source_approval.md OI/ML option-chain data source approval gate
 docs/runbooks/oi_ml_ce_seller_rollout.md OI/ML promotion and rollback gates
 docker-compose.oci-live.yml       Base Compose file used with the VM override
 phoenix-override.yml.example      Template mirroring the current VM override shape

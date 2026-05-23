@@ -88,6 +88,10 @@ Recent validation:
 | Continuous NSE validation loop | `app/data/option_chain_realtime_validator.py`, `app/data/option_chain_validation_store.py`, `migrations/023_option_chain_validation_reports.sql` | Done, opt-in via env |
 | Read-time NSE IV enrichment | `app/data/option_chain_repository.py` | Done, exact-contract enrichment for Angel reads from recent `provider='nse_web'` rows |
 | Strategy scaffold | `app/strategies/oi_ml_ce_seller.py` | Done, fail-closed and disabled by default |
+| Phase-0 data-source quality gate | `app/data/option_chain_quality_gate.py`, `scripts/data/report_option_chain_quality.py`, `docs/runbooks/oi_ml_data_source_approval.md` | Done, report blocks promotion until source approval and hard-field completeness pass |
+| Spread-aware labels and no-lookahead features | `app/features/oi_features.py`, `app/strategies/oi_ml/backtest.py` | Done, includes source/ingest timestamp lineage, bid/ask quality, OI velocity, wall persistence, beta, and EOD-capped spread labels |
+| Offline model promotion gates | `app/strategies/oi_ml/model.py`, `scripts/ml/train_mae_filter.py`, `scripts/ml/walk_forward_oi_ce.py` | Done, walk-forward report remains paper-review only even when gates pass |
+| Protected-first runtime entry and exits | `app/strategies/oi_ml_ce_seller.py` | Done, opt-in order routing buys the hedge first, rolls back on short rejection, blocks entries after cutoff, and exits residual spreads by time/EOD stops |
 
 ## Inputs Required Before a Candidate Can Pass
 
@@ -178,10 +182,11 @@ healthy instead of being marked stale overnight.
 
 ## Remaining Promotion Gate
 
-Do not promote this strategy beyond shadow until a market-window snapshot proves
-real broker FULL quote completeness for the hard fields and proves that IV is
-available either directly from Angel or through fresh exact-contract NSE
-validation rows. After this data gate passes, use
+Do not promote this strategy beyond shadow until the Phase-0 approval report in
+[OI/ML Option-Chain Data Source Approval](oi_ml_data_source_approval.md) passes
+and a market-window snapshot proves real broker FULL quote completeness for the
+hard fields and proves that IV is available either directly from Angel or
+through fresh exact-contract NSE validation rows. After this data gate passes, use
 [OI/ML CE Seller Rollout and Rollback](oi_ml_ce_seller_rollout.md) for the
 paper, shadow, Live A, Live B, and rollback checklist. The 2026-05-18
 off-market smoke proved connectivity and

@@ -1,8 +1,21 @@
 from types import SimpleNamespace
+from datetime import datetime, date, timezone
 
+from app.brokers.base import (
+    OrderResponse,
+    OrderSide,
+    OrderType,
+    ProductType,
+    TimeInForce,
+)
+from app.risk.option_sell_guard import OptionSellStructure
 from app.strategies.identifiers import OI_ML_CE_SELLER_ID
 from app.strategies.oi_ml.decision import OiMlEntryAction, OiMlEntryDecision
-from app.strategies.oi_ml_ce_seller import OiMlCeSellerStrategy
+from app.strategies.oi_ml.order_intents import OiMlOrderIntent, OiMlOrderIntentLeg
+from app.strategies.oi_ml_ce_seller import OiMlCeSellerStrategy, OiMlOpenSpread
+
+
+ENTRY_TS = datetime(2026, 5, 19, 4, 30, tzinfo=timezone.utc)
 
 
 def _strategy(
@@ -42,7 +55,7 @@ def test_scaffold_records_market_data_but_stays_fail_closed():
     strategy.on_tick("NIFTY_IDX", 25000.5)
     strategy.on_bar("NIFTY_IDX", 300, candle, {"ema_20": 24950.0})
 
-    assert strategy.last_price["NIFTY_IDX"] == 25000.5
+    assert strategy.last_price["NIFTY_IDX"] == 25000.0
     assert strategy.no_trade_counts["strategy_scaffold_fail_closed"] == 1
     assert strategy.open_spreads == {}
 
@@ -82,7 +95,7 @@ def test_strategy_stages_guarded_candidate_without_order_submission():
         tenant_id="tenant-a",
         account_id="acct-a",
     )
-    candle = SimpleNamespace(start_ts=None, c=25000.0)
+    candle = SimpleNamespace(start_ts=ENTRY_TS, c=25000.0)
 
     strategy.on_bar("NIFTY_IDX", 300, candle, {})
 
@@ -102,7 +115,7 @@ def test_strategy_with_decision_engine_requires_expiry():
     )
     strategy = _strategy(decision_engine=engine)
 
-    strategy.on_bar("NIFTY_IDX", 300, SimpleNamespace(start_ts=None), {})
+    strategy.on_bar("NIFTY_IDX", 300, SimpleNamespace(start_ts=ENTRY_TS), {})
 
     assert strategy.no_trade_counts["missing_expiry"] == 1
     assert engine.calls == []
@@ -140,7 +153,7 @@ def test_strategy_records_rejected_order_intent_without_staging():
         expiry="2026-05-21",
     )
 
-    strategy.on_bar("NIFTY_IDX", 300, SimpleNamespace(start_ts=None), {})
+    strategy.on_bar("NIFTY_IDX", 300, SimpleNamespace(start_ts=ENTRY_TS), {})
 
     assert strategy.staged_entries == []
     assert strategy.staged_order_intents == []
@@ -185,7 +198,7 @@ def test_strategy_records_shadow_lifecycle_before_staging_intent():
         account_id="acct-a",
     )
 
-    strategy.on_bar("NIFTY_IDX", 300, SimpleNamespace(start_ts=None), {})
+    strategy.on_bar("NIFTY_IDX", 300, SimpleNamespace(start_ts=ENTRY_TS), {})
 
     assert store.calls[0]["intent"] is builder.intent
     assert store.calls[0]["decision_reason"] == "candidate_passed_guard"
@@ -210,9 +223,242 @@ def test_strategy_fails_closed_when_shadow_lifecycle_recording_fails():
         expiry="2026-05-21",
     )
 
-    strategy.on_bar("NIFTY_IDX", 300, SimpleNamespace(start_ts=None), {})
+    strategy.on_bar("NIFTY_IDX", 300, SimpleNamespace(start_ts=ENTRY_TS), {})
 
     assert strategy.staged_entries == []
     assert strategy.staged_order_intents == []
     assert strategy.shadow_lifecycle_records == []
     assert strategy.no_trade_counts["shadow_lifecycle_exception:RuntimeError"] == 1
+
+
+def _intent() -> OiMlOrderIntent:
+    created = datetime(2026, 5, 19, 4, 30, tzinfo=timezone.utc)
+    expiry = date(2026, 5, 21)
+    short = OiMlOrderIntentLeg(
+        role="CE_SHORT",
+        side=OrderSide.SELL,
+        symbol="NIFTY21MAY2625200CE",
+        exchange="NFO",
+        symbol_token="25200CE",
+        expiry=expiry,
+        strike=25200,
+        option_type="CE",
+        quantity=65,
+        price_hint=100.0,
+        order_type=OrderType.LIMIT,
+        product_type=ProductType.INTRADAY,
+        time_in_force=TimeInForce.DAY,
+        source_snapshot_ts=created,
+    )
+    long = OiMlOrderIntentLeg(
+        role="CE_LONG",
+        side=OrderSide.BUY,
+        symbol="NIFTY21MAY2625400CE",
+        exchange="NFO",
+        symbol_token="25400CE",
+        expiry=expiry,
+        strike=25400,
+        option_type="CE",
+        quantity=65,
+        price_hint=20.0,
+        order_type=OrderType.LIMIT,
+        product_type=ProductType.INTRADAY,
+        time_in_force=TimeInForce.DAY,
+        source_snapshot_ts=created,
+    )
+    return OiMlOrderIntent(
+        intent_id="intent-1",
+        strategy_id=OI_ML_CE_SELLER_ID,
+        structure=OptionSellStructure.BEAR_CALL_SPREAD,
+        underlying="NIFTY",
+        expiry=expiry,
+        short_strike=25200,
+        quantity=65,
+        created_at=created,
+        legs=(short, long),
+        estimated_net_credit_points=80.0,
+        estimated_max_loss_rupees=7800.0,
+    )
+
+
+class FakeIntentBuilderWithIntent:
+    def __init__(self, intent):
+        self.intent = intent
+
+    def __call__(self, *_args, **_kwargs):
+        return SimpleNamespace(ok=True, intent=self.intent, reasons=())
+
+
+def _routed_strategy(intent, **params):
+    selected = SimpleNamespace(quote=None, score=SimpleNamespace(probability=0.7, predicted_mae_premium=20.0))
+    decision = OiMlEntryDecision(
+        action=OiMlEntryAction.STAGE_ENTRY,
+        reason="candidate_passed_guard",
+        selected=selected,
+    )
+    return _strategy(
+        decision_engine=FakeDecisionEngine(decision),
+        order_intent_builder=FakeIntentBuilderWithIntent(intent),
+        expiry="2026-05-21",
+        order_routing_enabled=True,
+        lot_size=65,
+        **params,
+    )
+
+
+def test_strategy_routes_protected_first_spread_entry(monkeypatch):
+    calls = []
+
+    def fake_bridge(*, strategy_id, order_req, tenant_id=None, broker_account_id=None):
+        calls.append(order_req)
+        return OrderResponse(
+            broker_order_id=f"OID-{len(calls)}",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=order_req.quantity,
+        )
+
+    monkeypatch.setattr("app.strategies.oi_ml_ce_seller.place_order_via_bridge", fake_bridge)
+    strategy = _routed_strategy(_intent())
+    candle = SimpleNamespace(start_ts=datetime(2026, 5, 19, 4, 30, tzinfo=timezone.utc), c=25100.0)
+
+    strategy.on_bar("NIFTY_IDX", 300, candle, {})
+
+    assert [call.symbol for call in calls[:2]] == [
+        "NIFTY21MAY2625400CE",
+        "NIFTY21MAY2625200CE",
+    ]
+    assert [call.side for call in calls[:2]] == [OrderSide.BUY, OrderSide.SELL]
+    assert calls[0].quantity == 1
+    assert calls[1].strategy_context["structure"] == "BEAR_CALL_SPREAD"
+    assert len(strategy.open_spreads) == 1
+
+
+def test_strategy_rolls_back_hedge_when_short_leg_fails(monkeypatch):
+    calls = []
+
+    def fake_bridge(*, strategy_id, order_req, tenant_id=None, broker_account_id=None):
+        calls.append(order_req)
+        if order_req.tag == "OI_ML_ENTRY_SHORT":
+            return OrderResponse("", "REJECTED", "blocked")
+        return OrderResponse(
+            broker_order_id=f"OID-{len(calls)}",
+            status="COMPLETE",
+            message="ok",
+            filled_quantity=order_req.quantity,
+        )
+
+    monkeypatch.setattr("app.strategies.oi_ml_ce_seller.place_order_via_bridge", fake_bridge)
+    strategy = _routed_strategy(_intent())
+
+    strategy.on_bar(
+        "NIFTY_IDX",
+        300,
+        SimpleNamespace(start_ts=datetime(2026, 5, 19, 4, 30, tzinfo=timezone.utc), c=25100.0),
+        {},
+    )
+
+    assert [call.tag for call in calls] == [
+        "OI_ML_ENTRY_HEDGE",
+        "OI_ML_ENTRY_SHORT",
+        "OI_ML_ROLLBACK_HEDGE",
+    ]
+    assert strategy.open_spreads == {}
+    assert strategy.no_trade_counts["spread_entry_rejected:short_leg_rejected_hedge_rollback_submitted"] == 1
+
+
+def test_strategy_exit_retries_only_residual_lots_after_partial_fill(monkeypatch):
+    intent = _intent()
+    long_leg = list(intent.legs)[1]
+    short_leg = list(intent.legs)[0]
+    strategy = _routed_strategy(intent)
+    strategy.open_spreads["s1"] = OiMlOpenSpread(
+        spread_id="s1",
+        intent=intent,
+        short_leg=short_leg,
+        long_leg=long_leg,
+        quantity_lots=2,
+        remaining_lots=2,
+        entry_credit=80.0,
+        entry_time=datetime(2026, 5, 19, 4, 30, tzinfo=timezone.utc),
+    )
+    calls = []
+
+    def fake_bridge(*, strategy_id, order_req, tenant_id=None, broker_account_id=None):
+        calls.append(order_req)
+        filled = 1 if order_req.tag.startswith("OI_ML_EXIT") else order_req.quantity
+        return OrderResponse("OID", "PARTIALLY_FILLED", "partial", filled_quantity=filled)
+
+    monkeypatch.setattr("app.strategies.oi_ml_ce_seller.place_order_via_bridge", fake_bridge)
+
+    strategy.force_exit_all(reason="TEST")
+    strategy.force_exit_all(reason="TEST")
+
+    assert [call.quantity for call in calls if call.symbol == "NIFTY21MAY2625200CE"] == [2, 1]
+    assert strategy.open_spreads == {}
+
+
+def test_strategy_blocks_new_entries_after_cutoff_and_force_exits_at_time_stop(monkeypatch):
+    calls = []
+
+    def fake_bridge(*, strategy_id, order_req, tenant_id=None, broker_account_id=None):
+        calls.append(order_req)
+        return OrderResponse("OID", "COMPLETE", "ok", filled_quantity=order_req.quantity)
+
+    monkeypatch.setattr("app.strategies.oi_ml_ce_seller.place_order_via_bridge", fake_bridge)
+    intent = _intent()
+    strategy = _routed_strategy(intent)
+    strategy.open_spreads["s1"] = OiMlOpenSpread(
+        spread_id="s1",
+        intent=intent,
+        short_leg=list(intent.legs)[0],
+        long_leg=list(intent.legs)[1],
+        quantity_lots=1,
+        remaining_lots=1,
+        entry_credit=80.0,
+        entry_time=datetime(2026, 5, 19, 4, 30, tzinfo=timezone.utc),
+    )
+
+    strategy.on_bar(
+        "NIFTY_IDX",
+        300,
+        SimpleNamespace(start_ts=datetime(2026, 5, 19, 9, 25, tzinfo=timezone.utc), c=25100.0),
+        {},
+    )
+
+    assert strategy.no_trade_counts["outside_entry_window"] == 1
+    assert [call.tag for call in calls] == ["OI_ML_EXIT_TIME_STOP", "OI_ML_EXIT_HEDGE_TIME_STOP"]
+    assert strategy.open_spreads == {}
+
+
+def test_strategy_flattens_any_residual_spread_after_eod_cap(monkeypatch):
+    calls = []
+
+    def fake_bridge(*, strategy_id, order_req, tenant_id=None, broker_account_id=None):
+        calls.append(order_req)
+        return OrderResponse("OID", "COMPLETE", "ok", filled_quantity=order_req.quantity)
+
+    monkeypatch.setattr("app.strategies.oi_ml_ce_seller.place_order_via_bridge", fake_bridge)
+    intent = _intent()
+    strategy = _routed_strategy(intent)
+    strategy.open_spreads["s1"] = OiMlOpenSpread(
+        spread_id="s1",
+        intent=intent,
+        short_leg=list(intent.legs)[0],
+        long_leg=list(intent.legs)[1],
+        quantity_lots=1,
+        remaining_lots=1,
+        entry_credit=80.0,
+        entry_time=datetime(2026, 5, 19, 4, 30, tzinfo=timezone.utc),
+    )
+
+    strategy.on_bar(
+        "NIFTY_IDX",
+        300,
+        SimpleNamespace(start_ts=datetime(2026, 5, 19, 9, 51, tzinfo=timezone.utc), c=25100.0),
+        {},
+    )
+
+    assert [call.tag for call in calls] == ["OI_ML_EXIT_EOD", "OI_ML_EXIT_HEDGE_EOD"]
+    assert all(call.purpose.name == "EXIT" for call in calls)
+    assert strategy.open_spreads == {}

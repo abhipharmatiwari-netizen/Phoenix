@@ -109,6 +109,10 @@ def test_build_oi_features_combines_core_candidate_metrics():
     assert features["oi_wall_present"] is True
     assert features["oi_wall_strike"] == 25200
     assert features["candidate_distance_pct"] == pytest.approx((25200 - 25090) / 25090)
+    assert features["decision_ts"] == SNAPSHOT_TS.isoformat()
+    assert features["candidate_bid_ask_spread"] == pytest.approx(1.0)
+    assert features["candidate_missing_fields_count"] == 2  # source_ts/vix absent in fixture
+    assert features["vix_regime"] is None
 
 
 def test_build_oi_features_rejects_future_snapshot_rows():
@@ -121,3 +125,44 @@ def test_build_oi_features_rejects_future_snapshot_rows():
 
     with pytest.raises(ValueError, match="future snapshots"):
         build_oi_features([future], candidate_strike=25200, decision_ts=SNAPSHOT_TS)
+
+
+def test_build_oi_features_adds_velocity_persistence_and_beta_lineage():
+    previous = _quote(
+        25200,
+        "CE",
+        800,
+        snapshot_ts=datetime(2026, 5, 19, 9, 59, tzinfo=timezone.utc),
+        source_ts=datetime(2026, 5, 19, 9, 58, 50, tzinfo=timezone.utc),
+        ingested_at=datetime(2026, 5, 19, 9, 59, 5, tzinfo=timezone.utc),
+        underlying_ltp="25080",
+        vix="15.0",
+    )
+    latest = _quote(
+        25200,
+        "CE",
+        1000,
+        source_ts=datetime(2026, 5, 19, 9, 59, 50, tzinfo=timezone.utc),
+        ingested_at=datetime(2026, 5, 19, 10, 0, 5, tzinfo=timezone.utc),
+        underlying_ltp="25090",
+        vix="16.0",
+    )
+    features = build_oi_features(
+        [
+            previous,
+            _quote(25100, "CE", 100, snapshot_ts=previous.snapshot_ts),
+            _quote(25300, "CE", 100, snapshot_ts=previous.snapshot_ts),
+            latest,
+            _quote(25100, "CE", 100),
+            _quote(25300, "CE", 100),
+        ],
+        candidate_strike=25200,
+        decision_ts=SNAPSHOT_TS,
+    )
+
+    assert features["candidate_oi_velocity_per_minute"] == pytest.approx(200.0)
+    assert features["oi_wall_persistence_snapshots"] == 2
+    assert features["oi_vs_spot_beta"] is not None
+    assert features["max_source_ts"] == "2026-05-19T09:59:50+00:00"
+    assert features["max_ingested_at"] == "2026-05-19T10:00:05+00:00"
+    assert features["vix_regime"] == "NORMAL"
