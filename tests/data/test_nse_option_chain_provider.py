@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 import json
+from urllib.error import HTTPError
 
 from app.data.nse_option_chain_provider import (
     NSE_LIVE_EQUITY_SOURCE,
@@ -210,5 +211,56 @@ def test_web_client_falls_back_to_live_equity_derivatives_when_option_chain_empt
 
     assert payload["__phoenix_nse_source"] == NSE_LIVE_EQUITY_SOURCE
     assert payload["__phoenix_nse_symbol"] == "NIFTY"
+    assert any("option-chain-indices" in url for url in opener.urls)
+    assert any("liveEquity-derivatives" in url for url in opener.urls)
+
+
+def test_web_client_falls_back_to_live_equity_derivatives_when_option_chain_errors():
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+        def close(self):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeOpener:
+        def __init__(self):
+            self.urls = []
+
+        def open(self, request, timeout):
+            self.urls.append(request.full_url)
+            if "option-chain-indices" in request.full_url:
+                raise HTTPError(request.full_url, 404, "Not Found", None, None)
+            if "liveEquity-derivatives" in request.full_url:
+                return FakeResponse(
+                    {
+                        "timestamp": "22-May-2026 15:30:00",
+                        "data": [
+                            {
+                                "underlying": "NIFTY",
+                                "expiryDate": "26-May-2026",
+                                "strikePrice": 23800,
+                                "optionType": "Call",
+                            }
+                        ],
+                    }
+                )
+            return FakeResponse({"page": True})
+
+    opener = FakeOpener()
+    client = NseWebOptionChainClient(opener_factory=lambda: opener)
+
+    payload = client.fetch_option_chain(symbol="nifty")
+
+    assert payload["__phoenix_nse_source"] == NSE_LIVE_EQUITY_SOURCE
     assert any("option-chain-indices" in url for url in opener.urls)
     assert any("liveEquity-derivatives" in url for url in opener.urls)

@@ -73,11 +73,25 @@ class NseWebOptionChainClient:
             timeout=float(self.timeout_seconds),
         ).close()
         api_url = f"{NSE_OPTION_CHAIN_API_URL}?{urlencode({'symbol': resolved_symbol})}"
-        with opener.open(
-            Request(api_url, headers=self._headers(referer=NSE_OPTION_CHAIN_URL)),
-            timeout=float(self.timeout_seconds),
-        ) as response:
-            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        try:
+            with opener.open(
+                Request(api_url, headers=self._headers(referer=NSE_OPTION_CHAIN_URL)),
+                timeout=float(self.timeout_seconds),
+            ) as response:
+                payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        except Exception as exc:  # noqa: BLE001 - validation fallback may still work.
+            logger.warning(
+                "NSE option-chain API failed for symbol=%s; trying live-derivatives fallback: %s",
+                resolved_symbol,
+                exc,
+            )
+            fallback_payload = self._fetch_live_equity_derivatives(
+                opener,
+                symbol=resolved_symbol,
+            )
+            if fallback_payload is not None:
+                return fallback_payload
+            raise
         if not isinstance(payload, Mapping):
             raise ValueError(f"NSE option-chain payload type={type(payload).__name__} is invalid")
         if _has_option_chain_rows(payload):
