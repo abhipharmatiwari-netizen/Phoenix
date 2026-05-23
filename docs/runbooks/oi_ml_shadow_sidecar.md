@@ -181,7 +181,10 @@ healthy instead of being marked stale overnight.
 Do not promote this strategy beyond shadow until a market-window snapshot proves
 real broker FULL quote completeness for the hard fields and proves that IV is
 available either directly from Angel or through fresh exact-contract NSE
-validation rows. The 2026-05-18 off-market smoke proved connectivity and
+validation rows. After this data gate passes, use
+[OI/ML CE Seller Rollout and Rollback](oi_ml_ce_seller_rollout.md) for the
+paper, shadow, Live A, Live B, and rollback checklist. The 2026-05-18
+off-market smoke proved connectivity and
 storage, but all off-market rows were flagged because source timestamps were
 stale.
 

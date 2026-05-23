@@ -368,6 +368,7 @@ def test_default_interceptor_order_matches_runtime_contract():
         "CapitalGuardInterceptor",
         "RiskGuardInterceptor",
         "GlobalKillSwitchInterceptor",
+        "OptionSellGuardInterceptor",
         "ExposureLimitInterceptor",
         "ProfitGuardInterceptor",
         "PositionOwnershipInterceptor",

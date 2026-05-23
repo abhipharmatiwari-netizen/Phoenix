@@ -205,3 +205,22 @@ def test_oci_runbook_documents_verified_vm_runtime() -> None:
     assert "stop/start logs indicate stale VM wiring" in runbook
     assert "optimizer and backend-reload systemd timers" in runbook
     assert "not current" in runbook
+
+
+def test_oi_ml_rollout_runbook_pins_promotion_and_rollback_gates() -> None:
+    runbook = _read("docs/runbooks/oi_ml_ce_seller_rollout.md")
+
+    assert "40 clean sessions" in runbook
+    assert "profit factor >= 1.25" in runbook
+    assert "max simulated drawdown <= 6%" in runbook
+    assert "10 complete sessions" in runbook
+    assert "One spread max" in runbook
+    assert "20 sessions" in runbook
+    assert "Two spreads max" in runbook
+    assert "allow_naked=false" in runbook
+    assert "strict intraday" in runbook
+    assert "Do not disable strict intraday" in runbook
+    assert "Broker margin" in runbook
+    assert "Kill-switch dry run" in runbook
+    assert "Break-glass flatten drill" in runbook
+    assert "Do not paste account numbers or secrets" in runbook

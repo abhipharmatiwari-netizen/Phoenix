@@ -12,11 +12,13 @@ import logging
 import os
 from dataclasses import dataclass
 from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional, Protocol
 
 from app.brokers.base import OrderPurpose, OrderRequest, OrderResponse
 from app.core.identifiers import BrokerAccountId, StrategyId, TenantId
 from app.core.logging_utils import log_event
+from app.data.option_chain_provider import OptionQuote
 from app.orders.position_ownership import (
     ContractKey,
     PositionOwnershipStore,
@@ -32,10 +34,19 @@ from app.risk.exposure_limiter import (
     check_exposure_limits,
     compute_exposure_snapshot,
 )
+from app.risk.kill_switch import KillSwitchScope
+from app.risk.option_sell_guard import (
+    OptionSellGuardConfig,
+    OptionSellGuardContext,
+    OptionSellStructure,
+    evaluate_option_sell_guard,
+)
 from app.risk.profit_engine import ProfitEngine
 from app.risk.risk_engine import RiskEngine
+from app.strategies.identifiers import OI_ML_CE_SELLER_ID
 
 logger = logging.getLogger(__name__)
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _is_true_env(name: str) -> bool:
@@ -399,6 +410,349 @@ class GlobalKillSwitchInterceptor:
         return None
 
 
+class OptionSellGuardInterceptor:
+    """Fail-closed entry guard for the OI/ML CE seller.
+
+    The pure guard in ``app.risk.option_sell_guard`` is intentionally reusable
+    strategy logic. This interceptor is the hub authority layer: it requires a
+    complete ``OrderRequest.strategy_context`` before an OI/ML entry can reach
+    broker routing and preserves exit handling for EOD / break-glass paths.
+    """
+
+    _QUOTE_KEYS = ("quote", "option_quote", "short_quote")
+
+    def evaluate(self, ctx: OrderInterceptionContext) -> Optional[OrderResponse]:
+        if str(ctx.strategy_id) != OI_ML_CE_SELLER_ID:
+            return None
+        if ctx.is_exit_order:
+            return None
+
+        strategy_context = getattr(ctx.order_req, "strategy_context", None)
+        if not isinstance(strategy_context, dict):
+            return self._reject(ctx, ("missing_strategy_context",))
+
+        context = dict(strategy_context)
+        extra_reasons = self._validate_router_only_risk_context(ctx, context)
+        if self._structure(context) is not OptionSellStructure.BEAR_CALL_SPREAD:
+            extra_reasons.append("spread_only_v1_required")
+
+        guard_context, guard_reasons = self._build_guard_context(ctx, context)
+        extra_reasons.extend(guard_reasons)
+
+        guard_result = None
+        if guard_context is not None:
+            guard_result = evaluate_option_sell_guard(
+                guard_context,
+                self._guard_config(ctx, context),
+            )
+            if not guard_result.allowed:
+                extra_reasons.extend(str(reason) for reason in guard_result.reasons)
+
+        deduped = _dedupe(extra_reasons)
+        if deduped:
+            self._trip_strategy_soft_kill_if_needed(ctx, deduped)
+            metadata = dict(getattr(guard_result, "metadata", {}) or {})
+            return self._reject(ctx, tuple(deduped), metadata=metadata)
+
+        return None
+
+    def _build_guard_context(
+        self,
+        ctx: OrderInterceptionContext,
+        data: dict[str, Any],
+    ) -> tuple[OptionSellGuardContext | None, list[str]]:
+        reasons: list[str] = []
+        quote = self._quote(data, reasons)
+        return (
+            OptionSellGuardContext(
+                now=self._now(data),
+                structure=self._structure(data) or "",
+                quote=quote,
+                ml_score=_first_present(data, "ml_score", "score", "probability"),
+                predicted_mae_premium=_first_present(
+                    data,
+                    "predicted_mae_premium",
+                    "mae_premium",
+                    "predicted_mae",
+                ),
+                premium_received=_first_present(
+                    data,
+                    "premium_received",
+                    "net_credit_points",
+                    "credit_points",
+                ),
+                max_loss_rupees=_first_present(
+                    data,
+                    "max_loss_rupees",
+                    "estimated_max_loss_rupees",
+                    "spread_max_loss_rupees",
+                ),
+                vix=_first_present(data, "vix", "india_vix"),
+                strategy_id=str(ctx.strategy_id),
+                option_type=str(data.get("option_type") or "CE"),
+                is_exit=False,
+                tenant_id=str(ctx.tenant_id),
+                account_id=str(ctx.broker_account_id),
+                kill_switch_manager=self._kill_switch_manager(),
+                metadata=data,
+            ),
+            reasons,
+        )
+
+    def _guard_config(
+        self,
+        ctx: OrderInterceptionContext,
+        data: dict[str, Any],
+    ) -> OptionSellGuardConfig:
+        live = self._is_live(ctx)
+        return OptionSellGuardConfig(
+            strategy_id=OI_ML_CE_SELLER_ID,
+            allow_naked=False,
+            require_kill_switch_manager=live,
+            max_quote_age_seconds=int(
+                _float_or(
+                    _first_present(
+                        data,
+                        "max_quote_age_seconds",
+                        "max_data_age_seconds",
+                    ),
+                    120.0,
+                )
+            ),
+            max_entry_vix=_float_or(data.get("max_entry_vix"), 22.0),
+            min_spread_ml_score=_float_or(data.get("min_spread_ml_score"), 0.55),
+            max_mae_to_premium=_float_or(data.get("max_mae_to_premium"), 1.20),
+            max_spread_loss_rupees=_float_or(
+                _first_present(
+                    data,
+                    "max_spread_loss_limit_rupees",
+                    "max_spread_loss_rupees",
+                ),
+                5000.0,
+            ),
+        )
+
+    @staticmethod
+    def _structure(data: dict[str, Any]) -> OptionSellStructure | None:
+        value = _first_present(data, "structure", "option_sell_structure")
+        try:
+            return OptionSellStructure(str(value).strip().upper())
+        except Exception:
+            return None
+
+    def _quote(self, data: dict[str, Any], reasons: list[str]) -> OptionQuote | None:
+        raw_quote = None
+        for key in self._QUOTE_KEYS:
+            if key in data:
+                raw_quote = data.get(key)
+                break
+        if isinstance(raw_quote, OptionQuote):
+            return raw_quote
+        if not isinstance(raw_quote, dict):
+            reasons.append("missing_option_quote")
+            return None
+        try:
+            quote_data = dict(raw_quote)
+            quote_data["snapshot_ts"] = _parse_datetime(quote_data.get("snapshot_ts"))
+            quote_data["source_ts"] = _parse_optional_datetime(quote_data.get("source_ts"))
+            quote_data["ingested_at"] = _parse_optional_datetime(quote_data.get("ingested_at"))
+            quote_data["expiry"] = _parse_date(quote_data.get("expiry"))
+            return OptionQuote(**quote_data)
+        except Exception:
+            reasons.append("invalid_option_quote")
+            return None
+
+    def _validate_router_only_risk_context(
+        self,
+        ctx: OrderInterceptionContext,
+        data: dict[str, Any],
+    ) -> list[str]:
+        reasons: list[str] = []
+        live = self._is_live(ctx)
+
+        if live:
+            pnl_fresh = _bool_or_none(
+                _first_present(data, "pnl_fresh", "pnl_state_fresh")
+            )
+            pnl_age = _float_or_none(
+                _first_present(data, "pnl_age_seconds", "pnl_snapshot_age_seconds")
+            )
+            max_pnl_age = _float_or(
+                _first_present(data, "max_pnl_age_seconds", "max_risk_age_seconds"),
+                120.0,
+            )
+            if pnl_fresh is False:
+                reasons.append("stale_pnl_state")
+            elif pnl_age is None and pnl_fresh is not True:
+                reasons.append("missing_pnl_state")
+            elif pnl_age is not None and pnl_age > max_pnl_age:
+                reasons.append("stale_pnl_state")
+
+        data_fresh = _bool_or_none(_first_present(data, "data_fresh", "quote_fresh"))
+        data_age = _float_or_none(_first_present(data, "data_age_seconds", "quote_age_seconds"))
+        max_data_age = _float_or(
+            _first_present(data, "max_data_age_seconds", "max_quote_age_seconds"),
+            120.0,
+        )
+        if data_fresh is False:
+            reasons.append("stale_data_state")
+        elif data_age is not None and data_age > max_data_age:
+            reasons.append("stale_data_state")
+
+        max_loss = _float_or_none(
+            _first_present(
+                data,
+                "max_loss_rupees",
+                "estimated_max_loss_rupees",
+                "spread_max_loss_rupees",
+            )
+        )
+        current_open_risk = _float_or_none(data.get("current_open_risk_rupees"))
+        max_open_risk = _float_or_none(data.get("max_open_risk_rupees"))
+        if max_open_risk is not None:
+            if current_open_risk is None or max_loss is None:
+                reasons.append("missing_open_risk_state")
+            elif current_open_risk + max_loss > max_open_risk:
+                reasons.append("open_risk_above_limit")
+
+        self._validate_loss_limit(
+            reasons,
+            data=data,
+            loss_key="daily_loss_rupees",
+            pnl_key="daily_realized_pnl",
+            limit_key="daily_loss_limit_rupees",
+            reason="daily_loss_limit_breached",
+            missing_reason="missing_daily_loss_state",
+        )
+        self._validate_loss_limit(
+            reasons,
+            data=data,
+            loss_key="weekly_loss_rupees",
+            pnl_key="weekly_realized_pnl",
+            limit_key="weekly_loss_limit_rupees",
+            reason="weekly_loss_limit_breached",
+            missing_reason="missing_weekly_loss_state",
+        )
+        return reasons
+
+    @staticmethod
+    def _validate_loss_limit(
+        reasons: list[str],
+        *,
+        data: dict[str, Any],
+        loss_key: str,
+        pnl_key: str,
+        limit_key: str,
+        reason: str,
+        missing_reason: str,
+    ) -> None:
+        limit = _float_or_none(data.get(limit_key))
+        if limit is None:
+            return
+        raw_loss = _float_or_none(data.get(loss_key))
+        if raw_loss is None:
+            pnl = _float_or_none(data.get(pnl_key))
+            raw_loss = max(0.0, -pnl) if pnl is not None else None
+        if raw_loss is None:
+            reasons.append(missing_reason)
+            return
+        if raw_loss >= limit:
+            reasons.append(reason)
+
+    def _trip_strategy_soft_kill_if_needed(
+        self,
+        ctx: OrderInterceptionContext,
+        reasons: list[str],
+    ) -> None:
+        if "daily_loss_limit_breached" not in reasons:
+            return
+        manager = self._kill_switch_manager()
+        if manager is None:
+            return
+        try:
+            manager.trip(
+                KillSwitchScope.STRATEGY,
+                OI_ML_CE_SELLER_ID,
+                reason="oi_ml_ce_seller_daily_loss_limit_breached",
+                actor="option_sell_guard",
+                block_exits=False,
+            )
+        except ValueError:
+            # Already tripped or clear-pending. That still leaves entries
+            # blocked and exits governed by the existing SOFT/HARD state.
+            return
+        except Exception as exc:
+            log_event(
+                logger,
+                event_type="OPTION_SELL_GUARD_KILL_SWITCH_TRIP_FAILED",
+                message="OptionSellGuard failed to trip strategy kill switch",
+                level=logging.ERROR,
+                tenant_id=ctx.tenant_id,
+                broker_account_id=ctx.broker_account_id,
+                strategy_id=ctx.strategy_id,
+                correlation_id=ctx.correlation_id,
+                request_id=ctx.request_id,
+                instrument=ctx.order_req.symbol,
+                error=str(exc),
+            )
+
+    @staticmethod
+    def _kill_switch_manager() -> Any:
+        try:
+            from app.hub.runtime import get_hub_runtime
+            return getattr(get_hub_runtime(), "kill_switch_manager", None)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _is_live(ctx: OrderInterceptionContext) -> bool:
+        mode = str(
+            getattr(ctx.settings, "trade_mode", "")
+            or os.getenv("TRADE_MODE", "PAPER")
+        ).strip().upper()
+        return mode == "LIVE"
+
+    @staticmethod
+    def _now(data: dict[str, Any]) -> datetime:
+        raw = _first_present(data, "decision_ts", "now", "created_at")
+        parsed = _parse_optional_datetime(raw)
+        return parsed or datetime.now(IST)
+
+    def _reject(
+        self,
+        ctx: OrderInterceptionContext,
+        reasons: tuple[str, ...],
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> OrderResponse:
+        message = "option_sell_guard_rejected:" + ",".join(reasons)
+        log_event(
+            logger,
+            event_type="ORDER_REJECTED_OPTION_SELL_GUARD",
+            message=message,
+            level=logging.WARNING,
+            tenant_id=ctx.tenant_id,
+            broker_account_id=ctx.broker_account_id,
+            strategy_id=ctx.strategy_id,
+            correlation_id=ctx.correlation_id,
+            request_id=ctx.request_id,
+            instrument=ctx.order_req.symbol,
+            reasons=list(reasons),
+        )
+        return OrderResponse(
+            broker_order_id="",
+            status="REJECTED",
+            message=message,
+            filled_quantity=0,
+            average_price=None,
+            details={
+                "origin": "option_sell_guard",
+                "reasons": list(reasons),
+                "metadata": metadata or {},
+            },
+        )
+
+
 class PositionOwnershipInterceptor:
     def __init__(self, *, store: Optional[PositionOwnershipStore] = None) -> None:
         self._store = store or PositionOwnershipStore()
@@ -711,6 +1065,79 @@ class BrokerTokenGuardInterceptor:
         return None
 
 
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _first_present(data: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in data and data.get(key) not in (None, ""):
+            return data.get(key)
+    return None
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or(value: Any, default: float) -> float:
+    parsed = _float_or_none(value)
+    return default if parsed is None else parsed
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _parse_optional_datetime(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    return _parse_datetime(value)
+
+
+def _parse_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=IST)
+    return parsed
+
+
+def _parse_date(value: Any) -> date:
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    return date.fromisoformat(str(value).strip())
+
+
 def build_default_interceptors(
     *,
     position_ownership_store: Optional[PositionOwnershipStore] = None,
@@ -720,6 +1147,7 @@ def build_default_interceptors(
         CapitalGuardInterceptor(),
         RiskGuardInterceptor(),
         GlobalKillSwitchInterceptor(),
+        OptionSellGuardInterceptor(),
         ExposureLimitInterceptor(),
         ProfitGuardInterceptor(),
         PositionOwnershipInterceptor(store=position_ownership_store),
@@ -737,6 +1165,7 @@ __all__ = [
     "RiskGuardInterceptor",
     "ProfitGuardInterceptor",
     "GlobalKillSwitchInterceptor",
+    "OptionSellGuardInterceptor",
     "PositionOwnershipInterceptor",
     "ExposureLimitInterceptor",
     "CircuitBreakerInterceptor",
