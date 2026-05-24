@@ -6,6 +6,7 @@ import {
   Order,
   PnLSnapshot,
   Position,
+  Subscription,
   Tenant,
   Trade,
 } from '../types/trading';
@@ -58,6 +59,48 @@ interface ListTenantsResponse {
 interface ListBrokerAccountsResponse {
   count: number;
   broker_accounts: BrokerAccount[];
+}
+
+interface ListSubscriptionsResponse {
+  count: number;
+  subscriptions: Subscription[];
+}
+
+export interface TenantUpsertPayload {
+  tenant_id: string;
+  name: string;
+  email: string;
+  phone?: string | null;
+  status: string;
+  notes?: string | null;
+}
+
+export interface BrokerAccountUpsertPayload {
+  broker_account_id: string;
+  tenant_id: string;
+  broker_type: string;
+  display_name: string;
+  client_code: string;
+  secret_ref: string;
+  trading_mode: string;
+  enabled: boolean;
+  default_strategies: string[];
+}
+
+export interface SubscriptionUpsertPayload {
+  subscription_id: string;
+  tenant_id: string;
+  broker_account_id: string;
+  mode: string;
+  start_at: string;
+  end_at: string;
+}
+
+interface TenantDeactivateResponse {
+  status: string;
+  tenant: Tenant;
+  disabled_accounts: BrokerAccount[];
+  expired_subscriptions: Subscription[];
 }
 
 interface ListAccountsResponse {
@@ -561,6 +604,47 @@ export const AdminService = {
   listBrokerAccounts(): Promise<ListBrokerAccountsResponse> {
     return request<ListBrokerAccountsResponse>({
       path: bffPath('/admin/broker-accounts'),
+    });
+  },
+
+  listSubscriptions(): Promise<ListSubscriptionsResponse> {
+    return request<ListSubscriptionsResponse>({
+      path: bffPath('/admin/subscriptions'),
+    });
+  },
+
+  upsertTenant(payload: TenantUpsertPayload): Promise<Tenant> {
+    return request<Tenant>({
+      path: bffPath('/admin/tenants'),
+      method: 'POST',
+      body: payload,
+    });
+  },
+
+  upsertBrokerAccount(payload: BrokerAccountUpsertPayload): Promise<BrokerAccount> {
+    return request<BrokerAccount>({
+      path: bffPath('/admin/broker-accounts'),
+      method: 'POST',
+      body: payload,
+    });
+  },
+
+  upsertSubscription(payload: SubscriptionUpsertPayload): Promise<Subscription> {
+    return request<Subscription>({
+      path: bffPath('/admin/subscriptions'),
+      method: 'POST',
+      body: payload,
+    });
+  },
+
+  deactivateTenant(
+    tenantId: string,
+    payload: { reason: string; status?: string },
+  ): Promise<TenantDeactivateResponse> {
+    return request<TenantDeactivateResponse>({
+      path: bffPath(`/admin/tenants/${encodeURIComponent(tenantId)}/deactivate`),
+      method: 'POST',
+      body: payload,
     });
   },
 };

@@ -41,6 +41,7 @@ from app.orders.router import OrderRouter
 from app.tenants.firestore_client import (
     get_broker_account,
     get_all_broker_accounts,
+    get_all_subscriptions,
     get_all_tenants,
     get_subscriptions_for_account,
     get_tenant,
@@ -96,6 +97,11 @@ class SubscriptionUpsertRequest(BaseModel):
     mode: str
     start_at: datetime
     end_at: datetime
+
+
+class TenantDeactivateRequest(BaseModel):
+    reason: str
+    status: str = "archived"
 
 
 class AdminTestOrderRequest(BaseModel):
@@ -345,6 +351,224 @@ def _context_scoped(ctx: AdminContext) -> bool:
     )
 
 
+def _require_can_manage_tenant(ctx: AdminContext, tenant_id: object) -> str:
+    tenant_text = str(tenant_id or "").strip()
+    if not tenant_text:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="tenant_id is required.",
+        )
+    if _context_scoped(ctx) and not ctx.can_access_tenant(tenant_text):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tenant is outside the caller's entitlement scope.",
+        )
+    return tenant_text
+
+
+def _require_can_manage_full_tenant(ctx: AdminContext, tenant_id: object) -> str:
+    tenant_text = _require_can_manage_tenant(ctx, tenant_id)
+    if _context_scoped(ctx) and ctx.broker_account_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tenant-level changes require tenant-wide entitlement.",
+        )
+    return tenant_text
+
+
+def _require_can_manage_account(
+    ctx: AdminContext,
+    *,
+    tenant_id: object,
+    broker_account_id: object,
+) -> tuple[str, str]:
+    tenant_text = _require_can_manage_tenant(ctx, tenant_id)
+    account_text = str(broker_account_id or "").strip()
+    if not account_text:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="broker_account_id is required.",
+        )
+    if _context_scoped(ctx) and not ctx.can_access_broker_account(account_text):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Broker account is outside the caller's entitlement scope.",
+        )
+    return tenant_text, account_text
+
+
+def _normalize_tenant_status(value: object) -> str:
+    token = str(value or "active").strip().lower()
+    allowed = {"active", "suspended", "archived"}
+    if token not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"tenant status must be one of: {', '.join(sorted(allowed))}.",
+        )
+    return token
+
+
+def _normalize_subscription_mode(value: object) -> str:
+    token = str(value or "").strip().upper()
+    allowed = {"LIVE", "PAPER", "SHADOW"}
+    if token not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"subscription mode must be one of: {', '.join(sorted(allowed))}.",
+        )
+    return token
+
+
+def _tenant_accounts(tenant_id: str) -> list[BrokerAccountModel]:
+    return [
+        account
+        for account in get_all_broker_accounts()
+        if str(account.tenant_id) == str(tenant_id)
+    ]
+
+
+def _order_status_text(order: Any) -> str:
+    if isinstance(order, dict):
+        value = order.get("status") or order.get("order_status")
+    else:
+        value = getattr(order, "status", None) or getattr(order, "order_status", None)
+    return str(getattr(value, "value", value) or "").strip().upper()
+
+
+def _position_qty(position: Any) -> float:
+    candidates = (
+        "quantity",
+        "net_qty",
+        "net_quantity",
+        "netqty",
+        "qty",
+        "net",
+    )
+    for key in candidates:
+        value = (
+            position.get(key)
+            if isinstance(position, dict)
+            else getattr(position, key, None)
+        )
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+_TERMINAL_ORDER_STATUSES = {
+    "CANCELLED",
+    "CANCELED",
+    "COMPLETE",
+    "COMPLETED",
+    "EXECUTED",
+    "FILLED",
+    "REJECTED",
+    "FAILED",
+    "EXPIRED",
+}
+
+
+def _tenant_deactivation_blockers(
+    accounts: list[BrokerAccountModel],
+) -> list[dict[str, Any]]:
+    if not accounts:
+        return []
+    try:
+        runtime = get_hub_runtime()
+        hub = getattr(runtime, "hub", None)
+        state_store = getattr(runtime, "state_store", None) or getattr(
+            hub, "state_store", None
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "tenant_deactivation_state_check_unavailable",
+                "message": "Could not verify runner/order/position state.",
+                "reason": repr(exc),
+            },
+        ) from exc
+
+    blockers: list[dict[str, Any]] = []
+    for account in accounts:
+        account_id = str(account.broker_account_id)
+        runner = None
+        get_runner = getattr(hub, "get_runner", None)
+        if callable(get_runner):
+            try:
+                runner = get_runner(account_id)
+            except Exception as exc:
+                blockers.append({
+                    "broker_account_id": account_id,
+                    "reason": "runner_state_unavailable",
+                    "error": repr(exc),
+                })
+                continue
+        if runner is not None and bool(getattr(runner, "is_running", False)):
+            blockers.append({
+                "broker_account_id": account_id,
+                "reason": "runner_running",
+            })
+
+        if state_store is None:
+            blockers.append({
+                "broker_account_id": account_id,
+                "reason": "state_store_unavailable",
+            })
+            continue
+
+        try:
+            positions = list(state_store.get_positions(account_id) or [])
+        except Exception as exc:
+            blockers.append({
+                "broker_account_id": account_id,
+                "reason": "positions_unavailable",
+                "error": repr(exc),
+            })
+            continue
+        open_positions = [
+            position for position in positions if abs(_position_qty(position)) > 0.0001
+        ]
+        if open_positions:
+            blockers.append({
+                "broker_account_id": account_id,
+                "reason": "open_positions",
+                "count": len(open_positions),
+            })
+
+        try:
+            get_order_snapshot = getattr(state_store, "get_order_snapshot", None)
+            if callable(get_order_snapshot):
+                orders = list(get_order_snapshot(account_id) or [])
+            else:
+                orders = []
+            if not orders:
+                orders = list(state_store.get_orders(account_id) or [])
+        except Exception as exc:
+            blockers.append({
+                "broker_account_id": account_id,
+                "reason": "orders_unavailable",
+                "error": repr(exc),
+            })
+            continue
+        open_orders = [
+            order
+            for order in orders
+            if _order_status_text(order) not in _TERMINAL_ORDER_STATUSES
+        ]
+        if open_orders:
+            blockers.append({
+                "broker_account_id": account_id,
+                "reason": "open_orders",
+                "count": len(open_orders),
+            })
+    return blockers
+
+
 def _isoformat_or_none(value: Any) -> str | None:
     if value is None:
         return None
@@ -590,6 +814,20 @@ async def list_broker_accounts(ctx: AdminContext = Depends(get_admin_context)):
     return {"count": len(accounts), "broker_accounts": accounts}
 
 
+# List all subscription validity windows.
+@router.get("/subscriptions")
+async def list_subscriptions(ctx: AdminContext = Depends(get_admin_context)):
+    subscriptions = get_all_subscriptions()
+    if _context_scoped(ctx):
+        subscriptions = [
+            sub
+            for sub in subscriptions
+            if ctx.can_access_tenant(_field_text(sub, "tenant_id"))
+            and ctx.can_access_broker_account(_field_text(sub, "broker_account_id"))
+        ]
+    return {"count": len(subscriptions), "subscriptions": subscriptions}
+
+
 # List active hub runners and their status.
 @router.get("/runners")
 async def list_runners(ctx: AdminContext = Depends(get_admin_context)):
@@ -714,17 +952,19 @@ def create_or_update_tenant(
 ) -> TenantModel:
     ctx.require_role(AdminRole.ADMIN)
     check_rate_limit(request)
+    tenant_id = _require_can_manage_full_tenant(ctx, req.tenant_id)
+    tenant_status = _normalize_tenant_status(req.status)
     now = datetime.now(timezone.utc)
     before_model = get_tenant(req.tenant_id)
     model = TenantModel(
-        tenant_id=req.tenant_id,
-        name=req.name,
-        email=req.email,
+        tenant_id=TenantId(tenant_id),
+        name=req.name.strip(),
+        email=req.email.strip(),
         phone=req.phone,
-        status=req.status,
+        status=tenant_status,
         notes=req.notes,
         updated_at=now,
-        created_at=now,
+        created_at=before_model.created_at if before_model else now,
     )
     result = upsert_tenant(model)
     emit_audit_event(
@@ -748,20 +988,33 @@ def create_or_update_broker_account(
 ) -> BrokerAccountModel:
     ctx.require_role(AdminRole.ADMIN)
     check_rate_limit(request)
+    _require_can_manage_account(
+        ctx,
+        tenant_id=req.tenant_id,
+        broker_account_id=req.broker_account_id,
+    )
+    tenant = get_tenant(req.tenant_id)
+    if tenant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tenant not found.",
+        )
+    trading_mode = _normalize_subscription_mode(req.trading_mode)
     now = datetime.now(timezone.utc)
     before_model = get_broker_account(req.broker_account_id)
     model = BrokerAccountModel(
         broker_account_id=req.broker_account_id,
         tenant_id=req.tenant_id,
         broker_type=req.broker_type,
-        display_name=req.display_name,
-        client_code=req.client_code,
-        secret_ref=req.secret_ref,
-        trading_mode=req.trading_mode,
+        display_name=req.display_name.strip(),
+        client_code=req.client_code.strip(),
+        secret_ref=req.secret_ref.strip(),
+        trading_mode=trading_mode,
         enabled=req.enabled,
         default_strategies=req.default_strategies,
-        created_at=now,
+        created_at=before_model.created_at if before_model else now,
         updated_at=now,
+        meta=before_model.meta if before_model else {},
     )
     result = upsert_broker_account(model)
     emit_audit_event(
@@ -785,6 +1038,28 @@ def create_or_update_subscription(
 ) -> SubscriptionModel:
     ctx.require_role(AdminRole.OPERATOR)
     check_rate_limit(request)
+    _require_can_manage_account(
+        ctx,
+        tenant_id=req.tenant_id,
+        broker_account_id=req.broker_account_id,
+    )
+    if req.start_at >= req.end_at:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="start_at must be before end_at.",
+        )
+    mode = _normalize_subscription_mode(req.mode)
+    account = get_broker_account(req.broker_account_id)
+    if account is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Broker account not found.",
+        )
+    if str(account.tenant_id) != str(req.tenant_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Subscription tenant_id must match the broker account tenant_id.",
+        )
     now = datetime.now(timezone.utc)
     before_model = next(
         (
@@ -798,10 +1073,10 @@ def create_or_update_subscription(
         subscription_id=req.subscription_id,
         tenant_id=req.tenant_id,
         broker_account_id=req.broker_account_id,
-        mode=req.mode,
+        mode=mode,
         start_at=req.start_at,
         end_at=req.end_at,
-        created_at=now,
+        created_at=before_model.created_at if before_model else now,
         updated_at=now,
     )
     result = upsert_subscription(model)
@@ -815,6 +1090,139 @@ def create_or_update_subscription(
         request_id=_request_id_from_request(request),
     )
     return result
+
+
+@router.post("/tenants/{tenant_id}/deactivate")
+def deactivate_tenant(
+    tenant_id: TenantId,
+    request: Request,
+    req: TenantDeactivateRequest,
+    ctx: AdminContext = Depends(get_admin_context),
+) -> dict[str, Any]:
+    ctx.require_role(AdminRole.ADMIN)
+    check_rate_limit(request)
+    tenant_text = _require_can_manage_full_tenant(ctx, tenant_id)
+    target_status = _normalize_tenant_status(req.status)
+    if target_status == "active":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Deactivate status must be suspended or archived.",
+        )
+    reason = str(req.reason or "").strip()
+    if not reason:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="reason is required.",
+        )
+
+    tenant = get_tenant(TenantId(tenant_text))
+    if tenant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tenant not found.",
+        )
+    accounts = _tenant_accounts(tenant_text)
+    blockers = _tenant_deactivation_blockers(accounts)
+    if blockers:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "tenant_deactivation_blocked",
+                "message": (
+                    "Tenant cannot be deactivated while accounts have active "
+                    "runners, open positions, or open orders."
+                ),
+                "blockers": blockers,
+            },
+        )
+
+    now = datetime.now(timezone.utc)
+    before_subscriptions: list[SubscriptionModel] = []
+    after_subscriptions: list[SubscriptionModel] = []
+    disabled_accounts: list[BrokerAccountModel] = []
+
+    updated_tenant = upsert_tenant(
+        TenantModel(
+            tenant_id=tenant.tenant_id,
+            name=tenant.name,
+            email=tenant.email,
+            phone=tenant.phone,
+            status=target_status,
+            notes=tenant.notes,
+            created_at=tenant.created_at,
+            updated_at=now,
+        )
+    )
+
+    for account in accounts:
+        if account.enabled:
+            disabled_accounts.append(
+                upsert_broker_account(
+                    BrokerAccountModel(
+                        broker_account_id=account.broker_account_id,
+                        tenant_id=account.tenant_id,
+                        broker_type=account.broker_type,
+                        display_name=account.display_name,
+                        client_code=account.client_code,
+                        secret_ref=account.secret_ref,
+                        trading_mode=account.trading_mode,
+                        enabled=False,
+                        default_strategies=account.default_strategies,
+                        created_at=account.created_at,
+                        updated_at=now,
+                        meta=account.meta,
+                    )
+                )
+            )
+        for sub in get_subscriptions_for_account(account.broker_account_id):
+            before_subscriptions.append(sub)
+            sub_start = sub.start_at
+            if sub_start.tzinfo is None:
+                sub_start = sub_start.replace(tzinfo=timezone.utc)
+            expires_at = now
+            if sub_start > expires_at:
+                sub_start = expires_at
+            expired = SubscriptionModel(
+                subscription_id=sub.subscription_id,
+                tenant_id=sub.tenant_id,
+                broker_account_id=sub.broker_account_id,
+                mode=sub.mode,
+                start_at=sub_start,
+                end_at=expires_at,
+                created_at=sub.created_at,
+                updated_at=now,
+            )
+            after_subscriptions.append(upsert_subscription(expired))
+
+    emit_audit_event(
+        actor=ctx.caller,
+        action="deactivate_tenant",
+        resource_type="tenant",
+        resource_id=tenant_text,
+        before={
+            "tenant": tenant,
+            "broker_accounts": accounts,
+            "subscriptions": before_subscriptions,
+        },
+        after={
+            "tenant": updated_tenant,
+            "broker_accounts": disabled_accounts,
+            "subscriptions": after_subscriptions,
+        },
+        request_id=_request_id_from_request(request),
+        metadata={
+            "reason": reason,
+            "status": target_status,
+            "disabled_accounts": len(disabled_accounts),
+            "expired_subscriptions": len(after_subscriptions),
+        },
+    )
+    return {
+        "status": target_status,
+        "tenant": updated_tenant,
+        "disabled_accounts": disabled_accounts,
+        "expired_subscriptions": after_subscriptions,
+    }
 
 
 @router.post("/test-order")
@@ -3450,14 +3858,17 @@ __all__ = [
     "KillSwitchPasswordClearRequest",
     "StepUpIssueRequest",
     "SubscriptionUpsertRequest",
+    "TenantDeactivateRequest",
     "TenantUpsertRequest",
     "admin_test_order",
     "break_glass_flatten",
     "create_or_update_broker_account",
     "create_or_update_subscription",
     "create_or_update_tenant",
+    "deactivate_tenant",
     "list_broker_accounts",
     "list_runners",
+    "list_subscriptions",
     "kill_switch_rearm",
     "kill_switch_clear_with_password",
     "list_tenants",

@@ -2,11 +2,11 @@ export interface Tenant {
   tenant_id: string;
   name: string;
   email: string;
-  phone: string;
+  phone?: string | null;
   status: string;
-  notes: string;
-  created_at: string;
-  updated_at: string;
+  notes?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 export interface BrokerAccount {
@@ -15,11 +15,24 @@ export interface BrokerAccount {
   broker_type: string;
   display_name: string;
   client_code: string;
+  secret_ref?: string;
   trading_mode: string;
   enabled: boolean;
   default_strategies: string[];
-  created_at: string;
-  updated_at: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+  meta?: Record<string, unknown>;
+}
+
+export interface Subscription {
+  subscription_id: string;
+  tenant_id: string;
+  broker_account_id: string;
+  mode: string;
+  start_at: string;
+  end_at: string;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 export interface Position {
