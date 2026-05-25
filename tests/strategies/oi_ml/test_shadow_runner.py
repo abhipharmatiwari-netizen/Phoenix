@@ -100,6 +100,19 @@ def test_load_shadow_runner_config_reads_snapshot_window():
     assert cfg.snapshot_end_time.minute == 25
 
 
+def test_load_shadow_runner_config_reads_dry_run_spread_risk_overrides():
+    cfg = load_shadow_runner_config(
+        env={
+            "OI_ML_SHADOW_ENABLED": "true",
+            "OI_ML_SHADOW_SPREAD_WIDTH_POINTS": "180",
+            "OI_ML_SHADOW_MAX_SPREAD_LOSS_RUPEES": "5500",
+        }
+    )
+
+    assert cfg.spread_width_points == 180
+    assert cfg.max_spread_loss_rupees == 5500.0
+
+
 def test_resolve_listed_expiry_uses_provider_calendar(monkeypatch):
     monkeypatch.setattr(
         shadow_runner,
@@ -268,8 +281,10 @@ class FakeConn:
 
 
 class FakeDecisionEngine:
+    last_config = None
+
     def __init__(self, *args, **kwargs):
-        pass
+        FakeDecisionEngine.last_config = kwargs.get("config")
 
     def evaluate_entry(self, **kwargs):
         return SimpleNamespace(
@@ -289,6 +304,8 @@ def test_shadow_once_evaluates_no_trade_without_recording(monkeypatch):
         enabled=True,
         expiry=date(2026, 5, 21),
         market_window_only=False,
+        spread_width_points=180,
+        max_spread_loss_rupees=5500.0,
     )
 
     result = run_shadow_once(cfg, now=datetime(2026, 5, 19, 10, 0, tzinfo=IST))
@@ -296,6 +313,8 @@ def test_shadow_once_evaluates_no_trade_without_recording(monkeypatch):
     assert result.decision_action == "NO_TRADE"
     assert result.reason == "no_fresh_option_snapshot"
     assert result.snapshot_stored_rows == 12
+    assert FakeDecisionEngine.last_config.spread_width_points == 180.0
+    assert FakeDecisionEngine.last_config.guard_config.max_spread_loss_rupees == 5500.0
 
 
 class FakeStageDecisionEngine:

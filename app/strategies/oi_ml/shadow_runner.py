@@ -58,6 +58,7 @@ class OiMlShadowRunnerConfig:
     lots: int = 1
     lot_size: int = 65
     spread_width_points: int = 200
+    max_spread_loss_rupees: float = 5000.0
     allow_naked: bool = False
     tenant_id: str | None = None
     broker_account_id: str | None = None
@@ -124,6 +125,10 @@ def load_shadow_runner_config(
         lots=_int(source.get("OI_ML_SHADOW_LOTS"), 1, minimum=1),
         lot_size=_int(source.get("OI_ML_SHADOW_LOT_SIZE"), 65, minimum=1),
         spread_width_points=_int(source.get("OI_ML_SHADOW_SPREAD_WIDTH_POINTS"), 200, minimum=1),
+        max_spread_loss_rupees=_float(
+            source.get("OI_ML_SHADOW_MAX_SPREAD_LOSS_RUPEES"),
+            5000.0,
+        ),
         allow_naked=_bool(source.get("OI_ML_SHADOW_ALLOW_NAKED"), default=False),
         tenant_id=_optional_str(source.get("HUB_DEFAULT_TENANT_ID")),
         broker_account_id=_optional_str(source.get("HUB_DEFAULT_BROKER_ACCOUNT_ID")),
@@ -170,7 +175,10 @@ def run_shadow_once(
                 lot_size=config.lot_size,
                 spread_width_points=float(config.spread_width_points),
                 allow_naked=config.allow_naked,
-                guard_config=OptionSellGuardConfig(allow_naked=config.allow_naked),
+                guard_config=OptionSellGuardConfig(
+                    allow_naked=config.allow_naked,
+                    max_spread_loss_rupees=float(config.max_spread_loss_rupees),
+                ),
             ),
         )
         decision = decision_engine.evaluate_entry(
@@ -194,6 +202,7 @@ def run_shadow_once(
                 lots=config.lots,
                 lot_size=config.lot_size,
                 spread_width_points=config.spread_width_points,
+                max_spread_loss_rupees=float(config.max_spread_loss_rupees),
             ),
         )
         if not intent_result.ok or intent_result.intent is None:
