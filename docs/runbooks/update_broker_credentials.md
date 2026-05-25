@@ -18,6 +18,9 @@ Rotate broker login material in Postgres without moving platform secrets into re
 ## Scope
 
 This runbook applies only to deployments using `BROKER_SECRET_BACKEND=postgres`.
+In the Tenants UI, the broker-account `Credential Ref` field is a lookup key for
+stored broker credentials only. Do not enter PIN, password, TOTP secret, API
+secret, or credential values into that field.
 
 ## Preconditions
 

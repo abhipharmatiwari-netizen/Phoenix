@@ -14,20 +14,20 @@ Current VM evidence is captured in [docs/OCI_VM_RUNTIME.md](docs/OCI_VM_RUNTIME.
 
 ### 0.1 Verified OCI VM Runtime
 
-Verified on 2026-05-17 from the running OCI VM:
+Verified on 2026-05-25 from the running OCI VM:
 
 - Repo checkout: `/opt/phoenix/app`
-- Active branch/commit: `main` at `1a2cc47d8cb23fbc9b60e5eea8e5841e10d79ccd`
+- Active branch/commit: `main` at `e7f1e29ea898cf5776bfdceadd5c22bd492762a8`
 - Compose project: `phoenix-oci-live`
 - Compose files: `/opt/phoenix/app/docker-compose.oci-live.yml` plus `/opt/phoenix/phoenix-override.yml`
 - Env file: `/opt/phoenix/phoenix-deploy.env`
-- Backend: `phoenix-oci-backend`, image `phoenix-local-backend:local-1a2cc47`, command `python -m app.main`
-- Web: `phoenix-oci-web`, image `phoenix-local-nginx:local-1a2cc47`
+- Backend: `phoenix-oci-backend`, image `phoenix-local-backend:local-e7f1e29`, command `python -m app.main`
+- Web: `phoenix-oci-web`, image `phoenix-local-nginx:local-e7f1e29`
 - Database: VM-local `phoenix-oci-postgres`, image `postgres:16-alpine`
 - Watchdog: `phoenix-oci-watchdog`, image `docker:cli`
-- OI/ML shadow sidecar: `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-9e91b77`, dry-run only, no host ports
+- OI/ML shadow sidecar: `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd`, dry-run only, no host ports
 - Runtime health: backend `/health`, `/ready`, `/readyz`, and `/health/summary` return 200 from inside the backend container
-- Health evidence: `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE`
+- Health evidence: `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE`; `/readyz` reports `ready=true`, `degraded_scope_count=0`, `position_state_counts={}`, and `firing_count=0`
 
 The current VM differs from the intended OCIR/external-Postgres shape in these
 important ways:

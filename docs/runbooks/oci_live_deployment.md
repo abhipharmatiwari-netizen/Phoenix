@@ -1,6 +1,6 @@
 # Phoenix OCI LIVE Deployment Runbook
 
-Status: current operator runbook for the OCI VM verified on 2026-05-21.
+Status: current operator runbook for the OCI VM verified on 2026-05-25.
 
 This runbook describes what is actually running on the OCI VM. It does not
 describe the older intended OCIR/external-Postgres deployment as current state.
@@ -27,6 +27,15 @@ Current VM paths and containers:
 - OI/ML shadow checkout: `/opt/phoenix/oi-ml-shadow-src`
 - OI/ML shadow compose: `/opt/phoenix/oi-ml-shadow.yml`
 - OI/ML shadow container: `phoenix-oi-ml-shadow`
+
+Latest verified live deployment:
+
+- VM checkout: `main` at `e7f1e29`
+- backend image: `phoenix-local-backend:local-e7f1e29`
+- nginx image: `phoenix-local-nginx:local-e7f1e29`
+- readiness: `/readyz` returns HTTP 200 with `ready=true`,
+  `degraded_scope_count=0`, `position_state_counts={}`, and `firing_count=0`
+- host health: nginx `/health` and `/readyz` return HTTP 200
 
 Non-current for this VM unless a later evidence capture proves otherwise:
 
@@ -167,9 +176,9 @@ Expected success evidence:
 
 - backend and web are running; after the 2026-05-21 liveness-healthcheck patch
   they remain Docker-healthy when `/health` is 200 even if `/readyz` is 503
-- backend image was `phoenix-local-backend:local-04cf16c` in the latest
+- backend image is `phoenix-local-backend:local-e7f1e29` in the latest
   verified deployment
-- web image is `phoenix-local-nginx:local-04cf16c` in the latest verified
+- web image is `phoenix-local-nginx:local-e7f1e29` in the latest verified
   deployment
 - `/opt/phoenix/phoenix-override.yml` must also use `/health` for nginx
   Docker health; a VM-local override that still checks `/readyz` will keep the
@@ -391,7 +400,7 @@ The operator owns:
 
 | Drift | Evidence | Risk |
 |---|---|---|
-| Local images instead of OCIR | `phoenix-local-backend:local-349d55f`, `phoenix-local-nginx:local-349d55f` observed before 2026-05-21 rectification | Old OCIR docs do not describe current deploy/restart behavior |
+| Local images instead of OCIR | `phoenix-local-backend:local-e7f1e29`, `phoenix-local-nginx:local-e7f1e29` verified on 2026-05-25 | Old OCIR docs do not describe current deploy/restart behavior |
 | VM-local Postgres | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres` | External DB backup/SSL assumptions are not current |
 | Source bind mounts | backend mounts selected `/opt/phoenix/app/app/...` files | Container image alone is not the full deployed code |
 | Stale watchdog can stop nginx | watchdog command/logs | Current manifest is observe-only; stop/start logs indicate stale VM wiring or override drift |

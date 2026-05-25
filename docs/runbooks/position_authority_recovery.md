@@ -1,20 +1,34 @@
 # Position Authority Recovery
 
-Use this workflow only when broker/current-position evidence proves the contract
-is flat but Phoenix still reports a degraded or reconciling internal position
+Use this workflow when broker/current-position evidence proves the contract is
+flat but Phoenix still reports a degraded or reconciling internal position
 record.
 
-Ownership cleanup is automatic after corroborated broker-flat evidence. Normal
-owned records clear after two consecutive zero-position broker polls. Records
-that are already `RECONCILING` get one extra confirmation and clear on the third
-consecutive zero-position poll. If the same ownership row remains beyond that,
-treat it as stale VM code, a persistence failure, or an authority-path mismatch
-before using manual recovery.
+Ownership cleanup is automatic after corroborated broker-flat evidence. As of
+the 2026-05-25 deployment, broker-flat auto-recovery also runs after every
+successful order-sync cycle, after external-fill reconciliation. It can clear a
+stale zero-quantity `RECONCILING`, `DEGRADED`, or `RECOVERY_PENDING` lifecycle
+record only when all of these are true:
+
+- broker positions snapshot is fresh and successful
+- broker orders snapshot is fresh and not older than the positions snapshot
+- Phoenix internal net quantity for the record is zero
+- broker position evidence for the contract is flat
+- no active matching broker order exists
+
+On success, auto-recovery persists the internal record as `FLAT`, removes the
+matching ownership row, attempts degraded-scope recovery, and emits audit
+evidence. If broker evidence shows a nonzero position, Phoenix must not auto
+clear the record; position trailing lock may manage that external/manual-owned
+broker position.
+
+Manual recovery below is the fallback when auto-recovery does not converge.
 
 1. Check the dashboard status contract:
 
    ```bash
-   curl -sS http://localhost:8000/dashboard/status
+   docker exec phoenix-oci-backend \
+     curl -sS http://localhost:8080/dashboard/status
    ```
 
    Confirm `readiness.reason` is `position_authority_degraded` and note the
@@ -23,8 +37,9 @@ before using manual recovery.
 2. Fetch recovery evidence:
 
    ```bash
-   curl -sS -H "X-Admin-Key: <operator-key>" \
-     http://localhost:8000/admin/state/position-authority/recovery
+   docker exec phoenix-oci-backend \
+     curl -sS -H "X-Admin-Key: <operator-key>" \
+     http://localhost:8080/admin/state/position-authority/recovery
    ```
 
    Review each `records[]` item. The safe path requires
@@ -34,10 +49,11 @@ before using manual recovery.
 3. Clear the stuck internal record only after broker-flat evidence is present:
 
    ```bash
-   curl -sS -X POST -H "X-Admin-Key: <operator-key>" \
+   docker exec phoenix-oci-backend \
+     curl -sS -X POST -H "X-Admin-Key: <operator-key>" \
      -H "Content-Type: application/json" \
      -d '{"scope_key":"<scope_key>","reason":"broker_flat_verified_recovery","force":false}' \
-     http://localhost:8000/admin/state/clear-position-record
+     http://localhost:8080/admin/state/clear-position-record
    ```
 
    The endpoint refuses nonzero broker evidence with HTTP 409. `force=true` is a
@@ -50,8 +66,10 @@ before using manual recovery.
 4. Recheck readiness from the same workflow:
 
    ```bash
-   curl -sS http://localhost:8000/dashboard/status
-   curl -sS http://localhost:8000/readyz
+   docker exec phoenix-oci-backend \
+     curl -sS http://localhost:8080/dashboard/status
+   docker exec phoenix-oci-backend \
+     curl -sS http://localhost:8080/readyz
    ```
 
    Readiness should recover once no degraded scopes or DEGRADED/RECONCILING

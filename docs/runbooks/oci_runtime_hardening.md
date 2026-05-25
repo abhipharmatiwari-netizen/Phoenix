@@ -147,7 +147,7 @@ sha256sum /opt/phoenix/app/app/server.py /opt/phoenix/app/app/runtime/app_runtim
 ```
 
 Only remove source-file bind mounts after the image digest and file checksums are
-recorded in the deployment record. A local image tag such as `local-1a2cc47` is
+recorded in the deployment record. A local image tag such as `local-e7f1e29` is
 acceptable only as an explicitly approved temporary state; immutable registry
 tags are the target operating model.
 

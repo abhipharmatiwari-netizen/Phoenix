@@ -30,6 +30,10 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 Recent validation:
 
 - Local focused OI/ML suite: `159 passed`.
+- 2026-05-25 live backend/nginx deployment moved the main VM checkout to
+  `e7f1e29` with backend/nginx images tagged `local-e7f1e29`. The sidecar
+  image remains `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd` and remains
+  dry-run only.
 - 2026-05-20 16:50 UTC / 22:20 IST rectification deployment:
   backend `phoenix-local-backend:local-e1f9ddb`, nginx
   `phoenix-local-nginx:local-349d55f`, sidecar
@@ -145,7 +149,8 @@ The main dashboard health summary exposes read-only sidecar evidence under
 `oi_ml_shadow_ingestion`:
 
 ```bash
-curl -sS http://localhost:8000/health/summary
+docker exec phoenix-oci-backend \
+  curl -sS http://localhost:8080/health/summary
 ```
 
 The live backend observes the separate sidecar with

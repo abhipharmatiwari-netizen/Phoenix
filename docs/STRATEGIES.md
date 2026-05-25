@@ -70,11 +70,21 @@ Several strategies (`ema20_strategy`, `exclusive_nifty_ce_buy`, `put_momentum_sc
 ### Per-position trailing profit lock (account-level, tick mode deployed 2026-05-19)
 Cuts across all strategies via `PositionTrailingLockEngine` (env: `POSITION_TRAILING_LOCK_ENABLED=true`). Independent of strategy-level trail logic; tracks each open position's peak unrealised P&L and exits when it falls below `peak × (1 − giveback_pct)` (default 10%) once peak ≥ ₹500. The default path runs from the hub profit watchdog (`HUB_SUBSCRIPTION_POLL_INTERVAL`, clamped to a 10s minimum); optional tick-driven evaluation can also be enabled with `POSITION_TRAILING_LOCK_TICK_ENABLED=true`. Tick mode evaluates every registered hub account runner, including multiple SHADOW runners; shadow strategies that need independent locks must retain separate broker-account position views rather than collapsing into one account+symbol net position. Trailing-lock exits execute as `system::position_trailing_lock`, but the engine must preserve the original owner strategy for lifecycle close/PnL attribution. If the broker position snapshot has no owner and the ownership ledger has already released, the engine falls back to non-terminal internal position records for the same tenant/account/contract and selects the non-system owner. This fallback is strategy-agnostic and covers `ema20_strategy` and any other strategy that owns the open internal record. See commit `29c24f0`.
 
+The 2026-05-25 mitigation makes broker/current-position evidence the first
+authority check for trailing-lock action. If broker evidence is flat, trailing
+lock ignores stale external/manual-owned internal records and lets broker-flat
+auto-recovery clear zero-quantity `RECONCILING`, `DEGRADED`, or
+`RECOVERY_PENDING` records after order sync. If broker evidence shows a live
+position, trailing lock can manage that external/manual-owned broker position.
+After one terminal non-fill or broker rejection for the same broker position
+signature, repeat trailing-lock attempts are suppressed until the broker
+position changes or disappears.
+
 ### Account profit sweep
 Account-level profit sweep records its daily sweep state only after there are open positions to exit and the exit flow is attempted. If the profit lock fires from a historical peak but the broker/account position list is empty, Phoenix logs `PROFIT_SWEEP_SIMPLE_NO_POSITIONS` and leaves the daily sweep count unchanged. This prevents stale lock state from consuming the one SIMPLE sweep for the day. See [issue #319](https://github.com/abhipharmatiwari-netizen/Phoenix/issues/319) and `tests/hub/test_exit_engines_integration.py`.
 
 ### Manual / external broker fills
-Manual exits placed directly via the broker's UI bypass the strategies entirely. The `ExternalFillReconciler` (deployed 2026-05-08) detects them on every order-sync cycle and ingests them into `pnl_snapshots` under sentinel strategy `__external__`. See [`feat(orders): ingest external broker fills into pnl_snapshots`](https://github.com/abhipharmatiwari-netizen/Phoenix/commit/1b47813).
+Manual entries or exits placed directly via the broker's UI bypass the strategies entirely. The `ExternalFillReconciler` (deployed 2026-05-08) detects them on every order-sync cycle and ingests them into `pnl_snapshots` under sentinel strategy `__external__`. If the broker account is still nonzero, Phoenix may manage the resulting external/manual-owned broker position through the safety exit engines. If the broker account is flat, stale zero-quantity internal records must clear through broker-flat auto-recovery or the audited manual fallback. See [`feat(orders): ingest external broker fills into pnl_snapshots`](https://github.com/abhipharmatiwari-netizen/Phoenix/commit/1b47813).
 
 ---
 
@@ -709,6 +719,13 @@ Per-leg (`sl_pct`, `tp_pct`, `trail_buffer_pct`) — all soft, monitored per leg
 
 ## Resolved (recent)
 
+- **2026-05-25 manual-order degradation fix** - trailing lock now reconciles
+  broker position evidence before acting, manages external/manual-owned broker
+  positions only while broker evidence is nonzero, suppresses repeat
+  same-position rejection attempts after one terminal non-fill, and auto-clears
+  stale zero-quantity broker-flat `RECONCILING`/`DEGRADED`/`RECOVERY_PENDING`
+  records after fresh order-sync evidence. Shipped in `8564b9b` and deployed
+  through `e7f1e29` on 2026-05-25.
 - **Issues [#305](https://github.com/abhipharmatiwari-netizen/Phoenix/issues/305) / [#309](https://github.com/abhipharmatiwari-netizen/Phoenix/issues/309)** — system trailing-lock exits now preserve the original position owner for lifecycle close and PnL/control attribution while recording `system::position_trailing_lock` as the exit actor. Deployed in `349d55f` on 2026-05-20.
 - **2026-05-22 BANKNIFTY trailing-lock follow-up** — live evidence showed a broker-flat BANKNIFTY 54100 CE trailing-lock exit was normal behavior, but the owner fallback missed the original strategy after the ownership ledger was empty and left a `system::position_trailing_lock` internal record `DEGRADED`. The fallback now reads same-contract internal position records before routing the system exit, so this protection applies across strategies rather than being tied to `ema20_strategy`.
 - **Issue [#306](https://github.com/abhipharmatiwari-netizen/Phoenix/issues/306)** — `ProfitSweepEngine` now has production exchange-exclusion handling instead of relying on monkeypatched tests. Deployed in `349d55f` on 2026-05-20.

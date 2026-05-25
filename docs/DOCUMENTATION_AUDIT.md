@@ -1,6 +1,7 @@
 # Documentation Audit
 
-Audit date: 2026-05-17.
+Audit date: 2026-05-17. Runtime snapshot refreshed on 2026-05-25 after the
+`e7f1e29` live deployment.
 
 Scope: repository documentation, env examples, Compose comments, and operator
 script headers were checked against the running OCI VM. The OCI VM overrides all
@@ -11,12 +12,12 @@ repo docs and historical plans.
 | Area | Verified current state |
 |---|---|
 | Repo path | `/opt/phoenix/app` |
-| Active git | `main` at `1a2cc47d8cb23fbc9b60e5eea8e5841e10d79ccd`; untracked `docker-compose.oci-postgres.yml` |
+| Active git | `main` at `e7f1e29ea898cf5776bfdceadd5c22bd492762a8`; untracked `docker-compose.oci-postgres.yml` |
 | Compose project | `phoenix-oci-live` |
 | Compose files | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` |
 | Env file | `/opt/phoenix/phoenix-deploy.env` |
-| Backend | `phoenix-oci-backend`, `phoenix-local-backend:local-1a2cc47`, healthy |
-| Web | `phoenix-oci-web`, `phoenix-local-nginx:local-1a2cc47`, healthy |
+| Backend | `phoenix-oci-backend`, `phoenix-local-backend:local-e7f1e29`, healthy |
+| Web | `phoenix-oci-web`, `phoenix-local-nginx:local-e7f1e29`, healthy |
 | Database | VM-local `phoenix-oci-postgres`, `postgres:16-alpine`, no healthcheck |
 | Watchdog | `phoenix-oci-watchdog`, actively stops/starts nginx on backend health failures |
 | Runtime mode | `/health/summary` reports `HUB_AUTHORITATIVE`; `/health` reports `strategy_bridge_order_router` |
@@ -30,15 +31,15 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 
 | Path | Type | Claimed purpose | OCI VM match status | Action |
 |---|---|---|---|---|
-| `README.md` | entrypoint | repo/operator index | PARTIALLY_STALE | UPDATE |
-| `ABOUTME.md` | summary | plain-language overview | PARTIALLY_STALE | UPDATE |
-| `ARCHITECTURE.md` | architecture | production contract | PARTIALLY_STALE | UPDATE |
+| `README.md` | entrypoint | repo/operator index | MATCHES_OCI_VM | KEEP |
+| `ABOUTME.md` | summary | plain-language overview | MATCHES_OCI_VM | KEEP |
+| `ARCHITECTURE.md` | architecture | production contract | MATCHES_OCI_VM | KEEP |
 | `Agents.md` | agent instruction | review rules | MATCHES_OCI_VM | KEEP |
 | `docs/OCI_VM_RUNTIME.md` | evidence | current VM state | MATCHES_OCI_VM | KEEP |
-| `docs/DOCUMENTATION_AUDIT.md` | audit | doc inventory/mismatch | PARTIALLY_STALE | UPDATE |
-| `docs/runbooks/oci_live_deployment.md` | runbook | OCI operations | CONTRADICTS_OCI_VM | UPDATE |
+| `docs/DOCUMENTATION_AUDIT.md` | audit | doc inventory/mismatch | MATCHES_OCI_VM | KEEP |
+| `docs/runbooks/oci_live_deployment.md` | runbook | OCI operations | MATCHES_OCI_VM | KEEP |
 | `docs/runbooks/oi_ml_shadow_sidecar.md` | runbook | OI/ML shadow sidecar progress and gates | MATCHES_OCI_VM | KEEP |
-| `docs/runbooks/oci-live.env.example` | env template | OCI env names | PARTIALLY_STALE | UPDATE |
+| `docs/runbooks/oci-live.env.example` | env template | OCI env names | MATCHES_OCI_VM | KEEP |
 | `phoenix-override.yml.example` | override template | OCI override | CONTRADICTS_OCI_VM | UPDATE |
 | `docker-compose.oci-live.yml` | Compose/comments | OCI base manifest | PARTIALLY_STALE | UPDATE |
 | `docker-compose.live.single.yml` | Compose/comments | Docker Desktop live | OBSOLETE | UPDATE |
@@ -48,7 +49,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | `docs/runbooks/docker_desktop_live_deployment.md` | runbook | Docker Desktop LIVE | OBSOLETE | UPDATE |
 | `docs/runbooks/cloud_run_live_deployment.md` | runbook | Cloud Run reference | ROADMAP_ONLY | UPDATE |
 | `docs/runbooks/cloudrun-live.env.example` | env template | Cloud Run env | ROADMAP_ONLY | UPDATE |
-| `docs/runbooks/update_broker_credentials.md` | runbook | broker credential rotation | UNSAFE_FOR_LIVE | UPDATE |
+| `docs/runbooks/update_broker_credentials.md` | runbook | broker credential rotation | MATCHES_OCI_VM | KEEP |
 | `docs/runbooks/strategy_runtime_diagnostics.md` | runbook | strategy diagnostics | PARTIALLY_STALE | UPDATE |
 | `docs/runbooks/capital_limits_configuration.md` | runbook | capital limits | PARTIALLY_STALE | UPDATE |
 | `docs/runbooks/restore_drill.md` | runbook | DB restore drill | PARTIALLY_STALE | UPDATE |
@@ -60,7 +61,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | `docs/runbooks/oci_runtime_hardening.md` | runbook | runtime drift hardening | MATCHES_OCI_VM | KEEP |
 | `docs/runbooks/resolve_orphan_review.md` | runbook | orphan review | UNKNOWN_NEEDS_EVIDENCE | KEEP |
 | `docs/runbooks/ema20_tp_pct_tuning.md` | runbook | tuning diagnostics | ROADMAP_ONLY | KEEP |
-| `docs/STRATEGIES.md` | reference | strategy catalog | UNKNOWN_NEEDS_EVIDENCE | KEEP |
+| `docs/STRATEGIES.md` | reference | strategy catalog | UPDATED_WITH_2026_05_25_POSITION_AUTHORITY_FIX | KEEP |
 | `docs/Flowchart.md` | architecture reference | flow diagrams | PARTIALLY_STALE | KEEP |
 | `docs/kpis_slos.md` | observability | KPI/SLO reference | PARTIALLY_STALE | KEEP |
 | `docs/parameters.md` | reference | strategy parameters | UNKNOWN_NEEDS_EVIDENCE | KEEP |
@@ -87,13 +88,20 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | P1 | `docs/runbooks/oci_live_deployment.md` | watchdog is observe-only | `phoenix-oci-watchdog` command/logs stop and start nginx | Operator may misread nginx outages | Document active nginx stop/start behavior |
 | P1 | `phoenix-override.yml.example` | no source-code bind mounts, repo nginx template mount | VM override has source bind mounts and prerendered nginx template | Recreated runtime would differ from production | Make example mirror current VM and label drift |
 | P1 | `docs/runbooks/oci-live.env.example` | external DB endpoint and OCIR tag are current | VM uses `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres` and local images | Failed deploy or wrong DB target | Update template to VM-local DB and local image tag shape |
-| P0 | `docs/runbooks/update_broker_credentials.md` | select `api_key`, `client_code`, `client_public_ip` during verification | Broker credential table exists on VM | Secret leakage into terminals/tickets | Replace value selection with boolean presence checks |
+| RESOLVED P0 | `docs/runbooks/update_broker_credentials.md` | prior revisions selected credential values during verification | Current runbook uses boolean presence checks and documents `Credential Ref` as a lookup key only | Secret leakage invariant remains P0 | Do not reintroduce value selection or UI-secret entry guidance |
 | P1 | `docs/runbooks/docker_desktop_live_deployment.md` | Docker Desktop is current LIVE guidance | VM is OCI-only production | Operator could follow wrong restart/env path | Mark non-current production |
 | P1 | `docs/runbooks/blue_green_cutover.md` | blue/green cutover usable | VM has one Compose project and one local DB | False operational confidence | Mark roadmap-only |
 | P1 | `docs/runbooks/restore_drill.md` | generic/external DB examples apply | VM DB is local Postgres container | Wrong restore target | Add current OCI VM DB note |
 | P2 | Cloud Run docs/env | future Cloud Run target | no Cloud Run evidence on VM | Confusion | Mark non-current roadmap |
 | P2 | Optimizer/reload runbook sections | systemd timers installed | `systemctl status` shows units not found | Operators chase absent timers | Mark absent in runtime evidence and OCI runbook |
 | P2 | Health docs | `/api/health` as health path | nginx returns SPA for `/api/health` | False health check | Document `/health` and `/readyz` only |
+
+2026-05-25 refresh note: the operator entrypoints (`README.md`,
+`ARCHITECTURE.md`, `docs/OCI_VM_RUNTIME.md`,
+`docs/runbooks/oci_live_deployment.md`, and
+`docs/runbooks/oci-live.env.example`) now reflect the deployed
+`e7f1e29` VM state. Remaining mismatch rows apply to historical or lower-level
+templates unless a future audit removes them from this table.
 
 ## Final Documentation Map
 
