@@ -659,8 +659,9 @@ const Tenants: React.FC = () => {
                 <input required value={accountForm.client_code} onChange={(event) => setAccountForm({ ...accountForm, client_code: event.target.value })} />
               </label>
               <label>
-                Secret Ref
+                Credential Ref
                 <input required value={accountForm.secret_ref} onChange={(event) => setAccountForm({ ...accountForm, secret_ref: event.target.value })} />
+                <span className="tenant-form__help">Lookup key for stored broker credentials. Do not enter PIN, password, TOTP, or API secret here.</span>
               </label>
               <label>
                 Mode
