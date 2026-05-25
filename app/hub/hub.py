@@ -75,6 +75,7 @@ class Hub:
         pnl_engine: Optional[PnLEngine] = None,
         position_ownership_store: Optional[PositionOwnershipStore] = None,
         external_fill_reconciler: Optional[Any] = None,
+        position_authority_auto_recovery: Optional[Any] = None,
     ) -> None:
         self._settings = get_settings()
         self._reconcile_verbose = bool(
@@ -84,6 +85,7 @@ class Hub:
         self._pnl_engine = pnl_engine
         self._position_ownership_store = position_ownership_store
         self._external_fill_reconciler = external_fill_reconciler
+        self._position_authority_auto_recovery = position_authority_auto_recovery
         self._account_runners: Dict[BrokerAccountId, AccountRunner] = {}
         self._runner_tasks: Dict[BrokerAccountId, asyncio.Task[None]] = {}
         self._subscription_watchdog_task: Optional[asyncio.Task[None]] = None
@@ -133,6 +135,13 @@ class Hub:
     # Get the runner for a specific broker account id.
     def get_runner(self, broker_account_id: BrokerAccountId) -> Optional[AccountRunner]:
         return self._account_runners.get(broker_account_id)
+
+    def set_position_authority_auto_recovery(self, callback: Optional[Any]) -> None:
+        self._position_authority_auto_recovery = callback
+        for runner in self._account_runners.values():
+            setter = getattr(runner, "set_position_authority_auto_recovery", None)
+            if callable(setter):
+                setter(callback)
 
     async def wait_for_runner_startup(self) -> None:
         startup_tasks = [task for task in self._runner_tasks.values() if task is not None]
@@ -453,6 +462,9 @@ class Hub:
                     pnl_engine=self._pnl_engine,
                     position_ownership_store=self._position_ownership_store,
                     external_fill_reconciler=self._external_fill_reconciler,
+                    position_authority_auto_recovery=(
+                        self._position_authority_auto_recovery
+                    ),
                 )
                 self._account_runners[broker_account_id] = runner
                 if self._reconcile_verbose:

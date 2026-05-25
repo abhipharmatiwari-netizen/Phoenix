@@ -1247,6 +1247,77 @@ async def test_marker_cleared_when_router_rejects_submission():
 
 
 @pytest.mark.asyncio
+async def test_terminal_nonfill_fuse_suppresses_same_position_retry():
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [
+            Position(
+                symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                product_type=ProductType.INTRADAY,
+            )
+        ],
+    )
+    router = _RouterRejectingResponse()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    assert len(router.calls) == 1
+    assert ("t-1", "A1", "NG22MAY26255CE") in engine._terminal_nonfill_fuses
+    assert ("t-1", "A1", "NG22MAY26255CE") not in engine._inflight_markers
+
+
+@pytest.mark.asyncio
+async def test_terminal_nonfill_fuse_allows_retry_after_position_change():
+    state_store = StateStore()
+    state_store.set_positions(
+        "A1",
+        [
+            Position(
+                symbol="NG22MAY26255CE", quantity=1250, avg_price=14.30,
+                product_type=ProductType.INTRADAY,
+            )
+        ],
+    )
+    router = _RouterRejectingResponse()
+    engine = PositionTrailingLockEngine(
+        settings=_mk_settings(),
+        state_store=state_store,
+        order_router=router,  # type: ignore[arg-type]
+        manager=PositionTrailingLockManager(backend=_NoopPositionTrailingLockBackend()),
+    )
+
+    _seed_ltp("NG22MAY26255CE", 16.50)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+    _seed_ltp("NG22MAY26255CE", 16.27)
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    state_store.set_positions(
+        "A1",
+        [
+            Position(
+                symbol="NG22MAY26255CE", quantity=1250, avg_price=14.31,
+                product_type=ProductType.INTRADAY,
+            )
+        ],
+    )
+    await engine.evaluate_runners([_runner("t-1", "A1")])
+
+    assert len(router.calls) == 2
+    assert ("t-1", "A1", "NG22MAY26255CE") in engine._terminal_nonfill_fuses
+
+
+@pytest.mark.asyncio
 async def test_marker_remains_when_router_raises_post_submit():
     """Codex P1 round 1: when submit_order raises AFTER potentially
     placing the broker order, the marker MUST remain armed to preserve

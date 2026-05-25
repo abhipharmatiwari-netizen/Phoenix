@@ -406,6 +406,23 @@ class HubRuntime:
             submission_outbox=self.order_submission_outbox,
             clock=self.clock,
         )
+        from app.orders.position_authority_recovery import (
+            auto_recover_broker_flat_zero_qty_records,
+        )
+
+        def _position_authority_auto_recovery(
+            *, tenant_id: Any = None, broker_account_id: Any = None,
+        ) -> dict[str, Any]:
+            return auto_recover_broker_flat_zero_qty_records(
+                lifecycle=self.order_lifecycle,
+                state_store=self.state_store,
+                broker_account_id=broker_account_id,
+                actor="system:account_runner_position_sync",
+            )
+
+        self.hub.set_position_authority_auto_recovery(
+            _position_authority_auto_recovery
+        )
 
         # Trading circuit breaker (RISK-5.4)
         self.circuit_breaker = TradingCircuitBreaker(

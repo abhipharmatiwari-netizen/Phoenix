@@ -5,6 +5,7 @@ AccountRunner: per-broker-account runner managed by the Hub (§4 Execution Hub).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import threading
@@ -85,6 +86,7 @@ class AccountRunner:
         pnl_engine: Optional[PnLEngine] = None,
         position_ownership_store: Optional[PositionOwnershipStore] = None,
         external_fill_reconciler: Optional[Any] = None,
+        position_authority_auto_recovery: Optional[Any] = None,
         poll_interval_seconds: float = 15.0,
     ) -> None:
         self._tenant_id = tenant_id
@@ -106,6 +108,7 @@ class AccountRunner:
         self._pnl_engine = pnl_engine
         self._position_ownership_store = position_ownership_store
         self._external_fill_reconciler = external_fill_reconciler
+        self._position_authority_auto_recovery = position_authority_auto_recovery
         self._poll_interval = max(1.0, float(poll_interval_seconds))
         self._shadow_heartbeat_interval_seconds = max(
             5.0,
@@ -147,6 +150,9 @@ class AccountRunner:
             1,
             int(os.getenv("BALANCE_SYNC_ALERT_THRESHOLD", "3")),
         )
+
+    def set_position_authority_auto_recovery(self, callback: Optional[Any]) -> None:
+        self._position_authority_auto_recovery = callback
 
     # ---------- Properties ----------
     # Return the tenant id for this runner.
@@ -515,6 +521,36 @@ class AccountRunner:
             result.reason,
         )
 
+    async def _auto_recover_position_authority_if_broker_flat(self) -> None:
+        callback = self._position_authority_auto_recovery
+        if not callable(callback):
+            return
+        try:
+            result = callback(
+                tenant_id=self._tenant_id,
+                broker_account_id=self._broker_account_id,
+            )
+            if inspect.isawaitable(result):
+                result = await result
+            try:
+                recovered = int((result or {}).get("recovered", 0))
+            except Exception:
+                recovered = 0
+            if recovered > 0:
+                logger.warning(
+                    "AccountRunner broker-flat position-authority auto-recovery "
+                    "cleared %d record(s) for %s",
+                    recovered,
+                    self.broker_account_id,
+                )
+        except Exception as exc:
+            logger.warning(
+                "AccountRunner broker-flat position-authority auto-recovery "
+                "failed for %s: %s",
+                self.broker_account_id,
+                exc,
+            )
+
     def _sync_pnl_from_positions(self, positions: list[Any]) -> None:
         if self._pnl_engine is None:
             return
@@ -666,6 +702,7 @@ class AccountRunner:
                         self.broker_account_id,
                         exc,
                     )
+            await self._auto_recover_position_authority_if_broker_flat()
         except Exception as exc:
             logger.warning(
                 "AccountRunner orders sync failed for %s: %s",

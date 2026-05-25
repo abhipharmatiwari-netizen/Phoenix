@@ -2019,6 +2019,20 @@ class PositionTrailingLockEngine:
     _suppression_log_state: Dict[Tuple[str, str], datetime] = field(
         default_factory=dict, init=False, repr=False
     )
+    # Per-(tenant, account, symbol) fuse armed after a synchronous terminal
+    # non-fill response from the router/broker. A manual/external position
+    # should be managed while broker evidence says it exists, but if the exit
+    # is rejected once, repeated attempts against the exact same broker
+    # position snapshot only amplify broker throttling and lifecycle churn.
+    # The fuse clears when the broker position changes or disappears.
+    _terminal_nonfill_fuses: Dict[
+        Tuple[str, str, str],
+        Dict[str, Any],
+    ] = field(default_factory=dict, init=False, repr=False)
+    _terminal_nonfill_fuse_log_state: Dict[
+        Tuple[str, str, str],
+        datetime,
+    ] = field(default_factory=dict, init=False, repr=False)
     # Issue #251: durable backend for inflight markers. When wired (LIVE),
     # markers persist to Postgres so a restart does NOT drop the duplicate-
     # fill guard between submit_order and broker terminal confirmation.
@@ -2102,6 +2116,165 @@ class PositionTrailingLockEngine:
             str(os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper()
             == "LIVE"
         )
+
+    @staticmethod
+    def _terminal_nonfill_fuse_key(
+        *,
+        tenant_id: Any,
+        broker_account_id: Any,
+        symbol: Any,
+    ) -> Tuple[str, str, str]:
+        return (str(tenant_id), str(broker_account_id), str(symbol))
+
+    @staticmethod
+    def _broker_position_signature(pos: Any) -> str:
+        product_type = _position_value(pos, "product_type", "")
+        product_text = (
+            product_type.value
+            if hasattr(product_type, "value")
+            else str(product_type or "")
+        ).strip().upper()
+        token = _position_symbol_token(pos) or ""
+        try:
+            contract_key, _reason = derive_contract_key_from_position(pos)
+            contract_text = (
+                repr(contract_key.as_storage_key())
+                if contract_key is not None
+                else str(_position_value(pos, "symbol", "") or "")
+            )
+        except Exception:
+            contract_text = str(_position_value(pos, "symbol", "") or "")
+        return "|".join(
+            (
+                contract_text,
+                f"qty={str(_position_value(pos, 'quantity', '') or '').strip()}",
+                f"avg={str(_position_value(pos, 'avg_price', '') or '').strip()}",
+                f"product={product_text}",
+                f"token={token}",
+            )
+        )
+
+    def _clear_terminal_nonfill_fuse(
+        self,
+        *,
+        tenant_id: Any,
+        broker_account_id: Any,
+        symbol: Any,
+    ) -> None:
+        key = self._terminal_nonfill_fuse_key(
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+            symbol=symbol,
+        )
+        self._terminal_nonfill_fuses.pop(key, None)
+        self._terminal_nonfill_fuse_log_state.pop(key, None)
+
+    def _arm_terminal_nonfill_fuse(
+        self,
+        *,
+        tenant_id: Any,
+        broker_account_id: Any,
+        symbol: Any,
+        pos: Any,
+        response_status: str,
+    ) -> None:
+        key = self._terminal_nonfill_fuse_key(
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+            symbol=symbol,
+        )
+        self._terminal_nonfill_fuses[key] = {
+            "position_signature": self._broker_position_signature(pos),
+            "response_status": str(response_status or "").strip().upper(),
+            "armed_at": self.clock.now_utc().isoformat(),
+        }
+        self._terminal_nonfill_fuse_log_state.pop(key, None)
+
+    def _terminal_nonfill_fuse_blocks(
+        self,
+        *,
+        tenant_id: Any,
+        broker_account_id: Any,
+        symbol: Any,
+        pos: Any,
+    ) -> bool:
+        key = self._terminal_nonfill_fuse_key(
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+            symbol=symbol,
+        )
+        fuse = self._terminal_nonfill_fuses.get(key)
+        if not fuse:
+            return False
+        current_signature = self._broker_position_signature(pos)
+        if str(fuse.get("position_signature") or "") != current_signature:
+            self._terminal_nonfill_fuses.pop(key, None)
+            self._terminal_nonfill_fuse_log_state.pop(key, None)
+            log_event(
+                logger,
+                event_type="POSITION_TRAILING_LOCK_RETRY_FUSE_CLEARED",
+                message=(
+                    "Trailing-lock terminal-nonfill retry fuse cleared: "
+                    "broker position evidence changed."
+                ),
+                level=logging.INFO,
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=symbol,
+                prior_response_status=fuse.get("response_status"),
+            )
+            return False
+        return True
+
+    def _maybe_log_terminal_nonfill_fuse_skip(
+        self,
+        *,
+        tenant_id: Any,
+        broker_account_id: Any,
+        symbol: Any,
+    ) -> None:
+        key = self._terminal_nonfill_fuse_key(
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+            symbol=symbol,
+        )
+        now = self.clock.now_utc()
+        last = self._terminal_nonfill_fuse_log_state.get(key)
+        if last is not None and (now - last).total_seconds() < 60.0:
+            return
+        self._terminal_nonfill_fuse_log_state[key] = now
+        fuse = self._terminal_nonfill_fuses.get(key) or {}
+        log_event(
+            logger,
+            event_type="POSITION_TRAILING_LOCK_RETRY_SUPPRESSED_AFTER_NONFILL",
+            message=(
+                "Trailing-lock exit retry suppressed: previous attempt "
+                "ended in terminal non-fill and broker position evidence "
+                "is unchanged. The fuse clears when the broker position "
+                "changes or disappears."
+            ),
+            level=logging.WARNING,
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+            symbol=symbol,
+            prior_response_status=fuse.get("response_status"),
+            fuse_armed_at=fuse.get("armed_at"),
+        )
+
+    def _sweep_terminal_nonfill_fuses_for_absent_symbols(
+        self,
+        *,
+        tenant_id: Any,
+        broker_account_id: Any,
+        seen_symbols: set,
+    ) -> None:
+        tenant_key = str(tenant_id)
+        account_key = str(broker_account_id)
+        seen = {str(symbol) for symbol in seen_symbols}
+        for key in list(self._terminal_nonfill_fuses.keys()):
+            if key[0] == tenant_key and key[1] == account_key and key[2] not in seen:
+                self._terminal_nonfill_fuses.pop(key, None)
+                self._terminal_nonfill_fuse_log_state.pop(key, None)
 
     def _resolve_position_owner_strategy_id(
         self,
@@ -3147,6 +3320,18 @@ class PositionTrailingLockEngine:
                 exit_cooldown_seconds=cooldown,
             )
             if decision.exit_required:
+                if self._terminal_nonfill_fuse_blocks(
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    symbol=symbol,
+                    pos=pos,
+                ):
+                    self._maybe_log_terminal_nonfill_fuse_skip(
+                        tenant_id=tenant_id,
+                        broker_account_id=broker_account_id,
+                        symbol=symbol,
+                    )
+                    continue
                 await self._emit_exit(runner, pos, decision)
 
     async def evaluate_runners(self, runners: Iterable[AccountRunner]) -> None:
@@ -3395,6 +3580,11 @@ class PositionTrailingLockEngine:
                     broker_account_id=broker_account_id,
                     symbol=symbol,
                 )
+                self._clear_terminal_nonfill_fuse(
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    symbol=symbol,
+                )
                 continue
             # Skip the exit-submission path entirely when the kill switch
             # is tripped, but keep iterating positions so the qty==0
@@ -3456,6 +3646,18 @@ class PositionTrailingLockEngine:
                 exit_cooldown_seconds=cooldown,
             )
             if decision.exit_required:
+                if self._terminal_nonfill_fuse_blocks(
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    symbol=symbol,
+                    pos=pos,
+                ):
+                    self._maybe_log_terminal_nonfill_fuse_skip(
+                        tenant_id=tenant_id,
+                        broker_account_id=broker_account_id,
+                        symbol=symbol,
+                    )
+                    continue
                 await self._emit_exit(runner, pos, decision)
 
         # Issue #225 (PR #236 review P2): sweep markers for this
@@ -3486,6 +3688,11 @@ class PositionTrailingLockEngine:
             seen_symbols=seen_symbols,
             grace_seconds=5.0,
             positions_sync_fingerprint=positions_sync_fingerprint,
+        )
+        self._sweep_terminal_nonfill_fuses_for_absent_symbols(
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+            seen_symbols=seen_symbols,
         )
 
     def _get_positions_sync_fingerprint(
@@ -4396,13 +4603,21 @@ class PositionTrailingLockEngine:
                     broker_account_id=broker_account_id,
                     symbol=decision.symbol,
                 )
+                self._arm_terminal_nonfill_fuse(
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    symbol=decision.symbol,
+                    pos=pos,
+                    response_status=response_status,
+                )
                 log_event(
                     logger,
                     event_type="POSITION_TRAILING_LOCK_EXIT_REJECTED_BY_ROUTER",
                     message=(
                         "Trailing-lock exit was rejected by the router "
                         "(no broker order placed). Inflight marker cleared "
-                        "so the next eligible cycle can retry."
+                        "and same-position retries are suppressed until "
+                        "broker position evidence changes or disappears."
                     ),
                     level=logging.WARNING,
                     tenant_id=tenant_id,
@@ -4419,6 +4634,11 @@ class PositionTrailingLockEngine:
                 # not mistake a real execution for a router rejection
                 # (PR #236 round-4 review P3).
                 self._clear_inflight_marker(
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    symbol=decision.symbol,
+                )
+                self._clear_terminal_nonfill_fuse(
                     tenant_id=tenant_id,
                     broker_account_id=broker_account_id,
                     symbol=decision.symbol,
@@ -4467,6 +4687,11 @@ class PositionTrailingLockEngine:
             # refreshed too which extends the in-flight window from
             # broker-submission time. NB: broker_order_id remains None
             # if the router did not surface it; the marker still blocks.
+            self._clear_terminal_nonfill_fuse(
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                symbol=decision.symbol,
+            )
             self._set_inflight_marker(
                 tenant_id=tenant_id,
                 broker_account_id=broker_account_id,
