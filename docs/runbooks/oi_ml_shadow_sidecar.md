@@ -21,7 +21,7 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 | Database tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`, `public.option_chain_validation_reports` |
 | Default scorer | `missing` in compose; deployed smoke override uses `constant` |
 | Smoke scorer currently used | `OI_ML_SHADOW_SCORER=constant`, probability `0.64`, MAE premium `40` |
-| Dry-run spread risk | Current VM smoke values are `OI_ML_SHADOW_SPREAD_WIDTH_POINTS=100` and `OI_ML_SHADOW_MAX_SPREAD_LOSS_RUPEES=1500`; both apply only to the dry-run sidecar |
+| Dry-run spread risk | Current VM smoke values are `OI_ML_SHADOW_SPREAD_WIDTH_POINTS=50` and `OI_ML_SHADOW_MAX_SPREAD_LOSS_RUPEES=2000`; both apply only to the dry-run sidecar |
 | Broker proxy/session | Sidecar now forwards backend broker proxy env and reuses the Angel quote session during the snapshotter session |
 | LightGBM support | Implemented with `lightgbm==4.6.0`; artifact paths must be explicit |
 | Continuous NSE validation | Enabled in deployed sidecar; reports stored in `public.option_chain_validation_reports` |
@@ -381,8 +381,8 @@ IMAGE_TAG=oi-ml-shadow-bd999cd \
 OI_ML_SHADOW_SCORER=constant \
 OI_ML_SHADOW_CONSTANT_PROBABILITY=0.64 \
 OI_ML_SHADOW_CONSTANT_MAE_PREMIUM=40 \
-OI_ML_SHADOW_SPREAD_WIDTH_POINTS=100 \
-OI_ML_SHADOW_MAX_SPREAD_LOSS_RUPEES=1500 \
+OI_ML_SHADOW_SPREAD_WIDTH_POINTS=50 \
+OI_ML_SHADOW_MAX_SPREAD_LOSS_RUPEES=2000 \
 docker compose -f /opt/phoenix/oi-ml-shadow.yml \
   --env-file /opt/phoenix/phoenix-deploy.env \
   up -d oi-ml-shadow
