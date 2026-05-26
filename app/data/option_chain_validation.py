@@ -20,6 +20,8 @@ class OptionChainValidationConfig:
     iv_abs_tolerance: float = 0.50
     iv_pct_tolerance: float = 0.05
     skip_missing_reference_fields: tuple[str, ...] = ()
+    skip_reference_fields: tuple[str, ...] = ()
+    ignore_primary_only_contracts: bool = False
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,11 @@ def compare_angel_to_nse(
         for field_name in cfg.skip_missing_reference_fields
         if str(field_name).strip()
     }
+    skip_reference_fields = {
+        str(field_name).strip().lower()
+        for field_name in cfg.skip_reference_fields
+        if str(field_name).strip()
+    }
     mismatches: list[OptionChainContractDiff] = []
     for key in common_keys:
         diffs = _compare_quote_fields(
@@ -119,6 +126,7 @@ def compare_angel_to_nse(
             nse[key],
             cfg,
             skip_missing_reference_fields=skip_missing_reference_fields,
+            skip_reference_fields=skip_reference_fields,
         )
         if diffs:
             strike, option_type = key
@@ -132,18 +140,26 @@ def compare_angel_to_nse(
 
     underlying = _first_underlying(angel_quotes, nse_quotes)
     expiry = _first_expiry(angel_quotes, nse_quotes)
+    primary_only_contracts = tuple(sorted(angel_keys - nse_keys))
+    metadata_payload = dict(metadata or {})
+    if cfg.ignore_primary_only_contracts and primary_only_contracts:
+        metadata_payload.update(
+            _ignored_primary_only_metadata(primary_only_contracts)
+        )
+        primary_only_contracts = ()
+
     return OptionChainValidationReport(
         underlying=underlying,
         expiry=expiry,
         compared_contracts=len(common_keys),
-        angel_only_contracts=tuple(sorted(angel_keys - nse_keys)),
+        angel_only_contracts=primary_only_contracts,
         nse_only_contracts=tuple(sorted(nse_keys - angel_keys)),
         mismatches=tuple(mismatches),
         missing_angel_iv=sum(1 for quote in angel.values() if quote.iv is None),
         missing_nse_iv=0
-        if "iv" in skip_missing_reference_fields
+        if "iv" in skip_missing_reference_fields or "iv" in skip_reference_fields
         else sum(1 for quote in nse.values() if quote.iv is None),
-        metadata=metadata or {},
+        metadata=metadata_payload,
     )
 
 
@@ -153,6 +169,7 @@ def _compare_quote_fields(
     cfg: OptionChainValidationConfig,
     *,
     skip_missing_reference_fields: set[str],
+    skip_reference_fields: set[str],
 ) -> list[OptionChainFieldDiff]:
     diffs: list[OptionChainFieldDiff] = []
     field_specs = (
@@ -164,6 +181,8 @@ def _compare_quote_fields(
         ("ltp", Decimal(str(cfg.price_abs_tolerance)), Decimal(str(cfg.price_pct_tolerance))),
     )
     for field_name, abs_tolerance, pct_tolerance in field_specs:
+        if field_name in skip_reference_fields:
+            continue
         diff = _compare_field(
             field_name,
             getattr(angel, field_name),
@@ -202,6 +221,41 @@ def expected_missing_reference_fields(quotes: Sequence[OptionQuote]) -> tuple[st
         if all(getattr(quote, field_name, None) is None for quote in normalized_quotes)
     ]
     return tuple(sorted(skipped))
+
+
+def reference_contract_coverage_is_partial(quotes: Sequence[OptionQuote]) -> bool:
+    """Return True when reference rows explicitly represent a subset universe."""
+    for quote in quotes:
+        flags = dict(getattr(quote, "quality_flags", None) or {})
+        if flags.get("reference_contract_coverage") == "partial":
+            return True
+        if flags.get("nse_source") == "live_equity_derivatives":
+            return True
+    return False
+
+
+def expected_non_equivalent_reference_fields(
+    quotes: Sequence[OptionQuote],
+) -> tuple[str, ...]:
+    """Return reference fields marked unsuitable for strict equality checks."""
+    expected_sets: list[set[str]] = []
+    for quote in quotes:
+        flags = dict(getattr(quote, "quality_flags", None) or {})
+        fields = flags.get("non_equivalent_reference_fields_expected") or ()
+        if isinstance(fields, str) or not isinstance(fields, Iterable):
+            fields = ()
+        expected = {
+            str(field_name).strip().lower()
+            for field_name in fields
+            if str(field_name).strip()
+        }
+        if flags.get("nse_source") == "live_equity_derivatives":
+            expected.update({"ltp", "oi", "volume"})
+        if expected:
+            expected_sets.append(expected)
+    if not expected_sets:
+        return ()
+    return tuple(sorted(set.intersection(*expected_sets)))
 
 
 def _compare_field(
@@ -247,6 +301,20 @@ def _compare_field(
     )
 
 
+def _ignored_primary_only_metadata(
+    contracts: Sequence[tuple[int, str]],
+) -> dict[str, Any]:
+    sample = [
+        {"strike": strike, "option_type": option_type}
+        for strike, option_type in list(contracts)[:20]
+    ]
+    return {
+        "ignored_primary_only_contract_count": len(contracts),
+        "ignored_primary_only_contract_sample": sample,
+        "ignored_primary_only_contract_reason": "reference_contract_coverage_partial",
+    }
+
+
 def _key(quote: OptionQuote) -> tuple[int, str]:
     q = quote.normalized()
     return q.strike, q.option_type
@@ -287,5 +355,7 @@ __all__ = [
     "OptionChainValidationConfig",
     "OptionChainValidationReport",
     "compare_angel_to_nse",
+    "expected_non_equivalent_reference_fields",
     "expected_missing_reference_fields",
+    "reference_contract_coverage_is_partial",
 ]

@@ -47,7 +47,13 @@ Recent validation:
   showed `814` Angel rows, `288` NSE fallback rows, `288` compared contracts,
   `526` Angel-only contracts, `0` NSE-only contracts, and `215` common-contract
   mismatches. Remaining mismatch fields were OI, LTP, and volume; IV/bid/ask
-  were skipped because the fallback endpoint does not publish them.
+  were skipped because the fallback endpoint does not publish them. Later
+  validator builds treat the live-derivatives fallback as a partial reference
+  universe, so Angel-only contracts outside that fallback are retained as
+  metadata rather than counted as provider mismatches. The fallback's OI,
+  volume, and LTP are also marked non-equivalent for strict status because they
+  are not captured from the same broker snapshot or guaranteed to use identical
+  field semantics.
 - Post-rectification `/readyz` returned `ready=true`, backend/nginx were
   healthy, and `/health/summary` reported `status=degraded` with
   `oi_ml_shadow_ingestion_degraded` because 2026-05-20 IST sidecar evidence was
@@ -260,8 +266,9 @@ while shadow trade decisions remain restricted to `09:45` to `14:30` IST.
   fallback to `liveEquity-derivatives` when the classic payload is empty;
 - optional NSE quote persistence as `provider='nse_web'`;
 - an Angel-vs-NSE comparison for comparable fields;
-- one compact container-log observation per snapshot, with warnings for
-  mismatches, provider-only contracts, missing IV, or fetch errors;
+- one compact container-log observation per snapshot, with warnings for real
+  common-contract mismatches, unexpected provider-only contracts, missing
+  reference IV, or fetch errors;
 - a full JSON report in `public.option_chain_validation_reports` for EOD review.
 
 When the live-derivatives fallback is used, reference quotes are tagged with
@@ -269,7 +276,15 @@ When the live-derivatives fallback is used, reference quotes are tagged with
 `reference_sources=["live_equity_derivatives"]` and
 `skipped_missing_reference_fields=["ask","bid","iv"]` in report metadata. The
 fallback normalizes NSE open interest into the broker-unit convention used by
-stored Angel rows. If NSE still returns no comparable rows, the validator records
+stored Angel rows. Because this fallback is a partial strike universe, the
+validator ignores Angel-only contracts outside the fallback for status purposes
+and records `ignored_primary_only_contract_count` plus a sample in report
+metadata. Missing Angel IV remains visible in `missing_primary_iv`, but does not
+turn an otherwise matching fallback validation into a warning because Angel IV
+is optional in shadow ingestion. Fallback OI, volume, and LTP are recorded under
+`skipped_non_equivalent_reference_fields` and do not produce `MISMATCH/WARN`;
+the classic NSE option-chain payload still compares those fields strictly when
+it is available. If NSE still returns no comparable rows, the validator records
 `ERROR/ERROR` with `nse_reference_quotes_empty` instead of a misleading
 `MISMATCH/WARN` zero-reference report.
 

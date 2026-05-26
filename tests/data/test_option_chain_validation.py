@@ -6,7 +6,9 @@ from app.data.option_chain_provider import OptionQuote
 from app.data.option_chain_validation import (
     OptionChainValidationConfig,
     compare_angel_to_nse,
+    expected_non_equivalent_reference_fields,
     expected_missing_reference_fields,
+    reference_contract_coverage_is_partial,
 )
 
 
@@ -118,3 +120,61 @@ def test_compare_angel_to_nse_can_skip_expected_missing_reference_fields():
     assert report.ok is True
     assert report.missing_nse_iv == 0
     assert report.to_dict()["mismatches"] == []
+
+
+def test_compare_angel_to_nse_can_skip_live_derivatives_fallback_drift():
+    angel = [
+        _quote(iv=None),
+        _quote(
+            strike=23700,
+            option_type="PE",
+            trading_symbol="NIFTY19MAY2623700PE",
+            iv=None,
+        ),
+    ]
+    nse = [
+        _quote(
+            provider="nse_web",
+            oi=999999,
+            volume=999999,
+            iv=None,
+            bid=None,
+            ask=None,
+            ltp="101.15",
+            quality_flags={
+                "nse_source": "live_equity_derivatives",
+                "reference_contract_coverage": "partial",
+                "missing_reference_fields_expected": ["ask", "bid", "iv"],
+                "non_equivalent_reference_fields_expected": [
+                    "ltp",
+                    "oi",
+                    "volume",
+                ],
+            },
+        )
+    ]
+    skipped = expected_missing_reference_fields(nse)
+    non_equivalent = expected_non_equivalent_reference_fields(nse)
+
+    report = compare_angel_to_nse(
+        angel,
+        nse,
+        config=OptionChainValidationConfig(
+            skip_missing_reference_fields=skipped,
+            skip_reference_fields=non_equivalent,
+            ignore_primary_only_contracts=reference_contract_coverage_is_partial(nse),
+        ),
+    )
+    payload = report.to_dict()
+
+    assert skipped == ("ask", "bid", "iv")
+    assert non_equivalent == ("ltp", "oi", "volume")
+    assert report.ok is True
+    assert payload["angel_only_contracts"] == []
+    assert payload["missing_angel_iv"] == 2
+    assert payload["missing_nse_iv"] == 0
+    assert payload["mismatches"] == []
+    assert payload["metadata"]["ignored_primary_only_contract_count"] == 1
+    assert payload["metadata"]["ignored_primary_only_contract_reason"] == (
+        "reference_contract_coverage_partial"
+    )

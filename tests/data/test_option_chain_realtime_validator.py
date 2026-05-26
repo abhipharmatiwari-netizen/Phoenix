@@ -166,6 +166,69 @@ def test_realtime_validator_skips_fallback_reference_fields_missing_by_design():
     assert metadata["skipped_missing_reference_fields"] == ["ask", "bid", "iv"]
 
 
+def test_realtime_validator_accepts_partial_reference_universe_and_optional_primary_iv():
+    primary = [
+        _quote(iv=None),
+        _quote(
+            strike=23700,
+            option_type="PE",
+            trading_symbol="NIFTY19MAY2623700PE",
+            iv=None,
+        ),
+    ]
+    reference = [
+        _quote(
+            provider="nse_web",
+            oi=999999,
+            volume=999999,
+            iv=None,
+            bid=None,
+            ask=None,
+            ltp="101.15",
+            quality_flags={
+                "nse_source": "live_equity_derivatives",
+                "reference_contract_coverage": "partial",
+                "missing_reference_fields_expected": ["ask", "bid", "iv"],
+                "non_equivalent_reference_fields_expected": [
+                    "ltp",
+                    "oi",
+                    "volume",
+                ],
+            },
+        )
+    ]
+    report_store = FakeReportStore()
+    validator = RealtimeOptionChainValidator(
+        reference_provider=FakeReferenceProvider(reference),
+        report_store=report_store,
+        config=RealtimeOptionChainValidationConfig(enabled=True),
+    )
+
+    result = validator.validate(
+        primary_quotes=primary,
+        underlying="NIFTY",
+        expiry=date(2026, 5, 19),
+        snapshot_ts=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+    )
+
+    assert result is not None
+    assert result.status == "OK"
+    assert result.severity == "INFO"
+    assert result.primary_only_count == 0
+    assert result.missing_primary_iv == 2
+    payload = report_store.calls[0]["payload"]
+    assert payload["ok"] is True
+    assert payload["angel_only_contracts"] == []
+    assert payload["metadata"]["reference_contract_coverage"] == "partial"
+    assert payload["metadata"]["ignored_primary_only_contract_count"] == 1
+    assert payload["metadata"]["skipped_non_equivalent_reference_fields"] == [
+        "ltp",
+        "oi",
+        "volume",
+    ]
+    assert payload["mismatches"] == []
+
+
 def test_realtime_validator_records_error_when_reference_feed_returns_no_rows():
     report_store = FakeReportStore()
     validator = RealtimeOptionChainValidator(

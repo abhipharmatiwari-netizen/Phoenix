@@ -345,7 +345,13 @@ def _parse_live_equity_derivatives_rows(
                     "nse_open_interest_lot_size": NSE_LIVE_EQUITY_OI_LOT_SIZE.get(
                         underlying
                     ),
+                    "reference_contract_coverage": "partial",
                     "missing_reference_fields_expected": ["ask", "bid", "iv"],
+                    "non_equivalent_reference_fields_expected": [
+                        "ltp",
+                        "oi",
+                        "volume",
+                    ],
                 },
             )
         )

@@ -11,7 +11,9 @@ from app.data.option_chain_provider import OptionChainProvider, OptionQuote
 from app.data.option_chain_validation import (
     OptionChainValidationConfig,
     compare_angel_to_nse,
+    expected_non_equivalent_reference_fields,
     expected_missing_reference_fields,
+    reference_contract_coverage_is_partial,
 )
 from app.data.option_chain_validation_store import (
     OptionChainValidationReportStore,
@@ -129,6 +131,27 @@ class RealtimeOptionChainValidator:
                         )
                     ),
                 )
+            skipped_non_equivalent_fields = expected_non_equivalent_reference_fields(
+                reference_quotes
+            )
+            if skipped_non_equivalent_fields:
+                validation_config = replace(
+                    validation_config,
+                    skip_reference_fields=tuple(
+                        sorted(
+                            set(validation_config.skip_reference_fields)
+                            | set(skipped_non_equivalent_fields)
+                        )
+                    ),
+                )
+            reference_coverage_partial = reference_contract_coverage_is_partial(
+                reference_quotes
+            )
+            if reference_coverage_partial:
+                validation_config = replace(
+                    validation_config,
+                    ignore_primary_only_contracts=True,
+                )
             metadata = {
                 "auto_realtime_validation": True,
                 "validation_only": True,
@@ -145,6 +168,12 @@ class RealtimeOptionChainValidator:
                 metadata["reference_sources"] = reference_sources
             if skipped_reference_fields:
                 metadata["skipped_missing_reference_fields"] = list(skipped_reference_fields)
+            if skipped_non_equivalent_fields:
+                metadata["skipped_non_equivalent_reference_fields"] = list(
+                    skipped_non_equivalent_fields
+                )
+            if reference_coverage_partial:
+                metadata["reference_contract_coverage"] = "partial"
 
             report = compare_angel_to_nse(
                 list(primary_quotes),
@@ -297,7 +326,7 @@ class RealtimeOptionChainValidator:
 
 
 def _status_and_severity(payload: Mapping[str, Any]) -> tuple[str, str]:
-    if payload.get("ok") is True and not _has_missing_iv(payload):
+    if payload.get("ok") is True and not _has_missing_reference_iv(payload):
         return "OK", "INFO"
     if payload.get("metadata", {}).get("error"):
         return "ERROR", "ERROR"
@@ -314,8 +343,8 @@ def _reference_sources(quotes: Sequence[OptionQuote]) -> list[str]:
     return sorted(sources)
 
 
-def _has_missing_iv(payload: Mapping[str, Any]) -> bool:
-    return bool(payload.get("missing_angel_iv") or payload.get("missing_nse_iv"))
+def _has_missing_reference_iv(payload: Mapping[str, Any]) -> bool:
+    return bool(payload.get("missing_nse_iv"))
 
 
 def _result_from_payload(

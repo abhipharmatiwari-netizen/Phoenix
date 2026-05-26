@@ -159,7 +159,13 @@ def test_parse_nse_live_equity_derivatives_fallback_payload():
     assert ce.quality_flags["nse_source"] == NSE_LIVE_EQUITY_SOURCE
     assert ce.quality_flags["nse_open_interest_unit"] == "underlying_units"
     assert ce.quality_flags["nse_open_interest_lot_size"] == 65
+    assert ce.quality_flags["reference_contract_coverage"] == "partial"
     assert ce.quality_flags["missing_reference_fields_expected"] == ["ask", "bid", "iv"]
+    assert ce.quality_flags["non_equivalent_reference_fields_expected"] == [
+        "ltp",
+        "oi",
+        "volume",
+    ]
     assert pe.option_type == "PE"
 
 

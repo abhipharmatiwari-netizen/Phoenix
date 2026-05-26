@@ -29,7 +29,9 @@ from app.data.option_chain_store import OptionChainStore  # noqa: E402
 from app.data.option_chain_validation import (  # noqa: E402
     OptionChainValidationConfig,
     compare_angel_to_nse,
+    expected_non_equivalent_reference_fields,
     expected_missing_reference_fields,
+    reference_contract_coverage_is_partial,
 )
 from app.data.postgres import connect_with_retry, get_control_plane_dsn  # noqa: E402
 
@@ -126,6 +128,14 @@ def main(argv: list[str] | None = None) -> int:
     skipped_reference_fields = expected_missing_reference_fields(nse_quotes)
     if skipped_reference_fields:
         metadata["skipped_missing_reference_fields"] = list(skipped_reference_fields)
+    skipped_non_equivalent_fields = expected_non_equivalent_reference_fields(nse_quotes)
+    if skipped_non_equivalent_fields:
+        metadata["skipped_non_equivalent_reference_fields"] = list(
+            skipped_non_equivalent_fields
+        )
+    reference_coverage_partial = reference_contract_coverage_is_partial(nse_quotes)
+    if reference_coverage_partial:
+        metadata["reference_contract_coverage"] = "partial"
     if not angel_quotes:
         payload = _empty_report(
             underlying=underlying,
@@ -149,6 +159,8 @@ def main(argv: list[str] | None = None) -> int:
             iv_abs_tolerance=args.iv_abs_tolerance,
             iv_pct_tolerance=args.iv_pct_tolerance,
             skip_missing_reference_fields=skipped_reference_fields,
+            skip_reference_fields=skipped_non_equivalent_fields,
+            ignore_primary_only_contracts=reference_coverage_partial,
         ),
         metadata=metadata,
     )
