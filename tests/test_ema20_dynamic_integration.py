@@ -151,6 +151,43 @@ def test_missing_context_falls_back_safely(monkeypatch):
     assert strategy.position is None
 
 
+def test_dynamic_policy_regime_warmup_allows_entry_after_ten_bars(monkeypatch):
+    dynamic_policy = {
+        "enabled": True,
+        "policy_id": "ema20_ng_v1",
+        "hold_bars": 1,
+        "profiles": {
+            "NO_TRADE": {"disable_entries": True},
+        },
+    }
+    mod, strategy = _make_strategy(
+        monkeypatch,
+        dynamic_policy=dynamic_policy,
+        require_rsi_falling=False,
+    )
+    calls = _patch_bridge(monkeypatch, mod)
+    base_ts = datetime(2025, 1, 1, 4, 0, tzinfo=timezone.utc)
+
+    for i in range(12):
+        candle = _make_candle(base_ts + timedelta(minutes=5 * i), 90.0)
+        strategy.on_bar(
+            "NG_FUT",
+            300,
+            candle,
+            _bar_indicators(
+                ema=100.0,
+                atr=1.0,
+                adx=20.0,
+                plus_di=15.0,
+                minus_di=25.0,
+            ),
+        )
+
+    assert len(calls) == 1
+    assert strategy.position is not None
+    assert strategy._current_regime.value == "NORMAL"
+
+
 def test_kill_switch_disables_dynamic_mode(monkeypatch):
     monkeypatch.setenv("EMA20_DYNAMIC_POLICY_ENABLED", "false")
     dynamic_policy = {

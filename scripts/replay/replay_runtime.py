@@ -86,7 +86,7 @@ _OPTIONAL_COLUMNS = (
 
 _CONTEXT_BUILDER_DEFAULTS: Dict[str, Any] = {
     "atr_median_lookback": 200,
-    "min_median_samples": 50,
+    "min_median_samples": 10,
     "epsilon": 1e-9,
     "ema_period": 20,
     "atr_norm_min": 0.5,

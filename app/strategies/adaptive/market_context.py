@@ -100,7 +100,7 @@ class MarketContextBuilder:
         self,
         *,
         atr_median_lookback: int = 200,
-        min_median_samples: int = 50,
+        min_median_samples: int = 10,
         epsilon: float = 1e-9,
         ema_period: int = 20,
         atr_norm_min: float = 0.5,

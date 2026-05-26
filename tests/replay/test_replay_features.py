@@ -570,7 +570,7 @@ def test_replay_regime_versions_include_context_builder_signature():
             "dynamic_policy": {
                 "enabled": True,
                 "policy_id": "put_custom",
-                "thresholds": {"adx_trend": 18.0},
+                "thresholds": {"adx_trend": 18.0, "use_chop_index": True},
             }
         },
     )

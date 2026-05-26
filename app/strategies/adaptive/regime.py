@@ -7,7 +7,7 @@ from typing import Optional
 
 from .market_context import MarketContext
 
-CLASSIFIER_VERSION = "dynamic_policy_v2"
+CLASSIFIER_VERSION = "dynamic_policy_v3"
 
 
 class Regime(str, Enum):

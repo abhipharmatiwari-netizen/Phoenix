@@ -39,6 +39,31 @@ def test_atr_norm_is_clamped_to_workbook_range():
     assert out.atr_norm == 0.5
 
 
+def test_default_atr_norm_warmup_is_ten_bars():
+    builder = MarketContextBuilder(
+        ema_period=20,
+        slope_shift_bars=3,
+        slope_smoothing_span=1,
+    )
+    base_ts = datetime(2025, 1, 1, 9, 15, tzinfo=timezone.utc)
+
+    out = None
+    for i in range(9):
+        out = builder.build(
+            candle=_candle(base_ts + timedelta(minutes=5 * i), o=100.0, c=100.0),
+            indicators={"atr": 1.0, "ema_20": 100.0, "adx": 20.0, "plus_di": 10.0, "minus_di": 15.0},
+        )
+
+    assert out is not None
+    assert out.atr_norm is None
+
+    out = builder.build(
+        candle=_candle(base_ts + timedelta(minutes=45), o=100.0, c=100.0),
+        indicators={"atr": 1.0, "ema_20": 100.0, "adx": 20.0, "plus_di": 10.0, "minus_di": 15.0},
+    )
+    assert out.atr_norm == 1.0
+
+
 def test_ema_slope_uses_k_shift_formula():
     builder = MarketContextBuilder(
         min_median_samples=2,
