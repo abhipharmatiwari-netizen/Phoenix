@@ -34,6 +34,7 @@ services:
           psql -v ON_ERROR_STOP=1 -f /migrations/021_option_chain_1m.sql
           psql -v ON_ERROR_STOP=1 -f /migrations/022_oi_ml_shadow_order_intents.sql
           psql -v ON_ERROR_STOP=1 -f /migrations/023_option_chain_validation_reports.sql
+          psql -v ON_ERROR_STOP=1 -f /migrations/024_option_chain_greeks.sql
 
   oi-ml-shadow:
     image: phoenix-oi-ml-shadow:${IMAGE_TAG:-local}

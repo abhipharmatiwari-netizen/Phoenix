@@ -56,6 +56,10 @@ def _quote(**overrides):
         "oi": 120000,
         "volume": 1500,
         "iv": "11.25",
+        "delta": "0.42",
+        "gamma": "0.0012",
+        "theta": "-3.4",
+        "vega": "9.8",
         "bid": "42.5",
         "ask": "43.0",
         "ltp": "42.8",
@@ -73,6 +77,7 @@ def test_option_quote_to_row_serializes_quality_flags_for_jsonb():
 
     assert row["underlying"] == "NIFTY"
     assert row["provider"] == "angel"
+    assert str(row["delta"]) == "0.42"
     assert flags == {"missing_symbol_token": True, "source": "test"}
 
 

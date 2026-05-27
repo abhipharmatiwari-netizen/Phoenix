@@ -179,6 +179,71 @@ def test_resolve_listed_expiry_rejects_explicit_unlisted_expiry(monkeypatch):
         )
 
 
+def test_refresh_listed_expiry_rolls_implicit_config_after_date_change(monkeypatch):
+    monkeypatch.setattr(
+        shadow_runner,
+        "_load_scrip_master",
+        lambda: [
+            {
+                "symbol": "NIFTY26MAY2625200CE",
+                "expiry": "26MAY2026",
+                "strike": "2520000",
+                "exch_seg": "NFO",
+                "token": "222",
+            },
+            {
+                "symbol": "NIFTY02JUN2625200CE",
+                "expiry": "02JUN2026",
+                "strike": "2520000",
+                "exch_seg": "NFO",
+                "token": "333",
+            },
+        ],
+    )
+    cfg = OiMlShadowRunnerConfig(
+        enabled=True,
+        underlying="NIFTY",
+        expiry=date(2026, 5, 26),
+        expiry_is_explicit=False,
+        provider="angel",
+    )
+
+    refreshed, resolved_for_day = shadow_runner._refresh_listed_expiry_for_day(
+        cfg,
+        resolved_for_day=date(2026, 5, 26),
+        today=date(2026, 5, 27),
+    )
+
+    assert refreshed.expiry == date(2026, 6, 2)
+    assert refreshed.expiry_is_explicit is False
+    assert resolved_for_day == date(2026, 5, 27)
+
+
+def test_refresh_listed_expiry_preserves_explicit_config_after_date_change(monkeypatch):
+    monkeypatch.setattr(
+        shadow_runner,
+        "_load_scrip_master",
+        lambda: pytest.fail("explicit expiry should not refresh from scrip master"),
+    )
+    cfg = OiMlShadowRunnerConfig(
+        enabled=True,
+        underlying="NIFTY",
+        expiry=date(2026, 5, 26),
+        expiry_is_explicit=True,
+        provider="angel",
+    )
+
+    refreshed, resolved_for_day = shadow_runner._refresh_listed_expiry_for_day(
+        cfg,
+        resolved_for_day=date(2026, 5, 26),
+        today=date(2026, 5, 27),
+    )
+
+    assert refreshed is cfg
+    assert refreshed.expiry == date(2026, 5, 26)
+    assert resolved_for_day == date(2026, 5, 27)
+
+
 def test_build_lightgbm_scorer_requires_artifact_paths():
     cfg = OiMlShadowRunnerConfig(
         enabled=True,

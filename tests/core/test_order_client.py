@@ -215,3 +215,52 @@ def test_fetch_market_quotes_uses_full_mode_and_returns_fetched_rows(monkeypatch
     assert conn.path == "/rest/secure/angelbroking/market/v1/quote/"
     assert payload == {"mode": "FULL", "exchangeTokens": {"NFO": ["12345"]}}
     assert rows == [{"exchange": "NFO", "symbolToken": "12345", "ltp": 42.8, "opnInterest": 120000}]
+
+
+def test_fetch_option_greeks_calls_rest_endpoint_and_returns_rows(monkeypatch):
+    mod = importlib.import_module(MODULE_PATH)
+
+    class _FakeResponse:
+        status = 200
+
+        def getheaders(self):
+            return [
+                ("Content-Type", "application/json"),
+                ("X-Request-ID", "req-greek-1"),
+            ]
+
+        def read(self):
+            return (
+                b'{"status": true, "message": "SUCCESS", "data": ['
+                b'{"name": "NIFTY", "expiry": "19MAY2026", "strikePrice": "25200", '
+                b'"optionType": "CE", "impliedVolatility": "13.5", "delta": "0.42", '
+                b'"gamma": "0.0012", "theta": "-3.4", "vega": "9.8"}]}'
+            )
+
+    class _FakeConnection:
+        def __init__(self, *args, **kwargs):
+            self.body = None
+
+        def request(self, method, path, body=None, headers=None):
+            self.method = method
+            self.path = path
+            self.body = body
+
+        def getresponse(self):
+            return _FakeResponse()
+
+    conn = _FakeConnection()
+    monkeypatch.setattr(mod.rate_limiter, "acquire", lambda key: None)
+    monkeypatch.setattr(mod.http.client, "HTTPSConnection", lambda *args, **kwargs: conn)
+
+    client = mod.AngelOrderClient("jwt-token", "api-key")
+    rows = client.fetch_option_greeks(
+        underlying="nifty",
+        expiry="2026-05-19",
+    )
+
+    payload = json.loads(conn.body)
+    assert conn.path == "/rest/secure/angelbroking/marketData/v1/optionGreek"
+    assert payload == {"name": "NIFTY", "expirydate": "19MAY2026"}
+    assert rows[0]["impliedVolatility"] == "13.5"
+    assert rows[0]["delta"] == "0.42"

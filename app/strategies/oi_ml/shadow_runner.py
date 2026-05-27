@@ -236,10 +236,17 @@ def run_shadow_loop(config: OiMlShadowRunnerConfig) -> int:
         return 0
     iterations = 0
     consecutive_failures = 0
+    active_config = config
+    resolved_for_day = datetime.now(IST).date()
     while True:
         iterations += 1
         try:
-            result = run_shadow_once(config)
+            active_config, resolved_for_day = _refresh_listed_expiry_for_day(
+                active_config,
+                resolved_for_day=resolved_for_day,
+                today=datetime.now(IST).date(),
+            )
+            result = run_shadow_once(active_config)
             consecutive_failures = 0
             logger.info(
                 "oi_ml_shadow iteration=%d action=%s reason=%s snapshot_rows=%d intent_id=%s record_id=%s",
@@ -345,6 +352,27 @@ def _resolve_listed_expiry(
             resolved.isoformat(),
         )
     return replace(config, expiry=resolved)
+
+
+def _refresh_listed_expiry_for_day(
+    config: OiMlShadowRunnerConfig,
+    *,
+    resolved_for_day: date,
+    today: date,
+) -> tuple[OiMlShadowRunnerConfig, date]:
+    if today == resolved_for_day:
+        return config, resolved_for_day
+    if config.expiry_is_explicit or str(config.provider or "").strip().lower() != "angel":
+        return config, today
+    refreshed = _resolve_listed_expiry(config, today=today)
+    if refreshed.expiry != config.expiry:
+        logger.info(
+            "oi_ml_shadow refreshed listed expiry previous=%s current=%s trading_day=%s",
+            config.expiry.isoformat(),
+            refreshed.expiry.isoformat(),
+            today.isoformat(),
+        )
+    return refreshed, today
 
 
 def _load_scrip_master() -> object:

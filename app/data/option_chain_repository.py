@@ -18,7 +18,7 @@ FETCH_SNAPSHOT_SQL = """
 SELECT snapshot_ts, source_ts, ingested_at,
        underlying, expiry, strike, option_type,
        trading_symbol, exchange, symbol_token,
-       oi, volume, iv, bid, ask, ltp,
+       oi, volume, iv, delta, gamma, theta, vega, bid, ask, ltp,
        underlying_ltp, vix,
        provider, raw_hash, quality_flags
 FROM public.option_chain_1m
@@ -35,7 +35,7 @@ FETCH_CANDIDATE_WINDOW_SQL = """
 SELECT snapshot_ts, source_ts, ingested_at,
        underlying, expiry, strike, option_type,
        trading_symbol, exchange, symbol_token,
-       oi, volume, iv, bid, ask, ltp,
+       oi, volume, iv, delta, gamma, theta, vega, bid, ask, ltp,
        underlying_ltp, vix,
        provider, raw_hash, quality_flags
 FROM public.option_chain_1m
@@ -249,6 +249,10 @@ def _row_to_quote(row: dict[str, Any]) -> OptionQuote:
         oi=row.get("oi"),
         volume=row.get("volume"),
         iv=row.get("iv"),
+        delta=row.get("delta"),
+        gamma=row.get("gamma"),
+        theta=row.get("theta"),
+        vega=row.get("vega"),
         bid=row.get("bid"),
         ask=row.get("ask"),
         ltp=row.get("ltp"),

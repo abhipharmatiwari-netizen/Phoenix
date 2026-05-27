@@ -59,6 +59,10 @@ class OptionQuote:
     oi: int | None = None
     volume: int | None = None
     iv: Decimal | float | int | str | None = None
+    delta: Decimal | float | int | str | None = None
+    gamma: Decimal | float | int | str | None = None
+    theta: Decimal | float | int | str | None = None
+    vega: Decimal | float | int | str | None = None
     bid: Decimal | float | int | str | None = None
     ask: Decimal | float | int | str | None = None
     ltp: Decimal | float | int | str | None = None
@@ -87,6 +91,10 @@ class OptionQuote:
             oi=_optional_int(self.oi),
             volume=_optional_int(self.volume),
             iv=_optional_decimal(self.iv),
+            delta=_optional_decimal(self.delta),
+            gamma=_optional_decimal(self.gamma),
+            theta=_optional_decimal(self.theta),
+            vega=_optional_decimal(self.vega),
             bid=_optional_decimal(self.bid),
             ask=_optional_decimal(self.ask),
             ltp=_optional_decimal(self.ltp),

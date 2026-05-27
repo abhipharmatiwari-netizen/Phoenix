@@ -25,6 +25,10 @@ def _quote(**overrides):
         "oi": "120000",
         "volume": "1500",
         "iv": "11.25",
+        "delta": "0.42",
+        "gamma": "0.0012",
+        "theta": "-3.4",
+        "vega": "9.8",
         "bid": "42.5",
         "ask": "43.0",
         "ltp": "42.8",
@@ -42,6 +46,10 @@ def test_option_quote_normalizes_contract_fields_and_numbers():
     assert quote.provider == "angel"
     assert quote.oi == 120000
     assert quote.iv == Decimal("11.25")
+    assert quote.delta == Decimal("0.42")
+    assert quote.gamma == Decimal("0.0012")
+    assert quote.theta == Decimal("-3.4")
+    assert quote.vega == Decimal("9.8")
     assert quote.bid == Decimal("42.5")
 
 

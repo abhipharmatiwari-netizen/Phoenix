@@ -20,7 +20,7 @@ INSERT INTO public.option_chain_1m (
     snapshot_ts, source_ts, ingested_at,
     underlying, expiry, strike, option_type,
     trading_symbol, exchange, symbol_token,
-    oi, volume, iv, bid, ask, ltp,
+    oi, volume, iv, delta, gamma, theta, vega, bid, ask, ltp,
     underlying_ltp, vix,
     provider, raw_hash, quality_flags
 )
@@ -28,7 +28,8 @@ VALUES (
     %(snapshot_ts)s, %(source_ts)s, %(ingested_at)s,
     %(underlying)s, %(expiry)s, %(strike)s, %(option_type)s,
     %(trading_symbol)s, %(exchange)s, %(symbol_token)s,
-    %(oi)s, %(volume)s, %(iv)s, %(bid)s, %(ask)s, %(ltp)s,
+    %(oi)s, %(volume)s, %(iv)s, %(delta)s, %(gamma)s, %(theta)s, %(vega)s,
+    %(bid)s, %(ask)s, %(ltp)s,
     %(underlying_ltp)s, %(vix)s,
     %(provider)s, %(raw_hash)s, %(quality_flags)s::jsonb
 )
@@ -42,6 +43,10 @@ DO UPDATE SET
     oi = EXCLUDED.oi,
     volume = EXCLUDED.volume,
     iv = EXCLUDED.iv,
+    delta = EXCLUDED.delta,
+    gamma = EXCLUDED.gamma,
+    theta = EXCLUDED.theta,
+    vega = EXCLUDED.vega,
     bid = EXCLUDED.bid,
     ask = EXCLUDED.ask,
     ltp = EXCLUDED.ltp,
@@ -100,6 +105,10 @@ def option_quote_to_row(quote: OptionQuote) -> dict[str, Any]:
         "oi": q.oi,
         "volume": q.volume,
         "iv": q.iv,
+        "delta": q.delta,
+        "gamma": q.gamma,
+        "theta": q.theta,
+        "vega": q.vega,
         "bid": q.bid,
         "ask": q.ask,
         "ltp": q.ltp,

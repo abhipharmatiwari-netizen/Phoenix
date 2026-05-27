@@ -14,7 +14,7 @@ import logging
 import time
 import random
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional, Dict, Any, Tuple
 
 from app.core.broker_network_identity import resolve_broker_network_identity
@@ -201,6 +201,20 @@ def _format_historical_datetime(value: datetime) -> str:
     else:
         ts = ts.astimezone(timezone.utc)
     return ts.astimezone(HISTORICAL_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+
+
+def _format_option_greek_expiry(value: date | str) -> str:
+    if isinstance(value, datetime):
+        parsed = value.date()
+    elif isinstance(value, date):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        try:
+            parsed = date.fromisoformat(text)
+        except ValueError:
+            return text.upper()
+    return parsed.strftime("%d%b%Y").upper()
 
 
 # Read an HTTP response, validate JSON, and raise on blocked responses.
@@ -604,6 +618,47 @@ class AngelOrderClient:
         if not isinstance(fetched, list):
             return []
         return [dict(item) for item in fetched if isinstance(item, dict)]
+
+    def fetch_option_greeks(
+        self,
+        *,
+        underlying: str,
+        expiry: date | str,
+    ) -> list[Dict[str, Any]]:
+        payload = {
+            "name": str(underlying or "").strip().upper(),
+            "expirydate": _format_option_greek_expiry(expiry),
+        }
+        body = json.dumps(payload)
+        logger.debug("Option Greek request payload_head=%s", _payload_head(payload))
+        rate_limiter.acquire("optionGreek")
+        conn = _make_angel_connection()
+        conn.request(
+            "POST",
+            "/rest/secure/angelbroking/marketData/v1/optionGreek",
+            body=body,
+            headers=self._headers(),
+        )
+        res = conn.getresponse()
+        _text, headers, data = _read_json_response(
+            res,
+            url="https://apiconnect.angelone.in/rest/secure/angelbroking/marketData/v1/optionGreek",
+        )
+        request_id = _extract_request_id(headers)
+        logger.info(
+            "Option Greek response status=%s event=OPTION_GREEK_RESPONSE request_id=%s underlying=%s expiry=%s",
+            res.status,
+            request_id or "-",
+            payload["name"],
+            payload["expirydate"],
+        )
+        logger.debug("Option Greek response head=%r", _payload_head(data))
+        if not data.get("status"):
+            raise RuntimeError(f"optionGreek failed: {_payload_head(data)}")
+        rows = data.get("data")
+        if not isinstance(rows, list):
+            return []
+        return [dict(item) for item in rows if isinstance(item, dict)]
 
     # Fetch live positions with blocking detection and fallback logic.
     def get_positions(self) -> Dict[str, Any]:

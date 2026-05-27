@@ -213,6 +213,108 @@ def test_angel_provider_stamps_underlying_ltp_and_vix_from_context_quotes():
     assert str(quotes[0].normalized().vix) == "14.2"
 
 
+def test_angel_provider_enriches_iv_and_greeks_from_option_greek_rest_rows():
+    class GreekFetcher(FakeQuoteFetcher):
+        def __init__(self):
+            super().__init__()
+            self.greek_calls = []
+
+        def fetch_market_quotes(self, *, mode, exchange_to_tokens):
+            self.calls.append((mode, exchange_to_tokens))
+            payloads = {
+                "111": {
+                    "exchange": "NFO",
+                    "symbolToken": "111",
+                    "ltp": "42.8",
+                    "opnInterest": "120000",
+                    "tradeVolume": "1500",
+                    "depth": {
+                        "buy": [{"price": "42.5"}],
+                        "sell": [{"price": "43.0"}],
+                    },
+                },
+                "222": {
+                    "exchange": "NFO",
+                    "symbolToken": "222",
+                    "ltp": "38.2",
+                    "opnInterest": "90000",
+                    "tradeVolume": "1200",
+                    "bid": "38.0",
+                    "ask": "38.4",
+                },
+            }
+            return [
+                payloads[token]
+                for tokens in exchange_to_tokens.values()
+                for token in tokens
+                if token in payloads
+            ]
+
+        def fetch_option_greeks(self, *, underlying, expiry):
+            self.greek_calls.append((underlying, expiry))
+            return [
+                {
+                    "expiry": "19MAY2026",
+                    "strikePrice": "25200",
+                    "optionType": "CE",
+                    "impliedVolatility": "13.5",
+                    "delta": "0.42",
+                    "gamma": "0.0012",
+                    "theta": "-3.4",
+                    "vega": "9.8",
+                },
+                {
+                    "expiry": "19MAY2026",
+                    "strikePrice": "25200",
+                    "optionType": "PE",
+                    "impliedVolatility": "14.2",
+                    "delta": "-0.58",
+                    "gamma": "0.0011",
+                    "theta": "-3.8",
+                    "vega": "9.4",
+                },
+            ]
+
+    fetcher = GreekFetcher()
+    provider = AngelOptionChainProvider(
+        fetcher,
+        [
+            {
+                "symbol": "NIFTY19MAY2625200CE",
+                "expiry": "19MAY2026",
+                "strike": "2520000",
+                "exch_seg": "NFO",
+                "token": "111",
+            },
+            {
+                "symbol": "NIFTY19MAY2625200PE",
+                "expiry": "19MAY2026",
+                "strike": "2520000",
+                "exch_seg": "NFO",
+                "token": "222",
+            },
+        ],
+        batch_size=10,
+    )
+
+    quotes = provider.fetch_chain(
+        underlying="NIFTY",
+        expiry=date(2026, 5, 19),
+        snapshot_ts=datetime(2026, 5, 19, 4, 30),
+    )
+
+    assert fetcher.greek_calls == [("NIFTY", date(2026, 5, 19))]
+    ce = quotes[0].normalized()
+    pe = quotes[1].normalized()
+    assert str(ce.iv) == "13.5"
+    assert str(ce.delta) == "0.42"
+    assert str(ce.gamma) == "0.0012"
+    assert str(ce.theta) == "-3.4"
+    assert str(ce.vega) == "9.8"
+    assert str(pe.iv) == "14.2"
+    assert str(pe.delta) == "-0.58"
+
+
 def test_listed_option_expiries_uses_provider_calendar_not_weekday_assumption():
     scrip_master = [
         {

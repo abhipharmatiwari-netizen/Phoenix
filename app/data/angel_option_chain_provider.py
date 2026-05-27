@@ -8,9 +8,13 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
+import logging
 from typing import Any, Protocol
 
 from app.data.option_chain_provider import OptionQuote
+
+
+logger = logging.getLogger(__name__)
 
 
 class MarketQuoteFetcher(Protocol):
@@ -47,6 +51,10 @@ class AngelOptionChainProvider:
             option_segments=self.option_segments,
         )
         quote_payloads = self._fetch_quote_payloads(rows)
+        greek_payloads = self._fetch_greek_payloads(
+            underlying=underlying,
+            expiry=expiry,
+        )
         context_payloads = self._fetch_context_payloads(underlying)
         underlying_ltp = _ltp_from_payload(context_payloads.get("underlying"))
         vix = _ltp_from_payload(context_payloads.get("vix"))
@@ -62,6 +70,11 @@ class AngelOptionChainProvider:
             if payload is None:
                 quality_flags["missing_quote_payload"] = True
                 payload = {}
+            option_type = _option_type_from_symbol(symbol)
+            greek = greek_payloads.get((_strike_from_row(row), option_type), {})
+            quote_iv = _first(payload, "impliedVolatility", "impliedvolatility", "iv")
+            if greek_payloads and not greek:
+                quality_flags["missing_option_greek_payload"] = True
             quotes.append(
                 OptionQuote(
                     snapshot_ts=snapshot,
@@ -78,14 +91,20 @@ class AngelOptionChainProvider:
                     underlying=str(underlying).strip().upper(),
                     expiry=expiry,
                     strike=_strike_from_row(row),
-                    option_type=_option_type_from_symbol(symbol),
+                    option_type=option_type,
                     trading_symbol=symbol,
                     exchange=exchange,
                     symbol_token=str(token) if token is not None else None,
                     provider=self.provider_name,
                     oi=_first(payload, "opnInterest", "openInterest", "oi"),
                     volume=_first(payload, "tradeVolume", "volume", "totTradedQty", "tottrdqty"),
-                    iv=_first(payload, "impliedVolatility", "impliedvolatility", "iv"),
+                    iv=quote_iv
+                    if quote_iv is not None
+                    else _first(greek, "impliedVolatility", "impliedvolatility", "iv"),
+                    delta=_first(greek, "delta"),
+                    gamma=_first(greek, "gamma"),
+                    theta=_first(greek, "theta"),
+                    vega=_first(greek, "vega"),
                     bid=_best_bid(payload),
                     ask=_best_ask(payload),
                     ltp=_first(payload, "ltp", "lastTradedPrice", "last_price"),
@@ -96,6 +115,27 @@ class AngelOptionChainProvider:
                 )
             )
         return quotes
+
+    def _fetch_greek_payloads(
+        self,
+        *,
+        underlying: str,
+        expiry: date,
+    ) -> dict[tuple[int, str], Mapping[str, Any]]:
+        method = getattr(self.quote_fetcher, "fetch_option_greeks", None)
+        if not callable(method):
+            return {}
+        try:
+            rows = method(underlying=str(underlying).strip().upper(), expiry=expiry)
+        except Exception as exc:
+            logger.warning(
+                "Angel optionGreek enrichment failed underlying=%s expiry=%s error=%s",
+                str(underlying).strip().upper(),
+                expiry.isoformat(),
+                type(exc).__name__,
+            )
+            return {}
+        return _greek_payloads_by_contract(rows, expiry=expiry)
 
     def _fetch_quote_payloads(
         self,
@@ -390,6 +430,36 @@ def _ltp_from_payload(payload: Mapping[str, Any] | None) -> Any:
     if not payload:
         return None
     return _first(payload, "ltp", "lastTradedPrice", "last_price")
+
+
+def _greek_payloads_by_contract(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    expiry: date,
+) -> dict[tuple[int, str], Mapping[str, Any]]:
+    mapped: dict[tuple[int, str], Mapping[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        row_expiry = _parse_date(_first(row, "expiry", "expiryDate", "expirydate"))
+        if row_expiry is not None and row_expiry != expiry:
+            continue
+        strike = _strike_from_greek(row)
+        option_type = str(_first(row, "optionType", "option_type") or "").strip().upper()
+        if strike <= 0 or option_type not in {"CE", "PE"}:
+            continue
+        mapped[(strike, option_type)] = row
+    return mapped
+
+
+def _strike_from_greek(row: Mapping[str, Any]) -> int:
+    raw = _first(row, "strikePrice", "strike", "strike_price")
+    value = _decimal(raw)
+    if value is None:
+        return 0
+    if value > Decimal("100000"):
+        value = value / Decimal("100")
+    return int(value.to_integral_value())
 
 
 def _raw_hash(payload: Mapping[str, Any]) -> str:
