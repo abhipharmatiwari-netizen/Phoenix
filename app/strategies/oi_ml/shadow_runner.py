@@ -19,6 +19,7 @@ from app.data.option_chain_repository import OptionChainRepository
 from app.data.postgres import connect_with_retry, get_control_plane_dsn
 from app.risk.option_sell_guard import OptionSellGuardConfig
 from app.strategies.oi_ml.decision import OiMlCeDecisionEngine, OiMlDecisionConfig, OiMlEntryAction
+from app.strategies.oi_ml.greek_risk import OiMlGreekRiskConfig
 from app.strategies.oi_ml.order_intents import OiMlOrderIntentConfig, build_order_intent_from_candidate
 from app.strategies.oi_ml.scoring import (
     ConstantOiMlScorer,
@@ -60,6 +61,7 @@ class OiMlShadowRunnerConfig:
     spread_width_points: int = 200
     max_spread_loss_rupees: float = 5000.0
     allow_naked: bool = False
+    greek_risk_config: OiMlGreekRiskConfig = field(default_factory=OiMlGreekRiskConfig)
     tenant_id: str | None = None
     broker_account_id: str | None = None
 
@@ -130,6 +132,7 @@ def load_shadow_runner_config(
             5000.0,
         ),
         allow_naked=_bool(source.get("OI_ML_SHADOW_ALLOW_NAKED"), default=False),
+        greek_risk_config=_load_greek_risk_config(source),
         tenant_id=_optional_str(source.get("HUB_DEFAULT_TENANT_ID")),
         broker_account_id=_optional_str(source.get("HUB_DEFAULT_BROKER_ACCOUNT_ID")),
     )
@@ -179,6 +182,7 @@ def run_shadow_once(
                     allow_naked=config.allow_naked,
                     max_spread_loss_rupees=float(config.max_spread_loss_rupees),
                 ),
+                greek_risk_config=config.greek_risk_config,
             ),
         )
         decision = decision_engine.evaluate_entry(
@@ -407,6 +411,50 @@ def _build_scorer(config: OiMlShadowRunnerConfig) -> OiMlScorer:
     return MissingOiMlScorer()
 
 
+def _load_greek_risk_config(source: Mapping[str, str]) -> OiMlGreekRiskConfig:
+    return OiMlGreekRiskConfig(
+        enabled=_bool(source.get("OI_ML_SHADOW_GREEK_RISK_ENABLED"), default=True),
+        require_greeks=_bool(source.get("OI_ML_SHADOW_REQUIRE_GREEKS"), default=True),
+        require_oi_wall=_bool(source.get("OI_ML_SHADOW_REQUIRE_OI_WALL"), default=True),
+        target_abs_delta=_float(source.get("OI_ML_SHADOW_TARGET_ABS_DELTA"), 0.20),
+        min_abs_delta=_float(source.get("OI_ML_SHADOW_MIN_ABS_DELTA"), 0.05),
+        max_abs_delta=_float(source.get("OI_ML_SHADOW_MAX_ABS_DELTA"), 0.35),
+        max_abs_gamma=_float(source.get("OI_ML_SHADOW_MAX_ABS_GAMMA"), 0.0030),
+        max_abs_vega=_optional_float(source.get("OI_ML_SHADOW_MAX_ABS_VEGA")),
+        force_spread_abs_gamma=_float(
+            source.get("OI_ML_SHADOW_FORCE_SPREAD_ABS_GAMMA"),
+            0.0015,
+        ),
+        force_spread_abs_vega=_float(
+            source.get("OI_ML_SHADOW_FORCE_SPREAD_ABS_VEGA"),
+            8.0,
+        ),
+        size_down_abs_delta=_float(source.get("OI_ML_SHADOW_SIZE_DOWN_ABS_DELTA"), 0.25),
+        size_down_abs_gamma=_float(source.get("OI_ML_SHADOW_SIZE_DOWN_ABS_GAMMA"), 0.0012),
+        size_down_abs_vega=_float(source.get("OI_ML_SHADOW_SIZE_DOWN_ABS_VEGA"), 7.0),
+        size_down_lot_multiplier=_float(
+            source.get("OI_ML_SHADOW_SIZE_DOWN_LOT_MULTIPLIER"),
+            0.50,
+        ),
+        exit_abs_delta=_float(source.get("OI_ML_SHADOW_EXIT_ABS_DELTA"), 0.45),
+        exit_abs_gamma=_float(source.get("OI_ML_SHADOW_EXIT_ABS_GAMMA"), 0.0040),
+        exit_iv_expansion_pct=_float(
+            source.get("OI_ML_SHADOW_EXIT_IV_EXPANSION_PCT"),
+            0.25,
+        ),
+        tighten_abs_delta=_float(source.get("OI_ML_SHADOW_TIGHTEN_ABS_DELTA"), 0.30),
+        tighten_abs_gamma=_float(source.get("OI_ML_SHADOW_TIGHTEN_ABS_GAMMA"), 0.0020),
+        tighten_iv_expansion_pct=_float(
+            source.get("OI_ML_SHADOW_TIGHTEN_IV_EXPANSION_PCT"),
+            0.15,
+        ),
+        tightened_stop_loss_mult_credit=_float(
+            source.get("OI_ML_SHADOW_TIGHTENED_STOP_LOSS_MULT_CREDIT"),
+            1.25,
+        ),
+    )
+
+
 def _next_weekly_expiry(today: date | None = None) -> date:
     base = today or datetime.now(IST).date()
     days_until_thursday = (3 - base.weekday()) % 7
@@ -474,6 +522,15 @@ def _optional_int(value: object, *, minimum: int) -> int | None:
     if value in (None, ""):
         return None
     return _int(value, int(minimum), minimum=minimum)
+
+
+def _optional_float(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _float(value: object, default: float) -> float:

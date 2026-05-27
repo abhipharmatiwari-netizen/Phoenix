@@ -32,6 +32,10 @@ def _quote(strike: int, *, option_type: str = "CE", ltp: float = 100.0) -> Optio
         oi=1000,
         volume=1000,
         iv="12.0",
+        delta="0.20",
+        gamma="0.0010",
+        theta="-3.0",
+        vega="6.0",
         bid=max(0.05, ltp - 0.5),
         ask=ltp + 0.5,
         ltp=ltp,
@@ -62,6 +66,7 @@ def _plan(
         max_loss_rupees=4000.0,
         guard_result=guard,
         snapshot=tuple(snapshot if snapshot is not None else [short_quote, _quote(25400, ltp=20.0)]),
+        metadata={},
     )
 
 
@@ -84,6 +89,8 @@ def test_builds_inert_bear_call_spread_intent_with_template_roles():
     assert [leg.side for leg in intent.legs] == [OrderSide.SELL, OrderSide.BUY]
     assert intent.legs[0].symbol == "NIFTY21MAY2625200CE"
     assert intent.legs[1].symbol == "NIFTY21MAY2625400CE"
+    assert intent.legs[0].delta == 0.20
+    assert intent.metadata["greek_exposure"]["gross_abs_delta"] == 10.0
     assert not isinstance(intent.legs[0], OrderRequest)
 
 
@@ -156,3 +163,30 @@ def test_intent_builder_rejects_unguarded_candidates():
 
     assert result.ok is False
     assert result.reasons == ("guard_result_not_allowed",)
+
+
+def test_intent_builder_scales_lots_from_greek_risk_multiplier():
+    plan = _plan(structure=OptionSellStructure.BEAR_CALL_SPREAD)
+    plan = OiMlCandidatePlan(
+        quote=plan.quote,
+        features=plan.features,
+        score=plan.score,
+        structure=plan.structure,
+        premium_received=plan.premium_received,
+        max_loss_rupees=plan.max_loss_rupees,
+        guard_result=plan.guard_result,
+        snapshot=plan.snapshot,
+        metadata={"greek_risk": {"lot_multiplier": 0.5}},
+    )
+
+    result = build_order_intent_from_candidate(
+        plan,
+        created_at=CREATED_AT,
+        config=OiMlOrderIntentConfig(lots=4, lot_size=25, max_spread_loss_rupees=10000.0),
+    )
+
+    assert result.ok is True
+    assert result.intent is not None
+    assert result.intent.quantity == 50
+    assert result.intent.metadata["base_lots"] == 4
+    assert result.intent.metadata["effective_lots"] == 2

@@ -12,6 +12,7 @@ from app.strategies.oi_ml.decision import (
     OiMlDecisionConfig,
     OiMlEntryAction,
 )
+from app.strategies.oi_ml.greek_risk import OiMlGreekRiskConfig
 from app.strategies.oi_ml.scoring import ConstantOiMlScorer
 
 
@@ -27,6 +28,10 @@ def _quote(
     oi: int = 1000,
     vix: float = 16.0,
     spot: float = 25140.0,
+    delta: float = 0.20,
+    gamma: float = 0.0010,
+    theta: float = -3.0,
+    vega: float = 6.0,
     minute_offset: int = 0,
 ) -> OptionQuote:
     ts = DECISION_TS + timedelta(minutes=minute_offset)
@@ -44,6 +49,10 @@ def _quote(
         oi=oi,
         volume=1000,
         iv="12.0",
+        delta=delta,
+        gamma=gamma,
+        theta=theta,
+        vega=vega,
         bid=max(0.05, ltp - 0.5),
         ask=ltp + 0.5,
         ltp=ltp,
@@ -76,9 +85,9 @@ def _config(**overrides) -> OiMlDecisionConfig:
 
 def test_decision_engine_stages_first_guarded_spread_candidate():
     snapshot = [
-        _quote(25100, "CE", ltp=130.0, oi=500),
-        _quote(25200, "CE", ltp=120.0, oi=1000),
-        _quote(25300, "CE", ltp=115.0, oi=900),
+        _quote(25100, "CE", ltp=130.0, oi=500, delta=0.38),
+        _quote(25200, "CE", ltp=120.0, oi=2500, delta=0.20),
+        _quote(25300, "CE", ltp=115.0, oi=100, delta=0.12),
         _quote(25200, "PE", ltp=80.0, oi=700),
     ]
     repo = FakeRepository(snapshot)
@@ -100,17 +109,20 @@ def test_decision_engine_stages_first_guarded_spread_candidate():
     assert decision.selected.quote.strike == 25200
     assert decision.selected.structure == OptionSellStructure.BEAR_CALL_SPREAD
     assert decision.selected.guard_result.allowed is True
+    assert decision.selected.metadata["greek_risk"]["oi_wall_present"] is True
+    assert decision.selected.metadata["greek_risk"]["abs_delta"] == 0.2
     assert repo.calls[0]["provider"] == "angel"
     assert repo.calls[0]["min_snapshot_ts"] == DECISION_TS - timedelta(seconds=120)
 
 
 def test_decision_engine_stages_angel_candidate_when_iv_is_missing():
     snapshot = [
-        _quote(25200, "CE", ltp=120.0, oi=1000, vix=16.0, spot=25140.0),
+        _quote(25100, "CE", ltp=130.0, oi=500, vix=16.0, spot=25140.0, delta=0.38),
+        _quote(25200, "CE", ltp=120.0, oi=2500, vix=16.0, spot=25140.0),
+        _quote(25300, "CE", ltp=110.0, oi=100, vix=16.0, spot=25140.0, delta=0.12),
         _quote(25200, "PE", ltp=80.0, oi=700, vix=16.0, spot=25140.0),
     ]
-    snapshot[0] = replace(snapshot[0], iv=None)
-    snapshot[1] = replace(snapshot[1], iv=None)
+    snapshot = [replace(row, iv=None) for row in snapshot]
     engine = OiMlCeDecisionEngine(
         FakeRepository(snapshot),
         ConstantOiMlScorer(probability=0.64, predicted_mae_premium=40.0),
@@ -150,7 +162,11 @@ def test_decision_engine_fails_closed_without_snapshot():
 
 
 def test_decision_engine_rejects_when_guard_vetoes_all_candidates():
-    snapshot = [_quote(25200, "CE", ltp=120.0, oi=1000)]
+    snapshot = [
+        _quote(25100, "CE", ltp=130.0, oi=500, delta=0.38),
+        _quote(25200, "CE", ltp=120.0, oi=2500),
+        _quote(25300, "CE", ltp=110.0, oi=100, delta=0.12),
+    ]
     engine = OiMlCeDecisionEngine(
         FakeRepository(snapshot),
         ConstantOiMlScorer(probability=0.64, predicted_mae_premium=200.0),
@@ -169,7 +185,11 @@ def test_decision_engine_rejects_when_guard_vetoes_all_candidates():
 
 
 def test_decision_engine_can_stage_naked_candidate_only_when_enabled_and_tight():
-    snapshot = [_quote(25200, "CE", ltp=120.0, oi=1000, vix=17.0)]
+    snapshot = [
+        _quote(25100, "CE", ltp=130.0, oi=500, vix=17.0, delta=0.38),
+        _quote(25200, "CE", ltp=120.0, oi=2500, vix=17.0),
+        _quote(25300, "CE", ltp=110.0, oi=100, vix=17.0, delta=0.12),
+    ]
     engine = OiMlCeDecisionEngine(
         FakeRepository(snapshot),
         ConstantOiMlScorer(probability=0.72, predicted_mae_premium=40.0),
@@ -185,6 +205,53 @@ def test_decision_engine_can_stage_naked_candidate_only_when_enabled_and_tight()
     assert decision.action == OiMlEntryAction.STAGE_ENTRY
     assert decision.selected is not None
     assert decision.selected.structure == OptionSellStructure.NAKED_SHORT_CE
+
+
+def test_decision_engine_rejects_candidate_with_excessive_delta():
+    snapshot = [
+        _quote(25100, "CE", ltp=130.0, oi=500, delta=0.42),
+        _quote(25200, "CE", ltp=120.0, oi=2500, delta=0.41),
+        _quote(25300, "CE", ltp=110.0, oi=100, delta=0.39),
+    ]
+    engine = OiMlCeDecisionEngine(
+        FakeRepository(snapshot),
+        ConstantOiMlScorer(probability=0.72, predicted_mae_premium=40.0),
+        config=_config(),
+    )
+
+    decision = engine.evaluate_entry(
+        underlying="NIFTY",
+        expiry=EXPIRY,
+        decision_ts=DECISION_TS,
+    )
+
+    assert decision.action == OiMlEntryAction.NO_TRADE
+    assert "delta_above_max" in decision.evaluated[0].guard_result.reasons
+
+
+def test_decision_engine_forces_spread_and_scales_size_on_high_vega():
+    snapshot = [
+        _quote(25100, "CE", ltp=130.0, oi=500, delta=0.38),
+        _quote(25200, "CE", ltp=120.0, oi=2500, vega=8.5),
+        _quote(25300, "CE", ltp=110.0, oi=100, delta=0.12),
+    ]
+    engine = OiMlCeDecisionEngine(
+        FakeRepository(snapshot),
+        ConstantOiMlScorer(probability=0.72, predicted_mae_premium=40.0),
+        config=_config(allow_naked=True),
+    )
+
+    decision = engine.evaluate_entry(
+        underlying="NIFTY",
+        expiry=EXPIRY,
+        decision_ts=DECISION_TS,
+    )
+
+    assert decision.action == OiMlEntryAction.STAGE_ENTRY
+    assert decision.selected is not None
+    assert decision.selected.structure == OptionSellStructure.BEAR_CALL_SPREAD
+    assert decision.selected.metadata["greek_risk"]["force_spread"] is True
+    assert decision.selected.metadata["greek_risk"]["lot_multiplier"] == 0.5
 
 
 def test_decision_engine_respects_strategy_kill_switch():

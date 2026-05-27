@@ -27,6 +27,11 @@ from app.risk.option_sell_guard import OptionSellStructure
 from app.strategies.base import BaseStrategy
 from app.strategies.identifiers import OI_ML_CE_SELLER_ID
 from app.strategies.oi_ml.decision import OiMlEntryAction
+from app.strategies.oi_ml.greek_risk import (
+    OiMlGreekRiskConfig,
+    abs_delta_value,
+    greek_metadata_from_quote,
+)
 from app.strategies.oi_ml.order_intents import (
     OiMlOrderIntent,
     OiMlOrderIntentLeg,
@@ -64,6 +69,15 @@ def _parse_date(value: Any) -> date | None:
     try:
         return date.fromisoformat(str(value))
     except ValueError:
+        return None
+
+
+def _optional_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
         return None
 
 
@@ -154,6 +168,7 @@ class OiMlCeSellerStrategy(BaseStrategy):
             self.params.get("spot_stop_buffer_points", 0.0)
         )
         self.max_vix = float(self.params.get("max_vix", 22.0))
+        self.max_quote_age_seconds = int(self.params.get("max_quote_age_seconds", 120))
         self.lots = int(self.params.get("lots", 1))
         self.lot_size = int(self.params.get("lot_size", 65))
         self.spread_width_points = int(self.params.get("spread_width_points", 200))
@@ -161,6 +176,7 @@ class OiMlCeSellerStrategy(BaseStrategy):
         self.expiry = _parse_date(self.params.get("expiry"))
         self.tenant_id = self.params.get("tenant_id")
         self.account_id = self.params.get("account_id")
+        self.greek_risk_config = self._load_greek_risk_config()
         self.order_intent_config = OiMlOrderIntentConfig(
             strategy_id=self._strategy_id,
             lots=self.lots,
@@ -223,6 +239,7 @@ class OiMlCeSellerStrategy(BaseStrategy):
                 self.last_price[self.underlying] = close_price
         except (TypeError, ValueError):
             pass
+        self._refresh_open_spread_greeks(bar_ts)
         self._maybe_manage_exits(bar_ts)
         if self.decision_engine is None:
             self._record_no_trade("strategy_scaffold_fail_closed")
@@ -399,6 +416,9 @@ class OiMlCeSellerStrategy(BaseStrategy):
             metadata={
                 "selected_strike": getattr(getattr(selected, "quote", None), "strike", None),
                 "max_loss_rupees": float(intent.estimated_max_loss_rupees),
+                "greek_risk": dict(getattr(selected, "metadata", {}) or {}).get("greek_risk"),
+                "entry_greeks": greek_metadata_from_quote(getattr(selected, "quote", None)),
+                "current_greeks": greek_metadata_from_quote(getattr(selected, "quote", None)),
             },
         )
         self.open_spreads[spread_id] = spread
@@ -431,13 +451,17 @@ class OiMlCeSellerStrategy(BaseStrategy):
         vix = spread.metadata.get("vix")
         if vix is not None and float(vix) > float(self.max_vix):
             return "VOL_STOP"
+        greek_exit = self._greek_exit_reason(spread)
+        if greek_exit:
+            return greek_exit
         close_debit = self._spread_close_debit(spread)
         if close_debit is None:
             return None
         if close_debit <= spread.entry_credit * (1.0 - self.take_profit_pct_of_credit):
             return "TAKE_PROFIT"
-        if close_debit >= spread.entry_credit * self.stop_loss_mult_credit:
-            return "LOSS_STOP"
+        stop_mult, greek_tightened = self._effective_stop_loss_mult_credit(spread)
+        if close_debit >= spread.entry_credit * stop_mult:
+            return "GREEK_TIGHT_LOSS_STOP" if greek_tightened else "LOSS_STOP"
         return None
 
     def _exit_spread(self, spread_id: str, *, reason: str) -> None:
@@ -488,6 +512,37 @@ class OiMlCeSellerStrategy(BaseStrategy):
         spread = self.open_spreads.get(spread_id)
         if spread is not None:
             spread.metadata["vix"] = float(value)
+
+    def mark_spread_greeks(
+        self,
+        spread_id: str,
+        *,
+        delta: float | None = None,
+        gamma: float | None = None,
+        theta: float | None = None,
+        vega: float | None = None,
+        iv: float | None = None,
+    ) -> None:
+        spread = self.open_spreads.get(spread_id)
+        if spread is None:
+            return
+        current = dict(spread.metadata.get("current_greeks") or {})
+        for key, value in {
+            "delta": delta,
+            "gamma": gamma,
+            "theta": theta,
+            "vega": vega,
+            "iv": iv,
+        }.items():
+            if value is not None:
+                current[key] = float(value)
+        if "delta" in current:
+            current["abs_delta"] = abs_delta_value(current["delta"])
+        if "gamma" in current:
+            current["abs_gamma"] = abs(float(current["gamma"]))
+        if "vega" in current:
+            current["abs_vega"] = abs(float(current["vega"]))
+        spread.metadata["current_greeks"] = current
 
     def _submit_leg(
         self,
@@ -590,6 +645,10 @@ class OiMlCeSellerStrategy(BaseStrategy):
             "oi": row.oi,
             "volume": row.volume,
             "iv": float(row.iv) if row.iv is not None else None,
+            "delta": float(row.delta) if row.delta is not None else None,
+            "gamma": float(row.gamma) if row.gamma is not None else None,
+            "theta": float(row.theta) if row.theta is not None else None,
+            "vega": float(row.vega) if row.vega is not None else None,
             "bid": float(row.bid) if row.bid is not None else None,
             "ask": float(row.ask) if row.ask is not None else None,
             "ltp": float(row.ltp) if row.ltp is not None else None,
@@ -630,6 +689,135 @@ class OiMlCeSellerStrategy(BaseStrategy):
             if value is not None:
                 return float(value)
         return float(leg.price_hint) if leg.price_hint > 0 else None
+
+    def _load_greek_risk_config(self) -> OiMlGreekRiskConfig:
+        return OiMlGreekRiskConfig(
+            enabled=_parse_bool(self.params.get("greek_risk_enabled"), default=True),
+            require_greeks=_parse_bool(self.params.get("require_greeks"), default=True),
+            require_oi_wall=_parse_bool(self.params.get("require_oi_wall"), default=True),
+            target_abs_delta=float(self.params.get("target_abs_delta", 0.20)),
+            min_abs_delta=float(self.params.get("min_abs_delta", 0.05)),
+            max_abs_delta=float(self.params.get("max_abs_delta", 0.35)),
+            max_abs_gamma=float(self.params.get("max_abs_gamma", 0.0030)),
+            max_abs_vega=_optional_float(self.params.get("max_abs_vega")),
+            force_spread_abs_gamma=float(self.params.get("force_spread_abs_gamma", 0.0015)),
+            force_spread_abs_vega=float(self.params.get("force_spread_abs_vega", 8.0)),
+            size_down_abs_delta=float(self.params.get("size_down_abs_delta", 0.25)),
+            size_down_abs_gamma=float(self.params.get("size_down_abs_gamma", 0.0012)),
+            size_down_abs_vega=float(self.params.get("size_down_abs_vega", 7.0)),
+            size_down_lot_multiplier=float(self.params.get("size_down_lot_multiplier", 0.50)),
+            exit_abs_delta=float(self.params.get("exit_abs_delta", 0.45)),
+            exit_abs_gamma=float(self.params.get("exit_abs_gamma", 0.0040)),
+            exit_iv_expansion_pct=float(self.params.get("exit_iv_expansion_pct", 0.25)),
+            tighten_abs_delta=float(self.params.get("tighten_abs_delta", 0.30)),
+            tighten_abs_gamma=float(self.params.get("tighten_abs_gamma", 0.0020)),
+            tighten_iv_expansion_pct=float(self.params.get("tighten_iv_expansion_pct", 0.15)),
+            tightened_stop_loss_mult_credit=float(
+                self.params.get("tightened_stop_loss_mult_credit", 1.25)
+            ),
+        )
+
+    def _refresh_open_spread_greeks(self, now: datetime) -> None:
+        if not self.open_spreads or self.decision_engine is None:
+            return
+        repository = getattr(self.decision_engine, "repository", None)
+        fetch = getattr(repository, "fetch_latest_snapshot", None)
+        if not callable(fetch):
+            return
+        decision_ts = _as_ist(now).astimezone(timezone.utc)
+        min_snapshot_ts = decision_ts - timedelta(
+            seconds=max(0, int(self.max_quote_age_seconds))
+        )
+        provider = getattr(getattr(self.decision_engine, "config", None), "provider", None)
+        expiries = sorted({spread.intent.expiry for spread in self.open_spreads.values()})
+        for expiry in expiries:
+            try:
+                snapshot = fetch(
+                    underlying=self.underlying,
+                    expiry=expiry,
+                    decision_ts=decision_ts,
+                    min_snapshot_ts=min_snapshot_ts,
+                    provider=provider,
+                )
+            except Exception:
+                logger.debug("[%s] open-spread Greek refresh failed", self._strategy_id, exc_info=True)
+                continue
+            rows = [quote.normalized() for quote in snapshot]
+            for spread_id, spread in self.open_spreads.items():
+                if spread.intent.expiry != expiry:
+                    continue
+                quote = _find_short_quote(rows, spread.short_leg)
+                if quote is not None:
+                    spread.metadata["current_greeks"] = greek_metadata_from_quote(quote)
+
+    def _greek_exit_reason(self, spread: OiMlOpenSpread) -> str | None:
+        cfg = self.greek_risk_config
+        if not cfg.enabled:
+            return None
+        current = dict(spread.metadata.get("current_greeks") or {})
+        abs_delta = _metadata_float(current, "abs_delta")
+        abs_gamma = _metadata_float(current, "abs_gamma")
+        if abs_delta is not None and abs_delta >= float(cfg.exit_abs_delta):
+            return "GREEK_DELTA_STOP"
+        if abs_gamma is not None and abs_gamma >= float(cfg.exit_abs_gamma):
+            return "GREEK_GAMMA_STOP"
+        if self._iv_expansion_pct(spread) >= float(cfg.exit_iv_expansion_pct):
+            return "GREEK_IV_EXPANSION_STOP"
+        return None
+
+    def _effective_stop_loss_mult_credit(self, spread: OiMlOpenSpread) -> tuple[float, bool]:
+        cfg = self.greek_risk_config
+        base = float(self.stop_loss_mult_credit)
+        if not cfg.enabled:
+            return base, False
+        current = dict(spread.metadata.get("current_greeks") or {})
+        tighten = False
+        abs_delta = _metadata_float(current, "abs_delta")
+        abs_gamma = _metadata_float(current, "abs_gamma")
+        if abs_delta is not None and abs_delta >= float(cfg.tighten_abs_delta):
+            tighten = True
+        if abs_gamma is not None and abs_gamma >= float(cfg.tighten_abs_gamma):
+            tighten = True
+        if self._iv_expansion_pct(spread) >= float(cfg.tighten_iv_expansion_pct):
+            tighten = True
+        if not tighten:
+            return base, False
+        return min(base, float(cfg.tightened_stop_loss_mult_credit)), True
+
+    @staticmethod
+    def _iv_expansion_pct(spread: OiMlOpenSpread) -> float:
+        entry = dict(spread.metadata.get("entry_greeks") or {})
+        current = dict(spread.metadata.get("current_greeks") or {})
+        entry_iv = _metadata_float(entry, "iv")
+        current_iv = _metadata_float(current, "iv")
+        if entry_iv is None or entry_iv <= 0 or current_iv is None:
+            return 0.0
+        return max(0.0, (current_iv - entry_iv) / entry_iv)
+
+
+def _metadata_float(values: Dict[str, Any], key: str) -> float | None:
+    value = values.get(key)
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _find_short_quote(rows: list[Any], leg: OiMlOrderIntentLeg) -> Any | None:
+    for row in rows:
+        if (
+            row.strike == int(leg.strike)
+            and row.option_type == str(leg.option_type).strip().upper()
+            and (
+                not leg.symbol_token
+                or not row.symbol_token
+                or str(row.symbol_token) == str(leg.symbol_token)
+            )
+        ):
+            return row
+    return None
 
 
 __all__ = ["OiMlCeSellerStrategy", "OiMlOpenSpread"]

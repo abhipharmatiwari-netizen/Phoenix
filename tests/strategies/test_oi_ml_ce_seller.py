@@ -371,7 +371,11 @@ def test_strategy_exit_retries_only_residual_lots_after_partial_fill(monkeypatch
     intent = _intent()
     long_leg = list(intent.legs)[1]
     short_leg = list(intent.legs)[0]
-    strategy = _routed_strategy(intent)
+    strategy = _strategy(
+        expiry="2026-05-21",
+        order_routing_enabled=True,
+        lot_size=65,
+    )
     strategy.open_spreads["s1"] = OiMlOpenSpread(
         spread_id="s1",
         intent=intent,
@@ -440,7 +444,11 @@ def test_strategy_flattens_any_residual_spread_after_eod_cap(monkeypatch):
 
     monkeypatch.setattr("app.strategies.oi_ml_ce_seller.place_order_via_bridge", fake_bridge)
     intent = _intent()
-    strategy = _routed_strategy(intent)
+    strategy = _strategy(
+        expiry="2026-05-21",
+        order_routing_enabled=True,
+        lot_size=65,
+    )
     strategy.open_spreads["s1"] = OiMlOpenSpread(
         spread_id="s1",
         intent=intent,
@@ -461,4 +469,80 @@ def test_strategy_flattens_any_residual_spread_after_eod_cap(monkeypatch):
 
     assert [call.tag for call in calls] == ["OI_ML_EXIT_EOD", "OI_ML_EXIT_HEDGE_EOD"]
     assert all(call.purpose.name == "EXIT" for call in calls)
+    assert strategy.open_spreads == {}
+
+
+def test_strategy_exits_open_spread_when_delta_rises_above_greek_stop(monkeypatch):
+    calls = []
+
+    def fake_bridge(*, strategy_id, order_req, tenant_id=None, broker_account_id=None):
+        calls.append(order_req)
+        return OrderResponse("OID", "COMPLETE", "ok", filled_quantity=order_req.quantity)
+
+    monkeypatch.setattr("app.strategies.oi_ml_ce_seller.place_order_via_bridge", fake_bridge)
+    intent = _intent()
+    strategy = _strategy(
+        expiry="2026-05-21",
+        order_routing_enabled=True,
+        lot_size=65,
+    )
+    strategy.open_spreads["s1"] = OiMlOpenSpread(
+        spread_id="s1",
+        intent=intent,
+        short_leg=list(intent.legs)[0],
+        long_leg=list(intent.legs)[1],
+        quantity_lots=1,
+        remaining_lots=1,
+        entry_credit=80.0,
+        entry_time=ENTRY_TS,
+    )
+    strategy.mark_spread_greeks("s1", delta=0.48, gamma=0.0010, iv=12.0)
+
+    strategy.on_bar("NIFTY_IDX", 300, SimpleNamespace(start_ts=ENTRY_TS, c=25100.0), {})
+
+    assert [call.tag for call in calls] == [
+        "OI_ML_EXIT_GREEK_DELTA_STOP",
+        "OI_ML_EXIT_HEDGE_GREEK_DELTA_STOP",
+    ]
+    assert strategy.open_spreads == {}
+
+
+def test_strategy_tightens_loss_stop_when_iv_expands(monkeypatch):
+    calls = []
+
+    def fake_bridge(*, strategy_id, order_req, tenant_id=None, broker_account_id=None):
+        calls.append(order_req)
+        return OrderResponse("OID", "COMPLETE", "ok", filled_quantity=order_req.quantity)
+
+    monkeypatch.setattr("app.strategies.oi_ml_ce_seller.place_order_via_bridge", fake_bridge)
+    intent = _intent()
+    strategy = _strategy(
+        expiry="2026-05-21",
+        order_routing_enabled=True,
+        lot_size=65,
+        stop_loss_mult_credit=1.8,
+    )
+    strategy.open_spreads["s1"] = OiMlOpenSpread(
+        spread_id="s1",
+        intent=intent,
+        short_leg=list(intent.legs)[0],
+        long_leg=list(intent.legs)[1],
+        quantity_lots=1,
+        remaining_lots=1,
+        entry_credit=80.0,
+        entry_time=ENTRY_TS,
+        metadata={
+            "entry_greeks": {"iv": 10.0, "abs_delta": 0.20, "abs_gamma": 0.0010},
+            "current_greeks": {"iv": 12.0, "abs_delta": 0.20, "abs_gamma": 0.0010},
+        },
+    )
+    strategy.last_price["NIFTY21MAY2625200CE"] = 120.0
+    strategy.last_price["NIFTY21MAY2625400CE"] = 10.0
+
+    strategy.on_bar("NIFTY_IDX", 300, SimpleNamespace(start_ts=ENTRY_TS, c=25100.0), {})
+
+    assert [call.tag for call in calls] == [
+        "OI_ML_EXIT_GREEK_TIGHT_LOSS_STOP",
+        "OI_ML_EXIT_HEDGE_GREEK_TIGHT_LOSS_STOP",
+    ]
     assert strategy.open_spreads == {}

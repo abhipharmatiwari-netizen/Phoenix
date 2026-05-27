@@ -114,16 +114,19 @@ The current runtime path needs these fields per option quote:
 | `trading_symbol`, `exchange`, `symbol_token` | Angel scrip master | Auditability and eventual order-intent construction |
 | `oi` | Angel FULL quote | OI wall, PCR, max pain, concentration features |
 | `volume` | Angel FULL quote | Quote completeness and future liquidity features |
-| `iv` | Angel FULL quote when supplied; otherwise recent exact-contract `nse_web` validation row at read time | Volatility features and later sigma filters |
+| `iv` | Angel `optionGreek` REST enrichment, falling back to Angel FULL quote when supplied and recent exact-contract `nse_web` validation rows at read time | Volatility features, IV expansion exits, and later sigma filters |
+| `delta`, `gamma`, `theta`, `vega` | Angel `optionGreek` REST enrichment | Greek risk gates, spread preference, risk-scaled sizing, and post-entry exit/tighten controls |
 | `bid`, `ask`, `ltp` | Angel FULL quote | Premium, bid/ask quality, labels, stops |
 | `source_ts` | Angel quote payload when available | Staleness detection |
 | `underlying_ltp` | NSE NIFTY context LTP fallback, or option payload if supplied | OTM filter, distance features, spot stops |
 | `vix` | NSE India VIX context LTP fallback, or option payload if supplied | Option-sell guard and naked/spread gating |
 
 Missing hard fields are persisted in `quality_flags`; live entry gates must reject
-rows with hard quality flags. Missing Angel IV is an optional field. When the
-repository enriches IV from stored NSE validation rows, it does not update the
-Angel row; the returned in-memory quote is tagged with
+rows with hard quality flags. The OI/ML Greek-risk policy separately rejects
+candidates when required Greeks are missing, delta is outside the configured
+range, gamma is above the hard cap, or no OI wall is present. Missing Angel IV is
+an optional quote-quality field. When the repository enriches IV from stored NSE
+validation rows, it does not update the Angel row; the returned in-memory quote is tagged with
 `iv_enrichment_mode=read_time`, `iv_enriched_from_provider=nse_web`, and the
 reference snapshot timestamp.
 

@@ -804,6 +804,26 @@ strategies:
       min_ml_score: 0.64
       min_late_ml_score: 0.75
       max_vix: 20
+      greek_risk_enabled: true
+      require_greeks: true
+      require_oi_wall: true
+      target_abs_delta: 0.20
+      min_abs_delta: 0.05
+      max_abs_delta: 0.35
+      max_abs_gamma: 0.0030
+      force_spread_abs_gamma: 0.0015
+      force_spread_abs_vega: 8.0
+      size_down_abs_delta: 0.25
+      size_down_abs_gamma: 0.0012
+      size_down_abs_vega: 7.0
+      size_down_lot_multiplier: 0.50
+      exit_abs_delta: 0.45
+      exit_abs_gamma: 0.0040
+      exit_iv_expansion_pct: 0.25
+      tighten_abs_delta: 0.30
+      tighten_abs_gamma: 0.0020
+      tighten_iv_expansion_pct: 0.15
+      tightened_stop_loss_mult_credit: 1.25
 
 instruments:
   NIFTY_IDX:

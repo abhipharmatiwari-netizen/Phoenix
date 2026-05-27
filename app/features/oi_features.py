@@ -61,6 +61,8 @@ def build_oi_features(
     lineage = _timestamp_lineage(raw_quotes, decision_ts=decision_ts)
     missing = _missing_fields(candidate)
     spread_quality = _bid_ask_quality(candidate)
+    greek_features = _candidate_greek_features(candidate)
+    side_greek_exposure = _side_greek_exposure(latest_rows, side)
 
     return {
         **lineage,
@@ -100,6 +102,8 @@ def build_oi_features(
         "candidate_bid_ask_crossed": spread_quality["crossed"],
         "candidate_missing_fields": missing,
         "candidate_missing_fields_count": len(missing),
+        **greek_features,
+        **side_greek_exposure,
         "vix": _to_float(candidate.vix) if candidate and candidate.vix is not None else None,
         "vix_regime": _vix_regime(candidate),
         "ce_total_oi": sum(call_oi.values()),
@@ -264,6 +268,10 @@ def _missing_fields(row: OptionQuote | None) -> list[str]:
         "ltp",
         "underlying_ltp",
         "vix",
+        "delta",
+        "gamma",
+        "theta",
+        "vega",
     )
     return [field for field in fields if getattr(row, field) in (None, "")]
 
@@ -281,6 +289,55 @@ def _bid_ask_quality(row: OptionQuote | None) -> dict[str, Any]:
         "spread": spread,
         "spread_pct": _safe_ratio(spread, mid),
         "crossed": ask < bid,
+    }
+
+
+def _candidate_greek_features(row: OptionQuote | None) -> dict[str, Any]:
+    if row is None:
+        return {
+            "candidate_iv": None,
+            "candidate_delta": None,
+            "candidate_abs_delta": None,
+            "candidate_gamma": None,
+            "candidate_abs_gamma": None,
+            "candidate_theta": None,
+            "candidate_vega": None,
+            "candidate_abs_vega": None,
+        }
+    delta = _to_float_or_none(row.delta)
+    gamma = _to_float_or_none(row.gamma)
+    vega = _to_float_or_none(row.vega)
+    return {
+        "candidate_iv": _to_float_or_none(row.iv),
+        "candidate_delta": delta,
+        "candidate_abs_delta": _normalise_abs_delta(delta),
+        "candidate_gamma": gamma,
+        "candidate_abs_gamma": abs(gamma) if gamma is not None else None,
+        "candidate_theta": _to_float_or_none(row.theta),
+        "candidate_vega": vega,
+        "candidate_abs_vega": abs(vega) if vega is not None else None,
+    }
+
+
+def _side_greek_exposure(rows: Sequence[OptionQuote], option_type: str) -> dict[str, Any]:
+    side = str(option_type or "").strip().upper()
+    side_rows = [row for row in rows if row.option_type == side]
+    return {
+        "side_abs_delta_sum": _sum_present(
+            _normalise_abs_delta(_to_float_or_none(row.delta)) for row in side_rows
+        ),
+        "side_abs_gamma_sum": _sum_present(
+            abs(value)
+            for row in side_rows
+            for value in [_to_float_or_none(row.gamma)]
+            if value is not None
+        ),
+        "side_abs_vega_sum": _sum_present(
+            abs(value)
+            for row in side_rows
+            for value in [_to_float_or_none(row.vega)]
+            if value is not None
+        ),
     }
 
 
@@ -412,6 +469,31 @@ def _first_underlying_ltp(rows: Sequence[OptionQuote]) -> float | None:
 
 def _to_float(value: Decimal | float | int | str) -> float:
     return float(value)
+
+
+def _to_float_or_none(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalise_abs_delta(value: float | None) -> float | None:
+    if value is None:
+        return None
+    parsed = abs(float(value))
+    if parsed > 1.0 and parsed <= 100.0:
+        return parsed / 100.0
+    return parsed
+
+
+def _sum_present(values: Iterable[float | None]) -> float | None:
+    present = [float(value) for value in values if value is not None]
+    if not present:
+        return None
+    return sum(present)
 
 
 def _aware_utc(value: datetime) -> datetime:

@@ -32,6 +32,10 @@ def _quote(strike: int, option_type: str, oi: int, **overrides) -> OptionQuote:
         "oi": oi,
         "volume": 100,
         "iv": "12.0",
+        "delta": "0.20",
+        "gamma": "0.0010",
+        "theta": "-3.0",
+        "vega": "6.0",
         "bid": "40.0",
         "ask": "41.0",
         "ltp": "40.5",
@@ -112,6 +116,9 @@ def test_build_oi_features_combines_core_candidate_metrics():
     assert features["decision_ts"] == SNAPSHOT_TS.isoformat()
     assert features["candidate_bid_ask_spread"] == pytest.approx(1.0)
     assert features["candidate_missing_fields_count"] == 2  # source_ts/vix absent in fixture
+    assert features["candidate_abs_delta"] == pytest.approx(0.20)
+    assert features["candidate_abs_gamma"] == pytest.approx(0.0010)
+    assert features["side_abs_vega_sum"] == pytest.approx(18.0)
     assert features["vix_regime"] is None
 
 

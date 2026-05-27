@@ -60,6 +60,11 @@ class OiMlOrderIntentLeg:
     time_in_force: TimeInForce
     purpose: OrderPurpose = OrderPurpose.ENTRY
     source_snapshot_ts: datetime | None = None
+    iv: float | None = None
+    delta: float | None = None
+    gamma: float | None = None
+    theta: float | None = None
+    vega: float | None = None
 
 
 @dataclass(frozen=True)
@@ -107,7 +112,8 @@ def build_order_intent_from_candidate(
     reasons: list[str] = []
     if not plan.guard_result.allowed:
         reasons.append("guard_result_not_allowed")
-    quantity = int(cfg.lots) * int(cfg.lot_size)
+    effective_lots = _effective_lots(plan, cfg)
+    quantity = effective_lots * int(cfg.lot_size)
     if quantity <= 0:
         reasons.append("invalid_quantity")
 
@@ -125,6 +131,7 @@ def build_order_intent_from_candidate(
             plan,
             short_quote=short_quote,
             quantity=quantity,
+            effective_lots=effective_lots,
             created_at=_aware_utc(created_at),
             config=cfg,
         )
@@ -133,6 +140,7 @@ def build_order_intent_from_candidate(
             plan,
             short_quote=short_quote,
             quantity=quantity,
+            effective_lots=effective_lots,
             created_at=_aware_utc(created_at),
             config=cfg,
         )
@@ -147,6 +155,7 @@ def _build_bear_call_spread_intent(
     *,
     short_quote: OptionQuote,
     quantity: int,
+    effective_lots: int,
     created_at: datetime,
     config: OiMlOrderIntentConfig,
 ) -> OiMlOrderIntentBuildResult:
@@ -223,10 +232,14 @@ def _build_bear_call_spread_intent(
             short_quote=short_quote,
             created_at=created_at,
             quantity=quantity,
+            effective_lots=effective_lots,
             legs=legs,
             net_credit=net_credit,
             max_loss=max_loss,
             config=config,
+            metadata={
+                "greek_exposure": _greek_exposure(legs),
+            },
         )
     )
 
@@ -236,6 +249,7 @@ def _build_naked_short_ce_intent(
     *,
     short_quote: OptionQuote,
     quantity: int,
+    effective_lots: int,
     created_at: datetime,
     config: OiMlOrderIntentConfig,
 ) -> OiMlOrderIntentBuildResult:
@@ -261,11 +275,15 @@ def _build_naked_short_ce_intent(
             short_quote=short_quote,
             created_at=created_at,
             quantity=quantity,
+            effective_lots=effective_lots,
             legs=legs,
             net_credit=short_price,
             max_loss=float(plan.max_loss_rupees),
             config=config,
-            metadata={"risk_note": "naked_loss_uses_guard_cap_not_theoretical"},
+            metadata={
+                "risk_note": "naked_loss_uses_guard_cap_not_theoretical",
+                "greek_exposure": _greek_exposure(legs),
+            },
         )
     )
 
@@ -276,6 +294,7 @@ def _intent(
     short_quote: OptionQuote,
     created_at: datetime,
     quantity: int,
+    effective_lots: int,
     legs: tuple[OiMlOrderIntentLeg, ...],
     net_credit: float,
     max_loss: float,
@@ -301,7 +320,13 @@ def _intent(
         estimated_max_loss_rupees=float(max_loss),
         dry_run_only=True,
         guard_reasons=tuple(plan.guard_result.reasons),
-        metadata=dict(metadata or {}),
+        metadata={
+            "base_lots": int(config.lots),
+            "effective_lots": int(effective_lots),
+            "lot_size": int(config.lot_size),
+            **_plan_metadata(plan),
+            **dict(metadata or {}),
+        },
     )
 
 
@@ -329,6 +354,11 @@ def _leg(
         product_type=config.product_type,
         time_in_force=config.time_in_force,
         source_snapshot_ts=quote.snapshot_ts,
+        iv=_float(quote.iv),
+        delta=_float(quote.delta),
+        gamma=_float(quote.gamma),
+        theta=_float(quote.theta),
+        vega=_float(quote.vega),
     )
 
 
@@ -355,6 +385,76 @@ def _find_quote(
         ):
             return row
     return None
+
+
+def _effective_lots(plan: OiMlCandidatePlan, config: OiMlOrderIntentConfig) -> int:
+    base_lots = max(0, int(config.lots))
+    if base_lots <= 0:
+        return 0
+    greek = dict(plan.metadata.get("greek_risk") or {})
+    multiplier = _float(greek.get("lot_multiplier"))
+    if multiplier is None or multiplier >= 1.0:
+        return base_lots
+    scaled = int(base_lots * max(0.0, multiplier))
+    return max(1, min(base_lots, scaled))
+
+
+def _plan_metadata(plan: OiMlCandidatePlan) -> dict[str, Any]:
+    metadata = dict(plan.metadata or {})
+    greek = metadata.get("greek_risk")
+    if isinstance(greek, Mapping):
+        metadata["greek_risk"] = dict(greek)
+    return metadata
+
+
+def _greek_exposure(legs: Sequence[OiMlOrderIntentLeg]) -> dict[str, float | None]:
+    net_delta = _signed_sum(legs, "delta")
+    net_gamma = _signed_sum(legs, "gamma")
+    net_vega = _signed_sum(legs, "vega")
+    return {
+        "net_delta": net_delta,
+        "gross_abs_delta": _gross_sum(legs, "delta"),
+        "net_gamma": net_gamma,
+        "gross_abs_gamma": _gross_sum(legs, "gamma"),
+        "net_vega": net_vega,
+        "gross_abs_vega": _gross_sum(legs, "vega"),
+    }
+
+
+def _signed_sum(legs: Sequence[OiMlOrderIntentLeg], field_name: str) -> float | None:
+    total = 0.0
+    seen = False
+    for leg in legs:
+        value = _leg_greek_value(leg, field_name)
+        if value is None:
+            continue
+        sign = -1.0 if leg.side is OrderSide.SELL else 1.0
+        total += sign * value * int(leg.quantity)
+        seen = True
+    return total if seen else None
+
+
+def _gross_sum(legs: Sequence[OiMlOrderIntentLeg], field_name: str) -> float | None:
+    total = 0.0
+    seen = False
+    for leg in legs:
+        value = _leg_greek_value(leg, field_name)
+        if value is None:
+            continue
+        total += abs(value) * int(leg.quantity)
+        seen = True
+    return total if seen else None
+
+
+def _leg_greek_value(leg: OiMlOrderIntentLeg, field_name: str) -> float | None:
+    value = _float(getattr(leg, field_name))
+    if value is None:
+        return None
+    if field_name == "delta":
+        magnitude = abs(value)
+        if magnitude > 1.0 and magnitude <= 100.0:
+            value = value / 100.0
+    return value
 
 
 def _sell_price(quote: OptionQuote) -> float | None:

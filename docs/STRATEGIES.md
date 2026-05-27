@@ -696,6 +696,29 @@ Per-leg (`sl_pct`, `tp_pct`, `trail_buffer_pct`) — all soft, monitored per leg
 
 ---
 
+## 11. `oi_ml_ce_seller` - OI/ML guarded short CE
+
+### Identity
+- **Class:** `OiMlCeSellerStrategy` in [app/strategies/oi_ml_ce_seller.py](../app/strategies/oi_ml_ce_seller.py)
+- **Direction:** SELL CE, currently as protected-first bear-call-spread intent.
+- **Production status:** _Shadow only / disabled for live trading by default._
+
+### Greek Risk Controls
+- Candidate CE strikes must pass OI wall and delta-range checks before they can stage an entry.
+- Excessive delta or gamma rejects the candidate before order-intent construction.
+- High gamma or vega forces a bear-call spread even when naked entries are otherwise enabled.
+- High aggregate Greek risk applies a lot multiplier before the intent is built; one-lot configs remain one lot but carry the risk metadata.
+- Open spreads store entry/current Greeks. Delta/gamma stops and IV-expansion stops can force exits; moderate Greek deterioration tightens the loss-stop multiple.
+
+### Data Source
+- IV and Greeks come from Angel `optionGreek` REST enrichment persisted on `option_chain_1m`.
+- Missing required Greeks fail closed under the default `require_greeks: true` policy.
+
+### Tests
+`tests/strategies/oi_ml/test_decision.py`, `tests/strategies/oi_ml/test_order_intents.py`, `tests/strategies/test_oi_ml_ce_seller.py`.
+
+---
+
 ## File map (where the work happens)
 
 | Concern | File |

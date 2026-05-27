@@ -19,6 +19,11 @@ from app.risk.option_sell_guard import (
 )
 from app.strategies.identifiers import OI_ML_CE_SELLER_ID
 from app.strategies.oi_ml.dataset import OiMlDatasetConfig, select_candidate_quotes
+from app.strategies.oi_ml.greek_risk import (
+    OiMlGreekRiskAssessment,
+    OiMlGreekRiskConfig,
+    assess_candidate_greek_risk,
+)
 from app.strategies.oi_ml.scoring import MissingOiMlScorer, OiMlScore, OiMlScorer
 
 
@@ -47,6 +52,7 @@ class OiMlDecisionConfig:
     spread_width_points: float = 200.0
     allow_naked: bool = False
     guard_config: OptionSellGuardConfig = field(default_factory=OptionSellGuardConfig)
+    greek_risk_config: OiMlGreekRiskConfig = field(default_factory=OiMlGreekRiskConfig)
 
 
 @dataclass(frozen=True)
@@ -61,6 +67,7 @@ class OiMlCandidatePlan:
     max_loss_rupees: float
     guard_result: OptionSellGuardResult
     snapshot: tuple[OptionQuote, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -152,14 +159,7 @@ class OiMlCeDecisionEngine:
                 evaluated=tuple(evaluated),
             )
 
-        selected = max(
-            allowed,
-            key=lambda plan: (
-                plan.score.probability,
-                -plan.max_loss_rupees,
-                int(plan.quote.oi or 0),
-            ),
-        )
+        selected = max(allowed, key=_selection_key)
         return OiMlEntryDecision(
             action=OiMlEntryAction.STAGE_ENTRY,
             reason="candidate_passed_guard",
@@ -204,8 +204,17 @@ class OiMlCeDecisionEngine:
             underlying_ltp=_spot_from_snapshot(snapshot),
             wall_multiple=self.config.wall_multiple,
         )
+        greek_risk = assess_candidate_greek_risk(
+            candidate,
+            features=features,
+            config=self.config.greek_risk_config,
+        )
         score = self.scorer.score(features)
-        structure = self._preferred_structure(score=score, quote=candidate)
+        structure = self._preferred_structure(
+            score=score,
+            quote=candidate,
+            greek_risk=greek_risk,
+        )
         premium = _premium_received(candidate)
         max_loss = self._max_loss_rupees(
             structure=structure,
@@ -234,6 +243,7 @@ class OiMlCeDecisionEngine:
             ),
             guard_cfg,
         )
+        guard_result = _apply_greek_risk_guard(guard_result, greek_risk)
         return OiMlCandidatePlan(
             quote=candidate.normalized(),
             features=features,
@@ -243,6 +253,7 @@ class OiMlCeDecisionEngine:
             max_loss_rupees=max_loss,
             guard_result=guard_result,
             snapshot=tuple(quote.normalized() for quote in snapshot),
+            metadata={"greek_risk": dict(greek_risk.metadata)},
         )
 
     def _dataset_config(self) -> OiMlDatasetConfig:
@@ -262,7 +273,10 @@ class OiMlCeDecisionEngine:
         *,
         score: OiMlScore,
         quote: OptionQuote,
+        greek_risk: OiMlGreekRiskAssessment,
     ) -> OptionSellStructure:
+        if greek_risk.force_spread:
+            return OptionSellStructure.BEAR_CALL_SPREAD
         vix = _float(quote.vix)
         guard = self.config.guard_config
         if (
@@ -298,6 +312,43 @@ def _premium_received(quote: OptionQuote) -> float:
     if ltp is not None and ltp > 0:
         return ltp
     return 0.0
+
+
+def _apply_greek_risk_guard(
+    guard_result: OptionSellGuardResult,
+    greek_risk: OiMlGreekRiskAssessment,
+) -> OptionSellGuardResult:
+    metadata = {
+        **dict(guard_result.metadata or {}),
+        "greek_risk": dict(greek_risk.metadata),
+    }
+    if greek_risk.allowed:
+        return OptionSellGuardResult(
+            allowed=guard_result.allowed,
+            decision=guard_result.decision,
+            reasons=guard_result.reasons,
+            required_structure=guard_result.required_structure,
+            metadata=metadata,
+        )
+    return OptionSellGuardResult.reject(
+        list(guard_result.reasons) + list(greek_risk.reasons),
+        metadata=metadata,
+    )
+
+
+def _selection_key(plan: OiMlCandidatePlan) -> tuple[float, float, float, float, float, int]:
+    greek = dict(plan.metadata.get("greek_risk") or {})
+    delta_distance = _float(greek.get("delta_distance_from_target"))
+    wall_multiple = _float(plan.features.get("oi_wall_multiple"))
+    stress = _float(greek.get("stress_score"))
+    return (
+        float(plan.score.probability),
+        -(delta_distance if delta_distance is not None else 1.0),
+        wall_multiple if wall_multiple is not None else 0.0,
+        -(stress if stress is not None else 0.0),
+        -plan.max_loss_rupees,
+        int(plan.quote.oi or 0),
+    )
 
 
 def _mid(quote: OptionQuote) -> float | None:

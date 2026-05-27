@@ -106,11 +106,17 @@ def test_load_shadow_runner_config_reads_dry_run_spread_risk_overrides():
             "OI_ML_SHADOW_ENABLED": "true",
             "OI_ML_SHADOW_SPREAD_WIDTH_POINTS": "180",
             "OI_ML_SHADOW_MAX_SPREAD_LOSS_RUPEES": "5500",
+            "OI_ML_SHADOW_TARGET_ABS_DELTA": "0.18",
+            "OI_ML_SHADOW_MAX_ABS_GAMMA": "0.0025",
+            "OI_ML_SHADOW_SIZE_DOWN_LOT_MULTIPLIER": "0.4",
         }
     )
 
     assert cfg.spread_width_points == 180
     assert cfg.max_spread_loss_rupees == 5500.0
+    assert cfg.greek_risk_config.target_abs_delta == 0.18
+    assert cfg.greek_risk_config.max_abs_gamma == 0.0025
+    assert cfg.greek_risk_config.size_down_lot_multiplier == 0.4
 
 
 def test_resolve_listed_expiry_uses_provider_calendar(monkeypatch):
