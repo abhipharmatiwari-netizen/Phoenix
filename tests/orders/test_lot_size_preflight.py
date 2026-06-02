@@ -55,3 +55,28 @@ def test_preflight_rejects_missing_lot_size():
         assert underlying is None
     finally:
         dashboard_bus.set_instrument_meta(original)
+
+
+def test_preflight_overrides_stale_option_metadata_lot_size():
+    original = dict(getattr(dashboard_bus, "_instrument_meta", {}))
+    try:
+        dashboard_bus.set_instrument_meta(
+            {
+                "BANKNIFTY_STALE_META": {
+                    "symbol": "BANKNIFTY30JUN2653200PE",
+                    "token": "75559",
+                    "lot_size": 1,
+                    "underlying": "BANKNIFTY",
+                }
+            }
+        )
+        order_req = _base_order("BANKNIFTY30JUN2653200PE", 1)
+        ok, reason, lots, lot_size, broker_qty, underlying = _preflight_order_quantity(order_req)
+        assert ok is True
+        assert reason == "ok"
+        assert lots == 1
+        assert lot_size == 30
+        assert broker_qty == 30
+        assert underlying == "BANKNIFTY"
+    finally:
+        dashboard_bus.set_instrument_meta(original)

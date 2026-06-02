@@ -61,8 +61,9 @@ class _CrashAfterAcceptRunner:
         self._quantity = quantity
         self.calls = 0
 
-    async def place_order(self, _order_req):
+    async def place_order(self, order_req):
         self.calls += 1
+        quantity = int(getattr(order_req, "quantity", self._quantity) or self._quantity)
         completed = OrderStatus(
             order_id="OID-RECOVER-1",
             symbol=self._request_symbol,
@@ -70,8 +71,8 @@ class _CrashAfterAcceptRunner:
             status="COMPLETE",
             order_type="MARKET",
             product_type="INTRADAY",
-            quantity=self._quantity,
-            filled_quantity=self._quantity,
+            quantity=quantity,
+            filled_quantity=quantity,
             average_price=101.5,
             price=None,
             exchange="NFO",

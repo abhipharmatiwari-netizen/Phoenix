@@ -6,9 +6,11 @@ record.
 
 Ownership cleanup is automatic after corroborated broker-flat evidence. As of
 the 2026-05-25 deployment, broker-flat auto-recovery also runs after every
-successful order-sync cycle, after external-fill reconciliation. It can clear a
-stale zero-quantity `RECONCILING`, `DEGRADED`, or `RECOVERY_PENDING` lifecycle
-record only when all of these are true:
+successful order-sync cycle, after external-fill reconciliation. As of the
+2026-06-02 live hardening, it can also clear zero-quantity
+`FLAT_PENDING_CONFIRMATION` records after broker-flat confirmation. It can clear
+a stale zero-quantity `FLAT_PENDING_CONFIRMATION`, `RECONCILING`, `DEGRADED`, or
+`RECOVERY_PENDING` lifecycle record only when all of these are true:
 
 - broker positions snapshot is fresh and successful
 - broker orders snapshot is fresh and not older than the positions snapshot
@@ -32,7 +34,10 @@ Manual recovery below is the fallback when auto-recovery does not converge.
    ```
 
    Confirm `readiness.reason` is `position_authority_degraded` and note the
-   `readiness.position_state_counts` / `readiness.degraded_scope_count` values.
+   `readiness.position_state_counts`, `readiness.degraded_scope_count`, and
+   `readiness.degraded_scope_samples` values. The sample list includes the
+   blocking scope key and recovery attempt count for the first few active
+   degraded scopes.
 
 2. Fetch recovery evidence:
 

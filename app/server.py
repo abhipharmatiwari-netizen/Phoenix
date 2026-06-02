@@ -246,9 +246,21 @@ def _runner_allowed_for_context(
 def _position_authority_readiness_snapshot() -> dict[str, Any]:
     degraded_scope_count = 0
     degraded_scope_error: str | None = None
+    degraded_scope_samples: list[dict[str, object]] = []
     try:
         from app.core.degraded_scope_manager import degraded_scope_manager
-        degraded_scope_count = len(degraded_scope_manager.active_scopes())
+        active_scopes = list(degraded_scope_manager.active_scopes())
+        degraded_scope_count = len(active_scopes)
+        for scope in active_scopes[:5]:
+            reason = getattr(scope, "reason", "")
+            degraded_scope_samples.append(
+                {
+                    "scope_key": str(getattr(scope, "scope_key", "") or ""),
+                    "reason": str(getattr(reason, "value", reason) or ""),
+                    "exit_restricted": bool(getattr(scope, "exit_restricted", False)),
+                    "recovery_attempts": int(getattr(scope, "recovery_attempts", 0) or 0),
+                }
+            )
     except Exception as exc:
         degraded_scope_error = str(exc)
 
@@ -277,6 +289,7 @@ def _position_authority_readiness_snapshot() -> dict[str, Any]:
     return {
         "degraded_scope_count": int(degraded_scope_count or 0),
         "degraded_scope_error": degraded_scope_error,
+        "degraded_scope_samples": degraded_scope_samples,
         "position_state_counts": position_state_counts,
         "degraded_positions": degraded_positions,
         "reconciling_positions": reconciling_positions,

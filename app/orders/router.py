@@ -22,6 +22,7 @@ from uuid import uuid4
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional, Tuple, TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -41,6 +42,7 @@ from app.core.identifiers import (
 )
 from app.core.lot_size import lot_size_for_symbol_optional
 from app.core.logging_utils import log_event
+from app.core.strategy_config_loader import load_strategy_env_from_yaml
 from app.data.bq_persister import insert_order_record, insert_trade_record
 from app.data.trade_records import (
     build_trade_record_from_fill,
@@ -305,6 +307,165 @@ def _coerce_lots(value: object) -> Optional[int]:
     return ival
 
 
+def _positive_int(value: object) -> Optional[int]:
+    try:
+        parsed = int(float(value)) if value is not None else 0
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+_UNDERLYING_SYMBOL_PREFIXES = (
+    "BANKNIFTY",
+    "FINNIFTY",
+    "MIDCPNIFTY",
+    "SENSEX",
+    "NIFTY",
+    "NATURALGAS",
+    "NG",
+)
+
+
+def _normalize_underlying_name(value: object) -> Optional[str]:
+    text = str(value or "").strip().upper()
+    if not text:
+        return None
+    if text in {"NIFTYBANK", "NIFTY BANK"}:
+        return "BANKNIFTY"
+    if text.startswith("NIFTY "):
+        return "NIFTY"
+    if text == "NATURALGAS":
+        return "NG"
+    return text
+
+
+def _infer_underlying_from_symbol(symbol: object) -> Optional[str]:
+    text = str(symbol or "").strip().upper()
+    if not text:
+        return None
+    for prefix in _UNDERLYING_SYMBOL_PREFIXES:
+        if text.startswith(prefix):
+            return "NG" if prefix == "NATURALGAS" else prefix
+    return None
+
+
+def _position_symbol(position: object) -> str:
+    if isinstance(position, dict):
+        return str(position.get("symbol") or position.get("tradingsymbol") or "").strip()
+    return str(
+        getattr(position, "symbol", None)
+        or getattr(position, "tradingsymbol", None)
+        or ""
+    ).strip()
+
+
+def _position_quantity(position: object) -> int:
+    value: object
+    if isinstance(position, dict):
+        value = (
+            position.get("quantity")
+            if position.get("quantity") is not None
+            else position.get("net_qty")
+        )
+        if value is None:
+            value = position.get("netqty")
+    else:
+        value = getattr(position, "quantity", None)
+        if value is None:
+            value = getattr(position, "net_qty", None)
+        if value is None:
+            value = getattr(position, "netqty", None)
+    try:
+        return int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _matches_order_symbol(position: object, order_req: OrderRequest) -> bool:
+    pos_symbol = _position_symbol(position).upper()
+    order_symbol = str(order_req.symbol or "").strip().upper()
+    if not pos_symbol or not order_symbol:
+        return False
+    return pos_symbol == order_symbol
+
+
+def _reducible_position_quantity(
+    positions: list[object],
+    order_req: OrderRequest,
+) -> tuple[Optional[int], bool]:
+    matched = False
+    reducible = 0
+    side = str(getattr(order_req.side, "value", order_req.side) or "").strip().upper()
+    for position in positions or []:
+        if not _matches_order_symbol(position, order_req):
+            continue
+        matched = True
+        qty = _position_quantity(position)
+        if side == "SELL" and qty > 0:
+            reducible += qty
+        elif side == "BUY" and qty < 0:
+            reducible += abs(qty)
+    return (reducible if matched else None), matched
+
+
+@lru_cache(maxsize=1)
+def _strategy_risk_limits() -> dict[str, Any]:
+    try:
+        cfg = load_strategy_env_from_yaml()
+    except Exception:
+        logger.exception("OrderRouter: failed to load strategy risk limits")
+        return {}
+    risk = cfg.get("risk", {}) if isinstance(cfg, dict) else {}
+    limits = risk.get("risk_limits", {}) if isinstance(risk, dict) else {}
+    return limits if isinstance(limits, dict) else {}
+
+
+def _limits_for_underlying(underlying: Optional[str]) -> dict[str, Optional[float]]:
+    limits: dict[str, Optional[float]] = {
+        "max_lots_per_trade": None,
+        "max_open_lots": None,
+    }
+    if not underlying:
+        return limits
+    cfg = _strategy_risk_limits()
+    default_cfg = cfg.get("default", {}) if isinstance(cfg, dict) else {}
+    per_cfg = cfg.get("per_underlying", {}) if isinstance(cfg, dict) else {}
+    if isinstance(default_cfg, dict):
+        for key in limits:
+            if default_cfg.get(key) is not None:
+                try:
+                    limits[key] = float(default_cfg[key])
+                except (TypeError, ValueError):
+                    pass
+    underlying_key = str(underlying or "").upper()
+    specific = per_cfg.get(underlying_key) if isinstance(per_cfg, dict) else None
+    if isinstance(specific, dict):
+        for key in limits:
+            if specific.get(key) is not None:
+                try:
+                    limits[key] = float(specific[key])
+                except (TypeError, ValueError):
+                    pass
+    return limits
+
+
+def _open_lots_for_underlying(positions: list[object], underlying: Optional[str]) -> float:
+    if not underlying:
+        return 0.0
+    total = 0.0
+    for position in positions or []:
+        qty = abs(_position_quantity(position))
+        if qty <= 0:
+            continue
+        symbol = _position_symbol(position)
+        pos_underlying = _infer_underlying_from_symbol(symbol)
+        if pos_underlying != underlying:
+            continue
+        lot_size = lot_size_for_symbol_optional(symbol) or 1
+        total += float(qty) / float(lot_size or 1)
+    return total
+
+
 # Resolve lot size from instrument metadata (token/symbol) or universe patterns.
 def _resolve_lot_size(order_req: OrderRequest) -> tuple[Optional[int], Optional[str]]:
     meta = dashboard_bus.resolve_instrument_meta(
@@ -320,12 +481,28 @@ def _resolve_lot_size(order_req: OrderRequest) -> tuple[Optional[int], Optional[
             or meta.get("name")
         )
         lot_size = meta.get("lot_size")
-    if lot_size is None:
-        lot_size = lot_size_for_symbol_optional(order_req.symbol)
+    underlying = _normalize_underlying_name(underlying) or _infer_underlying_from_symbol(
+        order_req.symbol
+    )
+    fallback_lot_size = lot_size_for_symbol_optional(order_req.symbol)
+    lot_size_int = _positive_int(lot_size)
+    fallback_int = _positive_int(fallback_lot_size)
+    if fallback_int is not None and (
+        lot_size_int is None or (lot_size_int == 1 and fallback_int > 1)
+    ):
+        if lot_size_int is not None and lot_size_int != fallback_int:
+            logger.warning(
+                "OrderRouter: overriding stale lot_size metadata symbol=%s token=%s "
+                "metadata_lot_size=%s canonical_lot_size=%s",
+                order_req.symbol,
+                order_req.symbol_token,
+                lot_size_int,
+                fallback_int,
+            )
+        lot_size_int = fallback_int
     try:
-        if lot_size is None:
+        if lot_size_int is None:
             return None, underlying
-        lot_size_int = int(lot_size)
         if lot_size_int <= 0:
             return None, underlying
         return lot_size_int, underlying
@@ -1173,16 +1350,183 @@ class OrderRouter:
             )
             return _finalize_response(response)
 
-        order_req_exec = replace(order_req, quantity=int(broker_qty))
-
-        balance = self._state_store.get_balance(broker_account_id)
-        positions = self._state_store.get_positions(broker_account_id)
-
         is_exit_order = False
         try:
             is_exit_order = bool(getattr(order_req, "is_exit_order", False))
         except Exception:
             is_exit_order = False
+
+        balance = self._state_store.get_balance(broker_account_id)
+        positions = self._state_store.get_positions(broker_account_id)
+
+        order_req_for_exec = order_req
+        if self._is_live_mode and not is_exit_order:
+            effective_lots = int(lots or 0)
+            limits = _limits_for_underlying(underlying)
+            max_lots_per_trade = limits.get("max_lots_per_trade")
+            max_open_lots = limits.get("max_open_lots")
+            cap_reason: Optional[str] = None
+            original_lots = effective_lots
+            if max_lots_per_trade is not None and effective_lots > int(max_lots_per_trade):
+                cap_to = int(max_lots_per_trade)
+                if cap_to <= 0:
+                    response = OrderResponse(
+                        broker_order_id="",
+                        status="REJECTED",
+                        message="max_lots_per_trade_exceeded",
+                        filled_quantity=0,
+                        average_price=None,
+                    )
+                    return _finalize_response(response)
+                effective_lots = cap_to
+                cap_reason = "max_lots_per_trade"
+            if max_open_lots is not None:
+                open_lots_before = _open_lots_for_underlying(positions, underlying)
+                available_lots = float(max_open_lots) - open_lots_before
+                if available_lots < 1.0:
+                    log_event(
+                        logger,
+                        event_type="ORDER_REJECTED_LOT_CAP",
+                        message="max_open_lots_exceeded",
+                        level=logging.WARNING,
+                        tenant_id=tenant_id,
+                        broker_account_id=broker_account_id,
+                        strategy_id=strategy_id,
+                        correlation_id=correlation_id,
+                        request_id=request_id,
+                        instrument=order_req.symbol,
+                        underlying=underlying,
+                        requested_lots=original_lots,
+                        open_lots_before=open_lots_before,
+                        max_open_lots=max_open_lots,
+                    )
+                    response = OrderResponse(
+                        broker_order_id="",
+                        status="REJECTED",
+                        message="max_open_lots_exceeded",
+                        filled_quantity=0,
+                        average_price=None,
+                    )
+                    return _finalize_response(response)
+                open_cap = int(available_lots)
+                if effective_lots > open_cap:
+                    effective_lots = open_cap
+                    cap_reason = "max_open_lots"
+            if effective_lots != original_lots:
+                broker_qty = effective_lots * int(lot_size or 1)
+                lots = effective_lots
+                strategy_context = getattr(order_req, "strategy_context", None)
+                if isinstance(strategy_context, dict):
+                    capped_context = dict(strategy_context)
+                    capped_context.setdefault("requested_position_qty", original_lots)
+                    capped_context["position_qty"] = int(effective_lots)
+                    capped_context["lot_cap_reason"] = str(cap_reason or "lot_cap")
+                    order_req_for_exec = replace(
+                        order_req,
+                        strategy_context=capped_context,
+                    )
+                log_event(
+                    logger,
+                    event_type="ORDER_QTY_ADJUSTED_FOR_LOT_CAP",
+                    message=str(cap_reason or "lot_cap"),
+                    level=logging.WARNING,
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    strategy_id=strategy_id,
+                    correlation_id=correlation_id,
+                    request_id=request_id,
+                    instrument=order_req.symbol,
+                    underlying=underlying,
+                    requested_lots=original_lots,
+                    effective_lots=effective_lots,
+                    lot_size=lot_size,
+                    broker_qty=broker_qty,
+                    max_lots_per_trade=max_lots_per_trade,
+                    max_open_lots=max_open_lots,
+                )
+
+        order_req_exec = replace(order_req_for_exec, quantity=int(broker_qty))
+
+        if is_exit_order:
+            reducible_qty, matched_position = _reducible_position_quantity(
+                positions,
+                order_req_exec,
+            )
+            if matched_position:
+                if reducible_qty is None or reducible_qty <= 0:
+                    log_event(
+                        logger,
+                        event_type="ORDER_EXIT_REJECTED_NOT_REDUCING",
+                        message="exit_order_not_reducing_current_position",
+                        level=logging.WARNING,
+                        tenant_id=tenant_id,
+                        broker_account_id=broker_account_id,
+                        strategy_id=strategy_id,
+                        correlation_id=correlation_id,
+                        request_id=request_id,
+                        instrument=order_req.symbol,
+                        requested_broker_qty=broker_qty,
+                        reducible_broker_qty=reducible_qty,
+                    )
+                    response = OrderResponse(
+                        broker_order_id="",
+                        status="REJECTED",
+                        message="exit_order_not_reducing_current_position",
+                        filled_quantity=0,
+                        average_price=None,
+                    )
+                    return _finalize_response(response)
+                if int(broker_qty) > int(reducible_qty):
+                    if lot_size and int(reducible_qty) % int(lot_size) != 0:
+                        response = OrderResponse(
+                            broker_order_id="",
+                            status="REJECTED",
+                            message="reducible_quantity_not_multiple_of_lot_size",
+                            filled_quantity=0,
+                            average_price=None,
+                        )
+                        return _finalize_response(response)
+                    log_event(
+                        logger,
+                        event_type="ORDER_EXIT_QTY_CLAMPED_TO_POSITION",
+                        message="exit quantity clamped to current reducible broker position",
+                        level=logging.WARNING,
+                        tenant_id=tenant_id,
+                        broker_account_id=broker_account_id,
+                        strategy_id=strategy_id,
+                        correlation_id=correlation_id,
+                        request_id=request_id,
+                        instrument=order_req.symbol,
+                        requested_broker_qty=broker_qty,
+                        reducible_broker_qty=reducible_qty,
+                        lot_size=lot_size,
+                        tag=getattr(order_req, "tag", None),
+                    )
+                    broker_qty = int(reducible_qty)
+                    order_req_exec = replace(order_req_exec, quantity=int(reducible_qty))
+            elif self._is_live_mode:
+                log_event(
+                    logger,
+                    event_type="ORDER_EXIT_REJECTED_NO_POSITION_EVIDENCE",
+                    message="exit order rejected because no matching broker position evidence exists",
+                    level=logging.WARNING,
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    strategy_id=strategy_id,
+                    correlation_id=correlation_id,
+                    request_id=request_id,
+                    instrument=order_req.symbol,
+                    requested_broker_qty=broker_qty,
+                    tag=getattr(order_req, "tag", None),
+                )
+                response = OrderResponse(
+                    broker_order_id="",
+                    status="REJECTED",
+                    message="exit_order_missing_position_evidence",
+                    filled_quantity=0,
+                    average_price=None,
+                )
+                return _finalize_response(response)
 
         reference_price = _resolve_reference_price(order_req_exec)
         instrument_meta = dashboard_bus.resolve_instrument_meta(

@@ -364,6 +364,15 @@ Policy ID `exclusive_nifty_ce_v1` (yaml:624). Regime is classified by `AdaptiveP
 **Time gates:** Per-instrument entry windows in `strategies[].instruments.<UNDERLYING>` (e.g. NIFTY 09:20–14:45).
 **Sizing:** `lots_per_trade = 1`; regime-scaled.
 
+**LIVE quantity authority (2026-06-02 hardening):** put-momentum entry and exit
+intents are lot-based at the strategy boundary. The OrderRouter is responsible
+for converting lots to broker units, overriding stale lot-size metadata from the
+canonical universe, capping LIVE entries by configured per-underlying lot
+limits, and clamping reducing exits to the current broker/state-store position.
+This prevents a stale `lot_size=1` BANKNIFTY option token or a strategy-side
+quantity retry from producing a one-unit invalid exit or an oversized kill-switch
+exit.
+
 ### Stop-loss
 - **Type:** Fixed % below entry premium.
 - **Default:** `option_sl_pct = 0.25` (25%).

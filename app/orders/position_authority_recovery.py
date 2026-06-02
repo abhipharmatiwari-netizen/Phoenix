@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 _QTY_EPSILON = 0.0001
 _AUTO_RECOVERY_STATES = {
     "DEGRADED",
+    "FLAT_PENDING_CONFIRMATION",
     "RECONCILING",
     "RECOVERY_PENDING",
 }

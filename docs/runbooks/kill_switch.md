@@ -29,6 +29,17 @@ The SOFT/HARD distinction was introduced in PR #233 (Issue #220). The intercepto
 
 Scopes: `GLOBAL`, `TENANT`, `ACCOUNT`, `STRATEGY`.
 
+### LIVE quantity safety added after the 2026-06-02 put-momentum incident
+
+The router now adds a final quantity guard before any LIVE broker submission:
+
+- Instrument metadata with a stale `lot_size=1` is overridden by the canonical universe lot size when the trading symbol identifies a known underlying. The observed `BANKNIFTY30JUN2653200PE` token now resolves to lot size `30`, not `1`.
+- LIVE entries are capped before broker submission by `risk.risk_limits.default` and `risk.risk_limits.per_underlying` in `strategy_env.yaml`. `max_lots_per_trade` and `max_open_lots` adjust the effective lot count and audit the original requested lots in `strategy_context.requested_position_qty`.
+- Exit orders, including SOFT kill-switch exits, are checked against the current broker/state-store position for the exact symbol and reducing side. If the calculated broker quantity is larger than the reducible position, it is clamped to that position quantity when the position quantity is a valid lot multiple. If no matching position evidence exists in LIVE, the exit is rejected fail-closed.
+- SOFT trips still allow reducing exits. HARD trips still block exits at the kill-switch interceptor.
+
+This protects against the June 2 failure shape where a 30-unit BANKNIFTY PE position could produce a 900-unit emergency exit after lot-size metadata and strategy quantity semantics diverged.
+
 In the current hub-authoritative runtime:
 
 - The hub-path `GlobalKillSwitchInterceptor` is gated by a single feature flag (`order_router_enforce_global_kill_switch`, env `ORDER_ROUTER_ENFORCE_GLOBAL_KILL_SWITCH`). **The setting defaults to `false`**; when false, `GlobalKillSwitchInterceptor.evaluate()` returns immediately and **neither the `GLOBAL_KILL` env var nor the durable `KillSwitchManager` is consulted** (`app/orders/interceptors.py:292-295`, `app/config/settings.py:279-282`). With the flag set to `true`, the interceptor first checks the `GLOBAL_KILL` env var (HARD-blockable via `GLOBAL_KILL_BLOCK_EXITS`) and then the durable `KillSwitchManager` for any matching scope (`app/orders/interceptors.py:297-374`).

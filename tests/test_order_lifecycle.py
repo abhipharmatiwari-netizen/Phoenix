@@ -219,6 +219,84 @@ def test_order_lifecycle_exit_fill_updates_projected_state_store_position(monkey
     assert state_store.get_positions("ba1") == []
 
 
+def test_order_lifecycle_exit_trade_records_realized_pnl(monkeypatch):
+    state_store = StateStore()
+    lifecycle = OrderLifecycleService(
+        state_store=state_store,
+        pnl_engine=None,
+        processed_store=InMemoryProcessedTradeStore(),
+    )
+
+    bq_rows: list[dict] = []
+    pg_rows: list[dict] = []
+    monkeypatch.setattr(
+        "app.orders.order_lifecycle.insert_trade_record",
+        lambda row, **_kwargs: bq_rows.append(dict(row)),
+    )
+    monkeypatch.setattr(
+        "app.data.trade_store_postgres.insert_trade_postgres",
+        lambda row, **_kwargs: pg_rows.append(dict(row)),
+    )
+
+    lifecycle.register_submission(
+        tenant_id="t1",
+        broker_account_id="ba1",
+        strategy_id="put_momentum_scalper",
+        hub_order_id="t1:ba1:put_momentum_scalper:entry-pnl",
+        order_req=OrderRequest(
+            symbol="BANKNIFTY30JUN2653200PE",
+            quantity=130,
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            product_type=ProductType.INTRADAY,
+            time_in_force=TimeInForce.DAY,
+            purpose=OrderPurpose.ENTRY,
+        ),
+        response=OrderResponse(
+            broker_order_id="OID-PNL-ENTRY",
+            status="COMPLETE",
+            message="filled",
+            filled_quantity=130,
+            average_price=93.15,
+        ),
+    )
+    lifecycle.register_submission(
+        tenant_id="t1",
+        broker_account_id="ba1",
+        strategy_id="put_momentum_scalper",
+        hub_order_id="t1:ba1:put_momentum_scalper:exit-pnl",
+        order_req=OrderRequest(
+            symbol="BANKNIFTY30JUN2653200PE",
+            quantity=130,
+            side=OrderSide.SELL,
+            order_type=OrderType.MARKET,
+            product_type=ProductType.INTRADAY,
+            time_in_force=TimeInForce.DAY,
+            purpose=OrderPurpose.EXIT,
+        ),
+        response=OrderResponse(
+            broker_order_id="OID-PNL-EXIT",
+            status="COMPLETE",
+            message="filled",
+            filled_quantity=130,
+            average_price=79.25,
+        ),
+    )
+
+    records = lifecycle.list_position_records()
+    assert len(records) == 1
+    record = records[0]
+    assert record.net_qty == pytest.approx(0.0)
+    assert record.realized_pnl == pytest.approx(-1807.0)
+    assert record.position_state.value == "FLAT_PENDING_CONFIRMATION"
+    assert len(bq_rows) == 2
+    assert len(pg_rows) == 2
+    assert bq_rows[0]["realized_pnl"] == pytest.approx(0.0)
+    assert pg_rows[0]["realized_pnl"] == pytest.approx(0.0)
+    assert bq_rows[1]["realized_pnl"] == pytest.approx(-1807.0)
+    assert pg_rows[1]["realized_pnl"] == pytest.approx(-1807.0)
+
+
 @pytest.mark.anyio
 async def test_order_lifecycle_delayed_fill_emits_trade_and_pnl_once(monkeypatch):
     state_store = StateStore()

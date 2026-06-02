@@ -5,10 +5,12 @@ from types import SimpleNamespace
 import pytest
 from app.brokers.base import (
     Balance,
+    OrderPurpose,
     OrderRequest,
     OrderResponse,
     OrderSide,
     OrderType,
+    Position,
     ProductType,
     TimeInForce,
 )
@@ -563,3 +565,195 @@ async def test_router_idempotency_suppresses_parallel_duplicate_submit(monkeypat
     statuses = {res[1].status for res in results}
     assert runner.calls == 1
     assert statuses.issubset({"SUCCESS", "DUPLICATE_PENDING"})
+
+
+@pytest.mark.anyio
+async def test_live_exit_quantity_is_clamped_to_reducible_position(monkeypatch):
+    mod = importlib.import_module(MODULE_PATH)
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    monkeypatch.setattr(
+        mod.dashboard_bus,
+        "resolve_instrument_meta",
+        lambda **_k: {
+            "lot_size": 1,
+            "underlying": "BANKNIFTY",
+            "label": "BANKNIFTY_ATM_PE_53200",
+        },
+    )
+    monkeypatch.setattr(mod.dashboard_bus, "get_last_price", lambda _label: 700.0)
+
+    class _Runner:
+        is_running = True
+
+        def __init__(self):
+            self.last_order_req = None
+
+        async def place_order(self, order_req):
+            self.last_order_req = order_req
+            return OrderResponse(
+                broker_order_id="OID-KILL-EXIT",
+                status="SUCCESS",
+                message="ok",
+                filled_quantity=0,
+                average_price=None,
+            )
+
+    class _Hub:
+        def __init__(self, runner):
+            self._runner = runner
+
+        def get_runner(self, _broker_account_id):
+            return self._runner
+
+    class _StateStore:
+        def get_balance(self, _broker_account_id):
+            return Balance(available=1_000_000.0, utilized=0.0, total=1_000_000.0)
+
+        def get_positions(self, _broker_account_id):
+            return [
+                Position(
+                    symbol="BANKNIFTY30JUN2653200PE",
+                    quantity=30,
+                    avg_price=979.0,
+                    product_type=ProductType.INTRADAY,
+                )
+            ]
+
+        def set_last_order_response(self, _broker_account_id, _response):
+            return None
+
+    from app.orders.order_outbox import InMemoryOrderSubmissionOutbox
+
+    runner = _Runner()
+    router = mod.OrderRouter(
+        hub=_Hub(runner),
+        capital_engine=None,
+        risk_engine=None,
+        profit_engine=None,
+        state_store=_StateStore(),
+        interceptors=(),
+        submission_outbox=InMemoryOrderSubmissionOutbox(),
+    )
+    request = OrderRequest(
+        symbol="BANKNIFTY30JUN2653200PE",
+        quantity=30,
+        side=OrderSide.SELL,
+        order_type=OrderType.MARKET,
+        product_type=ProductType.INTRADAY,
+        time_in_force=TimeInForce.DAY,
+        purpose=OrderPurpose.EXIT,
+        tag="KILL_SWITCH_EXIT",
+        symbol_token="75559",
+    )
+
+    _hub_order_id, response = await router.submit_order(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        strategy_id="put_momentum_scalper",
+        order_req=request,
+    )
+
+    assert response.status == "SUCCESS"
+    assert runner.last_order_req is not None
+    assert int(runner.last_order_req.quantity) == 30
+    assert int(response.requested_quantity or 0) == 30
+
+
+@pytest.mark.anyio
+async def test_live_entry_lots_are_capped_before_submission(monkeypatch):
+    mod = importlib.import_module(MODULE_PATH)
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    monkeypatch.setattr(
+        mod,
+        "_strategy_risk_limits",
+        lambda: {
+            "per_underlying": {
+                "NIFTY": {
+                    "max_lots_per_trade": 1,
+                    "max_open_lots": 1,
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        mod.dashboard_bus,
+        "resolve_instrument_meta",
+        lambda **_k: {
+            "lot_size": 65,
+            "underlying": "NIFTY",
+            "label": "NIFTY_ATM_PE_25750",
+        },
+    )
+    monkeypatch.setattr(mod.dashboard_bus, "get_last_price", lambda _label: 100.0)
+
+    class _Runner:
+        is_running = True
+
+        def __init__(self):
+            self.last_order_req = None
+
+        async def place_order(self, order_req):
+            self.last_order_req = order_req
+            return OrderResponse(
+                broker_order_id="OID-CAPPED",
+                status="SUCCESS",
+                message="ok",
+                filled_quantity=0,
+                average_price=None,
+            )
+
+    class _Hub:
+        def __init__(self, runner):
+            self._runner = runner
+
+        def get_runner(self, _broker_account_id):
+            return self._runner
+
+    class _StateStore:
+        def get_balance(self, _broker_account_id):
+            return Balance(available=1_000_000.0, utilized=0.0, total=1_000_000.0)
+
+        def get_positions(self, _broker_account_id):
+            return []
+
+        def set_last_order_response(self, _broker_account_id, _response):
+            return None
+
+    from app.orders.order_outbox import InMemoryOrderSubmissionOutbox
+
+    runner = _Runner()
+    router = mod.OrderRouter(
+        hub=_Hub(runner),
+        capital_engine=None,
+        risk_engine=None,
+        profit_engine=None,
+        state_store=_StateStore(),
+        interceptors=(),
+        submission_outbox=InMemoryOrderSubmissionOutbox(),
+    )
+    request = OrderRequest(
+        symbol="NIFTY17FEB2625750PE",
+        quantity=2,
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        product_type=ProductType.INTRADAY,
+        time_in_force=TimeInForce.DAY,
+        purpose=OrderPurpose.ENTRY,
+        symbol_token="12345",
+        strategy_context={"position_qty": 2},
+    )
+
+    _hub_order_id, response = await router.submit_order(
+        tenant_id="tenant-1",
+        broker_account_id="A1",
+        strategy_id="put_momentum_scalper",
+        order_req=request,
+    )
+
+    assert response.status == "SUCCESS"
+    assert runner.last_order_req is not None
+    assert int(runner.last_order_req.quantity) == 65
+    assert int(response.requested_quantity or 0) == 65
+    assert runner.last_order_req.strategy_context["position_qty"] == 1
+    assert runner.last_order_req.strategy_context["requested_position_qty"] == 2
+    assert runner.last_order_req.strategy_context["lot_cap_reason"] == "max_lots_per_trade"

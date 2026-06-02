@@ -1277,10 +1277,10 @@ class OrderLifecycleService:
         filled_qty: int,
         price: float,
         trade_time: datetime,
-    ) -> None:
+    ) -> float | None:
         record = self._ensure_position_record(ctx)
         if record is None:
-            return
+            return None
         signed_qty = float(filled_qty if ctx.side == "BUY" else -filled_qty)
         record.last_evidence_at = trade_time
         # Issue #204 Layer 2: run sign-aware exit inference. The helper
@@ -1362,7 +1362,7 @@ class OrderLifecycleService:
                     avg_open_price=record.avg_open_price,
                     trade_time=trade_time,
                 )
-                return
+                return None
 
             if record.position_state == PositionState.NONE:
                 self._transition_position_state(
@@ -1381,6 +1381,15 @@ class OrderLifecycleService:
                         (record.avg_close_price * prior_close)
                         + (float(price) * abs(float(filled_qty)))
                     ) / total_close
+            entry_side = str(record.side or "").upper()
+            close_qty = abs(float(filled_qty))
+            if entry_side == "BUY":
+                fill_realized_pnl = (float(price) - float(record.avg_open_price)) * close_qty
+            elif entry_side == "SELL":
+                fill_realized_pnl = (float(record.avg_open_price) - float(price)) * close_qty
+            else:
+                fill_realized_pnl = 0.0
+            record.realized_pnl += float(fill_realized_pnl)
             record.net_qty += signed_qty
             if abs(record.net_qty) <= 0.0001:
                 record.net_qty = 0.0
@@ -1401,7 +1410,7 @@ class OrderLifecycleService:
                 avg_open_price=record.avg_open_price,
                 trade_time=trade_time,
             )
-            return
+            return float(fill_realized_pnl)
 
         record.side = str(ctx.side or "").upper()
         record.filled_qty_open += abs(float(filled_qty))
@@ -1427,6 +1436,7 @@ class OrderLifecycleService:
             avg_open_price=record.avg_open_price,
             trade_time=trade_time,
         )
+        return None
 
     @staticmethod
     def _coerce_product_type(value: object) -> ProductType:
@@ -1950,7 +1960,7 @@ class OrderLifecycleService:
             recovery_action=transition_source,
             updated_at=trade_time,
         )
-        self._apply_position_fill(
+        fill_realized_pnl = self._apply_position_fill(
             ctx,
             filled_qty=filled_qty,
             price=price,
@@ -2017,8 +2027,12 @@ class OrderLifecycleService:
             qty=filled_qty,
             price=price,
             trade_time=trade_time,
-            realized_pnl=None,
-            fees=None,
+            realized_pnl=(
+                float(fill_realized_pnl)
+                if fill_realized_pnl is not None
+                else 0.0
+            ),
+            fees=0.0,
             entry_price=None,
             exit_price=None,
             entry_time=None,
@@ -2026,6 +2040,28 @@ class OrderLifecycleService:
         )
         try:
             bq_row = trade_record_to_bq_row(record)
+            if fill_realized_pnl is not None:
+                try:
+                    ledger_realized_pnl = float(bq_row.get("realized_pnl") or 0.0)
+                except (TypeError, ValueError):
+                    ledger_realized_pnl = None
+                if (
+                    ledger_realized_pnl is None
+                    or abs(ledger_realized_pnl - float(fill_realized_pnl)) > 0.01
+                ):
+                    log_event(
+                        logger,
+                        event_type="TRADE_LEDGER_PNL_MISMATCH",
+                        message="computed exit fill PnL diverges from trade ledger row",
+                        level=logging.WARNING,
+                        tenant_id=ctx.tenant_id,
+                        broker_account_id=ctx.broker_account_id,
+                        strategy_id=pnl_strategy_id,
+                        instrument=ctx.symbol,
+                        broker_order_id=broker_order_id,
+                        computed_realized_pnl=float(fill_realized_pnl),
+                        ledger_realized_pnl=ledger_realized_pnl,
+                    )
             insert_id = f"{ctx.broker_account_id}:{broker_order_id}"
             try:
                 insert_trade_record(bq_row, insert_id=insert_id)
