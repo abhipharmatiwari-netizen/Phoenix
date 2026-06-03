@@ -630,6 +630,45 @@ def test_put_momentum_exit_circuit_breaker_caps_retry_attempts(monkeypatch):
     assert len(calls) == 3
 
 
+def test_put_momentum_no_position_exit_rejection_retires_local_position(monkeypatch, caplog):
+    mod, strategy = _make_strategy(monkeypatch)
+    calls = []
+
+    def fake_place_order_via_bridge(**kwargs):
+        calls.append(kwargs["order_req"])
+        if len(calls) == 1:
+            return OrderResponse(
+                broker_order_id="entry-1",
+                status="ACCEPTED",
+                message="ok",
+            )
+        return OrderResponse(
+            broker_order_id="",
+            status="REJECTED",
+            message="exit_order_missing_position_evidence",
+            filled_quantity=0,
+            average_price=None,
+        )
+
+    monkeypatch.setattr(mod, "place_order_via_bridge", fake_place_order_via_bridge)
+    strategy.last_price["NIFTY_ATM_PE_20000"] = 100.0
+    strategy._enter_position(
+        types.SimpleNamespace(h=100.0, c=90.0),
+        ema20=100.0,
+        vwap=95.0,
+    )
+    assert strategy.state.position is not None
+
+    with caplog.at_level("WARNING"):
+        strategy._exit_position("TIME_STOP")
+    assert strategy.state.position is None
+    assert strategy._exit_failure_count == 0
+    assert "Retiring stale PUT_MOM position after no-position exit rejection" in caplog.text
+
+    strategy._exit_position("TIME_STOP")
+    assert len(calls) == 2
+
+
 def test_put_momentum_dynamic_policy_no_trade_blocks_entries(monkeypatch, caplog):
     _mod, strategy = _make_strategy(monkeypatch)
     strategy._adaptive_policy = strategy._adaptive_policy.__class__(

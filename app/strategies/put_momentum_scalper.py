@@ -701,6 +701,14 @@ class PutMomentumScalperStrategy(BaseStrategy):
         self._next_exit_retry_mono = now_mono + self._exit_retry_cooldown_seconds
         return attempt, self._exit_retry_cooldown_seconds, False
 
+    def _is_no_position_exit_rejection(self, resp: Any) -> bool:
+        message = str(getattr(resp, "message", "") or "").lower()
+        return (
+            "exit_order_missing_position_evidence" in message
+            or "no_owned_position_to_exit" in message
+            or "no matching broker position evidence" in message
+        )
+
     # Select the PE option label based on strike and expiry.
     def _select_put_option(self, spot: float) -> Optional[str]:
         current_expiry = self._current_expiry()
@@ -1442,6 +1450,20 @@ class PutMomentumScalperStrategy(BaseStrategy):
             self._exit_in_flight = False
         status = str(getattr(resp, "status", "")).upper()
         if status in {"REJECTED", "FAILED"}:
+            if self._is_no_position_exit_rejection(resp):
+                logger.warning(
+                    "[%s] Retiring stale PUT_MOM position after no-position exit rejection | label=%s broker_symbol=%s reason=%s status=%s msg=%s",
+                    self.env_prefix,
+                    pos.label,
+                    pos.broker_symbol or pos.label,
+                    reason,
+                    status,
+                    getattr(resp, "message", ""),
+                )
+                self.state.position = None
+                self._adaptive_policy.mark_position_closed()
+                self._reset_exit_retry_state()
+                return
             attempt, wait_s, opened = self._register_exit_failure(now_mono=monotonic())
             if opened:
                 logger.error(

@@ -29,6 +29,25 @@ Each event includes `underlying`, `strategy`, `reason`, `timeframe_seconds`, and
 
 Dispatch happens once per attached strategy for each closed underlying bar, so skip logging is naturally throttled to one event per strategy/bar pair. If the blocking reason changes, the next closed bar emits the new reason.
 
+## Put-momentum no-position exit rejections
+
+Observed during 2026-06-03 OCI live monitoring: after a put-momentum exit filled and
+broker-flat evidence was observed, stale in-memory strategy state could continue to
+emit `PUT_MOM_EXIT_*` orders. The router correctly rejected those exits in LIVE with:
+
+```
+event_type=ORDER_EXIT_REJECTED_NO_POSITION_EVIDENCE
+message=exit_order_missing_position_evidence
+```
+
+The strategy now treats that response as terminal stale-position evidence: it retires
+the local put-momentum position, marks the adaptive policy position closed, resets exit
+retry state, and does not open the exit circuit. A repeated
+`ORDER_EXIT_REJECTED_NO_POSITION_EVIDENCE` for the same put-momentum symbol after this
+change means the running image is stale or another strategy instance still owns stale
+state. Verify the deployed image tag, then inspect strategy attachments and restart
+through [oci_live_deployment.md](oci_live_deployment.md).
+
 ## Startup snapshot artifact
 
 At process startup the stream runner writes:
