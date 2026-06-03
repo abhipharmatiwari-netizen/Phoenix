@@ -30,12 +30,13 @@ Current VM paths and containers:
 
 Latest verified live deployment:
 
-- VM checkout: `main` at `e7f1e29`
-- backend image: `phoenix-local-backend:local-e7f1e29`
-- nginx image: `phoenix-local-nginx:local-e7f1e29`
-- readiness: `/readyz` returns HTTP 200 with `ready=true`,
-  `degraded_scope_count=0`, `position_state_counts={}`, and `firing_count=0`
-- host health: nginx `/health` and `/readyz` return HTTP 200
+- VM checkout: `main` at `132e0ea`
+- backend image: `phoenix-local-backend:local-132e0ea`
+- nginx image: `phoenix-local-nginx:local-132e0ea`
+- liveness: backend `/health` and nginx `/health` return HTTP 200
+- readiness: `/readyz` returns HTTP 503 with `ready=false` because one durable
+  global kill switch is active; kill-switch divergence is false. This is a
+  trading-readiness halt, not a failed deployment.
 
 Non-current for this VM unless a later evidence capture proves otherwise:
 
@@ -176,9 +177,9 @@ Expected success evidence:
 
 - backend and web are running; after the 2026-05-21 liveness-healthcheck patch
   they remain Docker-healthy when `/health` is 200 even if `/readyz` is 503
-- backend image is `phoenix-local-backend:local-e7f1e29` in the latest
+- backend image is `phoenix-local-backend:local-132e0ea` in the latest
   verified deployment
-- web image is `phoenix-local-nginx:local-e7f1e29` in the latest verified
+- web image is `phoenix-local-nginx:local-132e0ea` in the latest verified
   deployment
 - `/opt/phoenix/phoenix-override.yml` must also use `/health` for nginx
   Docker health; a VM-local override that still checks `/readyz` will keep the
@@ -400,7 +401,7 @@ The operator owns:
 
 | Drift | Evidence | Risk |
 |---|---|---|
-| Local images instead of OCIR | `phoenix-local-backend:local-e7f1e29`, `phoenix-local-nginx:local-e7f1e29` verified on 2026-05-25 | Old OCIR docs do not describe current deploy/restart behavior |
+| Local images instead of OCIR | `phoenix-local-backend:local-132e0ea`, `phoenix-local-nginx:local-132e0ea` verified on 2026-06-03 | Old OCIR docs do not describe current deploy/restart behavior |
 | VM-local Postgres | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres` | External DB backup/SSL assumptions are not current |
 | Source bind mounts | backend mounts selected `/opt/phoenix/app/app/...` files | Container image alone is not the full deployed code |
 | Stale watchdog can stop nginx | watchdog command/logs | Current manifest is observe-only; stop/start logs indicate stale VM wiring or override drift |
