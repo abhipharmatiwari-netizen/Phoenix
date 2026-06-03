@@ -1,6 +1,6 @@
 # OCI VM Runtime Evidence
 
-Last verified: 2026-05-25 15:07 UTC from the running OCI VM.
+Last verified: 2026-06-03 01:46 UTC from the running OCI VM.
 OI/ML shadow sidecar evidence was updated on 2026-05-23 00:12 IST.
 
 The OCI VM is the production source of truth. This file intentionally records
@@ -13,14 +13,14 @@ OCIDs, broker identifiers, and tokens are redacted.
 |---|---|---|---|---|
 | Host | `phoenix-vm`, `opc`, `/home/opc` | `hostname; date; whoami; pwd` | VM reachable through OCI Bastion; VM VNIC has no public IP | Do not document private IPs |
 | Deployed repo path | `/opt/phoenix/app` | Compose labels and `git -C` | Active checkout lives under `/opt/phoenix/app` | `/opt/phoenix` also contains operator-owned runtime files |
-| Active git commit/branch | `main`, `e7f1e29` | `git -C /opt/phoenix/app branch --show-current`, `rev-parse HEAD` | VM checkout is on `main` at `e7f1e29` | `git status --short` shows untracked `docker-compose.oci-postgres.yml` |
+| Active git commit/branch | `main`, `4288919` | `git -C /opt/phoenix/app branch --show-current`, `rev-parse HEAD` | VM checkout is on `main` at `4288919` with no tracked local changes | Untracked VM-owned files are intentionally omitted from evidence commands |
 | Compose project | `phoenix-oci-live` | `docker inspect ... Labels` | backend, nginx, and watchdog have Compose labels | `phoenix-oci-postgres` has no Compose labels |
 | Compose files used | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` | `com.docker.compose.project.config_files` labels | These are the active Phoenix Compose files for labelled containers | Runtime override must be treated as authoritative |
 | Env file used | `/opt/phoenix/phoenix-deploy.env` | runtime scripts and Compose commands | Non-secret deploy env file exists on VM | Document names only, not values |
 | Running Phoenix containers | `phoenix-oci-backend`, `phoenix-oci-web`, `phoenix-oci-watchdog`, `phoenix-oci-postgres` | `docker ps`, `docker inspect` | All four were running during audit | Aurelium containers also run on the host but are outside Phoenix docs |
 | Stopped Phoenix containers | none shown by name | `docker ps -a` | `phoenix-oci-optimizer` is not present | Optimizer systemd units are also absent |
-| Backend image | `phoenix-local-backend:local-e7f1e29` | `docker inspect phoenix-oci-backend` | Local image, not OCIR | Recreated 2026-05-25 after runtime deployment |
-| Web image | `phoenix-local-nginx:local-e7f1e29` | `docker inspect phoenix-oci-web` | Local image, not OCIR | Recreated 2026-05-25 after runtime deployment |
+| Backend image | `phoenix-local-backend:local-4288919` | `docker inspect phoenix-oci-backend` | Local image, not OCIR | Recreated 2026-06-03 after Control Tower / kill-switch recovery deployment |
+| Web image | `phoenix-local-nginx:local-4288919` | `docker inspect phoenix-oci-web` | Local image, not OCIR | Recreated 2026-06-03 after Control Tower dashboard deployment |
 | Database image | `postgres:16-alpine`, image ID `sha256:4e6e670...` | `docker inspect phoenix-oci-postgres` | VM-local Postgres container | No Docker healthcheck |
 | Watchdog image | `docker:cli`, image ID `sha256:17b5c235...` | `docker inspect phoenix-oci-watchdog` | Docker CLI sidecar | Has Docker socket mount |
 | Backend command | `python -m app.main` via `docker-entrypoint.sh` | `docker inspect` | FastAPI backend runs in backend container | Port 8080 is container-only |
@@ -36,8 +36,8 @@ OCIDs, broker identifiers, and tokens are redacted.
 | Postgres mounts | `/opt/phoenix/pgdata` to `/var/lib/postgresql/data` | `docker inspect .Mounts` | DB data is local VM disk path | Backup/restore docs must use this fact |
 | Logs | `/opt/phoenix/logs`, date-partitioned app logs, audit JSONL, scheduler logs, cert renewal log | `find /opt/phoenix/logs` | Current logs include 2026-05-25 runtime/deployment evidence and root log files | `/opt/phoenix/logs` is writable by container UID |
 | State files | `/opt/phoenix/state/risk_positions.json` and `.bak` | `ls -la /opt/phoenix/state` | Restart helper files exist | Not authoritative over Postgres |
-| Health endpoints | backend container `/health`, `/ready`, `/readyz`, `/health/summary`, `/dashboard/status` return 200 | `docker exec phoenix-oci-backend curl ...` | Backend ready at container-local port 8080; `/readyz` reports `ready=true`, `degraded_scope_count=0`, `position_state_counts={}`, `firing_count=0`; `/dashboard/status` reports `status=ok` and `readiness.ready=true` | Host `localhost:8080` is not exposed |
-| nginx health | host `http://localhost/health`, `http://localhost/readyz`, `https://localhost:8443/health`, `https://localhost:8443/readyz` return 200 | `curl -k` on VM | nginx proxies current health paths | `/api/health` falls through to SPA and is not a health API |
+| Health endpoints | backend container `/health` returns 200; backend `/readyz` returns 503 | `docker exec phoenix-oci-backend curl ...` | Backend liveness is healthy; `/readyz` is not trading-ready because `kill_switch_active_count=1`, `kill_switch_divergence=false`, `kill_switch_legacy_active=false`, runners are registered/running, and sync is fresh | `/readyz` 503 is expected while the durable kill switch remains active |
+| nginx health | host `http://localhost/health` returns 200; host `http://localhost/readyz` returns 503 | `curl` on VM | nginx proxies current health paths; host liveness is healthy and readiness reflects the active kill switch | `/api/health` falls through to SPA and is not a health API |
 | Release evidence endpoint | `/admin/release-evidence` returns 401 without admin key | `docker exec phoenix-oci-backend curl` | Endpoint exists and requires auth | Do not print admin key |
 | Database tables | `audit_events`, `broker_accounts`, `broker_credentials`, `internal_position_records`, `kill_switch_state`, `order_submission_outbox`, `position_ownership_ledger`, `schema_migrations`, `strategy_configs`, `strategy_config_candidates`, `trades`, tenant/user entitlement tables, and others | `docker exec phoenix-oci-postgres psql -U phoenix_app -d phoenix` | Operational DB schema exists in VM-local Postgres | Backend container does not include `psql` |
 | Cron/systemd | root cron starts at 03:30 UTC Mon-Fri and stops at 18:30 UTC Sun-Thu; root cert renewal; user safety watcher; weekly cleanup in `/etc/cron.d/phoenix-cleanup` | `crontab -l`, `sudo crontab -l`, `/etc/cron*` | Cron, not optimizer/reload systemd timers, controls current scheduled operations | `phoenix-runtime-secrets.service` exists but is inactive |
@@ -60,6 +60,21 @@ were emitted. Final evidence after backend restart:
 - `/admin/state/position-authority/recovery` returned `recovery_record_count=0`.
 - `kill_switch_active_count=0`.
 - `terminal_position_records_nonzero_net_qty_count=0`.
+
+## 2026-06-03 Control Tower / Kill-Switch Recovery Deploy
+
+Commit `4288919` was deployed as `phoenix-local-backend:local-4288919` and
+`phoenix-local-nginx:local-4288919`. Post-deploy evidence:
+
+- backend and nginx containers are Docker-healthy.
+- backend `/health` and host `/health` returned 200.
+- backend `/readyz` and host `/readyz` returned 503 because one durable
+  kill switch is active; divergence is false and legacy kill switch is inactive.
+- `GET /api/control_tower/status` with admin auth returned 200 and
+  `capability.read_only=true`, `mutation_enabled=false`,
+  `routes_disabled=true`.
+- Control Tower read visibility is therefore available while LIVE management
+  mutations stay disabled by deployment gates and the active durable kill switch.
 
 ## 2026-05-22 BANKNIFTY Position-Authority Recovery
 
