@@ -121,7 +121,12 @@ def test_bff_post_forwards_json_body_and_query_params(monkeypatch):
             "Authorization": "Bearer operator-token",
             "X-Correlation-Id": "corr-1",
         },
-        json={"tenant_id": "tenant-1", "strategy_id": "strat-1", "enabled": True},
+        json={
+            "tenant_id": "tenant-1",
+            "strategy_id": "strat-1",
+            "enabled": True,
+            "reason": "operator audit reason",
+        },
     )
 
     assert response.status_code == 200
@@ -135,6 +140,7 @@ def test_bff_post_forwards_json_body_and_query_params(monkeypatch):
         "tenant_id": "tenant-1",
         "strategy_id": "strat-1",
         "enabled": True,
+        "reason": "operator audit reason",
     }
     assert forwarded["headers"]["Authorization"] == "Bearer operator-token"
     assert forwarded["headers"]["X-Correlation-Id"] == "corr-1"

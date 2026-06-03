@@ -148,6 +148,17 @@ diverge, or if the normal order-lifecycle clear checks find
 during an incident; investigate and retry only after the reported
 condition is resolved.
 
+When the response says legacy kill-switch state is the blocker and
+broker flatness has already been verified, the backend also returns a
+`next_step` pointing to
+`POST /admin/kill-switch/legacy-recovery-clear`. That recovery endpoint
+uses the same ADMIN bearer session and vault-backed override password,
+then refuses unless every registered broker account has zero position
+quantity and no non-terminal orders. On success it clears the legacy
+risk-manager halt, advances the durable kill switch to `INACTIVE`,
+audits actor/reason/evidence, and returns post-action `/readyz` plus
+`/health/summary` recheck summaries.
+
 The older `request-clear`, `confirm-clear`, `rearm`, and step-up-token
 endpoints remain available for advanced API compatibility. They are
 not the dashboard SOP.

@@ -152,6 +152,7 @@ interface ControlTowerTogglePayload {
   tenant_id: string;
   strategy_id: string;
   enabled: boolean;
+  reason?: string;
 }
 
 export interface StrategyCandidateDiff {
@@ -507,12 +508,31 @@ function formatErrorDetail(detail: unknown, fallback: string): string {
     return parts.join('; ') || fallback;
   }
   if (detail && typeof detail === 'object') {
-    const obj = detail as { message?: unknown; failures?: unknown };
+    const obj = detail as {
+      message?: unknown;
+      failures?: unknown;
+      next_step?: unknown;
+      blocking_reasons?: unknown;
+      management_disabled_reason?: unknown;
+    };
     const message = typeof obj.message === 'string' ? obj.message : '';
+    const nextStep = typeof obj.next_step === 'string' ? obj.next_step : '';
     const failures = Array.isArray(obj.failures)
       ? obj.failures.map((item) => String(item)).filter(Boolean)
       : [];
-    const joined = [message, failures.join('; ')].filter(Boolean).join(' ');
+    const blockingReasons = Array.isArray(obj.blocking_reasons)
+      ? obj.blocking_reasons.map((item) => String(item)).filter(Boolean)
+      : [];
+    const disabledReason = typeof obj.management_disabled_reason === 'string'
+      ? obj.management_disabled_reason
+      : '';
+    const joined = [
+      message,
+      disabledReason,
+      failures.join('; '),
+      blockingReasons.join('; '),
+      nextStep,
+    ].filter(Boolean).join(' ');
     if (joined) {
       return joined;
     }
@@ -882,6 +902,10 @@ export const KillSwitchService = {
 export const ControlTowerService = {
   getControlTowerMatrix(): Promise<MatrixResponse> {
     return request<MatrixResponse>({ path: bffPath('/api/control_tower/matrix') });
+  },
+
+  getControlTowerStatus(): Promise<MatrixResponse> {
+    return request<MatrixResponse>({ path: bffPath('/api/control_tower/status') });
   },
 
   toggleControlTower(

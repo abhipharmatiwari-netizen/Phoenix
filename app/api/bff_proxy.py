@@ -27,6 +27,7 @@ _DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 # draining orders.
 _LONG_PATH_PREFIXES: tuple[str, ...] = (
     "admin/kill-switch/cancel-all",
+    "admin/kill-switch/legacy-recovery-clear",
     "admin/break-glass/flatten",
 )
 _LONG_TIMEOUT = httpx.Timeout(120.0, connect=10.0)

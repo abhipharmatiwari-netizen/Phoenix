@@ -23,10 +23,12 @@ from app.brokers.base import OrderResponse
 from app.dashboard import admin_routes
 from app.dashboard.admin_routes import (
     KillSwitchCancelAllRequest,
+    KillSwitchLegacyRecoveryRequest,
     KillSwitchPasswordClearRequest,
     _save_kill_switch_state,
     kill_switch_cancel_all,
     kill_switch_clear_with_password,
+    kill_switch_legacy_recovery_clear,
 )
 from app.dashboard.auth import AdminContext, AdminRole
 
@@ -228,7 +230,208 @@ def test_kill_switch_password_clear_fails_closed_when_legacy_active(monkeypatch,
         )
 
     assert exc_info.value.status_code == 409
+    assert "legacy-recovery-clear" in str(exc_info.value.detail)
     assert ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL").state == KillSwitchState.TRIPPED
+
+
+class _LegacyRecoveryRiskManager:
+    def __init__(self) -> None:
+        self.kill_switch_activated = True
+        self._durable_kill_switch_bridge_succeeded = False
+        self._pending_audit_reemit = True
+        self.persist_calls = 0
+
+    def _persist_state(self, *, force: bool = True) -> None:
+        self.persist_calls += 1
+
+
+class _LegacyRecoveryStateStore:
+    def __init__(self, *, positions: list[Any], orders: list[Any]) -> None:
+        self._positions = positions
+        self._orders = orders
+
+    def get_positions(self, _account_id: str) -> list[Any]:
+        return list(self._positions)
+
+    def get_orders(self, _account_id: str) -> list[Any]:
+        return list(self._orders)
+
+
+def _legacy_recovery_runtime(
+    *,
+    risk_manager: _LegacyRecoveryRiskManager,
+    positions: list[Any],
+    orders: list[Any],
+) -> SimpleNamespace:
+    legacy_active = {"value": True, "reason": "legacy_auto_trip"}
+
+    def record_legacy_kill_switch_state(*, active: bool, reason: str | None = None) -> None:
+        legacy_active["value"] = bool(active)
+        legacy_active["reason"] = reason
+
+    def get_legacy_kill_switch_snapshot() -> dict:
+        return {
+            "publisher_seen": True,
+            "legacy_active": legacy_active["value"],
+            "legacy_reason": legacy_active["reason"],
+        }
+
+    runner = SimpleNamespace(
+        broker_account_id="ba1",
+        tenant_id="tenant-a",
+        _risk_manager=risk_manager,
+    )
+    hub = SimpleNamespace(
+        list_runner_ids=lambda: ["ba1"],
+        get_runner=lambda account_id: runner if account_id == "ba1" else None,
+    )
+    return SimpleNamespace(
+        hub=hub,
+        state_store=_LegacyRecoveryStateStore(positions=positions, orders=orders),
+        record_legacy_kill_switch_state=record_legacy_kill_switch_state,
+        get_legacy_kill_switch_snapshot=get_legacy_kill_switch_snapshot,
+    )
+
+
+def test_legacy_recovery_refuses_when_broker_positions_not_flat(monkeypatch, tmp_path):
+    from app.risk.kill_switch import KillSwitchManager, KillSwitchScope, KillSwitchState
+
+    ksm = KillSwitchManager(audit_fn=lambda **_: None)
+    ksm.trip(KillSwitchScope.GLOBAL, "GLOBAL", "auto-trip", actor="risk_manager_auto")
+    rm = _LegacyRecoveryRiskManager()
+    runtime = _legacy_recovery_runtime(
+        risk_manager=rm,
+        positions=[{"symbol": "NIFTY", "quantity": 1}],
+        orders=[],
+    )
+    secret_file = tmp_path / "admin_kill_switch_override"
+    secret_file.write_text("vault-override-password", encoding="utf-8")
+
+    monkeypatch.setattr("app.dashboard.admin_routes.check_rate_limit", lambda _request: None)
+    monkeypatch.setenv("ADMIN_KILL_SWITCH_OVERRIDE_FILE", str(secret_file))
+    monkeypatch.setattr(admin_routes, "_get_kill_switch_manager", lambda: ksm)
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: runtime)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(kill_switch_legacy_recovery_clear(
+            KillSwitchLegacyRecoveryRequest(
+                scope="GLOBAL",
+                scope_id="GLOBAL",
+                password="vault-override-password",
+                reason="broker flat verified",
+            ),
+            _mk_request(),
+            _mk_bearer_admin(),
+        ))
+
+    assert exc_info.value.status_code == 409
+    assert "positions are not flat" in str(exc_info.value.detail)
+    assert rm.kill_switch_activated is True
+    assert ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL").state == KillSwitchState.TRIPPED
+
+
+def test_legacy_recovery_refuses_when_broker_orders_open(monkeypatch, tmp_path):
+    from app.risk.kill_switch import KillSwitchManager, KillSwitchScope, KillSwitchState
+
+    ksm = KillSwitchManager(audit_fn=lambda **_: None)
+    ksm.trip(KillSwitchScope.GLOBAL, "GLOBAL", "auto-trip", actor="risk_manager_auto")
+    rm = _LegacyRecoveryRiskManager()
+    runtime = _legacy_recovery_runtime(
+        risk_manager=rm,
+        positions=[],
+        orders=[{"order_id": "ord1", "status": "OPEN"}],
+    )
+    secret_file = tmp_path / "admin_kill_switch_override"
+    secret_file.write_text("vault-override-password", encoding="utf-8")
+
+    monkeypatch.setattr("app.dashboard.admin_routes.check_rate_limit", lambda _request: None)
+    monkeypatch.setenv("ADMIN_KILL_SWITCH_OVERRIDE_FILE", str(secret_file))
+    monkeypatch.setattr(admin_routes, "_get_kill_switch_manager", lambda: ksm)
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: runtime)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(kill_switch_legacy_recovery_clear(
+            KillSwitchLegacyRecoveryRequest(
+                scope="GLOBAL",
+                scope_id="GLOBAL",
+                password="vault-override-password",
+                reason="broker flat verified",
+            ),
+            _mk_request(),
+            _mk_bearer_admin(),
+        ))
+
+    assert exc_info.value.status_code == 409
+    assert "open orders" in str(exc_info.value.detail)
+    assert rm.kill_switch_activated is True
+    assert ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL").state == KillSwitchState.TRIPPED
+
+
+def test_legacy_recovery_clears_legacy_and_durable_after_flat_evidence(monkeypatch, tmp_path):
+    from app.risk.kill_switch import (
+        KillSwitchClearValidation,
+        KillSwitchManager,
+        KillSwitchScope,
+        KillSwitchState,
+    )
+
+    ksm = KillSwitchManager(audit_fn=lambda **_: None)
+    ksm.trip(KillSwitchScope.GLOBAL, "GLOBAL", "auto-trip", actor="risk_manager_auto")
+    rm = _LegacyRecoveryRiskManager()
+    runtime = _legacy_recovery_runtime(
+        risk_manager=rm,
+        positions=[{"symbol": "NIFTY", "quantity": 0}],
+        orders=[{"order_id": "ord1", "status": "COMPLETE"}],
+    )
+    secret_file = tmp_path / "admin_kill_switch_override"
+    secret_file.write_text("vault-override-password", encoding="utf-8")
+    audit_events: list[dict] = []
+    saved_states: list[str] = []
+
+    monkeypatch.setattr("app.dashboard.admin_routes.check_rate_limit", lambda _request: None)
+    monkeypatch.setenv("ADMIN_KILL_SWITCH_OVERRIDE_FILE", str(secret_file))
+    monkeypatch.setattr(admin_routes, "_get_kill_switch_manager", lambda: ksm)
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        admin_routes,
+        "_kill_switch_clear_validation",
+        lambda _req, *, fail_closed: KillSwitchClearValidation(passed=True, failures=[]),
+    )
+    monkeypatch.setattr(
+        admin_routes,
+        "_save_kill_switch_state",
+        lambda *_args, **_kwargs: saved_states.append(
+            ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL").state.value
+        ),
+    )
+    async def _fake_post_recheck():
+        return {"endpoints": ["/readyz", "/health/summary"], "readyz": {"ready": True}}
+
+    monkeypatch.setattr(admin_routes, "_kill_switch_post_recheck", _fake_post_recheck)
+    monkeypatch.setattr(admin_routes, "emit_audit_event", lambda **kw: audit_events.append(kw))
+
+    result = asyncio.run(kill_switch_legacy_recovery_clear(
+        KillSwitchLegacyRecoveryRequest(
+            scope="GLOBAL",
+            scope_id="GLOBAL",
+            password="vault-override-password",
+            reason="broker flat verified",
+        ),
+        _mk_request(),
+        _mk_bearer_admin(),
+    ))
+
+    assert result["status"] == "inactive"
+    assert result["durable_transitions"] == ["CLEAR_PENDING", "CLEARED", "INACTIVE"]
+    assert result["post_recheck"]["endpoints"] == ["/readyz", "/health/summary"]
+    assert rm.kill_switch_activated is False
+    assert rm._durable_kill_switch_bridge_succeeded is True
+    assert rm.persist_calls == 1
+    assert ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL").state == KillSwitchState.INACTIVE
+    assert saved_states == ["CLEAR_PENDING", "CLEARED", "INACTIVE"]
+    assert audit_events
+    assert audit_events[0]["action"] == "kill_switch_legacy_recovery_clear"
+    assert audit_events[0]["metadata"]["reason"] == "broker flat verified"
 
 
 class _FakeBroker:

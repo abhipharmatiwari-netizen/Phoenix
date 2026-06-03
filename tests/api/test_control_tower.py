@@ -14,11 +14,11 @@ from app.tenants.models import (
 )
 
 
-def _build_app() -> FastAPI:
+def _build_app(ctx: AdminContext | None = None) -> FastAPI:
     app = FastAPI()
     app.include_router(control_tower.router)
     app.dependency_overrides[get_admin_context] = (
-        lambda: AdminContext(caller="admin", role=AdminRole.ADMIN)
+        lambda: ctx or AdminContext(caller="admin", role=AdminRole.ADMIN)
     )
     return app
     
@@ -176,6 +176,7 @@ def test_toggle_creates_configs_for_enabled_accounts(monkeypatch):
             "tenant_id": "tenant-a",
             "strategy_id": "ce_orb",
             "enabled": True,
+            "reason": "test enable",
         },
     )
     assert resp.status_code == 200
@@ -224,6 +225,7 @@ def test_toggle_updates_existing(monkeypatch):
             "tenant_id": "tenant-z",
             "strategy_id": "delta_strangle",
             "enabled": False,
+            "reason": "test disable",
         },
     )
 
@@ -268,9 +270,205 @@ def test_toggle_emits_control_tower_app_log(monkeypatch, caplog):
             "tenant_id": "tenant-z",
             "strategy_id": "delta_strangle",
             "enabled": False,
+            "reason": "test disable",
         },
     )
 
     assert resp.status_code == 200
     assert "event_type=CONTROL_TOWER_TOGGLE" in caplog.text
     assert "tenant_id=tenant-z" in caplog.text
+
+
+def test_status_available_when_live_management_routes_disabled(monkeypatch):
+    tenant = SimpleNamespace(tenant_id="tenant-default", name="Default Tenant")
+
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    monkeypatch.setenv("DISABLE_CONTROL_TOWER_ROUTES", "true")
+    monkeypatch.delenv("CONTROL_TOWER_MUTATIONS_ENABLED", raising=False)
+    monkeypatch.setattr(control_tower, "get_all_tenants", lambda: [tenant])
+    monkeypatch.setattr(
+        control_tower,
+        "_discover_strategy_columns",
+        lambda: [
+            control_tower.StrategyColumn(
+                strategy_id="ce_orb", display_name="CE ORB"
+            ),
+        ],
+    )
+    monkeypatch.setattr(control_tower, "get_strategy_configs_for_tenant", lambda _: [])
+    monkeypatch.setattr(control_tower, "_control_tower_kill_switch_blockers", lambda: [])
+    monkeypatch.setattr(control_tower, "_control_tower_readiness_blockers", lambda: [])
+
+    client = TestClient(_build_app())
+    resp = client.get("/api/control_tower/status")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["capability"]["mutation_enabled"] is False
+    assert data["capability"]["read_only"] is True
+    assert data["matrix"]["tenant-default"]["ce_orb"] is False
+    assert "management routes are disabled" in data["capability"]["management_disabled_reason"]
+
+
+def test_live_mutation_routes_disabled_by_default(monkeypatch):
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    monkeypatch.setenv("DISABLE_CONTROL_TOWER_ROUTES", "true")
+    monkeypatch.delenv("CONTROL_TOWER_MUTATIONS_ENABLED", raising=False)
+    monkeypatch.setattr(control_tower, "_control_tower_kill_switch_blockers", lambda: [])
+    monkeypatch.setattr(control_tower, "_control_tower_readiness_blockers", lambda: [])
+
+    client = TestClient(_build_app())
+    resp = client.post(
+        "/api/control_tower/toggle",
+        json={
+            "tenant_id": "tenant-a",
+            "strategy_id": "ce_orb",
+            "enabled": True,
+            "reason": "test enable",
+        },
+    )
+
+    assert resp.status_code == 403
+    assert "mutation blocked" in resp.json()["detail"]["message"]
+
+
+def test_toggle_requires_reason(monkeypatch):
+    monkeypatch.setattr(control_tower, "_control_tower_kill_switch_blockers", lambda: [])
+    monkeypatch.setattr(control_tower, "_control_tower_readiness_blockers", lambda: [])
+
+    client = TestClient(_build_app())
+    resp = client.post(
+        "/api/control_tower/toggle",
+        json={
+            "tenant_id": "tenant-a",
+            "strategy_id": "ce_orb",
+            "enabled": True,
+        },
+    )
+
+    assert resp.status_code == 422
+    assert "reason is required" in resp.json()["detail"]
+
+
+def test_scoped_admin_cannot_mutate_unentitled_tenant(monkeypatch):
+    scoped_ctx = AdminContext(
+        caller="scoped",
+        role=AdminRole.ADMIN,
+        tenant_ids=["tenant-allowed"],
+        all_tenants=False,
+        auth_source="bearer",
+    )
+    monkeypatch.setattr(control_tower, "_control_tower_kill_switch_blockers", lambda: [])
+    monkeypatch.setattr(control_tower, "_control_tower_readiness_blockers", lambda: [])
+
+    client = TestClient(_build_app(scoped_ctx))
+    resp = client.post(
+        "/api/control_tower/toggle",
+        json={
+            "tenant_id": "tenant-blocked",
+            "strategy_id": "ce_orb",
+            "enabled": True,
+            "reason": "test enable",
+        },
+    )
+
+    assert resp.status_code == 403
+    assert "outside the caller's entitlement scope" in resp.json()["detail"]
+
+
+def test_live_mutation_rejected_when_kill_switch_active(monkeypatch):
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    monkeypatch.setenv("DISABLE_CONTROL_TOWER_ROUTES", "false")
+    monkeypatch.setenv("CONTROL_TOWER_MUTATIONS_ENABLED", "true")
+    monkeypatch.setattr(
+        control_tower,
+        "_control_tower_kill_switch_blockers",
+        lambda: ["durable kill switch active: 1 non-INACTIVE scope(s)"],
+    )
+    monkeypatch.setattr(control_tower, "_control_tower_readiness_blockers", lambda: [])
+
+    client = TestClient(_build_app())
+    resp = client.post(
+        "/api/control_tower/toggle",
+        json={
+            "tenant_id": "tenant-a",
+            "strategy_id": "ce_orb",
+            "enabled": True,
+            "reason": "test enable",
+        },
+    )
+
+    assert resp.status_code == 403
+    assert "durable kill switch active" in str(resp.json()["detail"]["blocking_reasons"])
+
+
+def test_live_mutation_rejected_when_readiness_degraded(monkeypatch):
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    monkeypatch.setenv("DISABLE_CONTROL_TOWER_ROUTES", "false")
+    monkeypatch.setenv("CONTROL_TOWER_MUTATIONS_ENABLED", "true")
+    monkeypatch.setattr(control_tower, "_control_tower_kill_switch_blockers", lambda: [])
+    monkeypatch.setattr(
+        control_tower,
+        "_control_tower_readiness_blockers",
+        lambda: ["runtime is not ready"],
+    )
+
+    client = TestClient(_build_app())
+    resp = client.post(
+        "/api/control_tower/toggle",
+        json={
+            "tenant_id": "tenant-a",
+            "strategy_id": "ce_orb",
+            "enabled": True,
+            "reason": "test enable",
+        },
+    )
+
+    assert resp.status_code == 403
+    assert "runtime is not ready" in str(resp.json()["detail"]["blocking_reasons"])
+
+
+def test_successful_toggle_audit_contains_reason_and_request_id(monkeypatch):
+    now = datetime.now(timezone.utc)
+    events: list[dict] = []
+    existing_cfgs = [
+        StrategyConfigModel(
+            strategy_config_id="cfg1",
+            tenant_id=TenantId("tenant-z"),
+            broker_account_id=BrokerAccountId("ba9"),
+            strategy_id=StrategyId("delta_strangle"),
+            enabled=True,
+            params={},
+            created_at=now,
+            updated_at=now,
+        )
+    ]
+
+    monkeypatch.setattr(
+        control_tower,
+        "get_strategy_configs_for_tenant_strategy",
+        lambda tenant_id, strategy_id: existing_cfgs,
+    )
+    monkeypatch.setattr(control_tower, "upsert_strategy_config", lambda model: model)
+    monkeypatch.setattr(control_tower, "emit_audit_event", lambda **kw: events.append(kw))
+
+    client = TestClient(_build_app())
+    resp = client.post(
+        "/api/control_tower/toggle",
+        headers={"X-Request-Id": "req-toggle-1"},
+        json={
+            "tenant_id": "tenant-z",
+            "strategy_id": "delta_strangle",
+            "enabled": False,
+            "reason": "audit test",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert events
+    event = events[0]
+    assert event["actor"] == "admin"
+    assert event["request_id"] == "req-toggle-1"
+    assert event["metadata"]["reason"] == "audit test"
+    assert event["metadata"]["old_value"] is True
+    assert event["metadata"]["new_value"] is False

@@ -23,7 +23,7 @@
   border-collapse: separate;
   border-spacing: 0;
   border: 1px solid #e5e7eb;
-  border-radius: 10px;
+  border-radius: 8px;
   overflow: hidden;
 }
 
@@ -103,7 +103,9 @@
 
 .loading-message,
 .error-message,
-.success-message {
+.success-message,
+.readonly-message,
+.empty-message {
   padding: 0.75rem 1rem;
   border-radius: 8px;
   margin-bottom: 1rem;
@@ -130,4 +132,69 @@
   background-color: #f0fdf4;
   color: #166534;
   border: 1px solid #bbf7d0;
+}
+
+.readonly-message {
+  background-color: #fffbeb;
+  color: #92400e;
+  border: 1px solid #fde68a;
+}
+
+.empty-message {
+  background-color: #f8fafc;
+  color: #475569;
+  border: 1px solid #e2e8f0;
+}
+
+.control-tower-status {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.control-tower-status > div {
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 0.75rem 0.875rem;
+  min-height: 66px;
+}
+
+.control-tower-status.is-readonly > div:first-child {
+  border-color: #fde68a;
+  background-color: #fffbeb;
+}
+
+.control-tower-status.is-enabled > div:first-child {
+  border-color: #bbf7d0;
+  background-color: #f0fdf4;
+}
+
+.status-label {
+  display: block;
+  color: #64748b;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.35rem;
+}
+
+.control-tower-status strong {
+  display: block;
+  color: #111827;
+  font-size: 0.95rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .control-tower-container {
+    padding: 1rem;
+  }
+
+  .control-tower-status {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }

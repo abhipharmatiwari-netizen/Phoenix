@@ -17,7 +17,7 @@ const ControlTower: React.FC = () => {
 
     const fetchMatrix = async () => {
       try {
-        const response = await ControlTowerService.getControlTowerMatrix();
+        const response = await ControlTowerService.getControlTowerStatus();
         if (active) {
           setMatrix(response);
         }
@@ -42,10 +42,24 @@ const ControlTower: React.FC = () => {
   const handleToggle = async (tenantId: string, strategyId: string, enabled: boolean) => {
     setError(null);
     setSuccessMessage(null);
+    const capability = matrix?.capability;
+    if (!capability?.mutation_enabled) {
+      setError(capability?.management_disabled_reason || 'Control Tower management is read-only');
+      return;
+    }
+    const reason = window.prompt(`Reason for ${enabled ? 'enabling' : 'disabling'} ${strategyId}`)?.trim();
+    if (!reason) {
+      return;
+    }
     try {
       setPendingKey(`${tenantId}:${strategyId}`);
-      await ControlTowerService.toggleControlTower({ tenant_id: tenantId, strategy_id: strategyId, enabled });
-      const response = await ControlTowerService.getControlTowerMatrix();
+      await ControlTowerService.toggleControlTower({
+        tenant_id: tenantId,
+        strategy_id: strategyId,
+        enabled,
+        reason,
+      });
+      const response = await ControlTowerService.getControlTowerStatus();
       setMatrix(response);
       const strategyLabel = strategyId.replace(/_/g, ' ').replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
       const tenantLabel = response.tenants.find(t => t.tenant_id === tenantId)?.name || tenantId;
@@ -61,49 +75,92 @@ const ControlTower: React.FC = () => {
   const formatStrategyName = (name: string): string =>
     name.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 
+  const capability = matrix?.capability;
+  const mutationEnabled = Boolean(capability?.mutation_enabled);
+  const disabledReason = capability?.management_disabled_reason
+    || (capability?.blocking_reasons || [])[0]
+    || null;
+  const activeAccountCount = matrix?.active_accounts?.length || 0;
+  const enabledConfigCount = matrix?.enabled_strategy_configs?.length || 0;
+  const routedStrategyCount = matrix?.routed_strategy_ids?.length || 0;
+  const emptyStatusMessage = capability?.read_only && disabledReason
+    ? 'Management disabled for safety'
+    : 'No strategies found';
+
   return (
     <Gate requiredRoles={[Role.OPERATOR, Role.ADMIN]}>
       <div className="control-tower-container">
         <h1 className="control-tower-title">Control Tower</h1>
-        <p className="control-tower-subtitle">Enable or disable strategies per tenant</p>
+        <p className="control-tower-subtitle">
+          Strategy Status
+          {capability?.read_only ? ' - read-only' : ' - management enabled'}
+        </p>
         {loading && <p className="loading-message">Loading...</p>}
         {error && <p className="error-message">{error}</p>}
         {successMessage && <p className="success-message">{successMessage}</p>}
         {matrix && (
-          <table className="control-tower-table">
-            <thead>
-              <tr>
-                <th>Strategy</th>
-                {matrix.tenants.map((tenant) => (
-                  <th key={tenant.tenant_id}>
-                    {tenant.name || tenant.tenant_id}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {matrix.strategies.map((strategy) => (
-                <tr key={strategy.strategy_id}>
-                  <td>{formatStrategyName(strategy.display_name)}</td>
-                  {matrix.tenants.map((tenant) => {
-                    const toggleKey = `${tenant.tenant_id}:${strategy.strategy_id}`;
-                    return (
-                      <td key={tenant.tenant_id}>
-                        <input
-                          type="checkbox"
-                          checked={matrix.matrix[tenant.tenant_id]?.[strategy.strategy_id] || false}
-                          disabled={pendingKey === toggleKey}
-                          onChange={(event) =>
-                            handleToggle(tenant.tenant_id, strategy.strategy_id, event.target.checked)
-                          }
-                        />
-                      </td>
-                    );
-                  })}
+          <section className={`control-tower-status ${mutationEnabled ? 'is-enabled' : 'is-readonly'}`}>
+            <div>
+              <span className="status-label">Mode</span>
+              <strong>{mutationEnabled ? 'Management enabled' : 'Read-only'}</strong>
+            </div>
+            <div>
+              <span className="status-label">Active accounts</span>
+              <strong>{activeAccountCount}</strong>
+            </div>
+            <div>
+              <span className="status-label">Enabled configs</span>
+              <strong>{enabledConfigCount}</strong>
+            </div>
+            <div>
+              <span className="status-label">Routed strategies</span>
+              <strong>{routedStrategyCount}</strong>
+            </div>
+          </section>
+        )}
+        {matrix && disabledReason && (
+          <p className="readonly-message">{disabledReason}</p>
+        )}
+        {matrix && (
+          matrix.tenants.length === 0 || matrix.strategies.length === 0 ? (
+            <p className="empty-message">{emptyStatusMessage}</p>
+          ) : (
+            <table className="control-tower-table">
+              <thead>
+                <tr>
+                  <th>Strategy</th>
+                  {matrix.tenants.map((tenant) => (
+                    <th key={tenant.tenant_id}>
+                      {tenant.name || tenant.tenant_id}
+                    </th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {matrix.strategies.map((strategy) => (
+                  <tr key={strategy.strategy_id}>
+                    <td>{formatStrategyName(strategy.display_name)}</td>
+                    {matrix.tenants.map((tenant) => {
+                      const toggleKey = `${tenant.tenant_id}:${strategy.strategy_id}`;
+                      return (
+                        <td key={tenant.tenant_id}>
+                          <input
+                            type="checkbox"
+                            checked={matrix.matrix[tenant.tenant_id]?.[strategy.strategy_id] || false}
+                            disabled={pendingKey === toggleKey || !mutationEnabled}
+                            title={!mutationEnabled && disabledReason ? disabledReason : undefined}
+                            onChange={(event) =>
+                              handleToggle(tenant.tenant_id, strategy.strategy_id, event.target.checked)
+                            }
+                          />
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )
         )}
       </div>
     </Gate>

@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import hmac
+import inspect
 import os
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -2454,6 +2455,17 @@ class KillSwitchPasswordClearRequest(BaseModel):
     reason: str = Field(..., description="Operator-entered clear reason")
 
 
+class KillSwitchLegacyRecoveryRequest(BaseModel):
+    scope: str = Field("GLOBAL", description="GLOBAL | TENANT | ACCOUNT | STRATEGY")
+    scope_id: str = Field("GLOBAL", description="Scope identifier")
+    password: str = Field(
+        ...,
+        min_length=1,
+        description="Kill-switch override password from the vault-backed secret.",
+    )
+    reason: str = Field(..., description="Operator-entered recovery reason")
+
+
 class StepUpIssueRequest(BaseModel):
     action_class: str = Field(
         ...,
@@ -2586,6 +2598,241 @@ def _kill_switch_clear_validation(req: Any, *, fail_closed: bool):
     if fail_closed:
         failures.extend(_collect_legacy_kill_switch_clear_failures(fail_closed=True))
     return KillSwitchClearValidation(passed=len(failures) == 0, failures=failures)
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def _hub_runner_ids(hub: Any) -> list[str]:
+    if hub is None:
+        return []
+    if callable(getattr(hub, "list_runner_ids", None)):
+        try:
+            return [str(v) for v in hub.list_runner_ids()]
+        except Exception:
+            return []
+    return [str(v) for v in getattr(hub, "_runners", {}).keys()]
+
+
+def _hub_runner_for_account(hub: Any, account_id: str) -> Any:
+    if hub is None:
+        return None
+    getter = getattr(hub, "get_runner", None)
+    if callable(getter):
+        try:
+            return getter(account_id)
+        except Exception:
+            return None
+    return getattr(hub, "_runners", {}).get(account_id)
+
+
+async def _collect_legacy_recovery_flatness_evidence(ctx: AdminContext) -> tuple[list[dict[str, Any]], list[str]]:
+    try:
+        runtime = get_hub_runtime()
+    except Exception as exc:
+        return [], [f"hub runtime unavailable: {exc}"]
+    hub = getattr(runtime, "hub", None)
+    state_store = getattr(runtime, "state_store", None)
+    account_ids = _hub_runner_ids(hub)
+    if not account_ids:
+        return [], ["no broker runners registered; cannot prove broker flatness"]
+
+    evidence: list[dict[str, Any]] = []
+    blockers: list[str] = []
+    for account_id in account_ids:
+        runner = _hub_runner_for_account(hub, account_id)
+        if runner is None:
+            blockers.append(f"{account_id}: runner unavailable")
+            continue
+        tenant_id = str(getattr(runner, "tenant_id", "") or "")
+        if _context_scoped(ctx) and (
+            not ctx.can_access_broker_account(account_id)
+            and not (tenant_id and ctx.can_access_tenant(tenant_id))
+        ):
+            blockers.append(f"{account_id}: outside admin entitlement scope")
+            continue
+
+        broker_client = (
+            getattr(runner, "_broker_client", None)
+            or getattr(runner, "broker_client", None)
+            or getattr(runner, "broker", None)
+        )
+        positions: list[Any] = []
+        orders: list[Any] = []
+        position_source = "unavailable"
+        order_source = "unavailable"
+
+        get_positions = getattr(broker_client, "get_positions", None)
+        if callable(get_positions):
+            try:
+                positions = list(await _maybe_await(get_positions()) or [])
+                position_source = "broker"
+            except Exception as exc:
+                blockers.append(f"{account_id}: broker positions unavailable: {exc}")
+        elif state_store is not None and callable(getattr(state_store, "get_positions", None)):
+            try:
+                positions = list(state_store.get_positions(account_id) or [])
+                position_source = "state_store"
+            except Exception as exc:
+                blockers.append(f"{account_id}: state-store positions unavailable: {exc}")
+        else:
+            blockers.append(f"{account_id}: no broker/state-store position evidence")
+
+        get_orders = getattr(broker_client, "get_orders", None)
+        if callable(get_orders):
+            try:
+                orders = list(await _maybe_await(get_orders()) or [])
+                order_source = "broker"
+            except Exception as exc:
+                blockers.append(f"{account_id}: broker orders unavailable: {exc}")
+        elif state_store is not None:
+            try:
+                get_order_snapshot = getattr(state_store, "get_order_snapshot", None)
+                if callable(get_order_snapshot):
+                    orders = list(get_order_snapshot(account_id) or [])
+                if not orders and callable(getattr(state_store, "get_orders", None)):
+                    orders = list(state_store.get_orders(account_id) or [])
+                order_source = "state_store"
+            except Exception as exc:
+                blockers.append(f"{account_id}: state-store orders unavailable: {exc}")
+        else:
+            blockers.append(f"{account_id}: no broker/state-store order evidence")
+
+        open_positions = [
+            position for position in positions if abs(_position_qty(position)) > 0.0001
+        ]
+        open_orders = [
+            order for order in orders if _order_status_text(order) not in _TERMINAL_ORDER_STATUSES
+        ]
+        if open_positions:
+            blockers.append(f"{account_id}: broker positions are not flat ({len(open_positions)})")
+        if open_orders:
+            blockers.append(f"{account_id}: broker has open orders ({len(open_orders)})")
+
+        evidence.append({
+            "broker_account_id": account_id,
+            "tenant_id": tenant_id or None,
+            "position_source": position_source,
+            "order_source": order_source,
+            "position_count": len(positions),
+            "open_position_count": len(open_positions),
+            "order_count": len(orders),
+            "open_order_count": len(open_orders),
+        })
+    return evidence, blockers
+
+
+def _clear_legacy_kill_switch_runtime_state(*, actor: str, reason: str) -> dict[str, Any]:
+    runtime = get_hub_runtime()
+    hub = getattr(runtime, "hub", None)
+    before_snapshot = (
+        runtime.get_legacy_kill_switch_snapshot()
+        if callable(getattr(runtime, "get_legacy_kill_switch_snapshot", None))
+        else {}
+    )
+    if callable(getattr(runtime, "record_legacy_kill_switch_state", None)):
+        runtime.record_legacy_kill_switch_state(
+            active=False,
+            reason=f"admin_legacy_recovery:{reason}",
+        )
+
+    cleared_managers: list[dict[str, Any]] = []
+    persist_failures: list[str] = []
+    for account_id in _hub_runner_ids(hub):
+        runner = _hub_runner_for_account(hub, account_id)
+        risk_manager = (
+            getattr(runner, "_risk_manager", None)
+            or getattr(runner, "risk_manager", None)
+        )
+        if risk_manager is None:
+            continue
+        was_active = bool(getattr(risk_manager, "kill_switch_activated", False))
+        setattr(risk_manager, "kill_switch_activated", False)
+        if hasattr(risk_manager, "_durable_kill_switch_bridge_succeeded"):
+            setattr(risk_manager, "_durable_kill_switch_bridge_succeeded", True)
+        if hasattr(risk_manager, "_pending_audit_reemit"):
+            setattr(risk_manager, "_pending_audit_reemit", False)
+        persist = getattr(risk_manager, "_persist_state", None)
+        if callable(persist):
+            try:
+                persist(force=True)
+            except TypeError:
+                try:
+                    persist()
+                except Exception as exc:
+                    persist_failures.append(f"{account_id}: {exc}")
+            except Exception as exc:
+                persist_failures.append(f"{account_id}: {exc}")
+        publish = getattr(risk_manager, "_publish_legacy_kill_switch_state_to_hub", None)
+        if callable(publish):
+            try:
+                publish()
+            except Exception:
+                pass
+        cleared_managers.append({
+            "broker_account_id": account_id,
+            "was_active": was_active,
+        })
+    if persist_failures:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "message": "Legacy risk-manager state could not be persisted.",
+                "failures": persist_failures,
+            },
+        )
+    after_snapshot = (
+        runtime.get_legacy_kill_switch_snapshot()
+        if callable(getattr(runtime, "get_legacy_kill_switch_snapshot", None))
+        else {}
+    )
+    return {
+        "actor": actor,
+        "before": before_snapshot,
+        "after": after_snapshot,
+        "cleared_risk_managers": cleared_managers,
+    }
+
+
+async def _kill_switch_post_recheck() -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "endpoints": ["/readyz", "/health/summary"],
+    }
+    try:
+        from app.server import readyz
+
+        ready_response = await readyz()
+        body = getattr(ready_response, "body", b"") or b""
+        try:
+            import json as _json
+
+            payload = _json.loads(body.decode("utf-8")) if body else {}
+        except Exception:
+            payload = {}
+        result["readyz"] = {
+            "status_code": int(getattr(ready_response, "status_code", 0) or 0),
+            "ready": bool(payload.get("ready", False)),
+            "reason": payload.get("reason"),
+            "kill_switch_divergence": payload.get("kill_switch_divergence"),
+            "kill_switch_legacy_active": payload.get("kill_switch_legacy_active"),
+        }
+    except Exception as exc:
+        result["readyz"] = {"error": str(exc)}
+    try:
+        from app.server import health_summary
+
+        summary = await health_summary()
+        result["health_summary"] = {
+            "status": summary.get("status") if isinstance(summary, dict) else None,
+            "ready": summary.get("ready") if isinstance(summary, dict) else None,
+            "reason": summary.get("reason") if isinstance(summary, dict) else None,
+        }
+    except Exception as exc:
+        result["health_summary"] = {"error": str(exc)}
+    return result
 
 
 @router.post("/kill-switch/trip")
@@ -2985,6 +3232,11 @@ def kill_switch_clear_with_password(
             detail={
                 "message": "Kill switch clear blocked by safety validation.",
                 "failures": validation.failures,
+                "next_step": (
+                    "If the only blocker is legacy kill-switch state after "
+                    "broker flatness is verified, use "
+                    "POST /admin/kill-switch/legacy-recovery-clear."
+                ),
             },
         )
 
@@ -3014,6 +3266,11 @@ def kill_switch_clear_with_password(
                 detail={
                     "message": "Kill switch clear blocked by safety validation.",
                     "failures": request_validation.failures,
+                    "next_step": (
+                        "If the only blocker is legacy kill-switch state after "
+                        "broker flatness is verified, use "
+                        "POST /admin/kill-switch/legacy-recovery-clear."
+                    ),
                 },
             )
         rollback.set_expected_post_record(record)  # type: ignore[attr-defined]
@@ -3057,6 +3314,153 @@ def kill_switch_clear_with_password(
         "record_id": record.id,
         "state": record.state.value,
         "transitions": transitions,
+    }
+
+
+@router.post("/kill-switch/legacy-recovery-clear")
+async def kill_switch_legacy_recovery_clear(
+    payload: KillSwitchLegacyRecoveryRequest,
+    request: Request,
+    ctx: AdminContext = Depends(get_admin_context),
+) -> dict:
+    """Audited recovery for legacy RiskManager kill-switch state.
+
+    Use only when `/admin/kill-switch/clear-with-password` is blocked by
+    active legacy state after operators have verified the broker terminal is
+    flat. The endpoint proves every registered broker account has no open
+    broker position/order evidence, clears the legacy publisher/risk-manager
+    state, then clears and rearms the durable kill switch through the normal
+    state-machine path.
+    """
+    ctx.require_role(AdminRole.ADMIN)
+    check_rate_limit(request)
+    _require_scope_entitlement(ctx, payload.scope, payload.scope_id)
+    if not str(payload.reason or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="reason is required and must be non-empty",
+        )
+    _verify_kill_switch_override_password(ctx, payload.password)
+
+    evidence, blockers = await _collect_legacy_recovery_flatness_evidence(ctx)
+    if blockers:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": (
+                    "Legacy kill-switch recovery refused because broker "
+                    "flatness/open-order preconditions are not satisfied."
+                ),
+                "failures": blockers,
+                "evidence": evidence,
+                "next_step": (
+                    "Flatten broker positions and cancel broker orders first, "
+                    "then retry legacy recovery clear."
+                ),
+            },
+        )
+
+    from app.risk.kill_switch import (
+        KillSwitchClearRequest,
+        KillSwitchScope,
+        KillSwitchState,
+    )
+    try:
+        scope = KillSwitchScope(payload.scope.upper())
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
+
+    legacy_snapshot = _clear_legacy_kill_switch_runtime_state(
+        actor=ctx.caller,
+        reason=str(payload.reason).strip(),
+    )
+
+    ksm = _get_kill_switch_manager()
+    record = ksm.get_record(scope, payload.scope_id)
+    transitions: list[str] = []
+    if record is not None and record.state != KillSwitchState.INACTIVE:
+        if record.state == KillSwitchState.TRIPPED:
+            import uuid as _uuid
+
+            clear_req = KillSwitchClearRequest(
+                scope=scope,
+                scope_id=payload.scope_id,
+                actor=ctx.caller,
+                reason_code=payload.reason,
+                request_id=_uuid.uuid4().hex,
+                break_glass=False,
+            )
+            rollback = _kill_switch_rollback_factory(ksm, scope, payload.scope_id)
+            try:
+                record, request_validation = ksm.request_clear(
+                    clear_req,
+                    lambda req: _kill_switch_clear_validation(req, fail_closed=True),
+                )
+            except (KeyError, ValueError) as exc:
+                raise HTTPException(status_code=409, detail=str(exc))
+            if not request_validation.passed:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "message": "Durable kill-switch clear blocked after legacy recovery.",
+                        "failures": request_validation.failures,
+                    },
+                )
+            rollback.set_expected_post_record(record)  # type: ignore[attr-defined]
+            _save_kill_switch_state(ksm, rollback=rollback)
+            transitions.append("CLEAR_PENDING")
+
+        if record.state == KillSwitchState.CLEAR_PENDING:
+            rollback = _kill_switch_rollback_factory(ksm, scope, payload.scope_id)
+            try:
+                record = ksm.confirm_clear(scope, payload.scope_id)
+            except (KeyError, ValueError) as exc:
+                raise HTTPException(status_code=409, detail=str(exc))
+            rollback.set_expected_post_record(record)  # type: ignore[attr-defined]
+            _save_kill_switch_state(ksm, rollback=rollback)
+            transitions.append("CLEARED")
+
+        if record.state == KillSwitchState.CLEARED:
+            rollback = _kill_switch_rollback_factory(ksm, scope, payload.scope_id)
+            try:
+                record = ksm.rearm(scope, payload.scope_id, actor=ctx.caller)
+            except (KeyError, ValueError) as exc:
+                raise HTTPException(status_code=409, detail=str(exc))
+            rollback.set_expected_post_record(record)  # type: ignore[attr-defined]
+            _save_kill_switch_state(ksm, rollback=rollback)
+            transitions.append("INACTIVE")
+
+    post_recheck = await _kill_switch_post_recheck()
+    emit_audit_event(
+        actor=ctx.caller,
+        action="kill_switch_legacy_recovery_clear",
+        resource_type="kill_switch",
+        resource_id=str(payload.scope_id),
+        metadata={
+            "scope": payload.scope,
+            "scope_id": payload.scope_id,
+            "reason": payload.reason,
+            "broker_flatness_evidence": evidence,
+            "legacy_snapshot": legacy_snapshot,
+            "durable_transitions": transitions,
+            "post_recheck": post_recheck,
+            "request_id": _request_id_from_request(request),
+        },
+        request_id=_request_id_from_request(request),
+    )
+    state = getattr(record, "state", KillSwitchState.INACTIVE)
+    state_value = getattr(state, "value", str(state))
+    return {
+        "status": "inactive" if state_value == "INACTIVE" else "partial",
+        "record_id": getattr(record, "id", None),
+        "state": state_value,
+        "legacy_recovered": True,
+        "durable_transitions": transitions,
+        "broker_flatness_evidence": evidence,
+        "post_recheck": post_recheck,
+        "next_step": (
+            "Review /readyz and /health/summary before re-enabling any strategy mutations."
+        ),
     }
 
 

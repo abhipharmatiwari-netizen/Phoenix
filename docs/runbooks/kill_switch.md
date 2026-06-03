@@ -225,6 +225,46 @@ tokens. Do not use that legacy sequence as the dashboard SOP.
 Do **not** issue clear based on Phoenix's empty position view alone —
 see Step 2.
 
+### Legacy recovery clear
+
+If `clear-with-password` is blocked only because legacy
+`RiskManager.kill_switch_activated` is still active after broker-side
+flatness has been verified, use the audited recovery endpoint instead
+of manually editing `risk_positions.json`:
+
+```http
+POST /admin/kill-switch/legacy-recovery-clear
+Authorization: Bearer <ADMIN_ACCESS_TOKEN>
+Content-Type: application/json
+
+{"scope":"GLOBAL","scope_id":"GLOBAL","password":"<override password from vault ceremony>","reason":"broker flat verified; legacy halt stale"}
+```
+
+This endpoint requires the same ADMIN bearer session and file-mounted
+override password as `clear-with-password`. It first checks every
+registered broker runner for zero broker/state-store position quantity
+and zero non-terminal broker/state-store orders. If any account is not
+flat, has an open order, is outside the caller entitlement, or cannot
+be inspected, the request returns HTTP 409 with `failures`, `evidence`,
+and `next_step`.
+
+Only after those preconditions pass, the endpoint:
+
+- publishes the legacy kill-switch state as inactive
+- clears each runner's legacy `RiskManager.kill_switch_activated` flag
+  and persists the legacy risk-state shadow file
+- advances the durable `KillSwitchManager` through
+  `request_clear -> confirm_clear -> rearm` as needed
+- emits `kill_switch_legacy_recovery_clear` audit metadata with actor,
+  reason, broker-flatness evidence, legacy before/after state, durable
+  transitions, request id, and post-recheck summary
+- rechecks `/readyz` and `/health/summary` in-process and returns the
+  sanitized result in `post_recheck`
+
+Do not use this endpoint while broker exposure remains open. It is a
+recovery workflow for stale legacy state after flatness is proven, not
+a flattening or order-cancellation tool.
+
 ---
 
 ## Automated exit engines during kill-switch active

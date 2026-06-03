@@ -408,9 +408,10 @@ flowchart TD
         AUDIT[GET /admin/audit<br/>Audit event log]
     end
 
-    subgraph Control Tower -- disabled when DISABLE_CONTROL_TOWER_ROUTES=true
-        CT_MATRIX[GET /api/control_tower/matrix<br/>Control tower matrix view]
-        CT_TOGGLE[POST /api/control_tower/toggle<br/>Toggle control]
+    subgraph Control Tower -- read-only when management gates are disabled
+        CT_STATUS[GET /api/control_tower/status<br/>Read-only strategy status]
+        CT_MATRIX[GET /api/control_tower/matrix<br/>Strategy matrix plus capability]
+        CT_TOGGLE[POST /api/control_tower/toggle<br/>Audited toggle when safety gates pass]
     end
 
     subgraph ML Health

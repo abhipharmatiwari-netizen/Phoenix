@@ -533,10 +533,9 @@ app.include_router(admin_router)
 # The legacy demo_auth gate is no longer used; auth_routes has its own guards.
 app.include_router(auth_router)
 app.include_router(tenant_routes.router)
-if not _runtime_cfg.disable_control_tower_routes:
-    app.include_router(
-        control_tower_router, dependencies=[Depends(get_admin_context)]
-    )
+app.include_router(
+    control_tower_router, dependencies=[Depends(get_admin_context)]
+)
 app.include_router(bff_proxy_router)
 
 
