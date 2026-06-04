@@ -5,7 +5,6 @@ Used by strategies that need daily reference levels.
 
 from __future__ import annotations
 
-import http.client
 import json
 import logging
 from dataclasses import dataclass
@@ -13,7 +12,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, Optional
 
 from app.core.clock import IClock, SystemClock
-from app.core.order_client import AngelOrderClient, API_HOST
+from app.core.order_client import AngelOrderClient, _make_angel_connection
 from app.core.rate_limiter import rate_limiter
 
 logger = logging.getLogger(__name__)
@@ -126,7 +125,7 @@ class DailyLevelsCache:
             "todate": f"{to_date.isoformat()} 15:30",
         }
 
-        conn = http.client.HTTPSConnection(API_HOST)
+        conn = _make_angel_connection()
         body = json.dumps(payload)
         rate_limiter.acquire("historical")
         conn.request(

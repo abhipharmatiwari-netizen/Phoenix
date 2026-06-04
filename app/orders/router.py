@@ -1151,6 +1151,13 @@ class OrderRouter:
                 strategy_id=pnl_strategy_id,
                 signed_qty=signed_qty,
             )
+            if ownership_strategy_id is not None and pnl_strategy_id != strategy_id:
+                self._position_ownership_store.release_pending(
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    contract_key=contract_key,
+                    strategy_id=strategy_id,
+                )
         except Exception:
             logger.exception(
                 "OrderRouter: failed to record trade/PnL for hub_order_id=%s",

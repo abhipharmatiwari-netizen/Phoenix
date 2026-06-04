@@ -1998,6 +1998,13 @@ class OrderLifecycleService:
                     strategy_id=ownership_strategy,
                     signed_qty=signed_qty,
                 )
+                if ownership_strategy != ctx.strategy_id:
+                    self._position_ownership_store.release_pending(
+                        tenant_id=ctx.tenant_id,
+                        broker_account_id=ctx.broker_account_id,
+                        contract_key=ctx.contract_key,
+                        strategy_id=ctx.strategy_id,
+                    )
             except Exception:
                 logger.exception(
                     "OrderLifecycleService: ownership fill apply failed for broker_order_id=%s",

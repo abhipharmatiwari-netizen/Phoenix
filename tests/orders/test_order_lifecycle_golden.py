@@ -248,6 +248,75 @@ async def test_order_lifecycle_uses_broker_snapshot_for_delayed_complete_once(mo
 
 
 @pytest.mark.anyio
+async def test_order_lifecycle_releases_submitter_pending_lock_when_fill_owner_differs(monkeypatch):
+    monkeypatch.setenv("ORDER_LIFECYCLE_USE_BROKER_SNAPSHOT", "true")
+    state_store = StateStore()
+    ownership_spy = _OwnershipSpy()
+    lifecycle = OrderLifecycleService(
+        state_store=state_store,
+        pnl_engine=None,
+        position_ownership_store=ownership_spy,
+        processed_store=InMemoryProcessedTradeStore(),
+    )
+    monkeypatch.setattr(
+        "app.orders.order_lifecycle.insert_trade_record",
+        lambda row, **_kwargs: None,
+    )
+    contract_key = ContractKey(
+        underlying="NATURALGAS",
+        expiry="2026-03-24",
+        strike="310",
+        option_right="CE",
+        product_type="INTRADAY",
+    )
+
+    lifecycle.register_submission(
+        tenant_id="tenant-1",
+        broker_account_id="acc-1",
+        strategy_id="system::position_trailing_lock",
+        hub_order_id="tenant-1:acc-1:system::position_trailing_lock:oid-exit",
+        order_req=OrderRequest(
+            symbol="NATURALGAS24MAR26310CE",
+            quantity=1250,
+            side=OrderSide.SELL,
+            order_type=OrderType.MARKET,
+            product_type=ProductType.INTRADAY,
+            time_in_force=TimeInForce.DAY,
+            purpose=OrderPurpose.EXIT,
+        ),
+        response=OrderResponse(
+            broker_order_id="OID-SNAPSHOT-1",
+            status="OPEN",
+            message="accepted",
+            filled_quantity=0,
+            average_price=None,
+        ),
+        contract_key=contract_key,
+        ownership_strategy_id="ema20_strategy",
+    )
+
+    state_store.set_orders("acc-1", [])
+    state_store.set_order_snapshot(
+        "acc-1",
+        [_snapshot_order(status="COMPLETE", updated_at="2026-03-09T08:21:00+00:00")],
+    )
+
+    await lifecycle._tick_once()
+    await lifecycle._tick_once()
+
+    assert ownership_spy.fill_calls
+    assert ownership_spy.fill_calls[0]["strategy_id"] == "ema20_strategy"
+    assert ownership_spy.release_calls == [
+        {
+            "tenant_id": "tenant-1",
+            "broker_account_id": "acc-1",
+            "contract_key": contract_key,
+            "strategy_id": "system::position_trailing_lock",
+        }
+    ]
+
+
+@pytest.mark.anyio
 async def test_order_lifecycle_uses_broker_snapshot_for_delayed_reject_once(monkeypatch):
     monkeypatch.setenv("ORDER_LIFECYCLE_USE_BROKER_SNAPSHOT", "true")
     state_store = StateStore()

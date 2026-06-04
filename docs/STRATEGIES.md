@@ -1,6 +1,6 @@
 # Phoenix Strategies — Operator Reference
 
-> **Status:** Authoritative end-to-end reference for every strategy registered in `app/strategies/registry.py`. Generated 2026-05-08.
+> **Status:** Authoritative end-to-end reference for every strategy registered in `app/strategies/registry.py`. Updated 2026-06-03 for EMA20-only live routing.
 > All defaults below come from `app/config/strategy_env.yaml`. Per-tenant overrides may be present in the `strategy_configs` Postgres table — when in doubt, check there first. Cited line numbers are accurate at the commit that introduced this doc; treat them as starting points if files have moved.
 
 ---
@@ -10,9 +10,9 @@
 | # | Canonical ID | Display name | Production status | Underlyings (whitelist) | Direction | Timeframe | Source file |
 |---|---|---|---|---|---|---|---|
 | 1 | `ema20_strategy` | EMA 20 Strategy | **ACTIVE** | NIFTY, BANKNIFTY, NG_FUT | SELL CE | 5m | `app/strategies/ema20_strategy.py` |
-| 2 | `exclusive_nifty_ce_buy` | Exclusive Nifty CE Buy | **ACTIVE** | NIFTY only | BUY CE | 30s | `app/strategies/exclusive_nifty_ce_buy.py` |
-| 3 | `put_momentum_scalper` | Put Momentum Scalper | **ACTIVE** | NIFTY, BANKNIFTY | BUY PE | 5m + 15m | `app/strategies/put_momentum_scalper.py` |
-| 4 | `nifty_weekly_credit_spreads` | Nifty Weekly Credit Spreads | **ACTIVE** (live since 2026-05-08) | NIFTY only | SELL spread / iron condor | 5m | `app/strategies/nifty_weekly_credit_spreads.py` |
+| 2 | `exclusive_nifty_ce_buy` | Exclusive Nifty CE Buy | _DISABLED_ | NIFTY only | BUY CE | 30s | `app/strategies/exclusive_nifty_ce_buy.py` |
+| 3 | `put_momentum_scalper` | Put Momentum Scalper | _DISABLED_ | NIFTY, BANKNIFTY | BUY PE | 5m + 15m | `app/strategies/put_momentum_scalper.py` |
+| 4 | `nifty_weekly_credit_spreads` | Nifty Weekly Credit Spreads | _DISABLED_ | NIFTY only | SELL spread / iron condor | 5m | `app/strategies/nifty_weekly_credit_spreads.py` |
 | 5 | `put_buy` | Put Buy | _DISABLED_ | declared multi but not whitelisted | BUY PE | 5m + 15m | `app/strategies/put_buy_live.py` |
 | 6 | `put_reversion_writer` | Put Reversion Writer | _DISABLED_ | not whitelisted | SELL PE | 5m + 15m | `app/strategies/put_reversion_writer.py` |
 | 7 | `ce_orb` | CE ORB | _DISABLED / incomplete_ | not whitelisted | BUY CE | 1m | `app/strategies/ce_orb.py` |
@@ -21,7 +21,7 @@
 | 10 | `delta_strangle` | Delta Strangle | _DISABLED_ | NIFTY, BANKNIFTY (disabled) | SELL CE+PE | daily fixed | `app/strategies/delta_strangle.py` |
 | 11 | `oi_ml_ce_seller` | OI/ML CE Seller | _SHADOW ONLY / DISABLED_ | NIFTY only | SELL CE via bear-call-spread intent | 1m option-chain snapshots | `app/strategies/oi_ml_ce_seller.py` |
 
-A strategy is "ACTIVE" when **all three** are true: (a) `strategies[].enabled: true` in `strategy_env.yaml`, (b) its name appears in `instruments.<UNDERLYING>.allowed_strategies` for at least one enabled underlying, (c) `strategy_class` is wired up in `multi_instrument_stream.py` for the production runtime. `oi_ml_ce_seller` is registered/listed for tracking but remains disabled for live trading and is validated only through the shadow sidecar. Current sidecar progress is tracked in [OI/ML Shadow Sidecar Runbook](runbooks/oi_ml_shadow_sidecar.md).
+A strategy is "ACTIVE" when **all three** are true: (a) `strategies[].enabled: true` in `strategy_env.yaml`, (b) its name appears in `instruments.<UNDERLYING>.allowed_strategies` for at least one enabled underlying, (c) `strategy_class` is wired up in `multi_instrument_stream.py` for the production runtime. As of 2026-06-03, live routing is intentionally EMA20-only: enabled instruments allow only `ema20_strategy`, selector mappings list only `ema20_strategy`, and `max_active_per_underlying` is 1. `oi_ml_ce_seller` is registered/listed for tracking but remains disabled for live trading and is validated only through the shadow sidecar. Current sidecar progress is tracked in [OI/ML Shadow Sidecar Runbook](runbooks/oi_ml_shadow_sidecar.md).
 
 ---
 
@@ -65,7 +65,7 @@ Every strategy submits exits through `place_order_via_bridge → OrderRouter`. T
 Applies to **every** strategy. If a single broker fill exceeds the open quantity (carrying `net_qty` through zero), `OrderLifecycleService._apply_position_fill` routes the record to `RECONCILING` with state-reason `flip_fill_blocked:close_leg=N:open_leg=M`, instead of allowing `filled_qty_close > filled_qty_open`. Watch: `POSITION_FLIP_FILL_DETECTED` audit event. See [PR #199](https://github.com/abhipharmatiwari-netizen/Phoenix/pull/199).
 
 ### Dynamic policy (regime-based parameter overrides)
-Several strategies (`ema20_strategy`, `exclusive_nifty_ce_buy`, `put_momentum_scalper`) load a regime-keyed policy block from `strategy_env.yaml` (`dynamic_policy.profiles.<REGIME>`) that can override `qty_mult`, `sl_pct`, `tp_pct`, `disable_entries`, etc. Regimes: `TRENDING`, `CHOPPY`, `HIGH_VOL`, `NO_TRADE`. Set `policy_id` in YAML; loaded from the `canonical_strategy_registry` table at runtime.
+EMA20 loads a regime-keyed policy block from `strategy_env.yaml` (`dynamic_policy.profiles.<REGIME>`) that can override `qty_mult`, `sl_pct`, `tp_pct`, `disable_entries`, etc. Regimes: `TRENDING`, `CHOPPY`, `HIGH_VOL`, `NO_TRADE`. Set `policy_id` in YAML; loaded from the `canonical_strategy_registry` table at runtime. Other strategies may still have historical dynamic-policy blocks in YAML, but they are disabled in the live config.
 
 ### Per-position trailing profit lock (account-level, tick mode deployed 2026-05-19)
 Cuts across all strategies via `PositionTrailingLockEngine` (env: `POSITION_TRAILING_LOCK_ENABLED=true`). Independent of strategy-level trail logic; tracks each open position's peak unrealised P&L and exits when it falls below `peak × (1 − giveback_pct)` (default 10%) once peak ≥ ₹500. The default path runs from the hub profit watchdog (`HUB_SUBSCRIPTION_POLL_INTERVAL`, clamped to a 10s minimum); optional tick-driven evaluation can also be enabled with `POSITION_TRAILING_LOCK_TICK_ENABLED=true`. Tick mode evaluates every registered hub account runner, including multiple SHADOW runners; shadow strategies that need independent locks must retain separate broker-account position views rather than collapsing into one account+symbol net position. Trailing-lock exits execute as `system::position_trailing_lock`, but the engine must preserve the original owner strategy for lifecycle close/PnL attribution. If the broker position snapshot has no owner and the ownership ledger has already released, the engine falls back to non-terminal internal position records for the same tenant/account/contract and selects the non-system owner. This fallback is strategy-agnostic and covers `ema20_strategy` and any other strategy that owns the open internal record. See commit `29c24f0`.
@@ -218,7 +218,7 @@ EMA20 reads its regime classification from `RegimeClassifier.update()` (line 133
 ### Identity
 - **Class:** `ExclusiveNiftyCeBuyStrategy` in [app/strategies/exclusive_nifty_ce_buy.py](../app/strategies/exclusive_nifty_ce_buy.py)
 - **Direction:** BUY ATM CE.
-- **Underlyings active:** NIFTY only.
+- **Production status:** Disabled in LIVE as of 2026-06-03 EMA20-only routing. Historical implementation targets NIFTY only.
 
 ### Entry logic (30s timeframe)
 Bullish pullback to EMA20 with momentum alignment:
@@ -351,7 +351,7 @@ Policy ID `exclusive_nifty_ce_v1` (yaml:624). Regime is classified by `AdaptiveP
 ### Identity
 - **Class:** `PutMomentumScalperStrategy` in [app/strategies/put_momentum_scalper.py](../app/strategies/put_momentum_scalper.py)
 - **Direction:** BUY ATM/ITM1 PE.
-- **Underlyings active:** NIFTY_IDX, BANKNIFTY_IDX (declared also for FINNIFTY/SENSEX/MIDCPNIFTY but those instruments are disabled).
+- **Production status:** Disabled in LIVE as of 2026-06-03 EMA20-only routing. Historical implementation targets NIFTY_IDX and BANKNIFTY_IDX.
 
 ### Entry logic (5m + 15m)
 1. **15m bear filter:** `close < EMA20 × (1 + trend_ema_tolerance_ratio)`.
@@ -455,7 +455,9 @@ Policy ID `put_momentum_nifty_banknifty_v1` (yaml:698). The strategy DOES classi
 | `atr_norm_high` | 1.5 |
 | `chop_adx_max` | 18 |
 
-**Routing-level regime gating (central selector, yaml:827-833):** the selector dispatches put_momentum_scalper bars to this strategy ONLY when regime ∈ `{TRENDING, HIGH_VOL}` for both NIFTY and BANKNIFTY. In CHOPPY / NO_TRADE the selector silently routes elsewhere — the strategy's `on_bar` is never called. So the regime gate, although not implemented inside the strategy, is enforced one layer above it.
+**Current LIVE routing:** As of 2026-06-03, `put_momentum_scalper` is disabled, absent from enabled instrument allow-lists, and absent from selector mappings. The routing paragraph below is historical code-reference context only.
+
+**Historical routing-level regime gating (disabled in current LIVE):** the selector dispatches put_momentum_scalper bars to this strategy ONLY when regime ∈ `{TRENDING, HIGH_VOL}` for both NIFTY and BANKNIFTY. In CHOPPY / NO_TRADE the selector silently routes elsewhere — the strategy's `on_bar` is never called. So the regime gate, although not implemented inside the strategy, is enforced one layer above it.
 
 **Entry-freeze keys** (captured at entry time, immune to mid-trade regime drift, line 163-168):
 `min_atr_ratio, rsi_min, rsi_max, lookback_breakdown_bars` — once an entry fires, the regime that admitted it is locked for the trade's lifetime. Subsequent regime drift cannot re-tighten or re-loosen these gates mid-position.
@@ -472,7 +474,7 @@ Policy ID `put_momentum_nifty_banknifty_v1` (yaml:698). The strategy DOES classi
 ### Identity
 - **Class:** `NiftyWeeklyCreditSpreadStrategy` in [app/strategies/nifty_weekly_credit_spreads.py](../app/strategies/nifty_weekly_credit_spreads.py)
 - **Direction:** SELL credit spread (PUT_SPREAD / CALL_SPREAD / IRON_CONDOR), each with a long hedge leg.
-- **Underlyings active:** NIFTY only. **Live since 2026-05-08** (was structurally idle before — see commit `a1b55de`).
+- **Production status:** Disabled in LIVE as of 2026-06-03 EMA20-only routing. Historical implementation targets NIFTY only.
 
 ### Entry logic (5m)
 Three regime branches, all gated on a sane implied-move check:
@@ -525,9 +527,9 @@ Three regime branches, all gated on a sane implied-move check:
 - **Spread:** `spread_id, spread_type, short_leg, long_leg, entry_credit, width_pts, max_loss_rupees, entry_time, expiry, extra_legs, short_exit_done, long_exit_done`.
 
 ### Known caveats
-- **Strategy was structurally idle until 2026-05-08** — `enabled: false` flag in YAML and absence from `NIFTY_IDX.allowed_strategies` meant the stream worker never instantiated it. Both fixed in commit `a1b55de`.
+- **Disabled in current LIVE routing:** `enabled: false` and absent from enabled instrument allow-lists as of 2026-06-03 EMA20-only routing.
 - **Account equity is hard-coded in YAML** (`account_equity: 20000`) — risk sizing depends on this. Update when capital changes.
-- **Live but signal-rare:** strict regime + ATM-straddle band means most days produce zero trades.
+- **Historical signal rarity:** strict regime + ATM-straddle band meant most days produced zero trades when evaluated; the strategy is disabled in current LIVE routing.
 
 ### Tests
 `tests/strategies/test_nifty_weekly_credit_spreads.py`.

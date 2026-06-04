@@ -31,6 +31,11 @@ Dispatch happens once per attached strategy for each closed underlying bar, so s
 
 ## Put-momentum no-position exit rejections
 
+Current live note: as of 2026-06-03, `put_momentum_scalper` is disabled in LIVE
+routing. These diagnostics are for historical log review or stale-image
+verification only; a current live backend should not attach or dispatch this
+strategy.
+
 Observed during 2026-06-03 OCI live monitoring: after a put-momentum exit filled and
 broker-flat evidence was observed, stale in-memory strategy state could continue to
 emit `PUT_MOM_EXIT_*` orders. The router correctly rejected those exits in LIVE with:
@@ -152,6 +157,9 @@ Expected success evidence:
 - `/readyz` reports stream-worker and balance-sync readiness for automated LIVE.
 - backend logs show universe build, WebSocket subscription, and strategy attachment without fatal restart loops.
 - the latest startup snapshot exists under the mounted log path.
+- for current EMA20-only LIVE, enabled underlyings attach only `ema20_strategy`,
+  non-EMA entries are disabled in `strategy_switch`, and selector mappings for
+  enabled underlyings contain no non-EMA strategies.
 
 ## Failure handling and rollback
 

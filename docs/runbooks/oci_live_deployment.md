@@ -1,6 +1,6 @@
 # Phoenix OCI LIVE Deployment Runbook
 
-Status: current operator runbook for the OCI VM verified on 2026-05-25.
+Status: current operator runbook for the OCI VM verified on 2026-06-03.
 
 This runbook describes what is actually running on the OCI VM. It does not
 describe the older intended OCIR/external-Postgres deployment as current state.
@@ -33,6 +33,8 @@ Latest verified live deployment:
 - VM checkout: `main` at `132e0ea`
 - backend image: `phoenix-local-backend:local-132e0ea`
 - nginx image: `phoenix-local-nginx:local-132e0ea`
+- live strategy routing: EMA20-only; `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1`
+  and non-EMA strategies disabled in `strategy_configs`
 - liveness: backend `/health` and nginx `/health` return HTTP 200
 - readiness: `/readyz` returns HTTP 503 with `ready=false` because one durable
   global kill switch is active; kill-switch divergence is false. This is a
@@ -128,6 +130,12 @@ PHOENIX_STATE_HOST_PATH
 PROFIT_DAILY_TARGET
 RISK_MAX_DAILY_LOSS
 ```
+
+Current live strategy posture as of 2026-06-03: set
+`AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1` for EMA20-only routing. Do not
+restore older multi-strategy values unless selector mappings, instrument
+allow-lists, `strategy_configs`, tests, and release evidence are updated
+together.
 
 Runtime secret file names:
 

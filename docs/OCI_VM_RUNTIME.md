@@ -1,6 +1,6 @@
 # OCI VM Runtime Evidence
 
-Last verified: 2026-06-03 07:07 UTC from the running OCI VM.
+Last verified: 2026-06-04 05:29 UTC from the running OCI VM.
 OI/ML shadow sidecar evidence was updated on 2026-05-23 00:12 IST.
 
 The OCI VM is the production source of truth. This file intentionally records
@@ -13,13 +13,13 @@ OCIDs, broker identifiers, and tokens are redacted.
 |---|---|---|---|---|
 | Host | `phoenix-vm`, `opc`, `/home/opc` | `hostname; date; whoami; pwd` | VM reachable through OCI Bastion; VM VNIC has no public IP | Do not document private IPs |
 | Deployed repo path | `/opt/phoenix/app` | Compose labels and `git -C` | Active checkout lives under `/opt/phoenix/app` | `/opt/phoenix` also contains operator-owned runtime files |
-| Active git commit/branch | `main`, `132e0ea` | `git -C /opt/phoenix/app branch --show-current`, `rev-parse HEAD` | VM checkout is on `main` at `132e0ea` with no tracked local changes | Untracked VM-owned files are intentionally omitted from evidence commands |
+| Active git commit/branch | `main`, `132e0ea` plus live operator config drift | `git -C /opt/phoenix/app branch --show-current`, `rev-parse HEAD`, mounted config/env evidence | VM checkout is on `main` at `132e0ea`; `/opt/phoenix/app/app/config/strategy_env.yaml` and `/opt/phoenix/phoenix-deploy.env` were updated for EMA20-only routing | Commit/tag remains pinned; document this as config/env/control-plane drift until the next image release |
 | Compose project | `phoenix-oci-live` | `docker inspect ... Labels` | backend, nginx, and watchdog have Compose labels | `phoenix-oci-postgres` has no Compose labels |
 | Compose files used | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` | `com.docker.compose.project.config_files` labels | These are the active Phoenix Compose files for labelled containers | Runtime override must be treated as authoritative |
 | Env file used | `/opt/phoenix/phoenix-deploy.env` | runtime scripts and Compose commands | Non-secret deploy env file exists on VM | Document names only, not values |
 | Running Phoenix containers | `phoenix-oci-backend`, `phoenix-oci-web`, `phoenix-oci-watchdog`, `phoenix-oci-postgres` | `docker ps`, `docker inspect` | All four were running during audit | Aurelium containers also run on the host but are outside Phoenix docs |
 | Stopped Phoenix containers | none shown by name | `docker ps -a` | `phoenix-oci-optimizer` is not present | Optimizer systemd units are also absent |
-| Backend image | `phoenix-local-backend:local-132e0ea` | `docker inspect phoenix-oci-backend` | Local image, not OCIR | Recreated 2026-06-03 after put-momentum stale-exit retry fix |
+| Backend image | `phoenix-local-backend:local-132e0ea` | `docker inspect phoenix-oci-backend` | Local image, not OCIR | Recreated 2026-06-03 after EMA20-only live routing config/env update |
 | Web image | `phoenix-local-nginx:local-132e0ea` | `docker inspect phoenix-oci-web` | Local image, not OCIR | Recreated 2026-06-03 with the same pinned tag |
 | Database image | `postgres:16-alpine`, image ID `sha256:4e6e670...` | `docker inspect phoenix-oci-postgres` | VM-local Postgres container | No Docker healthcheck |
 | Watchdog image | `docker:cli`, image ID `sha256:17b5c235...` | `docker inspect phoenix-oci-watchdog` | Docker CLI sidecar | Has Docker socket mount |
@@ -29,6 +29,7 @@ OCIDs, broker identifiers, and tokens are redacted.
 | Runtime mode | `HUB_AUTHORITATIVE` | `/health/summary` | Health summary reports hub-authoritative mode | `TRADE_MODE` env was not present in selected env check |
 | Order path | `strategy_bridge_order_router` | `/health` | Broker-facing order path is the strategy bridge/order router path | Do not document legacy path as current authority |
 | Backend env mode | `APP_ENV=production`, `CONTROL_PLANE_BACKEND=postgres`, `ENABLE_MULTI_HUB=true`, `DISABLE_CONTROL_TOWER_ROUTES=true` | selected `docker exec phoenix-oci-backend sh -lc 'printenv ...'` | Current backend env aligns with hub/Postgres authority | Secret-like values were redacted; Control Tower read-only status endpoints remain mounted, while mutating management controls stay disabled unless the LIVE mutation gate is explicitly enabled |
+| Live strategy routing | EMA20-only: enabled strategy names are `ema20_strategy`; enabled NIFTY_IDX, BANKNIFTY_IDX, and NG_FUT allow only `ema20_strategy`; selector mappings contain no non-EMA names; `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1` | container config validation and Postgres `strategy_configs` query | `exclusive_nifty_ce_buy`, `put_momentum_scalper`, and `nifty_weekly_credit_spreads` are disabled at config, instrument policy, selector, and control-plane layers | Durable kill switch remained active during verification; this routing change did not clear it |
 | Database backend | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres`, `CONTROL_PLANE_PG_SSLMODE=prefer`, `LIVE_PG_SSL_SKIP_CHECK=true` | selected backend env | VM-local Postgres, not external OCI DB | Remote/cloud Postgres docs are non-current |
 | Secret model | `/run/secrets/admin_api_key`, `/run/secrets/auth_token_secret`, `/run/secrets/control_plane_pg_password`, `/run/secrets/angel_postback_token`, `/run/secrets/admin_kill_switch_override` | mounts/env/runbook evidence | Secret values are mounted as files; kill-switch override is file-only | Never copy values into docs or env examples |
 | Backend mounts | `/opt/phoenix/logs`, `/opt/phoenix/state`, `/opt/phoenix/certs`, `/run/secrets/*`, plus source-file bind mounts | `docker inspect .Mounts` | Runtime includes host state/log/cert mounts and source overlays | Source bind mounts are current drift |
@@ -94,6 +95,55 @@ Post-deploy evidence:
 - deployed import probe returned `put_momentum_import_ok`.
 - no new `ORDER_EXIT_REJECTED_NO_POSITION_EVIDENCE` entries appeared after the
   12:29 IST deployment/restart through the 12:35 IST five-minute boundary.
+
+## 2026-06-03 EMA20-Only Live Routing Update
+
+Live operator change applied after repo-local config edits:
+
+- `/opt/phoenix/app/app/config/strategy_env.yaml` was backed up to
+  `/opt/phoenix/app/app/config/strategy_env.yaml.bak_20260603_ema20_only` and
+  updated so only `ema20_strategy` is enabled in LIVE routing.
+- `/opt/phoenix/phoenix-deploy.env` was backed up to
+  `/opt/phoenix/phoenix-deploy.env.bak_20260603_ema20_only` and updated with
+  `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1`.
+- Postgres `strategy_configs` rows were verified as `ema20_strategy=true` and
+  `exclusive_nifty_ce_buy=false`, `put_momentum_scalper=false`,
+  `nifty_weekly_credit_spreads=false`.
+- The backend was recreated with the documented compose files and reported
+  Docker healthy after restart.
+- Container validation reported `enabled_strategy_names=['ema20_strategy']`,
+  enabled NIFTY_IDX/BANKNIFTY_IDX/NG_FUT allow-lists containing only
+  `ema20_strategy`, selector max active value `1`, and no non-EMA selector names
+  for enabled underlyings.
+- Image tag remains `phoenix-local-backend:local-132e0ea`; this was a
+  config/env/control-plane update, not a new image build.
+- The durable kill switch remained active during verification; this change did
+  not clear it.
+
+## 2026-06-04 Live Monitor Remediations
+
+Live monitoring for the 09:00-15:30 IST window started at 09:26 IST, so
+09:00-09:26 was covered retrospectively and later scans ran from the VM-side
+monitor under `/opt/phoenix/logs/live_monitor_20260604`.
+
+Findings and remediation:
+
+- Issue #339: startup daily-level fetches for NIFTY_IDX and BANKNIFTY_IDX timed
+  out because `DailyLevelsCache` used a direct Angel HTTPS connection instead
+  of the existing proxy-aware broker connection helper. The code path now uses
+  the proxy-aware helper and has unit coverage.
+- Issue #340: startup loaded three stale
+  `__pending__:system::position_trailing_lock` ownership rows from 2026-05-27
+  and 2026-05-29. Root cause was terminal system-exit fills applying ownership
+  to the original strategy while leaving the submitting system strategy's
+  pending lock unreleased. Terminal-fill handling now releases the original
+  submitting strategy's pending lock when the fill owner differs.
+- One-time cleanup deleted exactly three stale pending rows after evidence
+  showed `/readyz ready=true`, position-authority recovery count `0`, active
+  outbox count `0`, and no matching active internal positions. Post-cleanup
+  query returned zero `__pending__:system::position_trailing_lock` rows.
+- The 09:07 IST kill-switch clear was an authenticated admin action and left
+  `/readyz` green with `kill_switch_active_count=0`.
 
 ## 2026-05-22 BANKNIFTY Position-Authority Recovery
 

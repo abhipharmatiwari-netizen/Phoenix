@@ -4,6 +4,10 @@
 > Current runnable values come from `app/config/strategy_env.yaml`, database-backed
 > strategy config, and runtime overrides. Do not apply parameter changes from this
 > file directly to LIVE without release evidence and operator sign-off.
+> As of 2026-06-03, LIVE routing is EMA20-only: `ema20_strategy` is the
+> only enabled live strategy, enabled instruments allow only `ema20_strategy`,
+> and `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1`. Non-EMA sections below
+> are historical research references only.
 
 **Backtest period:** 2026-02-23 to 2026-03-20 (19 trading days)
 **Data source:** `indicator_bars` table (PostgreSQL)
@@ -32,7 +36,7 @@
 ```yaml
 # exclusive_nifty_ce_buy — strategy_env.yaml
 - name: "exclusive_nifty_ce_buy"
-  enabled: true
+  enabled: false  # disabled in LIVE as of 2026-06-03 EMA20-only routing
   instruments:
     - "NIFTY_IDX"
   params:
@@ -306,7 +310,7 @@ Reproducer: `scripts/ops/run_replay_quiet.py --mode optimize --strategy ema20_st
 ```yaml
 # put_momentum_scalper — strategy_env.yaml
 - name: "put_momentum_scalper"
-  enabled: true
+  enabled: false  # disabled in LIVE as of 2026-06-03 EMA20-only routing
   instruments:
     - label: "NIFTY_IDX"
       entry_start: "09:20"
@@ -369,18 +373,17 @@ Reproducer: `scripts/ops/run_replay_quiet.py --mode optimize --strategy ema20_st
 - **15m bars:** 456 bars (NIFTY/BANKNIFTY only — FINNIFTY/SENSEX/MIDCPNIFTY stopped after Feb 26).
 - **`di_spread` column is NULL** in Postgres despite `plus_di` and `minus_di` being populated. Strategies compute spread inline.
 
-### Risk-Adjusted Ranking (by Profit Factor)
-1. **exclusive_nifty_ce_buy** — PF=5.09 (optimized), most reliable signal
-2. **ema20_strategy NG_FUT** — PF=2.55 (EMA-8, strongest EMA20 instance)
-3. **put_momentum_scalper** — PF=inf (too few trades for statistical validity)
-4. **ema20_strategy BANKNIFTY** — PF=1.08 (marginal edge)
-5. **ema20_strategy NIFTY** — PF=0.96 (slightly negative, needs more data)
+### Historical Research Ranking (Not LIVE Enablement)
+1. **exclusive_nifty_ce_buy** - PF=5.09 in the historical sweep, but disabled in LIVE.
+2. **ema20_strategy NG_FUT** - PF=2.55 (EMA-8, strongest EMA20 instance).
+3. **put_momentum_scalper** - PF=inf in the historical sweep, but too few trades for statistical validity and disabled in LIVE.
+4. **ema20_strategy BANKNIFTY** - PF=1.08 (marginal edge).
+5. **ema20_strategy NIFTY** - PF=0.96 (slightly negative, needs more data).
 
-### Recommended Priority Changes
-1. **Apply immediately:** `exclusive_nifty_ce_buy` ADX/DI relaxation (highest confidence, clearest improvement)
-2. **Apply with monitoring:** `ema20_strategy` NIFTY min_atr reduction to 25.0
-3. **Apply cautiously:** `put_momentum_scalper` RSI range widening (low sample size)
-4. **Investigate further:** EMA20 SL/TP mechanism (never triggers — consider ATR-based exits)
+### Current LIVE Priority
+1. **Maintain EMA20-only routing:** do not re-enable `exclusive_nifty_ce_buy`, `put_momentum_scalper`, or `nifty_weekly_credit_spreads` without fresh release evidence and operator approval.
+2. **Apply with monitoring:** EMA20-only parameter changes such as NIFTY `min_atr` reduction remain candidates, but must be validated against current live data first.
+3. **Investigate further:** EMA20 SL/TP mechanism. Historical replay rarely triggers premium-based exits; use real-fill or real-option data before changing exits.
 
 ### Caveats
 - **19-day sample** is insufficient for robust parameter optimization. These findings should be validated over 60+ trading days.
