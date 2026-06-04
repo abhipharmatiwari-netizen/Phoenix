@@ -1,6 +1,7 @@
 import importlib
 from datetime import datetime, timedelta, timezone
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -135,6 +136,82 @@ async def test_hub_start_and_stop(monkeypatch):
 def test_control_plane_outage_error_classifier():
     assert Hub._is_control_plane_outage_error("ConnectionTimeout('postgres down')")
     assert not Hub._is_control_plane_outage_error("ValueError('bad payload')")
+
+
+def test_disabled_reconcile_level_keeps_live_expiry_as_warning():
+    now = datetime.now(timezone.utc)
+    live_expired = SubscriptionModel(
+        subscription_id="live-expired",
+        tenant_id="t1",
+        broker_account_id="ba1",
+        mode="LIVE",
+        start_at=now - timedelta(days=2),
+        end_at=now - timedelta(days=1),
+    )
+    shadow_expired = SubscriptionModel(
+        subscription_id="shadow-expired",
+        tenant_id="t1",
+        broker_account_id="ba2",
+        mode="SHADOW",
+        start_at=now - timedelta(days=2),
+        end_at=now - timedelta(days=1),
+    )
+
+    assert (
+        Hub._disabled_reconcile_level("inactive_subscriptions", [live_expired])
+        == logging.WARNING
+    )
+    assert (
+        Hub._disabled_reconcile_level("inactive_subscriptions", [shadow_expired])
+        == logging.INFO
+    )
+
+
+@pytest.mark.anyio
+async def test_reconcile_deduplicates_expired_shadow_subscription_logs(
+    monkeypatch, caplog
+):
+    tenant = TenantModel(tenant_id="t1", name="Tenant", email="t@example.com", status="active")
+    account = BrokerAccountModel(
+        broker_account_id="ba1",
+        tenant_id="t1",
+        broker_type="angel",
+        display_name="Shadow Account",
+        client_code="123",
+        secret_ref="ref",
+        trading_mode="SHADOW",
+    )
+    subscription = SubscriptionModel(
+        subscription_id="sub-shadow-expired",
+        tenant_id="t1",
+        broker_account_id="ba1",
+        mode="SHADOW",
+        start_at=datetime.now(timezone.utc) - timedelta(days=3),
+        end_at=datetime.now(timezone.utc) - timedelta(days=2),
+    )
+
+    module = importlib.import_module("app.hub.hub")
+    monkeypatch.setattr(module, "get_all_active_tenants", lambda: [tenant])
+    monkeypatch.setattr(module, "get_enabled_broker_accounts", lambda: [account])
+    monkeypatch.setattr(module, "get_all_subscriptions", lambda: [subscription])
+    monkeypatch.setattr(module.Hub, "_control_plane_ready", AsyncMock(return_value=True))
+
+    hub = Hub()
+    caplog.set_level(logging.DEBUG, logger="app.hub.hub")
+
+    await hub._reconcile_runners_once()
+    await hub._reconcile_runners_once()
+
+    disabled_records = [
+        record
+        for record in caplog.records
+        if "subscriptions exist but NONE are active" in record.getMessage()
+    ]
+    assert [record.levelno for record in disabled_records] == [
+        logging.INFO,
+        logging.DEBUG,
+    ]
+    assert hub.runner_count == 0
 
 
 @pytest.mark.anyio

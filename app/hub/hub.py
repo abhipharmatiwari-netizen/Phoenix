@@ -97,6 +97,7 @@ class Hub:
         self._control_plane_next_probe_ts: float = 0.0
         self._subscription_watchdog_failures: int = 0
         self._subscription_watchdog_next_ts: float = 0.0
+        self._disabled_reconcile_reason_by_account: Dict[BrokerAccountId, str] = {}
 
     # Expose the shared state store.
     @property
@@ -192,6 +193,36 @@ class Hub:
             time.monotonic() + backoff_seconds,
         )
         return backoff_seconds
+
+    @staticmethod
+    def _disabled_reconcile_level(
+        reason_code: str, subscriptions: list[SubscriptionModel]
+    ) -> int:
+        if reason_code == "inactive_subscriptions":
+            modes = {
+                str(subscription.mode or "").upper()
+                for subscription in subscriptions
+                if str(subscription.mode or "").strip()
+            }
+            if modes and modes.issubset({"PAPER", "SHADOW"}):
+                return logging.INFO
+        return logging.WARNING
+
+    def _log_disabled_reconcile(
+        self,
+        account_id: BrokerAccountId,
+        reason_code: str,
+        level: int,
+        message: str,
+        *args: Any,
+    ) -> None:
+        signature = "|".join([reason_code, *(str(arg) for arg in args)])
+        previous_signature = self._disabled_reconcile_reason_by_account.get(account_id)
+        self._disabled_reconcile_reason_by_account[account_id] = signature
+        if previous_signature == signature:
+            logger.debug(message, *args)
+            return
+        logger.log(level, message, *args)
 
     def _probe_control_plane_sync(self) -> Optional[str]:
         if not self._uses_postgres_control_plane():
@@ -402,38 +433,61 @@ class Hub:
             if mode == "DISABLED":
                 # Provide UNAMBIGUOUS diagnostics - only one reason
                 if not account.enabled:
-                    logger.warning(
-                        "[RECONCILE] ⚠️ DISABLED %s@%s: Account explicitly disabled (broker_account.enabled=False)",
+                    self._log_disabled_reconcile(
+                        account.broker_account_id,
+                        "account_disabled",
+                        logging.WARNING,
+                        "[RECONCILE] DISABLED %s@%s: Account explicitly disabled (broker_account.enabled=False)",
                         account.broker_account_id,
                         account.tenant_id,
                     )
                 elif not subscriptions:
-                    logger.warning(
-                        "[RECONCILE] ⚠️ DISABLED %s@%s: No subscriptions found for this account",
+                    self._log_disabled_reconcile(
+                        account.broker_account_id,
+                        "no_subscriptions",
+                        logging.WARNING,
+                        "[RECONCILE] DISABLED %s@%s: No subscriptions found for this account",
                         account.broker_account_id,
                         account.tenant_id,
                     )
                 elif not any(is_subscription_active(sub) for sub in subscriptions):
-                    logger.warning(
-                        "[RECONCILE] ⚠️ DISABLED %s@%s: %d subscriptions exist but NONE are active. "
-                        "Details: %s",
+                    details = "; ".join(
+                        f"[{s.broker_account_id}] mode={s.mode} start={s.start_at} end={s.end_at}"
+                        for s in subscriptions
+                    )
+                    self._log_disabled_reconcile(
+                        account.broker_account_id,
+                        "inactive_subscriptions",
+                        self._disabled_reconcile_level(
+                            "inactive_subscriptions", subscriptions
+                        ),
+                        (
+                            "[RECONCILE] DISABLED %s@%s: %d subscriptions exist but NONE are active. "
+                            "Details: %s"
+                        ),
                         account.broker_account_id,
                         account.tenant_id,
                         len(subscriptions),
-                        "; ".join(
-                            f"[{s.broker_account_id}] mode={s.mode} start={s.start_at} end={s.end_at}"
-                            for s in subscriptions
-                        ),
+                        details,
                     )
                 else:
-                    logger.warning(
-                        "[RECONCILE] ⚠️ DISABLED %s@%s: Active subscription exists but mode is invalid. "
-                        "Active sub mode: %s",
+                    self._log_disabled_reconcile(
+                        account.broker_account_id,
+                        "invalid_active_subscription_mode",
+                        logging.WARNING,
+                        (
+                            "[RECONCILE] DISABLED %s@%s: Active subscription exists but mode is invalid. "
+                            "Active sub mode: %s"
+                        ),
                         account.broker_account_id,
                         account.tenant_id,
                         active_sub.mode if active_sub else "None",
                     )
                 continue
+
+            self._disabled_reconcile_reason_by_account.pop(
+                account.broker_account_id, None
+            )
 
             # Account IS ENABLED - will create runner
             broker_account_id = account.broker_account_id

@@ -138,12 +138,27 @@ Findings and remediation:
   to the original strategy while leaving the submitting system strategy's
   pending lock unreleased. Terminal-fill handling now releases the original
   submitting strategy's pending lock when the fill owner differs.
+- Issue #341: the subscription reconcile watchdog emitted a warning every
+  minute for expired SHADOW subscription `A2@A2`
+  (`2026-05-24 21:07 IST` through `2026-05-27 21:07 IST`). This did not affect
+  the live `A1` runner, readiness, degraded scopes, or kill-switch state. The
+  reconcile path now keeps warning-level logs for live-affecting disabled
+  states, while expired PAPER/SHADOW subscriptions log at info on first
+  observation and debug on unchanged repeats.
 - One-time cleanup deleted exactly three stale pending rows after evidence
   showed `/readyz ready=true`, position-authority recovery count `0`, active
   outbox count `0`, and no matching active internal positions. Post-cleanup
   query returned zero `__pending__:system::position_trailing_lock` rows.
 - The 09:07 IST kill-switch clear was an authenticated admin action and left
   `/readyz` green with `kill_switch_active_count=0`.
+- A transient 14:00 IST universe quote fetch timeout for `NSE:1` recovered on
+  retry; the universe build completed at 14:00:18 IST and no further quote
+  fetch failures were present through the 15:30 IST cutoff.
+- Final monitor poll at 15:31:57 IST reported `status=completed`; the last
+  health samples through 15:29:13 IST were `health_code=200`,
+  `readyz_code=200`, `ready=True`, `kill_switch_active_count=0`,
+  `divergence=False`, `degraded_scope_count=0`, and
+  `failed_runner_count=0`.
 
 ## 2026-05-22 BANKNIFTY Position-Authority Recovery
 
