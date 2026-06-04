@@ -43,11 +43,30 @@ _NON_RETRYABLE_STREAM_ERROR_MARKERS = (
     "Required runtime strategy attachment(s) missing after startup validation",
     "Hub route validation failed; missing routes for:",
 )
+_LOCAL_POSTGRES_HOSTS = frozenset(
+    {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "host.docker.internal",
+        "postgres",
+        "phoenix-oci-postgres",
+    }
+)
 
 
 def _is_non_retryable_stream_error(exc: Exception) -> bool:
     text = str(exc or "")
     return any(marker in text for marker in _NON_RETRYABLE_STREAM_ERROR_MARKERS)
+
+
+def _is_local_postgres_host(settings: Any) -> bool:
+    host = str(
+        getattr(settings, "control_plane_pg_host", None)
+        or os.getenv("CONTROL_PLANE_PG_HOST", "")
+        or ""
+    ).strip().lower()
+    return host in _LOCAL_POSTGRES_HOSTS
 
 
 class StreamWorker:
@@ -573,17 +592,33 @@ class AppRuntime:
                         "LIVE_PG_SSL_SKIP_CHECK from the deployment environment."
                     )
                 elif _ssl_skip:
-                    logger.warning(
-                        "startup.ssl_warning: LIVE_PG_SSL_SKIP_CHECK=true — "
-                        "CONTROL_PLANE_PG_SSLMODE=%r does not enforce encrypted Postgres transport. "
-                        "Acceptable ONLY when Postgres is on the local host (e.g. Docker Desktop). "
-                        "Never set this in a remote or cloud deployment.",
-                        _pg_sslmode,
+                    _is_local_pg_host = _is_local_postgres_host(settings)
+                    _ssl_log_level = logging.INFO if _is_local_pg_host else logging.WARNING
+                    _ssl_event = (
+                        "startup.ssl_skip_info"
+                        if _is_local_pg_host
+                        else "startup.ssl_warning"
                     )
-                    # §127 / Issue #6: Emit a durable audit event so that every LIVE
+                    _ssl_note = (
+                        "Plaintext Postgres transport accepted for local Docker "
+                        "Postgres host. This must not be used for network-attached "
+                        "or externally published Postgres deployments."
+                        if _is_local_pg_host
+                        else "Plaintext Postgres transport accepted without a "
+                        "recognized local Postgres host. Set CONTROL_PLANE_PG_SSLMODE=require "
+                        "for network-attached deployments."
+                    )
+                    logger.log(
+                        _ssl_log_level,
+                        "%s: LIVE_PG_SSL_SKIP_CHECK=true; "
+                        "CONTROL_PLANE_PG_SSLMODE=%r does not enforce encrypted "
+                        "Postgres transport. %s",
+                        _ssl_event,
+                        _pg_sslmode,
+                        _ssl_note,
+                    )
+                    # Issue #6 / #342: Emit a durable audit event so every LIVE
                     # deployment with plaintext Postgres transport has an auditable record.
-                    # This makes it visible in audit_events.jsonl that the operator
-                    # consciously accepted unencrypted transport for a local deployment.
                     try:
                         from app.core.audit_log import emit_audit_event
                         emit_audit_event(
@@ -595,15 +630,15 @@ class AppRuntime:
                                 "sslmode": _pg_sslmode,
                                 "live_pg_ssl_skip_check": True,
                                 "is_cloud": False,
-                                "note": (
-                                    "Plaintext Postgres transport accepted for local Docker "
-                                    "Desktop deployment. This must NEVER be set for cloud or "
-                                    "network-attached deployments."
-                                ),
+                                "local_postgres_host": _is_local_pg_host,
+                                "note": _ssl_note,
                             },
                         )
                     except Exception as _audit_exc:
-                        logger.warning("startup: failed to emit ssl_skip audit event: %s", _audit_exc)
+                        logger.warning(
+                            "startup: failed to emit ssl_skip audit event: %s",
+                            _audit_exc,
+                        )
                 else:
                     raise ValueError(
                         f"startup.ssl_error: TRADE_MODE=LIVE requires CONTROL_PLANE_PG_SSLMODE=require "

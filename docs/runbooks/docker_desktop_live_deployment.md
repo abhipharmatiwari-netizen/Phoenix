@@ -102,11 +102,11 @@ The bundled example command sets these explicitly if you do not override them:
   > `host.docker.internal` does not have SSL configured (the default for a bare
   > local install), you may set `LIVE_PG_SSL_SKIP_CHECK=true` in your PowerShell
   > session **before** running the start script. This bypasses the SSL enforcement
-  > check and emits a WARNING at startup. This exception is valid **only** when
-  > Postgres is on the local machine with no external network exposure. Never set
-  > this for Cloud Run, a remote Postgres instance, or any deployment reachable
-  > over a network. Cloud deployments will hard-abort if `LIVE_PG_SSL_SKIP_CHECK=true`
-  > is detected (K_SERVICE is set). §105
+  > check and emits audited info-level startup telemetry for recognized local
+  > Docker Postgres hosts. This exception is valid **only** when Postgres is on
+  > the local machine with no external network exposure. Unknown hosts still emit
+  > warning-level telemetry, and cloud deployments hard-abort if
+  > `LIVE_PG_SSL_SKIP_CHECK=true` is detected. Section 105
 - `CAPITAL_LIMITS_JSON={"tenant-1:A1": {"max_notional_per_order": 500000, "max_gross_exposure": 1000000}}`
 - `HUB_DEFAULT_TENANT_ID=tenant-1`
 - `HUB_DEFAULT_BROKER_ACCOUNT_ID=A1`

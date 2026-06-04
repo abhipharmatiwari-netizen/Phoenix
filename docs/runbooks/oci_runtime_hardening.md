@@ -25,6 +25,10 @@ approval to restart containers.
 - `/opt/phoenix/phoenix-deploy.env` sets `CONTROL_PLANE_PG_SSLMODE_HOST=prefer`
   for VM-local Postgres validation; external/cloud Postgres should use
   `require`.
+- `docker port phoenix-oci-postgres` returns no published host ports. If a
+  Postgres port is published or the DB host changes away from a recognized
+  local Docker host, remove `LIVE_PG_SSL_SKIP_CHECK=true` and require encrypted
+  Postgres transport before LIVE startup.
 - The operator has reviewed `docker compose config` output with secrets redacted.
 - The current `phoenix-oci-postgres` environment has been checked. On the
   verified VM, `PGDATA=/var/lib/postgresql/data` and `PG_VERSION` exists

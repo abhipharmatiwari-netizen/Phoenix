@@ -145,6 +145,14 @@ Findings and remediation:
   reconcile path now keeps warning-level logs for live-affecting disabled
   states, while expired PAPER/SHADOW subscriptions log at info on first
   observation and debug on unchanged repeats.
+- Issue #342: after the `83c32da` deploy, startup still emitted
+  `startup.ssl_warning` for `LIVE_PG_SSL_SKIP_CHECK=true` with
+  `CONTROL_PLANE_PG_SSLMODE=prefer`. Evidence showed the DB host was
+  `phoenix-oci-postgres` and `docker port phoenix-oci-postgres` returned no
+  published ports, so this is the documented VM-local Docker Postgres topology,
+  not an externally reachable database. Startup SSL validation now logs this
+  audited local-host exception at info level while preserving warning/error
+  behavior for unknown or remote/cloud Postgres deployments.
 - One-time cleanup deleted exactly three stale pending rows after evidence
   showed `/readyz ready=true`, position-authority recovery count `0`, active
   outbox count `0`, and no matching active internal positions. Post-cleanup
