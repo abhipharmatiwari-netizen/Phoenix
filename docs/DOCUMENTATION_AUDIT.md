@@ -1,7 +1,8 @@
 # Documentation Audit
 
 Audit date: 2026-06-06. Runtime snapshot refreshed after the OCI LIVE hardening
-deploy and frontend static asset redeploy, with VM verification at 10:19 UTC.
+deploy, frontend static asset redeploy, and backend restart, with VM
+verification at 10:29 UTC.
 
 Scope: repository documentation, environment examples, Compose comments, and
 operator-facing runbooks were checked against the running OCI VM. The OCI VM
@@ -16,7 +17,7 @@ overrides repo docs and historical plans when there is a conflict.
 | Compose project | `phoenix-oci-live` |
 | Compose files | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` |
 | Env file | `/opt/phoenix/phoenix-deploy.env` |
-| Backend | `phoenix-oci-backend`, `phoenix-local-backend:local-c8c80ea`, healthy |
+| Backend | `phoenix-oci-backend`, `phoenix-local-backend:local-4f567bf`, healthy |
 | Web | `phoenix-oci-web`, `phoenix-local-nginx:local-4f567bf`, healthy |
 | Database | VM-local `phoenix-oci-postgres`, `postgres:16-alpine`, Compose-managed and Docker-healthy |
 | Watchdog | `phoenix-oci-watchdog`, observe-only, no Docker socket or mounts |
@@ -61,11 +62,11 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 
 | Prior mismatch | Current resolution |
 |---|---|
-| Docs described `local-e7f1e29` as current | Current operator docs now reference VM checkout `4f567bf`, nginx `local-4f567bf`, and the intentionally unchanged running backend image `local-c8c80ea` |
+| Docs described `local-e7f1e29` as current | Current operator docs now reference VM checkout `4f567bf` and backend/nginx images tagged `local-4f567bf` |
 | Docs described `phoenix-oci-postgres` as unmanaged and lacking health | Current docs describe the Compose-managed `vm-local-postgres` profile and healthy container evidence |
 | Docs described watchdog nginx stop/start behavior as current | Current docs describe the observe-only watchdog and treat Docker socket mounts or nginx mutations as drift |
 | Public `/readyz` and `/health/summary` were not distinguished from internal diagnostics | Current docs state that public nginx responses are redacted and backend-local endpoints carry full diagnostics |
-| Runtime env examples referenced old verified local image tags | Current OCI env template references the `local-4f567bf` deploy tag and notes the frontend-only backend restart avoidance |
+| Runtime env examples referenced old verified local image tags | Current OCI env template references the `local-4f567bf` deploy tag |
 | Release evidence guidance treated Docker health as sufficient wait evidence | Current release guidance requires `/readyz` trading-readiness evidence in addition to liveness |
 
 ## Open Documentation-Backed Risks

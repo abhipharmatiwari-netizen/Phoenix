@@ -22,7 +22,7 @@ Verified on 2026-06-06 from the running OCI VM:
 - Compose project: `phoenix-oci-live`
 - Compose files: `/opt/phoenix/app/docker-compose.oci-live.yml` plus `/opt/phoenix/phoenix-override.yml`
 - Env file: `/opt/phoenix/phoenix-deploy.env`
-- Backend: `phoenix-oci-backend`, image `phoenix-local-backend:local-c8c80ea`, command `python -m app.main`; not restarted during the frontend-only static asset redeploy
+- Backend: `phoenix-oci-backend`, image `phoenix-local-backend:local-4f567bf`, command `python -m app.main`
 - Web: `phoenix-oci-web`, image `phoenix-local-nginx:local-4f567bf`
 - Database: VM-local `phoenix-oci-postgres`, image `postgres:16-alpine`, Compose-managed with Docker health status `healthy`
 - Watchdog: `phoenix-oci-watchdog`, image `docker:cli`, observe-only with no Docker socket or mounts
