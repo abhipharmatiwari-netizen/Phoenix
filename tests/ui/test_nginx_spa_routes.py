@@ -53,3 +53,18 @@ def test_frontend_public_index_references_existing_static_assets():
         assert (public_dir / ref).is_file(), ref
 
     assert "Loading Phoenix..." in index
+
+
+def test_frontend_runtime_failures_do_not_blank_root():
+    client = (REPO_ROOT / "frontend" / "src" / "client" / "index.ts").read_text(encoding="utf-8")
+    entrypoint = (REPO_ROOT / "frontend" / "src" / "index.tsx").read_text(encoding="utf-8")
+    boundary = (
+        REPO_ROOT / "frontend" / "src" / "components" / "shared" / "AppErrorBoundary.tsx"
+    ).read_text(encoding="utf-8")
+
+    assert "safeLocalStorageGetItem" in client
+    assert "safeLocalStorageSetItem" in client
+    assert "safeLocalStorageRemoveItem" in client
+    assert "<AppErrorBoundary>" in entrypoint
+    assert "Phoenix could not render" in boundary
+    assert "Reset session" in boundary

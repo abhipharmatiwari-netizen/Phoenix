@@ -217,6 +217,30 @@ const BACKEND_BASE_URL = inferBackendBaseUrl();
 let inMemoryAuthToken: string | null = null;
 let legacyAuthCleanupStarted = false;
 
+function safeLocalStorageGetItem(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeLocalStorageSetItem(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Keep the in-memory session path usable when browser storage is blocked.
+  }
+}
+
+function safeLocalStorageRemoveItem(key: string): void {
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    // Keep the in-memory session path usable when browser storage is blocked.
+  }
+}
+
 function buildUrl(
   baseUrl: string,
   path: string,
@@ -235,7 +259,7 @@ function readTenantIdFromStorage(): string | null {
   if (typeof window === 'undefined') {
     return null;
   }
-  const tenantId = window.localStorage.getItem(TENANT_STORAGE_KEY);
+  const tenantId = safeLocalStorageGetItem(TENANT_STORAGE_KEY);
   return tenantId ? tenantId.trim() : null;
 }
 
@@ -252,9 +276,9 @@ export function setTenantId(tenantId: string): void {
     return;
   }
   if (normalized) {
-    window.localStorage.setItem(TENANT_STORAGE_KEY, normalized);
+    safeLocalStorageSetItem(TENANT_STORAGE_KEY, normalized);
   } else {
-    window.localStorage.removeItem(TENANT_STORAGE_KEY);
+    safeLocalStorageRemoveItem(TENANT_STORAGE_KEY);
   }
 }
 
@@ -269,10 +293,10 @@ function purgeLegacyStoredAuthSession(): void {
   if (typeof window === 'undefined') {
     return;
   }
-  const legacyToken = window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
-  const legacyRefreshToken = window.localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY);
-  window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
-  window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+  const legacyToken = safeLocalStorageGetItem(AUTH_TOKEN_STORAGE_KEY);
+  const legacyRefreshToken = safeLocalStorageGetItem(REFRESH_TOKEN_STORAGE_KEY);
+  safeLocalStorageRemoveItem(AUTH_TOKEN_STORAGE_KEY);
+  safeLocalStorageRemoveItem(REFRESH_TOKEN_STORAGE_KEY);
   if ((legacyToken || legacyRefreshToken) && !legacyAuthCleanupStarted) {
     legacyAuthCleanupStarted = true;
     void revokeLegacyStoredSession(legacyToken, legacyRefreshToken);

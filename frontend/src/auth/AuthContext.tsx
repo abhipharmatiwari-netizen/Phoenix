@@ -100,6 +100,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setToken(restoredToken);
         setUser(decodeToken(restoredToken));
       })
+      .catch(() => {
+        clearAuthSession();
+      })
       .finally(() => {
         if (!cancelled) {
           setIsLoading(false);
