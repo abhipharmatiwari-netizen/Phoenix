@@ -17,18 +17,18 @@ Current VM evidence is captured in [docs/OCI_VM_RUNTIME.md](docs/OCI_VM_RUNTIME.
 Verified on 2026-06-06 from the running OCI VM:
 
 - Repo checkout: `/opt/phoenix/app`
-- Active branch/commit: `main` at `7c0330f...`; deploy env image tag
-  `local-7c0330f`
+- Active branch/commit: `main` at `697409e...`; deploy env image tag
+  `local-697409e`
 - Compose project: `phoenix-oci-live`
 - Compose files: `/opt/phoenix/app/docker-compose.oci-live.yml` plus `/opt/phoenix/phoenix-override.yml`
 - Env file: `/opt/phoenix/phoenix-deploy.env`
-- Backend: `phoenix-oci-backend`, image `phoenix-local-backend:local-7c0330f`, command `python -m app.main`
-- Web: `phoenix-oci-web`, image `phoenix-local-nginx:local-7c0330f`
+- Backend: `phoenix-oci-backend`, image `phoenix-local-backend:local-697409e`, command `python -m app.main`
+- Web: `phoenix-oci-web`, image `phoenix-local-nginx:local-697409e`
 - Database: VM-local `phoenix-oci-postgres`, image `postgres:16-alpine`, Compose-managed with Docker health status `healthy`
 - Watchdog: `phoenix-oci-watchdog`, image `docker:cli`, observe-only with no Docker socket or mounts
 - OI/ML shadow sidecar: `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd`, dry-run only, no host ports
 - Runtime health: backend `/health`, `/ready`, `/readyz`, and `/health/summary` return 200 from inside the backend container
-- Health evidence: `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE`; backend-local `/readyz` returns 200; public nginx `/readyz` and `/health/summary` are redacted
+- Health evidence: `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE`; backend-local `/readyz` returns 200; public nginx `/readyz` and `/health/summary` are redacted; public nginx `/health/alerts` and `/health/mitigations` proxy JSON to support the operator screens
 - Frontend health rendering: the Overview dashboard renders from the redacted
   public `/health/summary` payload and must not require internal-only schema,
   alert, watchdog, or account-count fields to be present
@@ -40,7 +40,7 @@ important ways:
 - A VM-local Postgres container is used instead of an external OCI PostgreSQL endpoint.
 - The backend has source-file bind mounts from `/opt/phoenix/app`.
 - `CONTROL_PLANE_PG_SSLMODE=prefer` and `LIVE_PG_SSL_SKIP_CHECK=true` are present for the local DB path.
-- The nginx container mounts `/opt/phoenix/nginx-ssl-prerendered.conf.template`, not the repo nginx template directly.
+- The nginx container mounts `/opt/phoenix/nginx-ssl-prerendered.conf.template`, not the repo nginx template directly. Keep this host template in sync with repo route changes before recreating nginx.
 - Phoenix still shares the VM with unrelated public workloads until the
   isolation backlog is resolved or risk-accepted.
 

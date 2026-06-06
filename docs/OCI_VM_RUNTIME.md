@@ -1,6 +1,6 @@
 # OCI VM Runtime Evidence
 
-Last verified: 2026-06-06 13:42 UTC from the running OCI VM.
+Last verified: 2026-06-06 14:02 UTC from the running OCI VM.
 OI/ML shadow sidecar evidence was rechecked as present and dry-run only during
 the same review.
 
@@ -14,14 +14,14 @@ OCIDs, broker identifiers, and tokens are redacted.
 |---|---|---|---|---|
 | Host | `phoenix-vm`, `opc`, `/home/opc` | `hostname; date; whoami; pwd` | VM reachable through OCI Bastion; VM VNIC has no public IP | Do not document private IPs |
 | Deployed repo path | `/opt/phoenix/app` | Compose labels and `git -C` | Active checkout lives under `/opt/phoenix/app` | `/opt/phoenix` also contains operator-owned runtime files |
-| Active git commit/branch | `main`, `7c0330f...` plus live operator config drift | `git -C /opt/phoenix/app branch --show-current`, `rev-parse HEAD`, mounted config/env evidence | VM checkout is on `main` at `7c0330f...`; `/opt/phoenix/app/app/config/strategy_env.yaml` and `/opt/phoenix/phoenix-deploy.env` remain operator-owned runtime inputs | Deploy env image tag is `local-7c0330f`; backend and nginx have been restarted/reconciled against that tag |
+| Active git commit/branch | `main`, `697409e...` plus live operator config drift | `git -C /opt/phoenix/app branch --show-current`, `rev-parse HEAD`, mounted config/env evidence | VM checkout is on `main` at `697409e...`; `/opt/phoenix/app/app/config/strategy_env.yaml` and `/opt/phoenix/phoenix-deploy.env` remain operator-owned runtime inputs | Deploy env image tag is `local-697409e`; backend and nginx have been restarted/reconciled against that tag |
 | Compose project | `phoenix-oci-live` | `docker inspect ... Labels` | backend, nginx, watchdog, and Postgres have Compose labels | `phoenix-oci-postgres` is now managed by the opt-in `vm-local-postgres` profile |
 | Compose files used | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` | `com.docker.compose.project.config_files` labels | These are the active Phoenix Compose files for labelled containers | Runtime override must be treated as authoritative |
 | Env file used | `/opt/phoenix/phoenix-deploy.env` | runtime scripts and Compose commands | Non-secret deploy env file exists on VM | Document names only, not values |
 | Running Phoenix containers | `phoenix-oci-backend`, `phoenix-oci-web`, `phoenix-oci-watchdog`, `phoenix-oci-postgres` | `docker ps`, `docker inspect` | All four were running during audit | Aurelium containers also run on the host but are outside Phoenix docs |
 | Stopped Phoenix containers | none shown by name | `docker ps -a` | `phoenix-oci-optimizer` is not present | Optimizer systemd units are also absent |
-| Backend image | `phoenix-local-backend:local-7c0330f` | `docker inspect phoenix-oci-backend` | Local image, not OCIR | Source bind mounts are still active |
-| Web image | `phoenix-local-nginx:local-7c0330f` | `docker inspect phoenix-oci-web` | Local image, not OCIR | Public nginx `/readyz` and `/health/summary` proxy to redacted backend endpoints; Overview renders fallback values when that public summary omits internal schema, alert, watchdog, or account-count fields; `/manifest.json`, `/favicon.svg`, and `/favicon.ico` are served as static assets; stale `/static/*` assets return 404 instead of SPA HTML; frontend runtime failures render a visible recovery screen instead of a blank root |
+| Backend image | `phoenix-local-backend:local-697409e` | `docker inspect phoenix-oci-backend` | Local image, not OCIR | Source bind mounts are still active |
+| Web image | `phoenix-local-nginx:local-697409e` | `docker inspect phoenix-oci-web` | Local image, not OCIR | Public nginx `/readyz` and `/health/summary` proxy to redacted backend endpoints; `/health/alerts` and `/health/mitigations` proxy JSON for the Alerts and Mitigations screens; Overview renders fallback values when that public summary omits internal schema, alert, watchdog, or account-count fields; `/manifest.json`, `/favicon.svg`, and `/favicon.ico` are served as static assets; stale `/static/*` assets return 404 instead of SPA HTML; frontend runtime failures render a visible recovery screen instead of a blank root |
 | Database image | `postgres:16-alpine` | `docker inspect phoenix-oci-postgres` | Compose-managed VM-local Postgres container with Docker health status `healthy` | Container uses the existing `/opt/phoenix/pgdata` mount and password-file env, not a plaintext password value |
 | Watchdog image | `docker:cli` | `docker inspect phoenix-oci-watchdog` | Docker CLI sidecar with no mounts | Recreated from the base no-socket compose service; no Docker socket or nginx stop/start capability is mounted |
 | Backend command | `python -m app.main` via `docker-entrypoint.sh` | `docker inspect` | FastAPI backend runs in backend container | Port 8080 is container-only |
@@ -34,12 +34,12 @@ OCIDs, broker identifiers, and tokens are redacted.
 | Database backend | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres`, `CONTROL_PLANE_PG_SSLMODE=prefer`, `LIVE_PG_SSL_SKIP_CHECK=true` | selected backend env | VM-local Postgres, not external OCI DB | Remote/cloud Postgres docs are non-current |
 | Secret model | `/run/secrets/admin_api_key`, `/run/secrets/auth_token_secret`, `/run/secrets/control_plane_pg_password`, `/run/secrets/angel_postback_token`, `/run/secrets/admin_kill_switch_override` | mounts/env/runbook evidence and `scripts/validate-live-secret-perms.sh` | Secret values are mounted as files; kill-switch override is file-only; permission validator passes | Shared runtime secret files are `0440` for UID 100/root group compatibility, and backend-only secrets are `0400`; never copy values into docs or env examples |
 | Backend mounts | `/opt/phoenix/logs`, `/opt/phoenix/state`, `/opt/phoenix/certs`, `/run/secrets/*`, plus source-file bind mounts | `docker inspect .Mounts` | Runtime includes host state/log/cert mounts and source overlays | Source bind mounts are current drift |
-| Web mounts | `/opt/phoenix/nginx-ssl-prerendered.conf.template`, `/opt/phoenix/certs`, `/opt/phoenix/acme-challenge`, `/run/secrets/admin_api_key` | `docker inspect .Mounts` | nginx uses a prerendered host template | Repo nginx template is not directly mounted today |
+| Web mounts | `/opt/phoenix/nginx-ssl-prerendered.conf.template`, `/opt/phoenix/certs`, `/opt/phoenix/acme-challenge`, `/run/secrets/admin_api_key` | `docker inspect .Mounts` | nginx uses a prerendered host template | Repo nginx template is not directly mounted today; this host template was patched with `/health/alerts` and `/health/mitigations` before the latest nginx recreate |
 | Postgres mounts | `/opt/phoenix/pgdata` to `/var/lib/postgresql/data` | `docker inspect .Mounts` | DB data is local VM disk path | Backup/restore docs must use this fact |
 | Logs | `/opt/phoenix/logs`, date-partitioned app logs, audit JSONL, scheduler logs, cert renewal log | `find /opt/phoenix/logs` | Current logs include 2026-06-06 hardening/deployment evidence and root log files | `/opt/phoenix/logs` is writable by container UID |
 | State files | `/opt/phoenix/state/risk_positions.json` and `.bak` | `ls -la /opt/phoenix/state` | Restart helper files exist | Not authoritative over Postgres |
 | Health endpoints | backend container `/health` returns 200; backend `/readyz` returns 200 | `docker exec phoenix-oci-backend curl ...` | Backend liveness and readiness are green; LIVE universe health is part of the readiness gate | `/readyz` must fail when LIVE universe/quote-auth health is failed |
-| nginx health | host `http://localhost/health`, `/readyz`, and `/health/summary` returned through nginx | `curl` on VM | nginx proxies current health paths | Public nginx `/readyz` and `/health/summary` use redacted backend endpoints |
+| nginx health | host `http://localhost/health`, `/readyz`, `/health/summary`, `/health/alerts`, and `/health/mitigations` returned through nginx | `curl` on VM and public curl probes | nginx proxies current health paths | Public nginx `/readyz` and `/health/summary` use redacted backend endpoints; Alerts/Mitigations endpoints return JSON |
 | Release evidence endpoint | `/admin/release-evidence` returns 401 without admin key | `docker exec phoenix-oci-backend curl` | Endpoint exists and requires auth | Do not print admin key |
 | Database tables | `audit_events`, `broker_accounts`, `broker_credentials`, `internal_position_records`, `kill_switch_state`, `order_submission_outbox`, `position_ownership_ledger`, `schema_migrations`, `strategy_configs`, `strategy_config_candidates`, `trades`, tenant/user entitlement tables, and others | `docker exec phoenix-oci-postgres psql -U phoenix_app -d phoenix` | Operational DB schema exists in VM-local Postgres | Backend container does not include `psql` |
 | Cron/systemd | root cron starts at 03:30 UTC Mon-Fri and stops at 18:30 UTC Sun-Thu; root cert renewal; user safety watcher; weekly cleanup in `/etc/cron.d/phoenix-cleanup` | `crontab -l`, `sudo crontab -l`, `/etc/cron*` | Cron, not optimizer/reload systemd timers, controls current scheduled operations | `phoenix-runtime-secrets.service` exists but is inactive |
@@ -78,6 +78,8 @@ Implemented and deployed in the hardening pass:
 - public nginx `/readyz` and `/health/summary` use redacted backend endpoints;
 - the frontend Overview page tolerates the redacted public health summary and
   shows unavailable diagnostics as fallback values instead of failing render;
+- public nginx `/health/alerts` and `/health/mitigations` now proxy JSON, and
+  the Alerts, Mitigations, and Safety screens tolerate omitted public fields;
 - root disk was expanded and Docker build cache was pruned;
 - `phoenix-oci-postgres` was adopted into the Compose `vm-local-postgres`
   profile with Docker health metadata;
