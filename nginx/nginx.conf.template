@@ -151,7 +151,7 @@ server {
     }
 
     location = /favicon.ico {
-        return 308 /favicon.svg;
+        rewrite ^ /favicon.svg last;
     }
 
     location = /favicon.svg {

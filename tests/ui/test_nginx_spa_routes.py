@@ -37,7 +37,7 @@ def test_frontend_assets_do_not_fall_back_to_spa_html():
     assert "location = /favicon.svg" in content
     assert "try_files /favicon.svg =404;" in content
     assert "location = /favicon.ico" in content
-    assert "return 308 /favicon.svg;" in content
+    assert "rewrite ^ /favicon.svg last;" in content
 
 
 def test_frontend_public_index_references_existing_static_assets():
