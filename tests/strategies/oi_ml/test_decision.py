@@ -33,11 +33,12 @@ def _quote(
     theta: float = -3.0,
     vega: float = 6.0,
     minute_offset: int = 0,
+    source_lag_seconds: int = 15,
 ) -> OptionQuote:
     ts = DECISION_TS + timedelta(minutes=minute_offset)
     return OptionQuote(
         snapshot_ts=ts,
-        source_ts=ts - timedelta(seconds=15),
+        source_ts=ts - timedelta(seconds=source_lag_seconds),
         underlying="NIFTY",
         expiry=EXPIRY,
         strike=strike,
@@ -115,7 +116,7 @@ def test_decision_engine_stages_first_guarded_spread_candidate():
     assert repo.calls[0]["min_snapshot_ts"] == DECISION_TS - timedelta(seconds=120)
 
 
-def test_decision_engine_stages_angel_candidate_when_iv_is_missing():
+def test_decision_engine_blocks_candidate_generation_when_iv_is_missing():
     snapshot = [
         _quote(25100, "CE", ltp=130.0, oi=500, vix=16.0, spot=25140.0, delta=0.38),
         _quote(25200, "CE", ltp=120.0, oi=2500, vix=16.0, spot=25140.0),
@@ -135,13 +136,50 @@ def test_decision_engine_stages_angel_candidate_when_iv_is_missing():
         decision_ts=DECISION_TS,
     )
 
-    assert decision.action == OiMlEntryAction.STAGE_ENTRY
-    assert decision.reason == "candidate_passed_guard"
-    assert decision.selected is not None
-    assert decision.selected.guard_result.allowed is True
-    assert "missing_optional_fields" in decision.selected.guard_result.metadata[
-        "quote_quality_flags"
+    assert decision.action == OiMlEntryAction.NO_TRADE
+    assert decision.reason == "candidate_generation_blocked:missing_iv"
+
+
+def test_decision_engine_blocks_candidate_generation_when_greeks_are_missing():
+    snapshot = [
+        _quote(25200, "CE", ltp=120.0, oi=2500, delta=None),
+        _quote(25350, "CE", ltp=110.0, oi=1000, gamma=None),
     ]
+    engine = OiMlCeDecisionEngine(
+        FakeRepository(snapshot),
+        ConstantOiMlScorer(probability=0.64, predicted_mae_premium=40.0),
+        config=_config(),
+    )
+
+    decision = engine.evaluate_entry(
+        underlying="NIFTY",
+        expiry=EXPIRY,
+        decision_ts=DECISION_TS,
+    )
+
+    assert decision.action == OiMlEntryAction.NO_TRADE
+    assert decision.reason == "candidate_generation_blocked:missing_greeks"
+
+
+def test_decision_engine_blocks_candidate_generation_when_source_is_stale():
+    snapshot = [
+        _quote(25200, "CE", ltp=120.0, oi=2500, source_lag_seconds=240),
+        _quote(25350, "CE", ltp=110.0, oi=1000, source_lag_seconds=240),
+    ]
+    engine = OiMlCeDecisionEngine(
+        FakeRepository(snapshot),
+        ConstantOiMlScorer(probability=0.64, predicted_mae_premium=40.0),
+        config=_config(),
+    )
+
+    decision = engine.evaluate_entry(
+        underlying="NIFTY",
+        expiry=EXPIRY,
+        decision_ts=DECISION_TS,
+    )
+
+    assert decision.action == OiMlEntryAction.NO_TRADE
+    assert decision.reason == "candidate_generation_blocked:stale_source_seconds"
 
 
 def test_decision_engine_fails_closed_without_snapshot():

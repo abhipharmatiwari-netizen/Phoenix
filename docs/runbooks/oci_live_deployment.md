@@ -68,14 +68,16 @@ dry-run only, publishes no host ports, and records option-chain snapshots plus
 shadow order intents in Postgres. It must not be used as evidence that live order
 routing is enabled.
 
-Current sidecar evidence as of 2026-05-23 IST:
+Current sidecar evidence as of 2026-06-06 IST:
 
-- image: `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd`
+- image: `phoenix-oi-ml-shadow:oi-ml-shadow-536163d-greeks-20260527`
 - checkout: `/opt/phoenix/oi-ml-shadow-src`
 - compose: `/opt/phoenix/oi-ml-shadow.yml`
 - tables: `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`,
   `public.option_chain_validation_reports`
-- scorer: smoke deployment uses `OI_ML_SHADOW_SCORER=constant`
+- scorer: promotable shadow requires validated LightGBM artifacts and a passed
+  model-validation report; `constant` is smoke-only and requires an explicit
+  override
 - broker access: sidecar forwards backend broker proxy env and reuses the Angel
   quote session during snapshotting
 - health visibility: backend dashboard health uses
@@ -89,8 +91,9 @@ Current sidecar evidence as of 2026-05-23 IST:
 - IV handling: missing Angel IV is enriched at read time only when fresh
   exact-contract `nse_web` rows contain IV; the live-derivatives fallback does
   not supply IV, so it is not promotion evidence for IV enrichment
-- promotion blocker: market-session hard-field completeness and fresh source
-  timestamps still must be proven
+- promotion blocker: market-session hard-field completeness, fresh source
+  timestamps, IV/Greeks, latest validation not `ERROR`, terminal virtual
+  lifecycle/PnL, and 10 clean sessions still must be proven
 
 Use [OI/ML Shadow Sidecar Runbook](oi_ml_shadow_sidecar.md) for sidecar-specific
 operations and proof gates.

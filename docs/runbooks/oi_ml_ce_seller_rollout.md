@@ -35,8 +35,8 @@ market window.
 | Phase | Maximum authority | Minimum evidence before entering next phase |
 |---|---|---|
 | Data approval | No order intents | Provider decision, field coverage, retention limits, and one-day quality report. |
-| Paper | Simulated orders only | 40 clean sessions, zero overnight positions, profit factor >= 1.25, max simulated drawdown <= 6%, and every session flat by 15:20 IST. |
-| Shadow | Live quotes, virtual orders | 10 clean sessions with broker FULL quote snapshots, virtual order lifecycle evidence, zero live order path, and daily validation reports. |
+| Paper | Simulated orders only | 40 clean sessions, approved trained model artifacts, zero overnight positions, profit factor >= 1.25, max simulated drawdown <= 6%, and every session flat by 15:20 IST. |
+| Shadow | Live quotes, virtual orders | 10 clean sessions with broker FULL quote snapshots, IV/Greeks/source freshness, latest validation not `ERROR`, virtual lifecycle/PnL evidence, zero live order path, and daily validation reports. |
 | Live A | One spread max | 20 sessions at `max_open_spreads=1`, `allow_naked=false`, strict intraday enabled, no EOD residual, no guard bypass, and explicit review after every incident. |
 | Live B | Two spreads max | Only after Live A review approves scaling; keep `allow_naked=false`, strict intraday enabled, and add a new dated approval record. |
 
@@ -73,6 +73,9 @@ not an operator toggle.
 - Require no accepted trade without broker-token-backed instrument identity.
 - Require no paper session with stale PnL, stale option-chain rows, or unresolved
   quality flags on candidate strikes.
+- Require `OI_ML_SHADOW_SCORER=lightgbm` or equivalent trained model artifacts
+  with a passed validation report; `constant` scorer output is smoke evidence
+  only and cannot satisfy Paper or Shadow gates.
 
 ### Shadow
 
@@ -80,14 +83,24 @@ not an operator toggle.
 - Confirm `live_order_path_enabled=false` in backend-local `/health/summary`.
   Public nginx `/health/summary` is redacted and is not sufficient for this
   internal gate.
-- Require 10 complete sessions with fresh option-chain rows, shadow intents, and
-  validation reports when the market window is open.
+- Require 10 complete sessions with fresh option-chain rows, shadow intents,
+  complete virtual lifecycle rows, realized dry-run PnL, and validation reports
+  when the market window is open.
+- Confirm `OI_ML_SHADOW_SCORER=lightgbm`, explicit model artifact paths, and a
+  passed `OI_ML_SHADOW_MODEL_VALIDATION_REPORT_PATH`.
+- Confirm candidate generation blocked any quote missing IV, missing Greeks, a
+  source timestamp, or a non-stale source timestamp.
+- Confirm the latest validation report for the active underlying/expiry is not
+  `ERROR`.
 - Confirm every staged intent is a bear-call spread with a long hedge leg and a
   short CE leg.
 - Confirm no intent is naked, no leg is missing symbol token, and no stale
   snapshot is used for entry decisions.
 - Confirm EOD checks show no shadow lifecycle record that would imply overnight
   exposure if it had been live.
+- Confirm every same-session record is terminal `FLAT` by 15:20 IST and includes
+  `VIRTUAL_FILLED`, `VIRTUAL_EXITED`, and `FLAT` lifecycle events plus
+  `realized_pnl_rupees`.
 - Review dashboard, backend, sidecar, and Postgres evidence with secrets
   redacted.
 
@@ -134,7 +147,10 @@ Disable new entries immediately when any of these occurs:
 - A strategy position or shadow lifecycle equivalent remains after 15:20 IST.
 - Strict intraday retry is not firing for a residual target position.
 - Option-chain hard fields are missing or stale on candidate strikes.
-- Validation reports show unexplained severe provider mismatch.
+- IV, delta, gamma, theta, vega, or source timestamp is missing on any candidate
+  strike.
+- Validation reports show unexplained severe provider mismatch or latest
+  `ERROR` status for the active underlying/expiry.
 - A staged or submitted order is naked, missing hedge-first protection, or lacks
   broker symbol/token identity.
 - The option-sell guard rejects because PnL, risk, kill-switch, or data state is

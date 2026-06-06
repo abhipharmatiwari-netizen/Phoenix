@@ -18,7 +18,11 @@ from app.risk.option_sell_guard import (
     evaluate_option_sell_guard,
 )
 from app.strategies.identifiers import OI_ML_CE_SELLER_ID
-from app.strategies.oi_ml.dataset import OiMlDatasetConfig, select_candidate_quotes
+from app.strategies.oi_ml.dataset import (
+    OiMlDatasetConfig,
+    candidate_quality_failure_reason,
+    select_candidate_quotes,
+)
 from app.strategies.oi_ml.greek_risk import (
     OiMlGreekRiskAssessment,
     OiMlGreekRiskConfig,
@@ -47,6 +51,9 @@ class OiMlDecisionConfig:
     min_otm_points: float = 0.0
     max_otm_points: float | None = None
     max_candidates_per_decision: int = 6
+    require_source_ts: bool = True
+    require_iv: bool = True
+    require_greeks: bool = True
     wall_multiple: float = 2.0
     lot_size: int = 65
     spread_width_points: float = 200.0
@@ -128,9 +135,18 @@ class OiMlCeDecisionEngine:
             config=self._dataset_config(),
         )
         if not candidates:
+            quality_reason = candidate_quality_failure_reason(
+                snapshot,
+                decision_ts=decision,
+                config=self._dataset_config(),
+            )
             return OiMlEntryDecision(
                 action=OiMlEntryAction.NO_TRADE,
-                reason="no_candidate_quotes",
+                reason=(
+                    f"candidate_generation_blocked:{quality_reason}"
+                    if quality_reason
+                    else "no_candidate_quotes"
+                ),
             )
 
         evaluated: list[OiMlCandidatePlan] = []
@@ -265,6 +281,9 @@ class OiMlCeDecisionEngine:
             min_otm_points=self.config.min_otm_points,
             max_otm_points=self.config.max_otm_points,
             max_candidates_per_decision=self.config.max_candidates_per_decision,
+            require_source_ts=self.config.require_source_ts,
+            require_iv=self.config.require_iv,
+            require_greeks=self.config.require_greeks,
             wall_multiple=self.config.wall_multiple,
         )
 

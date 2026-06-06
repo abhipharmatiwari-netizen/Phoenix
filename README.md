@@ -4,8 +4,8 @@ Phoenix is currently operated from an OCI VM. The running OCI VM is the only
 source of truth for production documentation; repo manifests and historical
 runbooks are secondary evidence only when they match that VM.
 
-Last verified against the VM: 2026-06-06 14:19 UTC.
-OI/ML shadow sidecar deployment was verified on 2026-05-23 00:12 IST.
+Last verified against the VM: 2026-06-06 15:05 UTC.
+OI/ML shadow sidecar deployment was verified on 2026-06-06 20:35 IST.
 
 ## Current OCI VM State
 
@@ -21,7 +21,7 @@ OI/ML shadow sidecar deployment was verified on 2026-05-23 00:12 IST.
 | Web container | `phoenix-oci-web`, image `phoenix-local-nginx:local-4ba598f`, healthy |
 | Database | VM-local `phoenix-oci-postgres` container, `postgres:16-alpine`, Compose-managed and Docker-healthy |
 | Watchdog | `phoenix-oci-watchdog`, `docker:cli`; observe-only, no Docker socket or mounts |
-| OI/ML shadow sidecar | `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd`, dry-run only |
+| OI/ML shadow sidecar | `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-536163d-greeks-20260527`, dry-run only; repo gate now requires validated LightGBM artifacts for promotable shadow decisions |
 | Backend command | `python -m app.main` |
 | Public backend exposure | backend port `8080` is container-only; nginx exposes host ports `80` and `8443` |
 | Health checks | backend container: `/health`, `/ready`, `/readyz`, `/health/summary`, `/health/alerts`, `/health/mitigations`; nginx/host: `/health`, redacted `/readyz`, redacted `/health/summary`, JSON `/health/alerts`, JSON `/health/mitigations` |
@@ -112,3 +112,11 @@ phoenix-override.yml.example      Template mirroring the current VM override sha
 Never commit or paste real values for broker credentials, database passwords,
 admin keys, JWT/session/HMAC secrets, TOTP/PIN values, tokens, private IPs, or
 OCI identifiers. Documentation may list required variable names only.
+
+## OI/ML Shadow Promotion Guard
+
+OI/ML shadow decisions are not promotable when produced by
+`OI_ML_SHADOW_SCORER=constant`. Promotable shadow evidence requires trained
+LightGBM artifacts, a passed model-validation report, fresh FULL quotes with IV
+and Greeks, latest validation status not `ERROR`, and virtual lifecycle rows
+that reach `FLAT` with realized dry-run PnL by the cutoff.

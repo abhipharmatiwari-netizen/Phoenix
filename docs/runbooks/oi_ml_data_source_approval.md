@@ -22,8 +22,11 @@ enable live orders by itself.
 ## Required Fields
 
 Every candidate-strike report must prove these fields: source timestamp, expiry,
-strike, option type, trading symbol, exchange, broker token, OI, volume, IV, bid,
-ask, LTP, underlying LTP, and India VIX or an audited VIX join value.
+strike, option type, trading symbol, exchange, broker token, OI, volume, IV,
+delta, gamma, theta, vega, bid, ask, LTP, underlying LTP, and India VIX or an
+audited VIX join value. Candidate generation must fail closed when any
+candidate-strike source timestamp is missing/stale or any IV/Greek field is
+missing.
 
 ## Quality Report
 
@@ -50,6 +53,7 @@ Passing thresholds:
 - provider retention >= 18 months
 - expired weekly NIFTY contracts available from the approved historical source
 - reconciliation plan documented
+- latest validation report for the active underlying/expiry is not `ERROR`
 
 The report exits with status `4` when any gate fails. A failed report blocks
 paper, shadow promotion, and live enablement.

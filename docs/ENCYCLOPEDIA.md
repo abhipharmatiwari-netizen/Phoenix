@@ -17,7 +17,7 @@ architecture document, runbooks, and operator playbooks.
 | Web | `phoenix-oci-web`, nginx frontend and reverse proxy. |
 | Database | `phoenix-oci-postgres`, VM-local Postgres container managed by the `vm-local-postgres` Compose profile. |
 | Watchdog | `phoenix-oci-watchdog`, observe-only Docker CLI sidecar with no Docker socket or mounts. |
-| OI/ML sidecar | `phoenix-oi-ml-shadow`, dry-run only and outside the live order authority path. |
+| OI/ML sidecar | `phoenix-oi-ml-shadow`, dry-run only and outside the live order authority path. Promotable decisions require validated model artifacts, fresh IV/Greek/source data, latest validation not `ERROR`, and terminal virtual lifecycle/PnL evidence. |
 
 ## Health And Readiness Surfaces
 
@@ -70,6 +70,15 @@ socket, stop nginx, start nginx, restart backend, or mutate host paths. If logs
 or `docker inspect` show those capabilities, treat the VM as running stale
 watchdog wiring and recreate it through `scripts/ops/recreate_oci_watchdog.sh`
 during an approved maintenance window.
+
+## OI/ML Shadow Contract
+
+The OI/ML sidecar never submits broker orders. `constant` scoring is
+connectivity-only and requires an explicit smoke override. Promotion evidence
+requires LightGBM model artifacts with a passed validation report, candidate
+quotes with source timestamps, IV, and Greeks, a latest validation report that is
+not `ERROR`, and dry-run lifecycle rows that progress through staged, virtual
+filled, virtual exited, and flat with realized paper PnL.
 
 ## Runbooks And Playbooks
 

@@ -1,6 +1,6 @@
 # OCI VM Runtime Evidence
 
-Last verified: 2026-06-06 14:19 UTC from the running OCI VM.
+Last verified: 2026-06-06 15:05 UTC from the running OCI VM.
 OI/ML shadow sidecar evidence was rechecked as present and dry-run only during
 the same review.
 
@@ -290,16 +290,16 @@ Final deployment evidence for `e7f1e29`:
 
 ## OI/ML Shadow Sidecar Evidence
 
-Verified on 2026-05-23 IST:
+Verified on 2026-06-06 IST:
 
 | Area | Verified current state |
 |---|---|
 | Purpose | Dry-run OI/ML CE seller validation; no live order routing |
 | Checkout | `/opt/phoenix/oi-ml-shadow-src` |
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
-| Image | `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd` |
+| Image | `phoenix-oi-ml-shadow:oi-ml-shadow-536163d-greeks-20260527` |
 | Container | `phoenix-oi-ml-shadow`, no host ports published |
-| Scorer | Smoke deployment uses `OI_ML_SHADOW_SCORER=constant` |
+| Scorer | Promotable repo path requires validated LightGBM artifacts; `constant` scorer is smoke-only and requires explicit override |
 | Risk posture | `OI_ML_SHADOW_ALLOW_NAKED=false`; sidecar records shadow intents only |
 | Health visibility | Backend observes the external sidecar with `OI_ML_SHADOW_HEALTH_ENABLED=true`; sidecar Docker healthcheck runs `python -m app.strategies.oi_ml.shadow_health` |
 | Tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`, `public.option_chain_validation_reports` |
@@ -309,7 +309,7 @@ Verified on 2026-05-23 IST:
 | Smoke proof | 2026-05-18 21:11 IST off-market run fetched/stored `220` NIFTY rows through Angel FULL/LTP quote APIs; no shadow intent was recorded |
 | NSE validation | Falls back to NSE `liveEquity-derivatives` rows when the classic option-chain JSON endpoint is empty; latest smoke returned `288` reference rows and `288` compared contracts |
 | IV handling | Missing Angel IV is enriched at read time only from fresh exact-contract `nse_web` rows that contain IV; the live-derivatives fallback does not supply IV/bid/ask |
-| Remaining gate | Market-session hard-field completeness and fresh source timestamps still need proof before promotion beyond shadow |
+| Remaining gate | Trained/validated scorer, fresh IV/Greeks/source timestamps, latest validation not `ERROR`, terminal virtual lifecycle/PnL, and 10 clean sessions still need proof before promotion beyond shadow |
 
 Operator runbook: [OI/ML Shadow Sidecar Runbook](runbooks/oi_ml_shadow_sidecar.md).
 

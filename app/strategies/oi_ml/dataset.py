@@ -9,7 +9,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from app.data.option_chain_provider import (
     OptionQuote,
-    is_quote_usable_for_live_entry,
+    quality_flags_for_quote,
 )
 from app.features.oi_features import build_oi_features
 from app.strategies.oi_ml.labels import (
@@ -30,6 +30,9 @@ class OiMlDatasetConfig:
     max_candidates_per_decision: int | None = None
     require_underlying_ltp: bool = True
     require_live_usable_quote: bool = True
+    require_source_ts: bool = False
+    require_iv: bool = False
+    require_greeks: bool = False
     skip_unlabelable: bool = True
     wall_multiple: float = 2.0
     label_config: IntradayLabelConfig = field(default_factory=IntradayLabelConfig)
@@ -199,7 +202,7 @@ def select_candidate_quotes(
     for row in rows:
         if row.option_type != side:
             continue
-        if cfg.require_live_usable_quote and not is_quote_usable_for_live_entry(row):
+        if not _passes_candidate_quality_gate(row, cfg):
             continue
         if int(row.oi or 0) < int(cfg.min_oi):
             continue
@@ -214,6 +217,86 @@ def select_candidate_quotes(
     if cfg.max_candidates_per_decision is not None:
         return candidates[: max(0, int(cfg.max_candidates_per_decision))]
     return candidates
+
+
+def candidate_quality_failure_reason(
+    snapshot_quotes: Sequence[OptionQuote],
+    *,
+    decision_ts: datetime,
+    config: OiMlDatasetConfig | None = None,
+) -> str | None:
+    """Return the dominant strict-quality reason when no candidate survived."""
+
+    cfg = config or OiMlDatasetConfig()
+    side = str(cfg.option_type or "CE").strip().upper()
+    decision = _aware_utc(decision_ts)
+    rows = [quote.normalized() for quote in snapshot_quotes]
+    spot = _spot_from_snapshot(rows)
+    counts: dict[str, int] = {}
+    considered = 0
+    for row in rows:
+        if row.option_type != side:
+            continue
+        if int(row.oi or 0) < int(cfg.min_oi):
+            continue
+        premium = _trigger_premium(row)
+        if premium is None or premium < float(cfg.min_premium):
+            continue
+        if spot is not None and not _passes_otm_filter(row, spot, cfg):
+            continue
+        considered += 1
+        reason = _candidate_quality_failure(row, cfg, decision)
+        if reason:
+            counts[reason] = counts.get(reason, 0) + 1
+    if not considered or not counts:
+        return None
+    return max(counts.items(), key=lambda item: (item[1], item[0]))[0]
+
+
+def _passes_candidate_quality_gate(row: OptionQuote, cfg: OiMlDatasetConfig) -> bool:
+    return _candidate_quality_failure(row, cfg, _aware_utc(row.snapshot_ts)) is None
+
+
+def _candidate_quality_failure(
+    row: OptionQuote,
+    cfg: OiMlDatasetConfig,
+    decision_ts: datetime,
+) -> str | None:
+    if cfg.require_live_usable_quote:
+        flags = quality_flags_for_quote(
+            row,
+            max_source_lag_seconds=max(0, int(cfg.max_snapshot_age_seconds)),
+        )
+        hard_flags = {
+            "missing_required_fields",
+            "missing_symbol_token",
+            "invalid_option_type",
+            "bad_bid_ask",
+            "stale_source_seconds",
+        }
+        for name in sorted(hard_flags):
+            if name in flags:
+                return name
+
+    if cfg.require_source_ts and row.source_ts is None:
+        return "missing_source_ts"
+    if row.source_ts is not None:
+        lag_seconds = (_aware_utc(row.snapshot_ts) - _aware_utc(row.source_ts)).total_seconds()
+        if lag_seconds > max(0, int(cfg.max_snapshot_age_seconds)):
+            return "stale_source_seconds"
+    if _aware_utc(row.snapshot_ts) > decision_ts:
+        return "future_snapshot"
+    if cfg.require_iv and _float(row.iv) is None:
+        return "missing_iv"
+    if cfg.require_greeks:
+        missing_greeks = [
+            name
+            for name in ("delta", "gamma", "theta", "vega")
+            if _float(getattr(row, name)) is None
+        ]
+        if missing_greeks:
+            return "missing_greeks"
+    return None
 
 
 def _passes_otm_filter(row: OptionQuote, spot: float, cfg: OiMlDatasetConfig) -> bool:
@@ -285,5 +368,6 @@ __all__ = [
     "OiMlDatasetBuilder",
     "OiMlDatasetConfig",
     "OiMlTrainingRow",
+    "candidate_quality_failure_reason",
     "select_candidate_quotes",
 ]

@@ -723,7 +723,16 @@ Per-leg (`sl_pct`, `tp_pct`, `trail_buffer_pct`) — all soft, monitored per leg
 
 ### Data Source
 - IV and Greeks come from Angel `optionGreek` REST enrichment persisted on `option_chain_1m`.
+- Shadow candidate generation requires source timestamps, non-stale source
+  timestamps, IV, and all Greeks. Missing IV/Greek/source evidence blocks
+  candidate generation before scoring.
 - Missing required Greeks fail closed under the default `require_greeks: true` policy.
+- `OI_ML_SHADOW_SCORER=constant` is smoke-only and requires
+  `OI_ML_SHADOW_ALLOW_CONSTANT_SCORER=true`; promotable shadow runs require
+  trained LightGBM artifacts plus a passed model-validation report.
+- Shadow lifecycle records must advance through virtual fill and EOD virtual
+  flat with `realized_pnl_rupees`; non-terminal dry-run records after cutoff
+  block promotion.
 
 ### Tests
 `tests/strategies/oi_ml/test_decision.py`, `tests/strategies/oi_ml/test_order_intents.py`, `tests/strategies/test_oi_ml_ce_seller.py`.

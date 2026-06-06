@@ -1,7 +1,7 @@
 # OI/ML Shadow Sidecar Runbook
 
 Status: current progress record for the OI/ML CE seller shadow sidecar as of
-2026-05-23 IST.
+2026-06-06 IST.
 
 This sidecar is a dry-run research and validation process. It must not place,
 modify, cancel, or exit live orders. It runs beside the live OCI stack, publishes
@@ -13,28 +13,33 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 | Area | State |
 |---|---|
 | Branch | `oi-ml-shadow-sidecar` |
-| Latest deployed sidecar commit | `bd999cd` |
+| Latest deployed sidecar commit | `536163d` sidecar image lineage |
 | OCI checkout | `/opt/phoenix/oi-ml-shadow-src` |
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
-| Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd` |
+| Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-536163d-greeks-20260527` |
 | Container | `phoenix-oi-ml-shadow` |
 | Database tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`, `public.option_chain_validation_reports` |
-| Default scorer | `missing` in compose; deployed smoke override uses `constant` |
-| Smoke scorer currently used | `OI_ML_SHADOW_SCORER=constant`, probability `0.64`, MAE premium `40` |
+| Default scorer | `missing` in compose; fail-closed until trained artifacts are configured |
+| Smoke scorer | `constant` is blocked unless `OI_ML_SHADOW_ALLOW_CONSTANT_SCORER=true`; it is connectivity-only and never promotion evidence |
 | Dry-run spread risk | Current VM smoke values are `OI_ML_SHADOW_SPREAD_WIDTH_POINTS=50` and `OI_ML_SHADOW_MAX_SPREAD_LOSS_RUPEES=2000`; both apply only to the dry-run sidecar |
+| Virtual spread cap | `OI_ML_SHADOW_MAX_OPEN_SPREADS=1`; open virtual spreads block repeat staging |
 | Broker proxy/session | Sidecar now forwards backend broker proxy env and reuses the Angel quote session during the snapshotter session |
-| LightGBM support | Implemented with `lightgbm==4.6.0`; artifact paths must be explicit |
-| Continuous NSE validation | Enabled in deployed sidecar; reports stored in `public.option_chain_validation_reports` |
+| LightGBM support | Implemented with `lightgbm==4.6.0`; artifact paths and a passed model-validation report must be explicit |
+| Continuous NSE validation | Enabled in deployed sidecar; latest `ERROR` report blocks new shadow entries |
 | Snapshot validation window | `09:15`-`15:30` IST; trade-decision window remains `09:45`-`14:30` IST |
+| Virtual lifecycle | `STAGED -> VIRTUAL_FILLED -> VIRTUAL_EXITED event -> FLAT`; realized dry-run PnL is stored |
 | Live order routing | Not used by the sidecar |
 
 Recent validation:
 
-- Local focused OI/ML suite: `159 passed`.
-- 2026-06-06 frontend static asset and redacted-health Overview redeploy moved
-  the main VM checkout plus backend/nginx runtime to `local-4ba598f`. The
-  sidecar image remains `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd` and remains
-  dry-run only.
+- Local focused OI/ML/data suite on 2026-06-06: `125 passed`.
+- 2026-06-06 OI/ML shadow evidence review found
+  `phoenix-oi-ml-shadow:oi-ml-shadow-536163d-greeks-20260527` healthy with
+  `dry_run_only=true`, `live_order_path_enabled=false`, `allow_naked=false`,
+  zero restarts, and no live order path. The same review found the strategy not
+  promotion-ready because constant scoring, missing IV/Greeks, latest validation
+  errors, incomplete virtual lifecycle accounting, and negative shadow PnL still
+  blocked promotion.
 - 2026-05-25 live backend/nginx deployment moved the main VM checkout to
   `e7f1e29` with backend/nginx images tagged `local-e7f1e29`. The sidecar
   image remains `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd` and remains
@@ -94,8 +99,8 @@ Recent validation:
 | OI feature builder | `app/features/oi_features.py` | Done |
 | Intraday labels and dataset builder | `app/strategies/oi_ml/labels.py`, `app/strategies/oi_ml/dataset.py` | Done |
 | Runtime scorer contracts | `app/strategies/oi_ml/scoring.py` | Done |
-| LightGBM shadow scorer mode | `app/strategies/oi_ml/shadow_runner.py` | Done |
-| Shadow order-intent lifecycle | `app/strategies/oi_ml/order_intents.py`, `app/strategies/oi_ml/shadow_lifecycle.py` | Done |
+| LightGBM shadow scorer mode | `app/strategies/oi_ml/shadow_runner.py` | Done; constant scorer requires explicit smoke override and LightGBM requires a passed validation report |
+| Shadow order-intent lifecycle | `app/strategies/oi_ml/order_intents.py`, `app/strategies/oi_ml/shadow_lifecycle.py`, `migrations/025_oi_ml_shadow_virtual_lifecycle.sql` | Done; virtual fill, EOD flat, and realized dry-run PnL are recorded |
 | Sidecar compose | `ops/compose/docker-compose.oi-ml-shadow.yml` | Done |
 | Broker proxy/session reuse | `ops/compose/docker-compose.oi-ml-shadow.yml`, `app/data/oi_snapshotter_runtime.py` | Done |
 | Provider-filter SQL typing | `app/data/option_chain_repository.py` | Done |
@@ -126,13 +131,14 @@ The current runtime path needs these fields per option quote:
 | `vix` | NSE India VIX context LTP fallback, or option payload if supplied | Option-sell guard and naked/spread gating |
 
 Missing hard fields are persisted in `quality_flags`; live entry gates must reject
-rows with hard quality flags. The OI/ML Greek-risk policy separately rejects
-candidates when required Greeks are missing, delta is outside the configured
-range, gamma is above the hard cap, or no OI wall is present. Missing Angel IV is
-an optional quote-quality field. When the repository enriches IV from stored NSE
-validation rows, it does not update the Angel row; the returned in-memory quote is tagged with
-`iv_enrichment_mode=read_time`, `iv_enriched_from_provider=nse_web`, and the
-reference snapshot timestamp.
+rows with hard quality flags. The shadow candidate-generation gate now also
+requires source timestamps, non-stale source timestamps, IV, and all Greeks
+(`delta`, `gamma`, `theta`, `vega`) before a quote can become a candidate.
+Missing Angel IV remains acceptable only for raw ingestion storage; it is not
+acceptable for shadow trade decisions unless the repository enriches the
+returned in-memory quote from fresh exact-contract validation rows. The returned
+quote is then tagged with `iv_enrichment_mode=read_time`,
+`iv_enriched_from_provider=nse_web`, and the reference snapshot timestamp.
 
 ## Resolved Gaps
 
@@ -205,12 +211,14 @@ Do not promote this strategy beyond shadow until the Phase-0 approval report in
 [OI/ML Option-Chain Data Source Approval](oi_ml_data_source_approval.md) passes
 and a market-window snapshot proves real broker FULL quote completeness for the
 hard fields and proves that IV is available either directly from Angel or
-through fresh exact-contract NSE validation rows. After this data gate passes, use
-[OI/ML CE Seller Rollout and Rollback](oi_ml_ce_seller_rollout.md) for the
-paper, shadow, Live A, Live B, and rollback checklist. The 2026-05-18
-off-market smoke proved connectivity and
-storage, but all off-market rows were flagged because source timestamps were
-stale.
+through fresh exact-contract NSE validation rows. The sidecar must also run
+`OI_ML_SHADOW_SCORER=lightgbm` with an approved model-validation report,
+must have latest validation status not `ERROR`, and must show complete virtual
+lifecycle rows that are `FLAT` by the cutoff with realized dry-run PnL. After
+this data gate passes, use [OI/ML CE Seller Rollout and Rollback](oi_ml_ce_seller_rollout.md)
+for the paper, shadow, Live A, Live B, and rollback checklist. The 2026-05-18
+off-market smoke proved connectivity and storage, but all off-market rows were
+flagged because source timestamps were stale.
 
 Required proof from `public.option_chain_1m` for the active listed NIFTY expiry:
 
@@ -246,6 +254,11 @@ Expected result before promotion:
   not contain IV and do not satisfy this promotion proof.
 - Any `flagged_angel_rows` must be explained and must not include required candidate
   strikes.
+- The latest `public.option_chain_validation_reports` row for the active
+  underlying/expiry must not be `ERROR/ERROR`.
+- Shadow lifecycle rows must contain `VIRTUAL_FILLED`, `VIRTUAL_EXITED`, and
+  `FLAT` events and no same-session `STAGED` or `VIRTUAL_FILLED` residual after
+  `15:20` IST.
 
 Earlier sidecar login timeouts were fixed by forwarding the same broker proxy
 environment used by the live backend and by reusing a read-only Angel quote
@@ -399,8 +412,9 @@ Restart the sidecar with smoke constants:
 
 ```bash
 cd /opt/phoenix
-IMAGE_TAG=oi-ml-shadow-bd999cd \
+IMAGE_TAG=oi-ml-shadow-536163d-greeks-20260527 \
 OI_ML_SHADOW_SCORER=constant \
+OI_ML_SHADOW_ALLOW_CONSTANT_SCORER=true \
 OI_ML_SHADOW_CONSTANT_PROBABILITY=0.64 \
 OI_ML_SHADOW_CONSTANT_MAE_PREMIUM=40 \
 OI_ML_SHADOW_SPREAD_WIDTH_POINTS=50 \
@@ -409,6 +423,9 @@ docker compose -f /opt/phoenix/oi-ml-shadow.yml \
   --env-file /opt/phoenix/phoenix-deploy.env \
   up -d oi-ml-shadow
 ```
+
+This smoke mode is for connectivity only. It is not model validation, not
+shadow-promotion evidence, and must not be used for Paper or Live gates.
 
 Do not add blank `ANGEL_HTTPS_PROXY` or `HTTPS_PROXY` entries under the sidecar
 `environment` block. Those keys come from `/opt/phoenix/phoenix-deploy.env`;
@@ -440,11 +457,34 @@ OI_ML_SHADOW_LIGHTGBM_CLASSIFIER_PATH
 OI_ML_SHADOW_LIGHTGBM_FEATURE_NAMES_PATH
 OI_ML_SHADOW_LIGHTGBM_MAE_MODEL_PATH
 OI_ML_SHADOW_LIGHTGBM_DEFAULT_MAE_PREMIUM
+OI_ML_SHADOW_MODEL_VALIDATION_REPORT_PATH
+OI_ML_SHADOW_REQUIRE_MODEL_VALIDATION_REPORT=true
 ```
 
 The sidecar compose mounts `/opt/phoenix/oi-ml-models` at `/app/models:ro`.
-Do not enable LightGBM mode until trained artifacts have passed walk-forward and
-market-session snapshot completeness checks.
+Do not enable LightGBM mode until trained artifacts have passed walk-forward,
+the validation report contains `promotion.passed=true`, and market-session
+snapshot completeness checks pass.
+
+## Virtual Lifecycle And PnL Evidence
+
+Every accepted dry-run intent must advance through virtual accounting:
+
+1. `STAGED` when the inert intent is written.
+2. `VIRTUAL_FILLED` immediately after staging, using the estimated entry credit.
+3. `VIRTUAL_EXITED` event at the virtual flat cutoff using latest quote marks.
+4. `FLAT` with `realized_pnl_rupees` and `virtual_flat_at`.
+
+The current default virtual flat cutoff is `15:20` IST and the lifecycle cleanup
+window ends at `15:45` IST. A non-terminal row after cutoff blocks promotion.
+
+```sql
+SELECT status, count(*) AS rows, sum(realized_pnl_rupees) AS realized_pnl
+FROM public.oi_ml_shadow_order_intents
+WHERE created_at::date = CURRENT_DATE
+GROUP BY status
+ORDER BY status;
+```
 
 ## Live Stack Restart Note
 

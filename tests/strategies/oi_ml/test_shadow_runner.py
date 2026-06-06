@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+import json
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -44,6 +45,7 @@ def test_load_shadow_runner_config_reads_lightgbm_artifacts():
             "OI_ML_SHADOW_LIGHTGBM_FEATURE_NAMES_PATH": "/models/features.json",
             "OI_ML_SHADOW_LIGHTGBM_MAE_MODEL_PATH": "/models/mae.txt",
             "OI_ML_SHADOW_LIGHTGBM_DEFAULT_MAE_PREMIUM": "27.5",
+            "OI_ML_SHADOW_MODEL_VALIDATION_REPORT_PATH": "/models/report.json",
         }
     )
 
@@ -52,6 +54,7 @@ def test_load_shadow_runner_config_reads_lightgbm_artifacts():
     assert cfg.lightgbm_feature_names_path == "/models/features.json"
     assert cfg.lightgbm_mae_model_path == "/models/mae.txt"
     assert cfg.lightgbm_default_mae_premium == 27.5
+    assert cfg.model_validation_report_path == "/models/report.json"
 
 
 def test_load_shadow_runner_config_accepts_shared_model_aliases():
@@ -106,6 +109,7 @@ def test_load_shadow_runner_config_reads_dry_run_spread_risk_overrides():
             "OI_ML_SHADOW_ENABLED": "true",
             "OI_ML_SHADOW_SPREAD_WIDTH_POINTS": "180",
             "OI_ML_SHADOW_MAX_SPREAD_LOSS_RUPEES": "5500",
+            "OI_ML_SHADOW_MAX_OPEN_SPREADS": "1",
             "OI_ML_SHADOW_TARGET_ABS_DELTA": "0.18",
             "OI_ML_SHADOW_MAX_ABS_GAMMA": "0.0025",
             "OI_ML_SHADOW_SIZE_DOWN_LOT_MULTIPLIER": "0.4",
@@ -114,6 +118,7 @@ def test_load_shadow_runner_config_reads_dry_run_spread_risk_overrides():
 
     assert cfg.spread_width_points == 180
     assert cfg.max_spread_loss_rupees == 5500.0
+    assert cfg.max_open_spreads == 1
     assert cfg.greek_risk_config.target_abs_delta == 0.18
     assert cfg.greek_risk_config.max_abs_gamma == 0.0025
     assert cfg.greek_risk_config.size_down_lot_multiplier == 0.4
@@ -270,6 +275,7 @@ def test_build_lightgbm_scorer_loads_artifacts(monkeypatch):
             return "fake-scorer"
 
     monkeypatch.setattr(shadow_runner, "LightGbmOiMlScorer", FakeLightGbmScorer)
+    monkeypatch.setattr(shadow_runner, "_validate_model_report", lambda cfg: None)
 
     cfg = OiMlShadowRunnerConfig(
         enabled=True,
@@ -291,6 +297,42 @@ def test_build_lightgbm_scorer_loads_artifacts(monkeypatch):
     }
 
 
+def test_build_lightgbm_scorer_requires_passed_validation_report():
+    cfg = OiMlShadowRunnerConfig(
+        enabled=True,
+        scorer_mode="lightgbm",
+        lightgbm_classifier_path="/models/classifier.txt",
+        lightgbm_feature_names_path="/models/features.json",
+    )
+
+    with pytest.raises(RuntimeError, match="validation report"):
+        shadow_runner._build_scorer(cfg)
+
+
+def test_build_constant_scorer_requires_explicit_smoke_override():
+    cfg = OiMlShadowRunnerConfig(
+        enabled=True,
+        scorer_mode="constant",
+        constant_probability=0.64,
+        constant_mae_premium=40.0,
+    )
+
+    with pytest.raises(RuntimeError, match="smoke-only"):
+        shadow_runner._build_scorer(cfg)
+
+
+def test_validate_model_report_accepts_passed_report(tmp_path):
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"promotion": {"passed": True}}), encoding="utf-8")
+    cfg = OiMlShadowRunnerConfig(
+        enabled=True,
+        scorer_mode="lightgbm",
+        model_validation_report_path=str(report),
+    )
+
+    shadow_runner._validate_model_report(cfg)
+
+
 def test_next_weekly_expiry_returns_upcoming_thursday():
     assert shadow_runner._next_weekly_expiry(date(2026, 5, 17)) == date(2026, 5, 21)
     assert shadow_runner._next_weekly_expiry(date(2026, 5, 21)) == date(2026, 5, 21)
@@ -305,6 +347,7 @@ def test_shadow_once_skips_outside_market_window_without_connecting(monkeypatch)
         enabled=True,
         expiry=date(2026, 5, 21),
         market_window_only=True,
+        validation_gate_enabled=False,
     )
 
     result = run_shadow_once(
@@ -328,6 +371,7 @@ def test_shadow_once_captures_snapshot_inside_snapshot_window_before_entry(monke
         enabled=True,
         expiry=date(2026, 5, 21),
         market_window_only=True,
+        validation_gate_enabled=False,
     )
 
     result = run_shadow_once(
@@ -341,6 +385,9 @@ def test_shadow_once_captures_snapshot_inside_snapshot_window_before_entry(monke
 
 
 class FakeConn:
+    def __init__(self):
+        self.committed = False
+
     def __enter__(self):
         return self
 
@@ -370,6 +417,7 @@ def test_shadow_once_evaluates_no_trade_without_recording(monkeypatch):
     monkeypatch.setattr(shadow_runner, "connect_with_retry", lambda *_, **__: FakeConn())
     monkeypatch.setattr(shadow_runner, "_capture_snapshot", lambda cfg: 12)
     monkeypatch.setattr(shadow_runner, "OiMlCeDecisionEngine", FakeDecisionEngine)
+    monkeypatch.setattr(shadow_runner, "PostgresOiMlShadowLifecycleStore", FakeStore)
 
     cfg = OiMlShadowRunnerConfig(
         enabled=True,
@@ -377,6 +425,7 @@ def test_shadow_once_evaluates_no_trade_without_recording(monkeypatch):
         market_window_only=False,
         spread_width_points=180,
         max_spread_loss_rupees=5500.0,
+        validation_gate_enabled=False,
     )
 
     result = run_shadow_once(cfg, now=datetime(2026, 5, 19, 10, 0, tzinfo=IST))
@@ -401,14 +450,28 @@ class FakeStageDecisionEngine:
 
 
 class FakeStore:
+    open_spreads = 0
+    virtual_filled = False
+    flattened = 0
+
     def __init__(self, conn):
         self.conn = conn
+
+    def flatten_due_virtual_positions(self, **kwargs):
+        return self.flattened
+
+    def count_open_virtual_spreads(self, **kwargs):
+        return self.open_spreads
 
     def record_intent(self, intent, **kwargs):
         return SimpleNamespace(record_id=99)
 
+    def mark_virtual_fill(self, record, **kwargs):
+        self.virtual_filled = True
+        return record
 
-def test_shadow_once_records_staged_intent(monkeypatch):
+
+def test_shadow_once_records_and_virtual_fills_staged_intent(monkeypatch):
     conn = FakeConn()
     monkeypatch.setattr(shadow_runner, "get_control_plane_dsn", lambda: "dsn")
     monkeypatch.setattr(shadow_runner, "connect_with_retry", lambda *_, **__: conn)
@@ -420,9 +483,77 @@ def test_shadow_once_records_staged_intent(monkeypatch):
         "build_order_intent_from_candidate",
         lambda *_, **__: SimpleNamespace(
             ok=True,
-            intent=SimpleNamespace(intent_id="intent-1"),
+            intent=SimpleNamespace(
+                intent_id="intent-1",
+                estimated_net_credit_points=12.5,
+            ),
             reasons=(),
         ),
+    )
+    cfg = OiMlShadowRunnerConfig(
+        enabled=True,
+        expiry=date(2026, 5, 21),
+        market_window_only=False,
+        validation_gate_enabled=False,
+        allow_constant_scorer=True,
+        scorer_mode="constant",
+    )
+
+    result = run_shadow_once(cfg, now=datetime(2026, 5, 19, 10, 0, tzinfo=IST))
+
+    assert result.decision_action == "STAGE_ENTRY"
+    assert result.reason == "candidate_passed_guard"
+    assert result.intent_id == "intent-1"
+    assert result.shadow_record_id == 99
+    assert result.lifecycle_updates == 1
+    assert conn.committed is True
+
+
+def test_shadow_once_blocks_when_open_virtual_spread_limit_reached(monkeypatch):
+    conn = FakeConn()
+    FakeStore.open_spreads = 1
+    monkeypatch.setattr(shadow_runner, "get_control_plane_dsn", lambda: "dsn")
+    monkeypatch.setattr(shadow_runner, "connect_with_retry", lambda *_, **__: conn)
+    monkeypatch.setattr(shadow_runner, "_capture_snapshot", lambda cfg: 0)
+    monkeypatch.setattr(shadow_runner, "PostgresOiMlShadowLifecycleStore", FakeStore)
+    monkeypatch.setattr(
+        shadow_runner,
+        "OiMlCeDecisionEngine",
+        lambda *_, **__: pytest.fail("decision should be blocked by open virtual spread"),
+    )
+    cfg = OiMlShadowRunnerConfig(
+        enabled=True,
+        expiry=date(2026, 5, 21),
+        market_window_only=False,
+        validation_gate_enabled=False,
+        max_open_spreads=1,
+    )
+
+    result = run_shadow_once(cfg, now=datetime(2026, 5, 19, 10, 0, tzinfo=IST))
+
+    assert result.decision_action == "NO_TRADE"
+    assert result.reason == "virtual_open_spread_limit_reached"
+    FakeStore.open_spreads = 0
+
+
+def test_shadow_once_blocks_latest_validation_error(monkeypatch):
+    conn = FakeConn()
+    monkeypatch.setattr(shadow_runner, "get_control_plane_dsn", lambda: "dsn")
+    monkeypatch.setattr(shadow_runner, "connect_with_retry", lambda *_, **__: conn)
+    monkeypatch.setattr(shadow_runner, "_capture_snapshot", lambda cfg: 0)
+    monkeypatch.setattr(shadow_runner, "PostgresOiMlShadowLifecycleStore", FakeStore)
+    monkeypatch.setattr(
+        shadow_runner,
+        "_latest_validation_gate",
+        lambda *_, **__: shadow_runner._ValidationGateResult(
+            allowed=False,
+            reason="latest_validation_error",
+        ),
+    )
+    monkeypatch.setattr(
+        shadow_runner,
+        "OiMlCeDecisionEngine",
+        lambda *_, **__: pytest.fail("decision should be blocked by validation"),
     )
     cfg = OiMlShadowRunnerConfig(
         enabled=True,
@@ -432,8 +563,5 @@ def test_shadow_once_records_staged_intent(monkeypatch):
 
     result = run_shadow_once(cfg, now=datetime(2026, 5, 19, 10, 0, tzinfo=IST))
 
-    assert result.decision_action == "STAGE_ENTRY"
-    assert result.reason == "candidate_passed_guard"
-    assert result.intent_id == "intent-1"
-    assert result.shadow_record_id == 99
-    assert conn.committed is True
+    assert result.decision_action == "NO_TRADE"
+    assert result.reason == "validation_gate_failed:latest_validation_error"

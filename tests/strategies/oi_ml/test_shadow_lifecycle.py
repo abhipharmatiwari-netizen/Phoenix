@@ -87,7 +87,36 @@ def test_in_memory_store_records_shadow_lifecycle_shape():
     assert record.broker_account_id == "acct-a"
     assert record.dry_run_only is True
     assert record.intent_payload["dry_run_only"] is True
+    assert record.lifecycle_events[0]["status"] == "STAGED"
     assert store.records == [record]
+
+
+def test_in_memory_store_marks_virtual_fill_and_eod_flat():
+    store = InMemoryOiMlShadowLifecycleStore()
+    staged = store.record_intent(_intent())
+
+    filled = store.mark_virtual_fill(
+        staged,
+        filled_at=CREATED_AT,
+        entry_credit_points=119.5,
+    )
+    updated = store.flatten_due_virtual_positions(
+        now=CREATED_AT,
+        provider="angel",
+        exit_reason="eod_virtual_flatten",
+    )
+
+    assert filled.status == OiMlShadowIntentStatus.VIRTUAL_FILLED
+    assert updated == 1
+    assert store.records[0].status == OiMlShadowIntentStatus.FLAT
+    assert store.records[0].virtual_flat_at == CREATED_AT
+    assert store.records[0].realized_pnl_rupees == 0.0
+    assert [event["status"] for event in store.records[0].lifecycle_events] == [
+        "STAGED",
+        "VIRTUAL_FILLED",
+        "VIRTUAL_EXITED",
+        "FLAT",
+    ]
 
 
 class FakeCursor:
@@ -132,9 +161,31 @@ def test_postgres_store_upserts_shadow_record_without_order_requests():
     assert "INSERT INTO \"public\".\"oi_ml_shadow_order_intents\"" in conn.cursor_obj.sql
     assert "ON CONFLICT (intent_id)" in conn.cursor_obj.sql
     assert "TRUE" in conn.cursor_obj.sql
+    assert "lifecycle_events" in conn.cursor_obj.sql
     assert conn.cursor_obj.params["intent_id"] == "intent-1"
     assert conn.cursor_obj.params["status"] == "STAGED"
     assert conn.cursor_obj.params["broker_account_id"] == "acct-a"
+
+
+def test_postgres_store_mark_virtual_fill_updates_dry_run_row():
+    conn = FakeConn()
+    store = PostgresOiMlShadowLifecycleStore(conn)
+    record = record_from_intent(
+        _intent(),
+        record_id=42,
+        recorded_at=CREATED_AT,
+    )
+
+    filled = store.mark_virtual_fill(
+        record,
+        filled_at=CREATED_AT,
+        entry_credit_points=119.5,
+    )
+
+    assert filled.status == OiMlShadowIntentStatus.VIRTUAL_FILLED
+    assert "status = 'VIRTUAL_FILLED'" in conn.cursor_obj.sql
+    assert "dry_run_only = TRUE" in conn.cursor_obj.sql
+    assert conn.cursor_obj.params["entry_credit_points"] == 119.5
 
 
 def test_postgres_store_rejects_unsafe_table_names():
