@@ -24,6 +24,30 @@ LOG_TAG="start-phoenix"
 
 log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') [$LOG_TAG] $*"; }
 
+backend_readyz_status() {
+    docker exec phoenix-oci-backend \
+        curl -sS -o /dev/null -w "%{http_code}" \
+        http://localhost:8080/readyz 2>/dev/null || echo "000"
+}
+
+wait_for_backend_readyz() {
+    max_wait="${READYZ_WAIT_SECONDS:-180}"
+    interval="${READYZ_POLL_INTERVAL_SECONDS:-10}"
+    elapsed=0
+    last_status="000"
+    while [ "$elapsed" -lt "$max_wait" ]; do
+        last_status=$(backend_readyz_status)
+        log "Backend /readyz status: $last_status"
+        if [ "$last_status" = "200" ]; then
+            return 0
+        fi
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+    done
+    log "Backend /readyz status: $last_status"
+    return 1
+}
+
 read_env_value() {
     key="$1"
     [ -f "$ENV_FILE" ] || return 1
@@ -127,6 +151,11 @@ fi
 if docker ps --filter name=phoenix-oci-backend --filter status=running -q | grep -q .; then
     log "Backend already running — no action needed."
     docker ps --filter name=phoenix-oci --format "  {{.Names}}: {{.Status}}"
+    if wait_for_backend_readyz; then
+        log "Phoenix /readyz is green and ready for trading."
+    else
+        log "WARNING: Backend is running but /readyz is not trading-ready."
+    fi
     exit 0
 fi
 
@@ -139,14 +168,14 @@ CONTROL_PLANE_PG_PASSWORD_HOST=dummy \
     --env-file "$ENV_FILE" \
     up -d --no-deps backend
 
-log "Backend started. Waiting 90s for healthcheck..."
-sleep 90
+log "Backend started. Waiting for /readyz trading readiness..."
 
 STATUS=$(docker ps --filter name=phoenix-oci-backend --format "{{.Status}}" 2>/dev/null || echo "unknown")
 log "Backend status: $STATUS"
 
-if echo "$STATUS" | grep -q "healthy"; then
-    log "Phoenix is healthy and ready for trading."
+if wait_for_backend_readyz; then
+    log "Phoenix /readyz is green and ready for trading."
 else
-    log "WARNING: Backend may not be healthy yet — check logs: docker logs phoenix-oci-backend --tail 20"
+    log "WARNING: Backend is not trading-ready - check /readyz and logs: docker logs phoenix-oci-backend --tail 20"
 fi
+exit 0

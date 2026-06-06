@@ -203,6 +203,71 @@ def _stream_worker_readiness_snapshot(runtime: Any) -> dict[str, Any]:
     return snapshot
 
 
+def _universe_health_readiness_snapshot() -> dict[str, Any]:
+    snapshot: dict[str, Any] = {"status": "unknown"}
+    try:
+        from app.runners.multi_instrument_stream import get_universe_health_snapshot
+
+        raw = get_universe_health_snapshot()
+        if isinstance(raw, dict):
+            snapshot.update(raw)
+    except Exception as exc:
+        snapshot.update({"status": "error", "failure_kind": "snapshot_error"})
+        logger.warning("readyz: universe health snapshot failed: %s", exc)
+    status_text = str(snapshot.get("status") or "unknown").strip().lower()
+    failure_kind = str(snapshot.get("failure_kind") or "unknown").strip() or "unknown"
+    required = str(
+        os.getenv("READYZ_UNIVERSE_HEALTH_REQUIRED", "false") or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    snapshot["ready"] = True
+    snapshot["reason"] = None
+    if status_text == "failed":
+        snapshot["ready"] = False
+        snapshot["reason"] = f"universe_health_failed:{failure_kind}"
+    elif required and status_text != "ok":
+        snapshot["ready"] = False
+        snapshot["reason"] = "universe_health_unknown"
+    return snapshot
+
+
+def _redact_readyz_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return public-safe readiness with no runner/account/lease internals."""
+    out: dict[str, Any] = {
+        "timestamp": payload.get("timestamp"),
+        "ready": bool(payload.get("ready", False)),
+    }
+    reason = payload.get("reason")
+    if reason:
+        out["reason"] = str(reason)
+    universe_health = payload.get("universe_health")
+    if isinstance(universe_health, dict):
+        out["universe_health"] = {
+            "status": universe_health.get("status"),
+            "failure_kind": universe_health.get("failure_kind"),
+            "failure_source": universe_health.get("failure_source"),
+        }
+    return out
+
+
+def _redact_health_summary_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return public-safe runtime health without account, lease, or row details."""
+    readiness = payload.get("readiness")
+    ready = bool(readiness.get("ready", False)) if isinstance(readiness, dict) else False
+    reason = readiness.get("reason") if isinstance(readiness, dict) else None
+    out = {
+        "timestamp": payload.get("timestamp"),
+        "status": payload.get("status"),
+        "ready": ready,
+        "service": "phoenix",
+        "operating_mode": payload.get("operating_mode"),
+        "stream_worker_expected": payload.get("stream_worker_expected"),
+        "stream_worker_running": payload.get("stream_worker_running"),
+    }
+    if reason:
+        out["reason"] = str(reason)
+    return out
+
+
 def _dashboard_ws_mode_token(requested_mode: str | None) -> str:
     return "delta" if _dashboard_ws_prefers_delta(requested_mode) else "full"
 
@@ -1264,6 +1329,12 @@ async def health_summary() -> dict:
     return _build_docker_health_summary()
 
 
+@app.get("/health/summary-public")
+async def health_summary_public() -> dict:
+    """Public-safe health summary for nginx/LB paths."""
+    return _redact_health_summary_payload(_build_docker_health_summary())
+
+
 @app.get("/dashboard/status")
 async def dashboard_status() -> dict:
     """Dashboard status contract. Overall status follows readiness blockers."""
@@ -1550,6 +1621,23 @@ async def readyz() -> JSONResponse:
                 payload["ready"] = False
                 payload["reason"] = "stream_watchdog_not_running"
                 return JSONResponse(status_code=503, content=payload)
+
+        universe_health = _universe_health_readiness_snapshot()
+        payload["universe_health"] = {
+            "status": universe_health.get("status"),
+            "failure_kind": universe_health.get("failure_kind"),
+            "failure_source": universe_health.get("failure_source"),
+            "instrument_count": universe_health.get("instrument_count"),
+            "token_exchange_count": universe_health.get("token_exchange_count"),
+            "last_success_ts": universe_health.get("last_success_ts"),
+            "last_failure_ts": universe_health.get("last_failure_ts"),
+        }
+        if not bool(universe_health.get("ready", True)):
+            payload["ready"] = False
+            payload["reason"] = str(
+                universe_health.get("reason") or "universe_health_failed"
+            )
+            return JSONResponse(status_code=503, content=payload)
 
     # Sync freshness check — gates readiness on position and orders sync currency
     try:
@@ -1936,6 +2024,20 @@ async def readyz() -> JSONResponse:
 
     payload["ready"] = True
     return JSONResponse(status_code=200, content=payload)
+
+
+@app.get("/readyz-public")
+async def readyz_public() -> JSONResponse:
+    """Public-safe readiness probe with no account, lease, or runner internals."""
+    response = await readyz()
+    try:
+        payload = json.loads(response.body.decode("utf-8"))
+    except Exception:
+        payload = {"ready": response.status_code < 400}
+    return JSONResponse(
+        status_code=response.status_code,
+        content=_redact_readyz_payload(payload),
+    )
 
 
 @app.get("/metrics", response_class=PlainTextResponse)

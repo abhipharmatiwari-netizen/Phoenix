@@ -14,13 +14,18 @@ server {
     server_name _;
 
     # OCI Load Balancer health check hits port 80 — must return 200, not 301
-    location /health {
+    location = /health {
         proxy_pass http://backend;
         proxy_set_header Host $host;
     }
 
-    location /readyz {
-        proxy_pass http://backend;
+    location = /health/summary {
+        proxy_pass http://backend/health/summary-public;
+        proxy_set_header Host $host;
+    }
+
+    location = /readyz {
+        proxy_pass http://backend/readyz-public;
         proxy_set_header Host $host;
     }
 
@@ -83,10 +88,11 @@ server {
         proxy_set_header X-Forwarded-Proto https;
     }
 
-    location /health  { proxy_pass http://backend; proxy_set_header Host $host; }
-    location /ready   { proxy_pass http://backend; proxy_set_header Host $host; }
-    location /readyz  { proxy_pass http://backend; proxy_set_header Host $host; }
-    location /start   { proxy_pass http://backend; proxy_set_header Host $host; }
+    location = /health  { proxy_pass http://backend; proxy_set_header Host $host; }
+    location = /health/summary  { proxy_pass http://backend/health/summary-public; proxy_set_header Host $host; }
+    location = /ready   { proxy_pass http://backend; proxy_set_header Host $host; }
+    location = /readyz  { proxy_pass http://backend/readyz-public; proxy_set_header Host $host; }
+    location = /start   { proxy_pass http://backend; proxy_set_header Host $host; }
 
     location /metrics {
         if ($http_x_admin_key != "${ADMIN_API_KEY}") { return 403; }

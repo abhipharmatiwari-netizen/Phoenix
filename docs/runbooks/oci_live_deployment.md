@@ -1,6 +1,6 @@
 # Phoenix OCI LIVE Deployment Runbook
 
-Status: current operator runbook for the OCI VM verified on 2026-06-03.
+Status: current operator runbook for the OCI VM verified on 2026-06-06.
 
 This runbook describes what is actually running on the OCI VM. It does not
 describe the older intended OCIR/external-Postgres deployment as current state.
@@ -30,15 +30,16 @@ Current VM paths and containers:
 
 Latest verified live deployment:
 
-- VM checkout: `main` at `132e0ea`
-- backend image: `phoenix-local-backend:local-132e0ea`
-- nginx image: `phoenix-local-nginx:local-132e0ea`
+- VM checkout: `main` at `a9afd518...`
+- backend image: `phoenix-local-backend:local-a9afd51`
+- nginx image: `phoenix-local-nginx:local-a9afd51`
 - live strategy routing: EMA20-only; `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1`
   and non-EMA strategies disabled in `strategy_configs`
 - liveness: backend `/health` and nginx `/health` return HTTP 200
-- readiness: `/readyz` returns HTTP 503 with `ready=false` because one durable
-  global kill switch is active; kill-switch divergence is false. This is a
-  trading-readiness halt, not a failed deployment.
+- readiness: backend-local `/readyz` returned HTTP 200 during the 2026-06-06
+  review, but the review found recent universe/quote-auth failures that were
+  not yet readiness-gated. New deployments must fail `/readyz` when LIVE
+  universe health is failed.
 
 Non-current for this VM unless a later evidence capture proves otherwise:
 
@@ -185,9 +186,9 @@ Expected success evidence:
 
 - backend and web are running; after the 2026-05-21 liveness-healthcheck patch
   they remain Docker-healthy when `/health` is 200 even if `/readyz` is 503
-- backend image is `phoenix-local-backend:local-132e0ea` in the latest
+- backend image is `phoenix-local-backend:local-a9afd51` in the latest
   verified deployment
-- web image is `phoenix-local-nginx:local-132e0ea` in the latest verified
+- web image is `phoenix-local-nginx:local-a9afd51` in the latest verified
   deployment
 - `/opt/phoenix/phoenix-override.yml` must also use `/health` for nginx
   Docker health; a VM-local override that still checks `/readyz` will keep the
@@ -409,7 +410,7 @@ The operator owns:
 
 | Drift | Evidence | Risk |
 |---|---|---|
-| Local images instead of OCIR | `phoenix-local-backend:local-132e0ea`, `phoenix-local-nginx:local-132e0ea` verified on 2026-06-03 | Old OCIR docs do not describe current deploy/restart behavior |
+| Local images instead of OCIR | `phoenix-local-backend:local-a9afd51`, `phoenix-local-nginx:local-a9afd51` verified on 2026-06-06 | Old OCIR docs do not describe current deploy/restart behavior |
 | VM-local Postgres | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres` | External DB backup/SSL assumptions are not current |
 | Source bind mounts | backend mounts selected `/opt/phoenix/app/app/...` files | Container image alone is not the full deployed code |
 | Stale watchdog can stop nginx | watchdog command/logs | Current manifest is observe-only; stop/start logs indicate stale VM wiring or override drift |

@@ -260,6 +260,79 @@ def test_health_summary_degrades_when_schema_guard_degraded(api_client, monkeypa
     assert "schema_error" in payload["degraded_reasons"]
 
 
+def test_health_summary_public_redacts_runtime_internals(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_build_docker_health_summary",
+        lambda: {
+            "status": "ok",
+            "service": "phoenix",
+            "timestamp": "2026-06-06T00:00:00Z",
+            "schema_status": "ok",
+            "operating_mode": "HUB_AUTHORITATIVE",
+            "stream_worker_running": True,
+            "stream_worker_expected": True,
+            "tracked_account_count": 2,
+            "leader_lease": {"owner_id": "internal-owner"},
+            "per_account_staleness": [{"broker_account_id": "acct-1"}],
+            "readiness": {"ready": True, "reason": None},
+        },
+    )
+
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/health/summary-public")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload == {
+        "timestamp": "2026-06-06T00:00:00Z",
+        "status": "ok",
+        "ready": True,
+        "service": "phoenix",
+        "operating_mode": "HUB_AUTHORITATIVE",
+        "stream_worker_expected": True,
+        "stream_worker_running": True,
+    }
+
+
+def test_readyz_public_redacts_runner_and_lease_internals(monkeypatch):
+    async def fake_readyz():
+        return server.JSONResponse(
+            status_code=503,
+            content={
+                "timestamp": "2026-06-06T00:00:00Z",
+                "ready": False,
+                "reason": "universe_health_failed:broker_auth",
+                "runner_count": 2,
+                "leader_lease_status": {"owner_id": "internal-owner"},
+                "universe_health": {
+                    "status": "failed",
+                    "failure_kind": "broker_auth",
+                    "failure_source": "atm_refresh",
+                    "last_failure_ts": "2026-06-06T00:00:00Z",
+                },
+            },
+        )
+
+    monkeypatch.setattr(server, "readyz", fake_readyz)
+
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz-public")
+
+    assert resp.status_code == 503
+    payload = resp.json()
+    assert payload == {
+        "timestamp": "2026-06-06T00:00:00Z",
+        "ready": False,
+        "reason": "universe_health_failed:broker_auth",
+        "universe_health": {
+            "status": "failed",
+            "failure_kind": "broker_auth",
+            "failure_source": "atm_refresh",
+        },
+    }
+
+
 def test_health_summary_degrades_when_terminal_position_records_have_quantity(
     api_client,
     monkeypatch,
@@ -1330,6 +1403,73 @@ def test_readyz_returns_503_when_schema_guard_degraded(monkeypatch):
     assert payload["ready"] is False
     assert payload["reason"] == "schema_guard_degraded"
     assert payload["schema_guard"]["missing_tables"] == ["strategy_config_candidates"]
+
+
+def test_readyz_returns_503_when_live_universe_health_failed(monkeypatch):
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = True
+    runtime.leader_lease_state = {
+        "enabled": True,
+        "owned": True,
+        "task_running": True,
+    }
+    hub_stub = SimpleNamespace(
+        registered_runner_count=1,
+        running_runner_count=1,
+        failed_runner_count=0,
+    )
+    hub_runtime_stub = SimpleNamespace(
+        hub=hub_stub,
+        audit_position_avg_price_corruption=lambda: {
+            "corrupt_count": 0,
+            "samples": [],
+            "read_failures": [],
+        },
+    )
+
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(server, "get_hub_runtime", lambda: hub_runtime_stub)
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            env={"TRADE_MODE": "LIVE"},
+            runtime=SimpleNamespace(app_env="production"),
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=True,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "_universe_health_readiness_snapshot",
+        lambda: {
+            "status": "failed",
+            "failure_kind": "broker_auth",
+            "failure_source": "atm_refresh",
+            "ready": False,
+            "reason": "universe_health_failed:broker_auth",
+        },
+    )
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz")
+
+    assert resp.status_code == 503
+    payload = resp.json()
+    assert payload["ready"] is False
+    assert payload["reason"] == "universe_health_failed:broker_auth"
+    assert payload["universe_health"]["failure_kind"] == "broker_auth"
 
 
 def test_readyz_returns_503_when_terminal_position_records_have_quantity(monkeypatch):

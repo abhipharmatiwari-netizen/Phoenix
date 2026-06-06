@@ -249,6 +249,99 @@ _DISABLE_TRADING_WINDOW_FILTER = os.getenv("DISABLE_TRADING_WINDOW_FILTER", "fal
 
 _daily_levels_state: dict[str, Any] = {"cache": None, "instruments": None}
 RUNTIME_EXIT_STRATEGY_ID = StrategyId("__runtime_exit__")
+_UNIVERSE_HEALTH_LOCK = threading.Lock()
+_UNIVERSE_HEALTH_STATE: dict[str, Any] = {
+    "status": "unknown",
+    "last_success_ts": None,
+    "last_failure_ts": None,
+    "failure_kind": None,
+    "failure_source": None,
+    "failure_message": None,
+    "instrument_count": 0,
+    "token_exchange_count": 0,
+}
+_UNIVERSE_AUTH_ERROR_MARKERS = (
+    "AG8001",
+    "invalid token",
+    "token expired",
+    "unauthorized",
+)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _classify_universe_failure(exc: BaseException) -> str:
+    err = str(exc or "")
+    lowered = err.lower()
+    if any(marker.lower() in lowered for marker in _UNIVERSE_AUTH_ERROR_MARKERS):
+        return "broker_auth"
+    if "quote" in lowered or "ltp" in lowered:
+        return "quote_fetch"
+    return "build_error"
+
+
+def _mark_universe_build_success(
+    *,
+    source: str,
+    instrument_count: int,
+    token_exchange_count: int,
+) -> None:
+    with _UNIVERSE_HEALTH_LOCK:
+        _UNIVERSE_HEALTH_STATE.update(
+            {
+                "status": "ok",
+                "last_success_ts": _utc_now_iso(),
+                "failure_kind": None,
+                "failure_source": None,
+                "failure_message": None,
+                "instrument_count": max(0, int(instrument_count)),
+                "token_exchange_count": max(0, int(token_exchange_count)),
+                "source": str(source),
+            }
+        )
+
+
+def _mark_universe_build_failure(*, source: str, exc: BaseException) -> None:
+    failure_kind = _classify_universe_failure(exc)
+    message = str(exc or "").strip()
+    with _UNIVERSE_HEALTH_LOCK:
+        _UNIVERSE_HEALTH_STATE.update(
+            {
+                "status": "failed",
+                "last_failure_ts": _utc_now_iso(),
+                "failure_kind": failure_kind,
+                "failure_source": str(source),
+                "failure_message": message[:240],
+            }
+        )
+
+
+def get_universe_health_snapshot() -> dict[str, Any]:
+    """Return sanitized stream-universe health for readiness checks."""
+    with _UNIVERSE_HEALTH_LOCK:
+        snapshot = dict(_UNIVERSE_HEALTH_STATE)
+    # The raw message is for logs only; public readiness should expose kind/source.
+    snapshot.pop("failure_message", None)
+    return snapshot
+
+
+def reset_universe_health_for_tests() -> None:
+    with _UNIVERSE_HEALTH_LOCK:
+        _UNIVERSE_HEALTH_STATE.clear()
+        _UNIVERSE_HEALTH_STATE.update(
+            {
+                "status": "unknown",
+                "last_success_ts": None,
+                "last_failure_ts": None,
+                "failure_kind": None,
+                "failure_source": None,
+                "failure_message": None,
+                "instrument_count": 0,
+                "token_exchange_count": 0,
+            }
+        )
 
 
 def get_active_instrument_count() -> int:
@@ -2044,9 +2137,18 @@ def stream_multi_instruments(
 
     auth_header_value = f"Bearer {jwt_token}"
 
-    instruments, token_labels, token_list, instrument_meta = build_instrument_universe(
-        jwt_token=jwt_token,
-        api_key=api_key,
+    try:
+        instruments, token_labels, token_list, instrument_meta = build_instrument_universe(
+            jwt_token=jwt_token,
+            api_key=api_key,
+        )
+    except Exception as exc:
+        _mark_universe_build_failure(source="startup", exc=exc)
+        raise
+    _mark_universe_build_success(
+        source="startup",
+        instrument_count=len(instruments),
+        token_exchange_count=len(token_list),
     )
     logger.info("[STREAM] Universe built: %d instruments, %d exchanges", len(instruments), len(token_list))
     for entry in token_list:
@@ -4751,6 +4853,11 @@ def stream_multi_instruments(
                     new_token_labels,
                     new_token_list,
                 )
+                _mark_universe_build_success(
+                    source="atm_refresh",
+                    instrument_count=len(new_instruments),
+                    token_exchange_count=len(new_token_list),
+                )
                 current_labels = set(token_labels_ref["map"].keys())
                 next_labels = set(next_token_labels.keys())
                 if next_labels == current_labels:
@@ -4793,6 +4900,7 @@ def stream_multi_instruments(
                     timeout=max(30.0, float(refresh_interval)),
                 )
             except Exception as exc:
+                _mark_universe_build_failure(source="atm_refresh", exc=exc)
                 err_str = str(exc)
                 is_auth_error = (
                     "AG8001" in err_str

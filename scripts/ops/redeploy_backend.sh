@@ -84,7 +84,11 @@ READYZ_STATUS=$(docker exec phoenix-oci-backend \
   curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/readyz 2>/dev/null || echo "000")
 echo "=== Backend /readyz status: ${READYZ_STATUS} ==="
 if [ "$READYZ_STATUS" != "200" ]; then
-  echo "NOTE: /readyz is trading readiness and may remain non-200 during a kill-switch or position-authority halt."
+  echo "ERROR: /readyz is trading readiness and returned ${READYZ_STATUS}."
+  echo "Set ALLOW_NON_READYZ_DEPLOY=true only for an approved maintenance or recovery deploy."
+  if [ "${ALLOW_NON_READYZ_DEPLOY:-false}" != "true" ]; then
+    exit 1
+  fi
 fi
 
 echo

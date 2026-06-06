@@ -1,7 +1,8 @@
 # OCI VM Runtime Evidence
 
-Last verified: 2026-06-04 05:29 UTC from the running OCI VM.
-OI/ML shadow sidecar evidence was updated on 2026-05-23 00:12 IST.
+Last verified: 2026-06-06 07:38 UTC from the running OCI VM.
+OI/ML shadow sidecar evidence was rechecked as present and dry-run only during
+the same review.
 
 The OCI VM is the production source of truth. This file intentionally records
 what is running, including drift from repo templates. Secret values, private IPs,
@@ -13,16 +14,16 @@ OCIDs, broker identifiers, and tokens are redacted.
 |---|---|---|---|---|
 | Host | `phoenix-vm`, `opc`, `/home/opc` | `hostname; date; whoami; pwd` | VM reachable through OCI Bastion; VM VNIC has no public IP | Do not document private IPs |
 | Deployed repo path | `/opt/phoenix/app` | Compose labels and `git -C` | Active checkout lives under `/opt/phoenix/app` | `/opt/phoenix` also contains operator-owned runtime files |
-| Active git commit/branch | `main`, `132e0ea` plus live operator config drift | `git -C /opt/phoenix/app branch --show-current`, `rev-parse HEAD`, mounted config/env evidence | VM checkout is on `main` at `132e0ea`; `/opt/phoenix/app/app/config/strategy_env.yaml` and `/opt/phoenix/phoenix-deploy.env` were updated for EMA20-only routing | Commit/tag remains pinned; document this as config/env/control-plane drift until the next image release |
+| Active git commit/branch | `main`, `a9afd518...` plus live operator config drift | `git -C /opt/phoenix/app branch --show-current`, `rev-parse HEAD`, mounted config/env evidence | VM checkout is on `main` at `a9afd518...`; `/opt/phoenix/app/app/config/strategy_env.yaml` and `/opt/phoenix/phoenix-deploy.env` remain operator-owned runtime inputs | Commit/tag and VM source bind mounts must be verified on each deployment |
 | Compose project | `phoenix-oci-live` | `docker inspect ... Labels` | backend, nginx, and watchdog have Compose labels | `phoenix-oci-postgres` has no Compose labels |
 | Compose files used | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` | `com.docker.compose.project.config_files` labels | These are the active Phoenix Compose files for labelled containers | Runtime override must be treated as authoritative |
 | Env file used | `/opt/phoenix/phoenix-deploy.env` | runtime scripts and Compose commands | Non-secret deploy env file exists on VM | Document names only, not values |
 | Running Phoenix containers | `phoenix-oci-backend`, `phoenix-oci-web`, `phoenix-oci-watchdog`, `phoenix-oci-postgres` | `docker ps`, `docker inspect` | All four were running during audit | Aurelium containers also run on the host but are outside Phoenix docs |
 | Stopped Phoenix containers | none shown by name | `docker ps -a` | `phoenix-oci-optimizer` is not present | Optimizer systemd units are also absent |
-| Backend image | `phoenix-local-backend:local-132e0ea` | `docker inspect phoenix-oci-backend` | Local image, not OCIR | Recreated 2026-06-03 after EMA20-only live routing config/env update |
-| Web image | `phoenix-local-nginx:local-132e0ea` | `docker inspect phoenix-oci-web` | Local image, not OCIR | Recreated 2026-06-03 with the same pinned tag |
-| Database image | `postgres:16-alpine`, image ID `sha256:4e6e670...` | `docker inspect phoenix-oci-postgres` | VM-local Postgres container | No Docker healthcheck |
-| Watchdog image | `docker:cli`, image ID `sha256:17b5c235...` | `docker inspect phoenix-oci-watchdog` | Docker CLI sidecar | Has Docker socket mount |
+| Backend image | `phoenix-local-backend:local-a9afd51` | `docker inspect phoenix-oci-backend` | Local image, not OCIR | Recreated before the 2026-06-06 review; source bind mounts are still active |
+| Web image | `phoenix-local-nginx:local-a9afd51` | `docker inspect phoenix-oci-web` | Local image, not OCIR | Public nginx path must serve redacted health/readiness details after the hardening deploy |
+| Database image | `postgres:16-alpine` | `docker inspect phoenix-oci-postgres` | VM-local Postgres container | 2026-06-06 review found this legacy container lacked Docker health metadata and carried the DB password in container env; adopt the compose `vm-local-postgres` profile in a maintenance window |
+| Watchdog image | `docker:cli` | `docker inspect phoenix-oci-watchdog` | Docker CLI sidecar | 2026-06-06 review found the live container had Docker socket access and active nginx stop/start behavior; recreate from the base no-socket compose service |
 | Backend command | `python -m app.main` via `docker-entrypoint.sh` | `docker inspect` | FastAPI backend runs in backend container | Port 8080 is container-only |
 | Web command | `nginx -g 'daemon off;'` | `docker inspect` | nginx serves frontend and reverse proxy | Host ports 80 and 8443 |
 | Restart policy | `unless-stopped` for Phoenix backend/web/postgres/watchdog | `docker inspect` | Containers restart unless stopped | `phoenix-oci-postgres` has no health status |
@@ -31,21 +32,47 @@ OCIDs, broker identifiers, and tokens are redacted.
 | Backend env mode | `APP_ENV=production`, `CONTROL_PLANE_BACKEND=postgres`, `ENABLE_MULTI_HUB=true`, `DISABLE_CONTROL_TOWER_ROUTES=true` | selected `docker exec phoenix-oci-backend sh -lc 'printenv ...'` | Current backend env aligns with hub/Postgres authority | Secret-like values were redacted; Control Tower read-only status endpoints remain mounted, while mutating management controls stay disabled unless the LIVE mutation gate is explicitly enabled |
 | Live strategy routing | EMA20-only: enabled strategy names are `ema20_strategy`; enabled NIFTY_IDX, BANKNIFTY_IDX, and NG_FUT allow only `ema20_strategy`; selector mappings contain no non-EMA names; `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1` | container config validation and Postgres `strategy_configs` query | `exclusive_nifty_ce_buy`, `put_momentum_scalper`, and `nifty_weekly_credit_spreads` are disabled at config, instrument policy, selector, and control-plane layers | Durable kill switch remained active during verification; this routing change did not clear it |
 | Database backend | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres`, `CONTROL_PLANE_PG_SSLMODE=prefer`, `LIVE_PG_SSL_SKIP_CHECK=true` | selected backend env | VM-local Postgres, not external OCI DB | Remote/cloud Postgres docs are non-current |
-| Secret model | `/run/secrets/admin_api_key`, `/run/secrets/auth_token_secret`, `/run/secrets/control_plane_pg_password`, `/run/secrets/angel_postback_token`, `/run/secrets/admin_kill_switch_override` | mounts/env/runbook evidence | Secret values are mounted as files; kill-switch override is file-only | Never copy values into docs or env examples |
+| Secret model | `/run/secrets/admin_api_key`, `/run/secrets/auth_token_secret`, `/run/secrets/control_plane_pg_password`, `/run/secrets/angel_postback_token`, `/run/secrets/admin_kill_switch_override` | mounts/env/runbook evidence | Secret values are mounted as files; kill-switch override is file-only | After the 2026-06-06 hardening, secret files must be owner-only readable by the backend runtime UID/GID; never copy values into docs or env examples |
 | Backend mounts | `/opt/phoenix/logs`, `/opt/phoenix/state`, `/opt/phoenix/certs`, `/run/secrets/*`, plus source-file bind mounts | `docker inspect .Mounts` | Runtime includes host state/log/cert mounts and source overlays | Source bind mounts are current drift |
 | Web mounts | `/opt/phoenix/nginx-ssl-prerendered.conf.template`, `/opt/phoenix/certs`, `/opt/phoenix/acme-challenge`, `/run/secrets/admin_api_key` | `docker inspect .Mounts` | nginx uses a prerendered host template | Repo nginx template is not directly mounted today |
 | Postgres mounts | `/opt/phoenix/pgdata` to `/var/lib/postgresql/data` | `docker inspect .Mounts` | DB data is local VM disk path | Backup/restore docs must use this fact |
 | Logs | `/opt/phoenix/logs`, date-partitioned app logs, audit JSONL, scheduler logs, cert renewal log | `find /opt/phoenix/logs` | Current logs include 2026-05-25 runtime/deployment evidence and root log files | `/opt/phoenix/logs` is writable by container UID |
 | State files | `/opt/phoenix/state/risk_positions.json` and `.bak` | `ls -la /opt/phoenix/state` | Restart helper files exist | Not authoritative over Postgres |
-| Health endpoints | backend container `/health` returns 200; backend `/readyz` returns 503 | `docker exec phoenix-oci-backend curl ...` | Backend liveness is healthy; `/readyz` is not trading-ready because `kill_switch_active_count=1`; runners are registered/running, sync is fresh, and kill-switch divergence is false | `/readyz` 503 is expected while the durable kill switch remains active |
-| nginx health | host `http://localhost/health` returns 200; host `http://localhost/readyz` returns 503 | `curl` on VM | nginx proxies current health paths; host liveness is healthy and readiness reflects the active kill switch | `/api/health` falls through to SPA and is not a health API |
+| Health endpoints | backend container `/health` returns 200; backend `/readyz` returned 200 during review | `docker exec phoenix-oci-backend curl ...` | Backend liveness and readiness were green, but recent universe/quote-auth failures showed the old readiness contract was incomplete | New deployments must fail `/readyz` on LIVE universe/quote-auth failure |
+| nginx health | host `http://localhost/health` and host `/readyz` returned through nginx | `curl` on VM | nginx proxies current health paths | After the hardening deploy, public nginx `/readyz` and `/health/summary` must use redacted backend endpoints |
 | Release evidence endpoint | `/admin/release-evidence` returns 401 without admin key | `docker exec phoenix-oci-backend curl` | Endpoint exists and requires auth | Do not print admin key |
 | Database tables | `audit_events`, `broker_accounts`, `broker_credentials`, `internal_position_records`, `kill_switch_state`, `order_submission_outbox`, `position_ownership_ledger`, `schema_migrations`, `strategy_configs`, `strategy_config_candidates`, `trades`, tenant/user entitlement tables, and others | `docker exec phoenix-oci-postgres psql -U phoenix_app -d phoenix` | Operational DB schema exists in VM-local Postgres | Backend container does not include `psql` |
 | Cron/systemd | root cron starts at 03:30 UTC Mon-Fri and stops at 18:30 UTC Sun-Thu; root cert renewal; user safety watcher; weekly cleanup in `/etc/cron.d/phoenix-cleanup` | `crontab -l`, `sudo crontab -l`, `/etc/cron*` | Cron, not optimizer/reload systemd timers, controls current scheduled operations | `phoenix-runtime-secrets.service` exists but is inactive |
 | Optimizer/reload timers | `phoenix-optimizer.*` and `phoenix-backend-reload.*` not found | `systemctl status` | Not installed on VM | Docs must not claim they are active |
-| Watchdog behavior | logs show repeated backend fail counts and nginx stop/start recovery | `docker logs phoenix-oci-watchdog` | Watchdog actively changes nginx state | Older "observe-only" docs are wrong |
+| Watchdog behavior | logs showed repeated backend fail counts and nginx stop/start recovery before hardening | `docker logs phoenix-oci-watchdog` | Live watchdog behavior drifted from the base observe-only repo service | Run `scripts/ops/recreate_oci_watchdog.sh` to restore the no-socket/no-nginx-action contract |
 | Log abnormalities | backend/web abnormal grep did not show recent critical errors; watchdog shows repeated fail/recover events | `docker logs --tail=500 ... grep` | No recent backend criticals found in sampled tail | Watchdog churn remains an operational warning |
 | OCI network | VM VNIC has private IP only, no public IP, no NSGs; subnet security list includes SSH, 80, 443, 8443, and ICMP | OCI network read-only inspection | VM is reached through private networking/Bastion/LB path | CIDRs and IPs redacted |
+
+## 2026-06-06 Production Review / Hardening Backlog
+
+The 2026-06-06 review created GitHub issues #343 through #354. Key production
+blockers were:
+
+- secret files and legacy Postgres env exposure required rotation and strict
+  file permissions;
+- `/readyz` could be green while universe/quote-auth refresh failed;
+- root filesystem headroom was unsafe;
+- public health/readiness responses exposed too much runtime detail;
+- the live watchdog and VM-local Postgres containers drifted from the repo
+  compose contract;
+- the Phoenix VM also hosted unrelated public workloads.
+
+Remediation scripts added for this review:
+
+- `scripts/validate-live-secret-perms.sh`
+- `scripts/ops/harden_oci_file_permissions.sh`
+- `scripts/ops/oci_storage_report.sh`
+- `scripts/ops/recreate_oci_watchdog.sh`
+- `scripts/ops/adopt_oci_postgres_compose.sh`
+
+Do not close the parent backlog until VM evidence confirms the scripts have been
+run where applicable, secrets have been rotated, and co-tenant workload
+isolation is either completed or explicitly risk-accepted.
 
 ## 2026-05-20 Position-Authority Recovery
 

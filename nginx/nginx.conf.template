@@ -49,8 +49,13 @@ server {
         proxy_set_header X-Forwarded-Proto $forwarded_proto;
     }
 
-    location /health {
+    location = /health {
         proxy_pass http://backend;
+        proxy_set_header Host $host;
+    }
+
+    location = /health/summary {
+        proxy_pass http://backend/health/summary-public;
         proxy_set_header Host $host;
     }
 
@@ -59,8 +64,8 @@ server {
         proxy_set_header Host $host;
     }
 
-    location /readyz {
-        proxy_pass http://backend;
+    location = /readyz {
+        proxy_pass http://backend/readyz-public;
         proxy_set_header Host $host;
     }
 

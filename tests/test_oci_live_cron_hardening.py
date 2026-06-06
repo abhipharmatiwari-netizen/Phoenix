@@ -26,6 +26,8 @@ def test_start_phoenix_preflights_backend_and_nginx_images_before_compose() -> N
     assert "phoenix-local-nginx:${IMAGE_TAG}" in script
     assert "${IMAGE_BASE}/backend:${IMAGE_TAG}" in script
     assert "${IMAGE_BASE}/nginx:${IMAGE_TAG}" in script
+    assert "Backend /readyz status" in script
+    assert "Phoenix /readyz is green and ready for trading." in script
 
     first_preflight = script.index('require_local_image "backend" "$BACKEND_IMAGE"')
     first_compose_start = script.index("docker compose")
@@ -188,6 +190,7 @@ def test_redeploy_pulls_and_recreates_nginx_with_backend() -> None:
     assert "up -d --no-deps --no-build --force-recreate backend" in script
     assert "http://localhost:8080/health" in script
     assert "Backend /readyz status" in script
+    assert "ALLOW_NON_READYZ_DEPLOY=true" in script
     assert "up -d --no-deps --no-build --force-recreate nginx" in script
     assert "docker inspect phoenix-oci-backend" in script
     assert "docker inspect phoenix-oci-web" in script
@@ -196,8 +199,8 @@ def test_redeploy_pulls_and_recreates_nginx_with_backend() -> None:
 def test_oci_runbook_documents_verified_vm_runtime() -> None:
     runbook = _read("docs/runbooks/oci_live_deployment.md")
 
-    assert "phoenix-local-backend:local-04cf16c" in runbook
-    assert "phoenix-local-nginx:local-04cf16c" in runbook
+    assert "phoenix-local-backend:local-a9afd51" in runbook
+    assert "phoenix-local-nginx:local-a9afd51" in runbook
     assert "phoenix-oci-postgres" in runbook
     assert "VM-local Postgres" in runbook
     assert "source-file bind mounts" in runbook

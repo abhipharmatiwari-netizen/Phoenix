@@ -63,7 +63,8 @@ def test_live_container_healthchecks_use_liveness_not_readiness():
     assert "/readyz" in dockerfile_text
     assert 'test: ["CMD", "curl", "-f", "http://localhost:8080/health"]' in compose_text
     assert 'test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/health >/dev/null 2>&1 || exit 1"]' in compose_text
-    assert "location /readyz {" in nginx_template_text
+    assert "location = /readyz {" in nginx_template_text
+    assert "proxy_pass http://backend/readyz-public;" in nginx_template_text
 
 
 def test_secretstore_launcher_builds_all_local_live_images_before_no_build_up():
