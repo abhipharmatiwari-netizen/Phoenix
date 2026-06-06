@@ -2,7 +2,9 @@
 
 Phoenix is an operator-run trading platform. Its current production deployment
 is the OCI VM described in [OCI VM Runtime Evidence](docs/OCI_VM_RUNTIME.md).
-This file is plain-language context only; it is not an operating runbook.
+This file is plain-language context only; it is not an operating runbook. The
+runtime glossary and endpoint behavior index live in
+[Phoenix Encyclopedia](docs/ENCYCLOPEDIA.md).
 
 ## What Is Running Today
 

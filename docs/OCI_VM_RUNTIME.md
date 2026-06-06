@@ -88,6 +88,19 @@ Implemented and deployed in the hardening pass:
   profile with Docker health metadata;
 - `phoenix-oci-watchdog` was recreated with no Docker socket and no mounts.
 
+Operator interpretation for the current dashboard:
+
+- `Unknown` Schema Status, Tracked Accounts, or Watchdog values from the public
+  health summary are expected when the response is redacted.
+- Use authenticated `/admin/health/summary` or backend-local
+  `/health/summary` before declaring schema/account/watchdog failure.
+- The latest authenticated VM probe returned schema `ok`, tracked account count
+  `2`, watchdog running `true`, and overall status `ok`.
+- If the authenticated admin summary reports watchdog stopped, inspect
+  `docker ps`, `docker logs phoenix-oci-watchdog`, and the watchdog mount list
+  before restarting anything. The watchdog is observe-only and should not stop
+  or start nginx.
+
 Remaining backlog items require credential or infrastructure owner action:
 
 - rotate the previously exposed secret values and broker credentials;

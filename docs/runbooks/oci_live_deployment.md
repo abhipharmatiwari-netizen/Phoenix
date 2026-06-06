@@ -258,6 +258,9 @@ Expected normal trading-readiness evidence:
   `/opt/phoenix/nginx-ssl-prerendered.conf.template` and recreate nginx.
 - Authenticated `/admin/health/summary` should return detailed internal fields
   such as `schema_status`, `tracked_account_count`, and `watchdog_running`.
+- If Overview or Safety shows Schema Status, Tracked Accounts, or Watchdog as
+  `Unknown`, first compare against authenticated `/admin/health/summary`. Public
+  redaction alone should not be treated as a component failure.
 - Public `/bff/health/summary`, `/bff/readyz`, and `/bff/dashboard/status`
   should return 404 to prevent bypassing redaction.
 - The frontend Overview page must continue to render if only the public

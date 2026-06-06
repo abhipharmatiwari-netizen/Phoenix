@@ -121,6 +121,7 @@ Current OCI VM example:
 ```bash
 docker exec phoenix-oci-backend sh -lc 'test -n "$CAPITAL_LIMITS_JSON" && echo CAPITAL_LIMITS_JSON_PRESENT'
 docker exec phoenix-oci-backend curl -sS http://localhost:8080/readyz
+docker exec phoenix-oci-backend curl -sS http://localhost:8080/health/summary
 ```
 
 Do not print the JSON value into tickets or docs.
@@ -154,7 +155,9 @@ curl.exe http://localhost/readyz
 Expected success evidence:
 
 - `CAPITAL_LIMITS_JSON` contains the approved funded-account key.
-- `/readyz` is healthy.
+- backend-local `/readyz` is healthy.
+- authenticated `/admin/health/summary` remains healthy for schema, watchdog,
+  and tracked-account diagnostics after deployment.
 - Startup logs do not contain `startup.capital_limits_override` unless an audited exception was approved.
 
 ## Failure handling and rollback

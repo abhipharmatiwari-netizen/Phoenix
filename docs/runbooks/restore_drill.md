@@ -160,7 +160,14 @@ docker logs --tail 200 phoenix-oci-backend
 docker exec phoenix-oci-backend curl -sS http://localhost:8080/readyz
 docker exec phoenix-oci-backend curl -sS http://localhost:8080/health/summary
 curl -sS http://localhost/readyz
+curl -sS http://localhost/health/summary
+curl -sS http://localhost/health/alerts
+curl -sS http://localhost/health/mitigations
 ```
+
+The public nginx `/readyz` and `/health/summary` responses are redacted. For
+post-restore schema, watchdog, and tracked-account details, use backend-local
+`/health/summary` or authenticated `/admin/health/summary`.
 
 ---
 

@@ -47,16 +47,17 @@ See [OCI VM Runtime Evidence](docs/OCI_VM_RUNTIME.md) for the evidence table.
 1. [OCI VM Runtime Evidence](docs/OCI_VM_RUNTIME.md)
 2. [OCI LIVE Deployment Runbook](docs/runbooks/oci_live_deployment.md)
 3. [Architecture Contract](ARCHITECTURE.md)
-4. [Documentation Audit](docs/DOCUMENTATION_AUDIT.md)
-5. [Release Evidence](docs/runbooks/release_evidence.md)
-6. [OCI Runtime Hardening](docs/runbooks/oci_runtime_hardening.md)
-7. [Strategy Runtime Diagnostics](docs/runbooks/strategy_runtime_diagnostics.md)
-8. [OI/ML Shadow Sidecar](docs/runbooks/oi_ml_shadow_sidecar.md)
-9. [OI/ML Data Source Approval](docs/runbooks/oi_ml_data_source_approval.md)
-10. [OI/ML CE Seller Rollout](docs/runbooks/oi_ml_ce_seller_rollout.md)
-11. [Kill Switch](docs/runbooks/kill_switch.md)
-12. [Broker Credential Update](docs/runbooks/update_broker_credentials.md)
-13. [Restore Drill](docs/runbooks/restore_drill.md)
+4. [Phoenix Encyclopedia](docs/ENCYCLOPEDIA.md)
+5. [Documentation Audit](docs/DOCUMENTATION_AUDIT.md)
+6. [Release Evidence](docs/runbooks/release_evidence.md)
+7. [OCI Runtime Hardening](docs/runbooks/oci_runtime_hardening.md)
+8. [Strategy Runtime Diagnostics](docs/runbooks/strategy_runtime_diagnostics.md)
+9. [OI/ML Shadow Sidecar](docs/runbooks/oi_ml_shadow_sidecar.md)
+10. [OI/ML Data Source Approval](docs/runbooks/oi_ml_data_source_approval.md)
+11. [OI/ML CE Seller Rollout](docs/runbooks/oi_ml_ce_seller_rollout.md)
+12. [Kill Switch](docs/runbooks/kill_switch.md)
+13. [Broker Credential Update](docs/runbooks/update_broker_credentials.md)
+14. [Restore Drill](docs/runbooks/restore_drill.md)
 
 Docker Desktop, Cloud Run, GCP, Firestore, BigQuery, and local development
 material are not current production operating models unless a future VM audit
@@ -97,6 +98,7 @@ migrations/                       SQL migrations and bootstrap assets
 scripts/                          Operator and release utility scripts
 tests/                            Pytest suite
 docs/OCI_VM_RUNTIME.md            Current VM evidence snapshot
+docs/ENCYCLOPEDIA.md              Current runtime glossary and endpoint behavior
 docs/runbooks/oci_live_deployment.md Current OCI VM operator runbook
 docs/runbooks/oi_ml_shadow_sidecar.md OI/ML shadow sidecar progress and gates
 docs/runbooks/oi_ml_data_source_approval.md OI/ML option-chain data source approval gate

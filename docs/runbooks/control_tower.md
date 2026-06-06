@@ -62,5 +62,8 @@ DISABLE_CONTROL_TOWER_ROUTES=false
 CONTROL_TOWER_MUTATIONS_ENABLED=true
 ```
 
-Recheck `/readyz`, `/health/summary`, and `/api/control_tower/status`
-before relying on enabled management controls.
+Recheck backend-local `/readyz`, backend-local `/health/summary`,
+authenticated `/admin/health/summary`, and `/api/control_tower/status` before
+relying on enabled management controls. Public nginx `/health/summary` is
+redacted and is not enough evidence for schema, watchdog, or tracked-account
+internals.

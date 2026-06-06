@@ -7,8 +7,10 @@ Define the day-1 runtime signals that operators can actually observe from the cu
 ## Scope
 
 This document covers in-repo observability only: `GET /metrics`,
-`GET /health/alerts`, backend-local `/readyz`, container health, logs, and the
-authenticated dashboard WebSocket. Phoenix does not currently ship a
+`GET /health/alerts`, `GET /health/mitigations`, backend-local `/readyz`,
+backend-local `/health/summary`, authenticated `/admin/health/summary`,
+container health, logs, and the authenticated dashboard WebSocket. Phoenix does
+not currently ship a
 repo-managed Grafana dashboard, Alertmanager routing config, or unattended
 pager policy.
 
@@ -18,8 +20,10 @@ pager policy.
 |---|---|---|
 | `GET /metrics` | `app/server.py`, `app/observability/prometheus_metrics.py` | Prometheus-format counters, gauges, and histograms |
 | `GET /health/alerts` | `app/server.py`, `app/observability/alert_rules.py` | In-repo alert evaluation for day-1 supervision |
+| `GET /health/mitigations` | `app/server.py`, nginx templates | Mitigation guidance payload for the operator screen |
 | `/readyz` | `app/server.py` | Release gate for leader lease, startup recovery, stream worker, sync freshness, kill switch, position authority, and LIVE universe/quote-auth health |
 | `/readyz-public` and `/health/summary-public` | `app/server.py`, `nginx/*.conf.template` | Redacted public nginx readiness/summary responses |
+| `/admin/health/summary` | `app/server.py`, frontend service client | Authenticated operator-only schema, watchdog, and tracked-account diagnostics |
 | `/admin/release-evidence` | `app/runtime/app_runtime.py`, `app/server.py` | Promotion evidence snapshot |
 | Dashboard WebSocket | `app/server.py`, `frontend/` | Derived operator view; not authoritative state |
 
@@ -81,14 +85,19 @@ The alert rules also read optional metrics such as `phoenix_quote_age_seconds`, 
   dashboard WebSocket is unavailable.
 - Public nginx `/readyz` and `/health/summary` must remain redacted; they are
   exposure checks, not full diagnostic evidence.
+- Dashboard cards that read Schema Status, Tracked Accounts, or Watchdog must
+  use authenticated `/admin/health/summary` for internal values. `Unknown`
+  from a public redacted response is not by itself an SLO failure.
 - Soak validation is not complete, so this release must not be represented as unattended SLO/pager-driven operation yet.
 
 ## Required Cutover Evidence
 
 - Capture backend-local `/readyz`, `/health`, backend-local `/health/summary`,
   `/health/alerts`, and `/metrics` output for green before and after cutover.
-- Capture public nginx `/readyz` only to prove redaction and high-level
-  reachability.
+- Capture authenticated `/admin/health/summary` to prove schema status,
+  watchdog status, and tracked-account count for the operator console.
+- Capture public nginx `/readyz` and `/health/summary` only to prove redaction
+  and high-level reachability.
 - Capture evidence that the dashboard connected successfully and was receiving fresh updates.
 - Record the named on-call owners.
 - If any minimum monitor fired, record the alert name, timestamp, operator decision, and rollback/continue rationale.

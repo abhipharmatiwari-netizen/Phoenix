@@ -77,7 +77,9 @@ not an operator toggle.
 ### Shadow
 
 - Run the sidecar with live broker quotes and virtual order intents only.
-- Confirm `live_order_path_enabled=false` in `/health/summary`.
+- Confirm `live_order_path_enabled=false` in backend-local `/health/summary`.
+  Public nginx `/health/summary` is redacted and is not sufficient for this
+  internal gate.
 - Require 10 complete sessions with fresh option-chain rows, shadow intents, and
   validation reports when the market window is open.
 - Confirm every staged intent is a bear-call spread with a long hedge leg and a
@@ -163,7 +165,8 @@ kill-switch visibility, trailing-lock cleanup, or break-glass controls.
 5. Use normal strategy exits, hub EOD, or break-glass flatten for residual
    exposure according to the current runbooks. Do not manually clear lifecycle
    records until broker-flat and authority evidence is captured.
-6. Capture `/readyz`, `/health/summary`, broker terminal flat evidence,
+6. Capture backend-local `/readyz`, backend-local `/health/summary`,
+   authenticated `/admin/health/summary`, broker terminal flat evidence,
    lifecycle terminal evidence, and audit entries for the rollback record.
 7. Keep shadow ingestion running only if it remains dry-run and useful for
    diagnosis. Stop it if quote-provider instability is contributing to incident
@@ -182,7 +185,8 @@ Complete this checklist before every phase promotion and after every rollback:
 - Dashboard route: open the operations dashboard through the current OCI nginx
   route and confirm health, readiness, strategy status, kill switch, positions,
   orders, and OI/ML shadow ingestion panes are visible.
-- EOD startup snapshot: capture sanitized `/readyz` and `/health/summary`
+- EOD startup snapshot: capture sanitized backend-local `/readyz`,
+  backend-local `/health/summary`, and authenticated `/admin/health/summary`
   output after the backend has started and after EOD on the same session.
 - Kill-switch dry run: in paper, shadow, or the approved pre-live test window,
   prove SOFT trip blocks entries, leaves exits allowed, emits durable audit, and

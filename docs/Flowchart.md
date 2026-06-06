@@ -392,11 +392,14 @@ flowchart TD
         READYZ_PUBLIC[GET /readyz-public<br/>Redacted public readiness]
         HEALTH_SUMMARY[GET /health/summary<br/>Internal startup and dependency summary]
         HEALTH_SUMMARY_PUBLIC[GET /health/summary-public<br/>Redacted public summary]
+        HEALTH_ALERTS[GET /health/alerts<br/>Public JSON alert rules]
+        HEALTH_MITIGATIONS[GET /health/mitigations<br/>Public JSON mitigations]
         METRICS[GET /metrics<br/>Prometheus metrics]
         POSITIONS[GET /positions<br/>Open positions - legacy compat]
     end
 
     subgraph Admin Routes -- prefix /admin
+        ADMIN_HEALTH_SUMMARY[GET /admin/health/summary<br/>Authenticated internal health summary]
         STRATEGIES[GET /admin/strategies<br/>Strategy list]
         TOGGLE[POST /admin/strategies/toggle<br/>Enable/disable strategy]
         INSTRUMENTS[GET /admin/instruments<br/>Instrument policy]
@@ -409,6 +412,12 @@ flowchart TD
         EOD_EXIT[POST /admin/manual-eod-exit<br/>Manual EOD exit]
         BREAK_GLASS[POST /admin/break-glass/flatten<br/>Break-glass flatten]
         AUDIT[GET /admin/audit<br/>Audit event log]
+    end
+
+    subgraph Blocked BFF Diagnostics
+        BFF_HEALTH[GET /bff/health/summary<br/>404 blocked redaction bypass]
+        BFF_READYZ[GET /bff/readyz<br/>404 blocked redaction bypass]
+        BFF_DASH[GET /bff/dashboard/status<br/>404 blocked redaction bypass]
     end
 
     subgraph Control Tower -- read-only when management gates are disabled

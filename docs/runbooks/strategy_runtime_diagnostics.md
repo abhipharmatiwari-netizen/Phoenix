@@ -143,6 +143,37 @@ correctly stops retrying because retrying cannot fix a missing database row.
 
 **Fix:** Seed the `strategy_configs` table. See [oci_live_deployment.md](oci_live_deployment.md).
 
+## Dashboard health diagnostics
+
+Use the authenticated or backend-local health summary when investigating
+Overview or Safety cards:
+
+```bash
+docker exec phoenix-oci-backend curl -sS http://localhost:8080/health/summary
+curl -sk -H "X-Admin-Key: ${ADMIN_KEY}" \
+  https://127.0.0.1:8443/admin/health/summary
+```
+
+Public nginx `/health/summary` is redacted. `Unknown` for Schema Status,
+Tracked Accounts, or Watchdog in a public or unauthenticated view is not enough
+evidence for a runtime failure. If authenticated `/admin/health/summary` reports
+`schema_status=ok`, a positive `tracked_account_count`, and
+`watchdog_running=true`, the dashboard is seeing redaction rather than a stopped
+component.
+
+If the authenticated summary reports watchdog stopped, inspect the watchdog
+container before changing backend code:
+
+```bash
+docker ps --filter name=phoenix-oci-watchdog
+docker logs --tail=120 phoenix-oci-watchdog
+docker inspect phoenix-oci-watchdog --format '{{json .Mounts}}'
+```
+
+The hardened watchdog is observe-only. It should have no mounts and should not
+stop or start nginx. nginx stop/start logs indicate stale VM wiring or an
+override drift, not normal watchdog behavior.
+
 ## Validation
 
 Capture these after any diagnostic action:

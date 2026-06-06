@@ -37,6 +37,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | `README.md` | operator entrypoint | MATCHES_OCI_VM | KEEP CURRENT |
 | `ABOUTME.md` | plain-language summary | MATCHES_OCI_VM | KEEP CURRENT |
 | `ARCHITECTURE.md` | production contract | MATCHES_OCI_VM_PREFACE | KEEP CURRENT |
+| `docs/ENCYCLOPEDIA.md` | runtime glossary and endpoint behavior index | CURRENT | KEEP CURRENT |
 | `docs/OCI_VM_RUNTIME.md` | evidence snapshot | MATCHES_OCI_VM | KEEP CURRENT |
 | `docs/runbooks/oci_live_deployment.md` | OCI operations | MATCHES_OCI_VM | KEEP CURRENT |
 | `docs/runbooks/oci_runtime_hardening.md` | runtime hardening | MATCHES_OCI_VM | KEEP CURRENT |
@@ -47,6 +48,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | `docs/release-evidence/README.md` | release evidence folder guide | MATCHES_CURRENT_ENDPOINTS | KEEP CURRENT |
 | `docs/kpis_slos.md` | observability/KPI reference | MATCHES_CURRENT_ENDPOINTS | KEEP CURRENT |
 | `docs/runbooks/update_broker_credentials.md` | broker credential rotation | MATCHES_OCI_VM | KEEP CURRENT |
+| `docs/runbooks/dashboard-kill-switch.md` | kill-switch dashboard playbook | CURRENT_WITH_KILL_SWITCH_AUTHORITY | KEEP CURRENT |
 | `docs/runbooks/oi_ml_shadow_sidecar.md` | OI/ML shadow sidecar | CURRENT_FOR_SIDECAR | KEEP CURRENT |
 | `docs/runbooks/docker_desktop_live_deployment.md` | Docker Desktop reference | NON_CURRENT_PRODUCTION | KEEP WITH BANNER |
 | `docs/runbooks/cloud_run_live_deployment.md` | Cloud Run reference | ROADMAP_ONLY | KEEP WITH BANNER |
@@ -71,6 +73,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | Overview assumed full internal health summary fields from the public endpoint | Current frontend and docs treat the public health summary as redacted and tolerate omitted schema, alert, watchdog, and account fields |
 | Alerts/Mitigations API paths fell through to SPA HTML | Current nginx repo and host-mounted templates explicitly proxy `/health/alerts` and `/health/mitigations` as JSON |
 | `/bff/health/summary` bypassed public health redaction | Direct BFF access to internal diagnostics is blocked; operator dashboards use authenticated `/admin/health/summary` |
+| There was no encyclopedia page for repeated endpoint terms | `docs/ENCYCLOPEDIA.md` now defines current runtime, health surfaces, dashboard health interpretation, static routing, watchdog contract, and runbook/playbook locations |
 | Runtime env examples referenced old verified local image tags | Current OCI env template references the `local-4ba598f` deploy tag |
 | Release evidence guidance treated Docker health as sufficient wait evidence | Current release guidance requires `/readyz` trading-readiness evidence in addition to liveness |
 
@@ -89,6 +92,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | Canonical document | Purpose |
 |---|---|
 | `README.md` | concise production entrypoint and reading order |
+| `docs/ENCYCLOPEDIA.md` | glossary for current runtime terms, endpoint behavior, and dashboard health interpretation |
 | `docs/OCI_VM_RUNTIME.md` | current VM evidence snapshot |
 | `docs/runbooks/oci_live_deployment.md` | executable current OCI runbook |
 | `ARCHITECTURE.md` | production contract with current runtime preface |

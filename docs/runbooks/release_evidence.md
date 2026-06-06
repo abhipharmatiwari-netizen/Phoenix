@@ -31,6 +31,11 @@ Collect all of the following without printing secret values:
 | Backend-local `/readyz` | HTTP 200 and `ready=true` |
 | Backend-local `/health/summary` | status is acceptable for the release gate and operating mode is `HUB_AUTHORITATIVE` |
 | Public `/readyz` | response is redacted and does not expose runner/account/lease internals |
+| Public `/health/summary` | response is redacted; internal schema, watchdog, and tracked-account details are omitted or masked |
+| Public `/health/alerts` and `/health/mitigations` | HTTP 200 JSON responses; neither endpoint returns SPA HTML |
+| Authenticated `/admin/health/summary` | schema, watchdog, tracked-account, and readiness fields are present for the logged-in operator view |
+| Direct BFF diagnostic bypass | `/bff/health/summary`, `/bff/readyz`, and `/bff/dashboard/status` return 404 |
+| Static asset routing | current `/static/*` bundle assets return the correct content type; stale `/static/*` paths return 404 instead of SPA HTML |
 | Secret permissions | `scripts/validate-live-secret-perms.sh` passes on the VM |
 | Watchdog contract | `docker inspect phoenix-oci-watchdog --format '{{json .Mounts}}'` returns an empty list |
 | Disk headroom | root filesystem has safe free-space buffer |
@@ -76,6 +81,9 @@ operator risk-halt or rollback decision is recorded.
    docker exec phoenix-oci-backend curl -sS http://localhost:8080/readyz
    docker exec phoenix-oci-backend curl -sS http://localhost:8080/health/summary
    curl -sS http://localhost/readyz
+   curl -sS http://localhost/health/summary
+   curl -sS http://localhost/health/alerts
+   curl -sS http://localhost/health/mitigations
    ```
 4. Validate hardening invariants:
    ```bash
@@ -88,7 +96,11 @@ operator risk-halt or rollback decision is recorded.
    ```bash
    ADMIN_KEY="$(sudo cat /run/secrets/admin_api_key)"
    curl -sk -H "X-Admin-Key: ${ADMIN_KEY}" \
+     https://127.0.0.1:8443/admin/health/summary
+   curl -sk -H "X-Admin-Key: ${ADMIN_KEY}" \
      https://127.0.0.1:8443/admin/release-evidence
+   curl -sk -o /dev/null -w "%{http_code}\n" \
+     https://127.0.0.1:8443/bff/health/summary
    unset ADMIN_KEY
    ```
 6. Review every field against the pass criteria table.

@@ -134,7 +134,9 @@ Maintenance-window migration outline:
    docker exec phoenix-oci-postgres psql -U phoenix_app -d phoenix -c "\dt"
    ```
 7. Start backend and nginx through the OCI runbook.
-8. Re-run `/readyz`, `/health/summary`, and `/admin/release-evidence`.
+8. Re-run backend-local `/readyz`, backend-local `/health/summary`,
+   authenticated `/admin/health/summary`, public redacted `/readyz` and
+   `/health/summary`, and `/admin/release-evidence`.
 
 Rollback: stop and rename the Compose-managed `postgres` container, rename the
 previous unmanaged container back to `phoenix-oci-postgres`, then start it:

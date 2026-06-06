@@ -349,7 +349,9 @@ When divergence is detected and `KILL_SWITCH_DIVERGENCE_FAILS_READY` is truthy (
 
 ### Via dashboard health summary
 
-`/health/summary` and `/dashboard/status` are dashboard/readiness summaries, not liveness probes. They must degrade whenever `/readyz` is blocked by an active durable kill switch:
+Backend-local `/health/summary` and authenticated dashboard summary data are
+dashboard/readiness summaries, not liveness probes. They must degrade whenever
+`/readyz` is blocked by an active durable kill switch:
 
 - `status="degraded"`
 - `degraded_reasons` contains `kill_switch_active`
@@ -357,7 +359,13 @@ When divergence is detected and `KILL_SWITCH_DIVERGENCE_FAILS_READY` is truthy (
 - `readiness.http_status=503`
 - `kill_switch.active_count > 0`
 
-This wiring prevents the dashboard Overview from showing green while `/readyz` is 503 because a kill switch is active. If `/readyz` reports `kill_switch_active` but `/health/summary` or `/dashboard/status` reports `status="ok"`, treat that as a dashboard wiring regression and stop deployment.
+Public nginx `/health/summary` is redacted and is not the source for
+operator-only kill-switch internals. This wiring prevents the dashboard
+Overview from showing green while `/readyz` is 503 because a kill switch is
+active. If `/readyz` reports `kill_switch_active` but backend-local
+`/health/summary`, authenticated `/admin/health/summary`, or `/dashboard/status`
+reports `status="ok"`, treat that as a dashboard wiring regression and stop
+deployment.
 
 ### Via health endpoint
 

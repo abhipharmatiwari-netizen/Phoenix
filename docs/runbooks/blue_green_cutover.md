@@ -181,7 +181,11 @@ For any real cutover, keep all of the following:
 - `migrator` logs showing migration apply success for the target database
 - query output or log evidence proving `public.schema_migrations` matches the exact repo migration set for the release
 - green effective backend LIVE env output
-- health output before and after cutover
+- backend-local `/readyz` and `/health/summary` before and after cutover
+- authenticated `/admin/health/summary` before and after cutover for schema,
+  watchdog, and tracked-account details
+- public redacted `/readyz` and `/health/summary`, JSON `/health/alerts` and
+  `/health/mitigations`, and blocked BFF diagnostic bypass evidence
 - log excerpts showing startup validation and reconciliation success
 - log excerpts showing stream-worker or approved replacement market-data plane health
 - operator notes describing whether cutover happened flat or with open positions carried through reconciliation

@@ -37,10 +37,13 @@ The helper redacts secret-like fields, writes a timestamped JSON file to
 in `docs/runbooks/release_evidence.md`.
 
 For the current OCI VM, release approval also requires backend-local `/readyz`,
-redacted public `/readyz`, Postgres health, watchdog no-mount evidence,
-secret-permission validation, and disk-headroom evidence. Those checks are
-listed in the release evidence runbook and should be captured in the deployment
-record, not committed here by default.
+backend-local `/health/summary`, authenticated `/admin/health/summary`,
+redacted public `/readyz` and `/health/summary`, JSON `/health/alerts` and
+`/health/mitigations`, blocked BFF diagnostic bypasses, Postgres health,
+watchdog no-mount evidence, static-asset routing evidence, secret-permission
+validation, and disk-headroom evidence. Those checks are listed in the release
+evidence runbook and should be captured in the deployment record, not committed
+here by default.
 
 ## Restore drill records
 

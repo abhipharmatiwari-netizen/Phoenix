@@ -261,7 +261,9 @@ docker compose \
 After restart:
 
 - backend-local `/readyz` returns 200
-- public `/readyz` remains redacted
+- public `/readyz` and `/health/summary` remain redacted
+- authenticated `/admin/health/summary` reports expected schema, watchdog, and
+  tracked-account details for the logged-in operator view
 - backend logs show broker login success
 - no repeated `BROKER_SECRET_BACKEND=postgres` credential errors appear
 - `balance_sync_ready=true` after the account runner completes its first balance sync

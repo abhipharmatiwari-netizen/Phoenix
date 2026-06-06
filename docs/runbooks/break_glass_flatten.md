@@ -63,6 +63,9 @@ Before calling this endpoint:
 - You know the `tenant_id` and `broker_account_id`.
 - An active `AccountRunner` is running for the target `broker_account_id`.
 - An authoritative live position for the contract exists in the runtime `StateStore`.
+- Backend-local `/readyz` and authenticated `/admin/health/summary` have been
+  checked so position authority, schema, watchdog, and tracked-account state are
+  understood before the emergency exit.
 - You have `ADMIN` credentials (`ADMIN_API_KEY` via `X-Admin-Key`, or an authenticated admin JWT).
 - In LIVE, you have a valid single-use BREAK_GLASS `step_up_token` obtained from `POST /admin/step-up/issue` (see header note above).
 

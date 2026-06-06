@@ -75,9 +75,14 @@ Manual recovery below is the fallback when auto-recovery does not converge.
      curl -sS http://localhost:8080/dashboard/status
    docker exec phoenix-oci-backend \
      curl -sS http://localhost:8080/readyz
+   docker exec phoenix-oci-backend \
+     curl -sS http://localhost:8080/health/summary
    ```
 
    Readiness should recover once no degraded scopes or DEGRADED/RECONCILING
    position records remain. If it does not, inspect the clear response's
    `degraded_scope_recovered` / `degraded_scope_recovery_error` fields, fetch
    recovery evidence again, and review the remaining record or degraded scope.
+   Public nginx `/health/summary` is redacted; use backend-local
+   `/health/summary` or authenticated `/admin/health/summary` for internal
+   recovery diagnostics.

@@ -11,6 +11,8 @@ historical docs, compose comments, or old runbooks conflict with the running VM,
 the VM wins and the document must be corrected.
 
 Current VM evidence is captured in [docs/OCI_VM_RUNTIME.md](docs/OCI_VM_RUNTIME.md).
+The runtime glossary and operator-facing endpoint behavior index is
+[docs/ENCYCLOPEDIA.md](docs/ENCYCLOPEDIA.md).
 
 ### 0.1 Verified OCI VM Runtime
 

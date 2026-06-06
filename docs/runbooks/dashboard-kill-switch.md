@@ -22,7 +22,7 @@ OCI VM.
 
 | Symptom | First action |
 | --- | --- |
-| Strategy is placing orders that look obviously wrong (wrong side, wrong qty, wrong symbol). | **Trip SOFT** — blocks new entries; trailing-lock can still close. |
+| Strategy is placing orders that look obviously wrong (wrong side, wrong qty, wrong symbol). | **Trip SOFT** - blocks new entries; use approved operator exit paths if exposure must be reduced. |
 | Operator wants to immediately stop everything including exit attempts. | **Trip HARD** — blocks all orders; you'll have to manually flatten via broker UI. |
 | Multiple unwanted broker orders are already open. | After tripping, **Cancel ALL Open Orders** to drain them. |
 | Burst behaviour stopped, ready to resume normal trading. | **Clear Kill Switch** with the vault-backed override password after broker-side flat and safety checks are confirmed. |
@@ -197,6 +197,11 @@ The Overview page consumes `/dashboard/status`, which mirrors
 and `readiness.http_status=503`. `/health` remains a liveness probe
 only; do not use it to decide whether live trading is ready.
 
+On the current OCI VM, public nginx `/health/summary` is redacted. Schema
+Status, Tracked Accounts, and Watchdog cards should be interpreted from the
+logged-in dashboard's authenticated `/admin/health/summary` data or from
+backend-local `/health/summary`, not from the public redacted response alone.
+
 ## Operator playbook — common scenarios
 
 ### Scenario 1: Strategy is mis-firing, exits are still safe
@@ -239,6 +244,9 @@ curl -H "X-Admin-Key: $ADMIN_KEY" https://$VM/admin/kill-switch/state
 # Recent kill-switch audit events
 curl -H "X-Admin-Key: $ADMIN_KEY" \
   "https://$VM/admin/audit?resource_type=kill_switch&limit=20"
+
+# Operator-only health summary used by Overview/Safety internals
+curl -H "X-Admin-Key: $ADMIN_KEY" https://$VM/admin/health/summary
 ```
 
 Both endpoints back the dashboard panel; running them from outside
