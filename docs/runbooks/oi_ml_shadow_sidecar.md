@@ -31,6 +31,9 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 Recent validation:
 
 - Local focused OI/ML suite: `159 passed`.
+- 2026-06-06 OCI hardening deploy moved the main Phoenix backend/nginx runtime
+  to `local-c8c80ea` with VM checkout `7060dd0`. The sidecar image remains
+  `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd` and remains dry-run only.
 - 2026-05-25 live backend/nginx deployment moved the main VM checkout to
   `e7f1e29` with backend/nginx images tagged `local-e7f1e29`. The sidecar
   image remains `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd` and remains

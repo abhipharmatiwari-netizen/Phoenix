@@ -70,6 +70,14 @@ def test_oci_container_healthchecks_use_liveness_not_readiness() -> None:
     assert "/readyz" not in nginx_probe
 
 
+def test_oci_override_template_nginx_healthcheck_uses_liveness() -> None:
+    override = _read("phoenix-override.yml.example")
+    healthcheck_block = override.split("healthcheck:", 1)[1].split("ports:", 1)[0]
+
+    assert "https://127.0.0.1:8443/health" in healthcheck_block
+    assert "/readyz" not in healthcheck_block
+
+
 def test_oi_ml_shadow_compose_does_not_blank_proxy_env_file_values() -> None:
     compose = yaml.safe_load(_read("ops/compose/docker-compose.oi-ml-shadow.yml"))
     sidecar = compose["services"]["oi-ml-shadow"]

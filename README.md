@@ -4,7 +4,7 @@ Phoenix is currently operated from an OCI VM. The running OCI VM is the only
 source of truth for production documentation; repo manifests and historical
 runbooks are secondary evidence only when they match that VM.
 
-Last verified against the VM: 2026-05-25 15:07 UTC.
+Last verified against the VM: 2026-06-06 09:12 UTC.
 OI/ML shadow sidecar deployment was verified on 2026-05-23 00:12 IST.
 
 ## Current OCI VM State
@@ -13,29 +13,30 @@ OI/ML shadow sidecar deployment was verified on 2026-05-23 00:12 IST.
 |---|---|
 | Host | `phoenix-vm` |
 | Repo checkout | `/opt/phoenix/app` |
-| Git state on VM | branch `main`, commit `e7f1e29`, untracked `docker-compose.oci-postgres.yml` |
+| Git state on VM | branch `main`, commit `7060dd0`; runtime backend/nginx images built from `c8c80ea` |
 | Compose project | `phoenix-oci-live` |
 | Compose files in use | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` |
 | Env file in use | `/opt/phoenix/phoenix-deploy.env` |
-| Backend container | `phoenix-oci-backend`, image `phoenix-local-backend:local-e7f1e29`, healthy |
-| Web container | `phoenix-oci-web`, image `phoenix-local-nginx:local-e7f1e29`, healthy |
-| Database | VM-local `phoenix-oci-postgres` container, `postgres:16-alpine`, no Docker healthcheck |
-| Watchdog | `phoenix-oci-watchdog`, `docker:cli`; actively stops/starts nginx when backend health fails |
+| Backend container | `phoenix-oci-backend`, image `phoenix-local-backend:local-c8c80ea`, healthy |
+| Web container | `phoenix-oci-web`, image `phoenix-local-nginx:local-c8c80ea`, healthy |
+| Database | VM-local `phoenix-oci-postgres` container, `postgres:16-alpine`, Compose-managed and Docker-healthy |
+| Watchdog | `phoenix-oci-watchdog`, `docker:cli`; observe-only, no Docker socket or mounts |
 | OI/ML shadow sidecar | `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd`, dry-run only |
 | Backend command | `python -m app.main` |
 | Public backend exposure | backend port `8080` is container-only; nginx exposes host ports `80` and `8443` |
-| Health checks | backend container: `/health`, `/ready`, `/readyz`, `/health/summary`; nginx/host: `/health`, `/readyz` |
+| Health checks | backend container: `/health`, `/ready`, `/readyz`, `/health/summary`; nginx/host: `/health`, redacted `/readyz`, redacted `/health/summary` |
 | Runtime mode evidence | `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE` |
-| Readiness evidence | `/readyz` returns `ready=true`, `degraded_scope_count=0`, `position_state_counts={}`, `firing_count=0` |
-| Secrets | secret files under `/run/secrets`; required names are documented, values must never be copied into git |
+| Readiness evidence | backend-local `/readyz` returned HTTP 200; public `/readyz` returned only redacted readiness and universe-health fields |
+| Secrets | secret files under `/run/secrets`; deployed permission validator passes; values must never be copied into git |
 
 Current drift that operators must not normalize:
 
-- The VM is not running OCIR images; it is running local images tagged `local-e7f1e29`.
+- The VM is not running OCIR images; it is running local images tagged `local-c8c80ea`.
 - The VM is not using an external OCI Database for PostgreSQL; it is using a VM-local Postgres container.
 - The backend has source-file bind mounts from `/opt/phoenix/app` into the container.
 - `CONTROL_PLANE_PG_SSLMODE=prefer` and `LIVE_PG_SSL_SKIP_CHECK=true` are present because the DB is local to the VM.
-- `phoenix-oci-postgres` is not part of the labelled Compose project and has no healthcheck.
+- Phoenix still shares the VM with unrelated public workloads until issue #349 is resolved or explicitly risk-accepted.
+- Previously exposed secret values still require rotation even though file permissions are now hardened.
 
 See [OCI VM Runtime Evidence](docs/OCI_VM_RUNTIME.md) for the evidence table.
 
@@ -72,10 +73,12 @@ docker inspect phoenix-oci-backend --format '{{json .Config.Image}} {{json .Conf
 docker inspect phoenix-oci-backend --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -E 's/=.*$/=<REDACTED>/'
 
 docker exec phoenix-oci-backend curl -sS http://localhost:8080/readyz
+curl -sS http://localhost/readyz
 curl -k -sS https://localhost:8443/readyz
 
 docker logs --tail=300 phoenix-oci-backend
-docker logs --tail=120 phoenix-oci-watchdog
+docker inspect phoenix-oci-postgres --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}'
+docker inspect phoenix-oci-watchdog --format '{{json .Mounts}}'
 ```
 
 Do not restart containers, run migrations, update credentials, flatten positions,

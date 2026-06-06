@@ -1,7 +1,7 @@
 # Oracle Cloud Infrastructure (OCI) base manifest
 #
 # Current source of truth is the running OCI VM, not this file alone.
-# Verified on 2026-05-17, the VM runs this base manifest together with
+# Verified on 2026-06-06, the VM runs this base manifest together with
 # /opt/phoenix/phoenix-override.yml. The override changes the effective runtime
 # to local images, VM-local Postgres, source-file bind mounts, and a prerendered
 # nginx template. See docs/OCI_VM_RUNTIME.md and
@@ -274,11 +274,10 @@ x-migration-volumes: &migration-volumes
   - ${PHOENIX_APP_PATH:-./scripts}/run_migrations.sh:/scripts/run_migrations.sh:ro
 
 services:
-  # Opt-in target for bringing the VM-local Postgres container under the
-  # phoenix-oci-live Compose project. The verified 2026-05-17 VM still runs
-  # phoenix-oci-postgres outside the labelled Compose project; do not enable
-  # this profile on production until the runtime-hardening runbook has been
-  # followed in a maintenance window with a fresh backup.
+  # Profile-gated VM-local Postgres service. The current OCI VM uses this
+  # profile with the existing /opt/phoenix/pgdata directory and Docker health
+  # evidence. Keep it profile-gated so default Compose operations cannot create
+  # a second local database accidentally.
   postgres:
     image: postgres:16-alpine
     container_name: phoenix-oci-postgres

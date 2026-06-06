@@ -387,8 +387,11 @@ flowchart TD
 flowchart TD
     subgraph Core Endpoints
         HEALTH[GET /health<br/>Liveness probe]
-        READY[GET /ready<br/>Readiness probe]
-        HEALTH_SUMMARY[GET /health/summary<br/>Startup and dependency summary]
+        READY[GET /ready<br/>Basic readiness probe]
+        READYZ[GET /readyz<br/>Trading readiness gate]
+        READYZ_PUBLIC[GET /readyz-public<br/>Redacted public readiness]
+        HEALTH_SUMMARY[GET /health/summary<br/>Internal startup and dependency summary]
+        HEALTH_SUMMARY_PUBLIC[GET /health/summary-public<br/>Redacted public summary]
         METRICS[GET /metrics<br/>Prometheus metrics]
         POSITIONS[GET /positions<br/>Open positions - legacy compat]
     end

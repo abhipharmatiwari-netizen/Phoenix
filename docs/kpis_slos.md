@@ -6,7 +6,11 @@ Define the day-1 runtime signals that operators can actually observe from the cu
 
 ## Scope
 
-This document covers in-repo observability only: `GET /metrics`, `GET /health/alerts`, `/readyz`, container health, logs, and the authenticated dashboard WebSocket. Phoenix does not currently ship a repo-managed Grafana dashboard, Alertmanager routing config, or unattended pager policy.
+This document covers in-repo observability only: `GET /metrics`,
+`GET /health/alerts`, backend-local `/readyz`, container health, logs, and the
+authenticated dashboard WebSocket. Phoenix does not currently ship a
+repo-managed Grafana dashboard, Alertmanager routing config, or unattended
+pager policy.
 
 ## Current Metric Surfaces
 
@@ -14,7 +18,8 @@ This document covers in-repo observability only: `GET /metrics`, `GET /health/al
 |---|---|---|
 | `GET /metrics` | `app/server.py`, `app/observability/prometheus_metrics.py` | Prometheus-format counters, gauges, and histograms |
 | `GET /health/alerts` | `app/server.py`, `app/observability/alert_rules.py` | In-repo alert evaluation for day-1 supervision |
-| `/readyz` | `app/server.py` | Release gate for leader lease, startup recovery, stream worker, sync freshness, kill switch, and position authority |
+| `/readyz` | `app/server.py` | Release gate for leader lease, startup recovery, stream worker, sync freshness, kill switch, position authority, and LIVE universe/quote-auth health |
+| `/readyz-public` and `/health/summary-public` | `app/server.py`, `nginx/*.conf.template` | Redacted public nginx readiness/summary responses |
 | `/admin/release-evidence` | `app/runtime/app_runtime.py`, `app/server.py` | Promotion evidence snapshot |
 | Dashboard WebSocket | `app/server.py`, `frontend/` | Derived operator view; not authoritative state |
 
@@ -61,22 +66,29 @@ The alert rules also read optional metrics such as `phoenix_quote_age_seconds`, 
 
 | Failure mode | Required signal | Operator expectation |
 |---|---|---|
-| Backend readiness | `/readyz`, container health | Healthy before automated LIVE entries continue |
+| Backend readiness | backend-local `/readyz`, container health | Docker health proves liveness; backend-local `/readyz` must be 200 before automated LIVE entries continue |
 | Order rejection / error rate | `/health/alerts`, `phoenix_orders_total` | No unexplained firing rejection alert |
 | WebSocket / dashboard availability | dashboard WebSocket, `dashboard_freshness_lag` | Dashboard connects and remains fresh |
 | Kill switch / circuit breaker state | `/readyz`, `/health/alerts`, kill-switch audit logs | Any active kill switch is stop-the-line until reviewed |
-| Broker/API latency or failure | `/health/alerts`, sync fields in `/readyz` | Broker sync and market-data freshness must be healthy |
+| Broker/API latency or failure | `/health/alerts`, sync fields and universe health in `/readyz` | Broker sync and market-data freshness must be healthy |
 
 ## Release Posture
 
 - LIVE cutover is approved only as supervised operation on day 1 and through the initial soak window.
 - Before cutover starts, release evidence must name `release_commander`, `trading_on_call`, and `platform_on_call`.
-- Cutover is blocked if `/health`, `/health/summary`, `/health/alerts`, `/metrics`, `/readyz`, or the authenticated dashboard WebSocket is unavailable.
+- Cutover is blocked if `/health`, backend-local `/health/summary`,
+  `/health/alerts`, `/metrics`, backend-local `/readyz`, or the authenticated
+  dashboard WebSocket is unavailable.
+- Public nginx `/readyz` and `/health/summary` must remain redacted; they are
+  exposure checks, not full diagnostic evidence.
 - Soak validation is not complete, so this release must not be represented as unattended SLO/pager-driven operation yet.
 
 ## Required Cutover Evidence
 
-- Capture `/readyz`, `/health`, `/health/summary`, `/health/alerts`, and `/metrics` output for green before and after cutover.
+- Capture backend-local `/readyz`, `/health`, backend-local `/health/summary`,
+  `/health/alerts`, and `/metrics` output for green before and after cutover.
+- Capture public nginx `/readyz` only to prove redaction and high-level
+  reachability.
 - Capture evidence that the dashboard connected successfully and was receiving fresh updates.
 - Record the named on-call owners.
 - If any minimum monitor fired, record the alert name, timestamp, operator decision, and rollback/continue rationale.

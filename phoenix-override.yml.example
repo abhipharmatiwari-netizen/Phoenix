@@ -1,11 +1,13 @@
 # phoenix-override.yml.example
 #
 # Status: mirrors the current /opt/phoenix/phoenix-override.yml shape verified on
-# the OCI VM on 2026-05-17. Keep filled copies off git.
+# the OCI VM on 2026-06-06. Keep filled copies off git.
 #
 # This is a current-state template, not a target-state recommendation. It
 # includes local images, VM-local Postgres wiring, nginx prerendered config, and
-# source-file bind mounts because those are what the VM is running today.
+# source-file bind mounts because those are what the VM is running today. The
+# VM-local Postgres service itself is managed through the base manifest's
+# vm-local-postgres profile.
 
 name: phoenix-oci-live
 
@@ -53,7 +55,7 @@ services:
       - SETGID
       - SETUID
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --no-check-certificate -O - https://127.0.0.1:8443/readyz >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -q --no-check-certificate -O - https://127.0.0.1:8443/health >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

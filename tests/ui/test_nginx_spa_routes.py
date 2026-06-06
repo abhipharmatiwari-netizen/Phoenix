@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -24,3 +25,16 @@ def test_public_health_routes_use_redacted_backend_endpoints():
 
     assert "proxy_pass http://backend/readyz-public;" in content
     assert "proxy_pass http://backend/health/summary-public;" in content
+
+
+def test_frontend_public_index_references_existing_static_assets():
+    public_dir = REPO_ROOT / "frontend" / "public"
+    index = (public_dir / "index.html").read_text(encoding="utf-8")
+
+    refs = re.findall(r'href="%PUBLIC_URL%/([^"]+)"', index)
+
+    assert "favicon.ico" not in refs
+    assert "logo192.png" not in refs
+    assert refs
+    for ref in refs:
+        assert (public_dir / ref).is_file(), ref

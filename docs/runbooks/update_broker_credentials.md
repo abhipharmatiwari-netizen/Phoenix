@@ -241,8 +241,11 @@ docker compose \
   up -d --no-deps backend
 ```
 
-If nginx was stopped by the watchdog and backend health is now good, recreate
-nginx separately:
+The hardened watchdog no longer stops or starts nginx. Recreate nginx only if
+the deployment change explicitly requires it, or if evidence shows the web
+container is unhealthy after backend readiness is restored. If watchdog logs
+show nginx stop/start actions, treat that as stale VM wiring and follow the OCI
+runtime hardening runbook.
 
 ```bash
 CONTROL_PLANE_PG_PASSWORD_HOST="$(sudo cat /run/secrets/control_plane_pg_password)" \
@@ -257,7 +260,8 @@ docker compose \
 
 After restart:
 
-- `/readyz` returns 200
+- backend-local `/readyz` returns 200
+- public `/readyz` remains redacted
 - backend logs show broker login success
 - no repeated `BROKER_SECRET_BACKEND=postgres` credential errors appear
 - `balance_sync_ready=true` after the account runner completes its first balance sync

@@ -124,13 +124,21 @@ WHERE status = 'SUBMITTING'
 
 ### Step 4 — Start Phoenix against the restored database
 
-Use the bundled LIVE manifest for the active deployment path and the same runtime secret process you use in production.
+Use the current OCI deployment path and the same runtime secret process you use
+in production.
 
-```powershell
-docker compose -f .\docker-compose.live.single.yml up -d --build --force-recreate
+```bash
+cd /opt/phoenix/app
+CONTROL_PLANE_PG_PASSWORD_HOST="$(sudo cat /run/secrets/control_plane_pg_password)" \
+docker compose \
+  -f docker-compose.oci-live.yml \
+  -f /opt/phoenix/phoenix-override.yml \
+  --env-file /opt/phoenix/phoenix-deploy.env \
+  up -d --no-deps backend nginx
 ```
 
-OCI Compose uses the equivalent `docker compose -f docker-compose.oci-live.yml -f /opt/phoenix/phoenix-override.yml --env-file /opt/phoenix/phoenix-deploy.env up -d --no-deps backend nginx` command after the database restore and secret refresh.
+The Docker Desktop command is retained only in the Docker Desktop runbook and is
+not current production guidance.
 
 ### Step 5 — Validate startup, reconciliation, and market-data readiness
 
@@ -142,13 +150,16 @@ Check all of the following:
 - kill-switch state is restored
 - reconciliation completes
 - stream-worker market-data / strategy plane restarts successfully for automated LIVE, or the approved replacement plane does
-- health endpoints are healthy
+- Docker liveness endpoints are healthy
+- backend-local `/readyz` returns 200 before automated LIVE entries resume
 
 Example checks:
 
-```powershell
-docker compose -f .\docker-compose.live.single.yml logs --tail 200 backend
-curl.exe http://localhost/health/summary
+```bash
+docker logs --tail 200 phoenix-oci-backend
+docker exec phoenix-oci-backend curl -sS http://localhost:8080/readyz
+docker exec phoenix-oci-backend curl -sS http://localhost:8080/health/summary
+curl -sS http://localhost/readyz
 ```
 
 ---

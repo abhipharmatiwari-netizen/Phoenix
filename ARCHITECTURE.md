@@ -14,20 +14,21 @@ Current VM evidence is captured in [docs/OCI_VM_RUNTIME.md](docs/OCI_VM_RUNTIME.
 
 ### 0.1 Verified OCI VM Runtime
 
-Verified on 2026-05-25 from the running OCI VM:
+Verified on 2026-06-06 from the running OCI VM:
 
 - Repo checkout: `/opt/phoenix/app`
-- Active branch/commit: `main` at `e7f1e29ea898cf5776bfdceadd5c22bd492762a8`
+- Active branch/commit: `main` at `7060dd0...`; runtime backend/nginx images
+  are built from `c8c80ea`
 - Compose project: `phoenix-oci-live`
 - Compose files: `/opt/phoenix/app/docker-compose.oci-live.yml` plus `/opt/phoenix/phoenix-override.yml`
 - Env file: `/opt/phoenix/phoenix-deploy.env`
-- Backend: `phoenix-oci-backend`, image `phoenix-local-backend:local-e7f1e29`, command `python -m app.main`
-- Web: `phoenix-oci-web`, image `phoenix-local-nginx:local-e7f1e29`
-- Database: VM-local `phoenix-oci-postgres`, image `postgres:16-alpine`
-- Watchdog: `phoenix-oci-watchdog`, image `docker:cli`
+- Backend: `phoenix-oci-backend`, image `phoenix-local-backend:local-c8c80ea`, command `python -m app.main`
+- Web: `phoenix-oci-web`, image `phoenix-local-nginx:local-c8c80ea`
+- Database: VM-local `phoenix-oci-postgres`, image `postgres:16-alpine`, Compose-managed with Docker health status `healthy`
+- Watchdog: `phoenix-oci-watchdog`, image `docker:cli`, observe-only with no Docker socket or mounts
 - OI/ML shadow sidecar: `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd`, dry-run only, no host ports
 - Runtime health: backend `/health`, `/ready`, `/readyz`, and `/health/summary` return 200 from inside the backend container
-- Health evidence: `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE`; `/readyz` reports `ready=true`, `degraded_scope_count=0`, `position_state_counts={}`, and `firing_count=0`
+- Health evidence: `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE`; backend-local `/readyz` returns 200; public nginx `/readyz` and `/health/summary` are redacted
 
 The current VM differs from the intended OCIR/external-Postgres shape in these
 important ways:
@@ -37,7 +38,8 @@ important ways:
 - The backend has source-file bind mounts from `/opt/phoenix/app`.
 - `CONTROL_PLANE_PG_SSLMODE=prefer` and `LIVE_PG_SSL_SKIP_CHECK=true` are present for the local DB path.
 - The nginx container mounts `/opt/phoenix/nginx-ssl-prerendered.conf.template`, not the repo nginx template directly.
-- `phoenix-oci-postgres` has no Compose labels and no Docker healthcheck.
+- Phoenix still shares the VM with unrelated public workloads until the
+  isolation backlog is resolved or risk-accepted.
 
 These facts are operational state, not recommendations. Any future move to OCIR
 images or external Postgres requires a fresh VM evidence capture and doc update.
@@ -58,7 +60,8 @@ The production safety contract remains:
 - Durable Postgres state is required for outbox, lifecycle, ownership,
   kill-switch, tenant/account/subscription, strategy config, and trade/audit
   records.
-- `/readyz` and `/health/summary` are the readiness evidence surfaces.
+- Backend-local `/readyz` and `/health/summary` are the detailed readiness
+  evidence surfaces. Public nginx readiness/summary responses are redacted.
 - Secret values must come from runtime secret files or approved stores, never
   committed env files.
 - `DISABLE_STREAM_WORKER=true` is not an automated-LIVE profile unless an

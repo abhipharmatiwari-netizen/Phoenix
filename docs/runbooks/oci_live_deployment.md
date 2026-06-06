@@ -226,8 +226,10 @@ Host/nginx checks:
 ```bash
 curl -sS http://localhost/health
 curl -sS http://localhost/readyz
+curl -sS http://localhost/health/summary
 curl -k -sS https://localhost:8443/health
 curl -k -sS https://localhost:8443/readyz
+curl -k -sS https://localhost:8443/health/summary
 ```
 
 Expected normal trading-readiness evidence:
@@ -282,8 +284,9 @@ Failure handling:
 
 - If backend `/readyz` fails, do not place or cancel orders as a troubleshooting
   step. Capture backend logs, watchdog logs, and Postgres status first.
-- If watchdog repeatedly stops nginx, validate backend health from inside the
-  backend container before restarting anything.
+- If evidence shows the watchdog stopping nginx, treat that as stale VM wiring.
+  Validate backend health from inside the backend container and follow the OCI
+  runtime hardening runbook before relying on dashboard availability.
 
 ## Database Inspection
 
