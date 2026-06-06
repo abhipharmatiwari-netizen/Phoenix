@@ -627,8 +627,12 @@ export const AuthService = {
 };
 
 export const DefaultService = {
-  getHealthSummary(): Promise<HealthSummary> {
-    return request<HealthSummary>({ path: '/health/summary' });
+  async getHealthSummary(): Promise<HealthSummary> {
+    try {
+      return await request<HealthSummary>({ path: bffPath('/admin/health/summary') });
+    } catch {
+      return request<HealthSummary>({ path: '/health/summary' });
+    }
   },
 
   getHealthAlerts(): Promise<AlertsResponse> {

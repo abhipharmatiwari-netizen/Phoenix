@@ -1335,6 +1335,13 @@ async def health_summary_public() -> dict:
     return _redact_health_summary_payload(_build_docker_health_summary())
 
 
+@app.get("/admin/health/summary")
+async def admin_health_summary(ctx: AdminContext = Depends(get_admin_context)) -> dict:
+    """Authenticated health summary for operator dashboards."""
+    ctx.require_role(AdminRole.READONLY)
+    return _build_docker_health_summary()
+
+
 @app.get("/dashboard/status")
 async def dashboard_status() -> dict:
     """Dashboard status contract. Overall status follows readiness blockers."""

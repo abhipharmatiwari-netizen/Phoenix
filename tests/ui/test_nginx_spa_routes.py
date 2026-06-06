@@ -74,12 +74,15 @@ def test_frontend_runtime_failures_do_not_blank_root():
 
 def test_overview_tolerates_public_redacted_health_summary():
     overview = (REPO_ROOT / "frontend" / "src" / "pages" / "Overview.tsx").read_text(encoding="utf-8")
+    client = (REPO_ROOT / "frontend" / "src" / "client" / "index.ts").read_text(encoding="utf-8")
 
     assert "String(status || 'unknown').toLowerCase()" in overview
     assert "healthSummary?.alerts?.firing_count ?? 0" in overview
     assert "healthSummary?.degraded_reasons || []" in overview
     assert "healthSummary?.schema_status || healthSummary?.schema?.status || 'unknown'" in overview
     assert "publicHealth?.ready" in overview
+    assert "bffPath('/admin/health/summary')" in client
+    assert "path: '/health/summary'" in client
 
 
 def test_alerts_and_mitigations_tolerate_missing_response_arrays():

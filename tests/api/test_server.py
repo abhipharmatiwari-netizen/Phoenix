@@ -295,6 +295,40 @@ def test_health_summary_public_redacts_runtime_internals(monkeypatch):
     }
 
 
+def test_admin_health_summary_requires_auth_and_returns_internal_fields(api_client, monkeypatch):
+    client, runtime = api_client
+    runtime.worker_running_state = True
+    runtime.watchdog_running_state = True
+    monkeypatch.setattr(
+        server,
+        "get_hub_runtime",
+        lambda: SimpleNamespace(
+            hub=SimpleNamespace(list_runner_ids=lambda: ["acc-1", "acc-2"]),
+            state_store=StateStore(),
+        ),
+    )
+
+    unauthenticated = client.get("/admin/health/summary")
+    assert unauthenticated.status_code == 401
+
+    resp = client.get("/admin/health/summary", headers={"X-Admin-Key": "test-admin"})
+    payload = resp.json()
+
+    assert resp.status_code == 200
+    assert payload["schema_status"] == "ok"
+    assert payload["tracked_account_count"] == 2
+    assert payload["watchdog_running"] is True
+    assert "per_account_staleness" in payload
+
+
+def test_bff_blocks_direct_internal_health_summary_bypass(api_client):
+    client, _ = api_client
+
+    for path in ("/bff/health/summary", "/bff/readyz", "/bff/dashboard/status"):
+        resp = client.get(path)
+        assert resp.status_code == 404
+
+
 def test_readyz_public_redacts_runner_and_lease_internals(monkeypatch):
     async def fake_readyz():
         return server.JSONResponse(

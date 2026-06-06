@@ -32,6 +32,12 @@ _LONG_PATH_PREFIXES: tuple[str, ...] = (
 )
 _LONG_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 
+_BLOCKED_DIRECT_DIAGNOSTIC_PATHS: set[str] = {
+    "dashboard/status",
+    "health/summary",
+    "readyz",
+}
+
 
 def _backend_url(path: str) -> str:
     settings = get_settings()
@@ -45,6 +51,11 @@ def _timeout_for_path(path: str) -> httpx.Timeout:
     if normalized.startswith(_LONG_PATH_PREFIXES):
         return _LONG_TIMEOUT
     return _DEFAULT_TIMEOUT
+
+
+def _is_blocked_direct_diagnostic_path(path: str) -> bool:
+    normalized = str(path or "").strip().lstrip("/").rstrip("/")
+    return normalized in _BLOCKED_DIRECT_DIAGNOSTIC_PATHS
 
 
 def _proxy_headers(
@@ -74,6 +85,8 @@ def _proxy_headers(
 @router.post("/{path:path}")
 async def proxy_post(request: Request, path: str):
     """A simple BFF proxy for POST requests."""
+    if _is_blocked_direct_diagnostic_path(path):
+        return Response(status_code=404, content="Not found")
     headers = _proxy_headers(request, include_json_content_type=True)
     body = await request.json()
     url = _backend_url(path)
@@ -98,6 +111,8 @@ async def proxy_post(request: Request, path: str):
 @router.get("/{path:path}")
 async def proxy_get(request: Request, path: str):
     """A simple BFF proxy for GET requests."""
+    if _is_blocked_direct_diagnostic_path(path):
+        return Response(status_code=404, content="Not found")
     headers = _proxy_headers(request)
     url = _backend_url(path)
     timeout = _timeout_for_path(path)
