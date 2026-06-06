@@ -30,16 +30,19 @@ Current VM paths and containers:
 
 Latest verified live deployment:
 
-- VM checkout: `main` at `a9afd518...`
-- backend image: `phoenix-local-backend:local-a9afd51`
-- nginx image: `phoenix-local-nginx:local-a9afd51`
+- VM checkout: `main` at `7060dd0...`
+- backend image: `phoenix-local-backend:local-c8c80ea`
+- nginx image: `phoenix-local-nginx:local-c8c80ea`
 - live strategy routing: EMA20-only; `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1`
   and non-EMA strategies disabled in `strategy_configs`
 - liveness: backend `/health` and nginx `/health` return HTTP 200
-- readiness: backend-local `/readyz` returned HTTP 200 during the 2026-06-06
-  review, but the review found recent universe/quote-auth failures that were
-  not yet readiness-gated. New deployments must fail `/readyz` when LIVE
-  universe health is failed.
+- readiness: backend-local `/readyz` and nginx `/readyz` return HTTP 200
+- public readiness/summary: nginx `/readyz` and `/health/summary` proxy to
+  redacted backend endpoints
+- database: `phoenix-oci-postgres` is Compose-managed with Docker health
+  status `healthy`
+- watchdog: `phoenix-oci-watchdog` has no Docker socket or other mounts
+- root filesystem: expanded boot volume, 63% used at the latest verification
 
 Non-current for this VM unless a later evidence capture proves otherwise:
 
@@ -153,6 +156,15 @@ must not export it into the backend process environment. The fetch
 script owns this file to the backend app user and uses mode `0400` so
 the non-root backend can read it without making it world-readable.
 
+Current live permission model:
+
+- shared runtime files such as `admin_api_key` and
+  `control_plane_pg_password` are owned by UID 100 with root group read and mode
+  `0440`;
+- backend-only runtime files use UID 100/GID 101 and mode `0400`;
+- `scripts/validate-live-secret-perms.sh` must pass before a LIVE deployment is
+  treated as hardened.
+
 ## Secret Redaction Rule
 
 Never paste secret values. When inspecting env or logs, redact values:
@@ -186,14 +198,16 @@ Expected success evidence:
 
 - backend and web are running; after the 2026-05-21 liveness-healthcheck patch
   they remain Docker-healthy when `/health` is 200 even if `/readyz` is 503
-- backend image is `phoenix-local-backend:local-a9afd51` in the latest
+- backend image is `phoenix-local-backend:local-c8c80ea` in the latest
   verified deployment
-- web image is `phoenix-local-nginx:local-a9afd51` in the latest verified
+- web image is `phoenix-local-nginx:local-c8c80ea` in the latest verified
   deployment
 - `/opt/phoenix/phoenix-override.yml` must also use `/health` for nginx
   Docker health; a VM-local override that still checks `/readyz` will keep the
   web container unhealthy during an intentional trading-readiness halt.
 - Postgres is `phoenix-oci-postgres`
+- Postgres reports Docker health status `healthy`
+- watchdog inspect reports no mounts
 - backend command is `python -m app.main`
 
 ## Health and Readiness
@@ -222,6 +236,8 @@ Expected normal trading-readiness evidence:
 - `/health` includes `order_path` equal to `strategy_bridge_order_router`.
 - `/health/summary` includes `operating_mode` equal to `HUB_AUTHORITATIVE`.
 - `/readyz` includes `ready: true`.
+- Host/nginx `/readyz` returns only the redacted public readiness fields. Use
+  backend-local `/readyz` for full internal diagnostics.
 
 Risk-halt or degraded evidence:
 
@@ -410,10 +426,10 @@ The operator owns:
 
 | Drift | Evidence | Risk |
 |---|---|---|
-| Local images instead of OCIR | `phoenix-local-backend:local-a9afd51`, `phoenix-local-nginx:local-a9afd51` verified on 2026-06-06 | Old OCIR docs do not describe current deploy/restart behavior |
-| VM-local Postgres | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres` | External DB backup/SSL assumptions are not current |
+| Local images instead of OCIR | `phoenix-local-backend:local-c8c80ea`, `phoenix-local-nginx:local-c8c80ea` verified on 2026-06-06 | Old OCIR docs do not describe current deploy/restart behavior |
+| VM-local Postgres | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres`; container is Compose-managed and healthy | External DB backup/SSL assumptions are not current |
 | Source bind mounts | backend mounts selected `/opt/phoenix/app/app/...` files | Container image alone is not the full deployed code |
-| Stale watchdog can stop nginx | watchdog command/logs | Current manifest is observe-only; stop/start logs indicate stale VM wiring or override drift |
+| Watchdog must remain observe-only | watchdog inspect should report no mounts | Docker socket mounts or nginx stop/start logs indicate stale VM wiring or override drift |
 | Optimizer/reload timers absent | `systemctl status` not found | Do not claim scheduled optimizer/reload is installed |
 
 Any change that removes this drift must be verified from the VM before docs are

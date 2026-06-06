@@ -3,6 +3,11 @@
 Purpose: reduce the runtime drift observed on the OCI VM without changing live
 trading behavior during normal documentation or review work.
 
+Status: the 2026-06-06 hardening pass has already applied the Postgres
+compose-adoption, watchdog no-socket recreation, secret-permission validation,
+and storage expansion steps on the current OCI VM. Keep this runbook for
+evidence capture, repeatable maintenance, and rollback.
+
 Scope: the current OCI VM deployment only. Do not apply these steps to the live
 VM without an approved maintenance window, a fresh database backup, and operator
 approval to restart containers.
@@ -11,10 +16,10 @@ approval to restart containers.
 
 | Drift | Verified current state | Target direction |
 |---|---|---|
-| Postgres ownership | `phoenix-oci-postgres` runs outside the labelled Compose project and has no Docker healthcheck | move Postgres under an opt-in Compose profile with a healthcheck |
+| Postgres ownership | `phoenix-oci-postgres` is Compose-managed and Docker-healthy on the current VM | keep Postgres under the `vm-local-postgres` profile and retain health evidence |
 | Image provenance | backend/web run `phoenix-local-*` images | use immutable image tags from the approved image build path |
 | Source overlays | backend has selected source-file bind mounts | remove overlays after the image contains those exact files |
-| Watchdog behavior | `phoenix-oci-watchdog` actively stops/starts nginx | either formalize this as an approved recovery controller or remove the side effect |
+| Watchdog behavior | `phoenix-oci-watchdog` has no mounts on the current VM | keep the observe-only no-socket contract; treat Docker socket mounts as drift |
 
 ## Preconditions
 
@@ -50,14 +55,18 @@ docker logs --tail=120 phoenix-oci-watchdog
 
 Expected evidence today:
 
-- `phoenix-oci-postgres` exists and uses `/opt/phoenix/pgdata`.
+- `phoenix-oci-postgres` exists, uses `/opt/phoenix/pgdata`, and reports
+  Docker health status `healthy`.
 - backend source overlays are still present.
-- watchdog logs show whether nginx stop/start actions are still occurring.
+- watchdog inspect reports no mounts. Logs should not show nginx stop/start
+  actions after the no-socket recreation.
 
 ## Phase 2 - Compose-Managed Postgres Candidate
 
 The repository now contains an opt-in `vm-local-postgres` Compose profile in
-`docker-compose.oci-live.yml`. It is not active by default.
+`docker-compose.oci-live.yml`. It is active on the current VM, but remains
+profile-gated in the manifest so a default Compose operation does not create a
+second local database.
 
 Validate only:
 
@@ -73,9 +82,10 @@ docker compose \
   config
 ```
 
-Do not run `up postgres` while the unmanaged `phoenix-oci-postgres` container is
-running. The container name is intentionally the same so an accidental second
-database cannot start beside production.
+Do not run `up postgres` while an unmanaged `phoenix-oci-postgres` container is
+running or while the current Compose-managed Postgres is already healthy. The
+container name is intentionally the same so an accidental second database cannot
+start beside production.
 
 Maintenance-window migration outline:
 
@@ -155,15 +165,14 @@ recorded in the deployment record. A local image tag such as `local-e7f1e29` is
 acceptable only as an explicitly approved temporary state; immutable registry
 tags are the target operating model.
 
-## Phase 4 - Watchdog Decision
+## Phase 4 - Watchdog Contract
 
-The current watchdog can stop and start nginx. Before changing it, decide which
-behavior production wants:
+The current hardened watchdog is observe-only. It should poll backend `/health`
+and log fail/recovery counts without Docker socket access, mounted host paths,
+or nginx stop/start actions.
 
-| Option | Impact |
-|---|---|
-| formalize active recovery | keep Docker socket access, document nginx stop/start as expected, and alert on repeated recovery loops |
-| observe-only | remove Docker socket access and nginx mutations; alert operators instead |
-
-Changing watchdog behavior requires a separate deployment review because it can
-change external availability during backend failure.
+If future evidence shows Docker socket access or nginx mutations, treat that as
+runtime drift. Recreate the watchdog with
+`scripts/ops/recreate_oci_watchdog.sh` during an approved maintenance window and
+capture `docker inspect phoenix-oci-watchdog --format '{{json .Mounts}}'` as
+post-change evidence.
