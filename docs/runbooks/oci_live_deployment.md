@@ -30,9 +30,9 @@ Current VM paths and containers:
 
 Latest verified live deployment:
 
-- VM checkout: `main` at `7060dd0...`
+- VM checkout: `main` at `4f567bf...`
 - backend image: `phoenix-local-backend:local-c8c80ea`
-- nginx image: `phoenix-local-nginx:local-c8c80ea`
+- nginx image: `phoenix-local-nginx:local-4f567bf`
 - live strategy routing: EMA20-only; `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1`
   and non-EMA strategies disabled in `strategy_configs`
 - liveness: backend `/health` and nginx `/health` return HTTP 200
@@ -199,8 +199,9 @@ Expected success evidence:
 - backend and web are running; after the 2026-05-21 liveness-healthcheck patch
   they remain Docker-healthy when `/health` is 200 even if `/readyz` is 503
 - backend image is `phoenix-local-backend:local-c8c80ea` in the latest
-  verified deployment
-- web image is `phoenix-local-nginx:local-c8c80ea` in the latest verified
+  verified deployment; the backend was not restarted for the frontend-only
+  static asset redeploy
+- web image is `phoenix-local-nginx:local-4f567bf` in the latest verified
   deployment
 - `/opt/phoenix/phoenix-override.yml` must also use `/health` for nginx
   Docker health; a VM-local override that still checks `/readyz` will keep the
@@ -429,7 +430,7 @@ The operator owns:
 
 | Drift | Evidence | Risk |
 |---|---|---|
-| Local images instead of OCIR | `phoenix-local-backend:local-c8c80ea`, `phoenix-local-nginx:local-c8c80ea` verified on 2026-06-06 | Old OCIR docs do not describe current deploy/restart behavior |
+| Local images instead of OCIR | `phoenix-local-backend:local-c8c80ea`, `phoenix-local-nginx:local-4f567bf` verified on 2026-06-06 | Old OCIR docs do not describe current deploy/restart behavior |
 | VM-local Postgres | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres`; container is Compose-managed and healthy | External DB backup/SSL assumptions are not current |
 | Source bind mounts | backend mounts selected `/opt/phoenix/app/app/...` files | Container image alone is not the full deployed code |
 | Watchdog must remain observe-only | watchdog inspect should report no mounts | Docker socket mounts or nginx stop/start logs indicate stale VM wiring or override drift |
