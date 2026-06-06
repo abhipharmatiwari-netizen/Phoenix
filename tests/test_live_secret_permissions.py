@@ -7,7 +7,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def test_fetch_secrets_writes_owner_only_runtime_readable_files() -> None:
     script = (REPO_ROOT / "scripts" / "fetch-secrets.sh").read_text(encoding="utf-8")
 
+    assert "admin_api_key|control_plane_pg_password" in script
+    assert 'chown "${PHOENIX_SECRET_UID:-100}:${PHOENIX_SHARED_SECRET_GID:-0}" "$out_path"' in script
     assert 'chown "${PHOENIX_SECRET_UID:-100}:${PHOENIX_SECRET_GID:-101}" "$out_path"' in script
+    assert 'chmod 440 "$out_path"' in script
     assert 'chmod 400 "$out_path"' in script
     assert 'chmod 644 "$out_path"' not in script
 
@@ -18,8 +21,10 @@ def test_live_secret_permission_validator_checks_mode_and_owner() -> None:
     ).read_text(encoding="utf-8")
 
     assert 'EXPECTED_OWNER="${PHOENIX_SECRET_UID:-100}:${PHOENIX_SECRET_GID:-101}"' in script
-    assert 'expected 400' in script
-    assert 'expected $EXPECTED_OWNER' in script
+    assert 'EXPECTED_SHARED_OWNER="${PHOENIX_SECRET_UID:-100}:${PHOENIX_SHARED_SECRET_GID:-0}"' in script
+    assert 'expected_mode="440"' in script
+    assert 'expected_mode="400"' in script
+    assert 'expected $expected_owner' in script
 
 
 def test_oci_file_hardening_script_does_not_print_secret_values() -> None:
@@ -30,6 +35,7 @@ def test_oci_file_hardening_script_does_not_print_secret_values() -> None:
     assert "cat " not in script
     assert "Get-Content" not in script
     assert "chmod 400" in script
+    assert "chmod 440" in script
     assert "chmod 600" in script
     assert "validate-live-secret-perms.sh" in script
 

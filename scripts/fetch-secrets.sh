@@ -75,10 +75,18 @@ fetch_secret() {
   fi
 
   mv "$tmp_path" "$out_path"
-  # Backend runs as appuser inside the container. Keep secrets readable by that
-  # non-root process while preventing host world-read exposure.
-  chown "${PHOENIX_SECRET_UID:-100}:${PHOENIX_SECRET_GID:-101}" "$out_path"
-  chmod 400 "$out_path"
+  # Backend runs as appuser inside the container. A small subset is also read
+  # by root-group service entrypoints (nginx admin key, Postgres password-file).
+  case "$secret_name" in
+    admin_api_key|control_plane_pg_password)
+      chown "${PHOENIX_SECRET_UID:-100}:${PHOENIX_SHARED_SECRET_GID:-0}" "$out_path"
+      chmod 440 "$out_path"
+      ;;
+    *)
+      chown "${PHOENIX_SECRET_UID:-100}:${PHOENIX_SECRET_GID:-101}" "$out_path"
+      chmod 400 "$out_path"
+      ;;
+  esac
 }
 
 fetch_secret "admin_api_key"

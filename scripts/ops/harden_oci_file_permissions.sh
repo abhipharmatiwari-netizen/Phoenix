@@ -6,6 +6,7 @@ set -eu
 PHOENIX_ROOT="${PHOENIX_ROOT:-/opt/phoenix}"
 SECRETS_DIR="${SECRETS_DIR:-/run/secrets}"
 SECRET_OWNER="${PHOENIX_SECRET_UID:-100}:${PHOENIX_SECRET_GID:-101}"
+SHARED_SECRET_OWNER="${PHOENIX_SECRET_UID:-100}:${PHOENIX_SHARED_SECRET_GID:-0}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: run as root so ownership changes are applied consistently" >&2
@@ -14,8 +15,17 @@ fi
 
 if [ -d "$SECRETS_DIR" ]; then
   find "$SECRETS_DIR" -maxdepth 1 -type f -print | while IFS= read -r path; do
-    chown "$SECRET_OWNER" "$path"
-    chmod 400 "$path"
+    name=$(basename "$path")
+    case "$name" in
+      admin_api_key|control_plane_pg_password)
+        chown "$SHARED_SECRET_OWNER" "$path"
+        chmod 440 "$path"
+        ;;
+      *)
+        chown "$SECRET_OWNER" "$path"
+        chmod 400 "$path"
+        ;;
+    esac
   done
 fi
 

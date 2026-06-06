@@ -5,6 +5,7 @@ set -eu
 
 SECRETS_DIR="${SECRETS_DIR:-/run/secrets}"
 EXPECTED_OWNER="${PHOENIX_SECRET_UID:-100}:${PHOENIX_SECRET_GID:-101}"
+EXPECTED_SHARED_OWNER="${PHOENIX_SECRET_UID:-100}:${PHOENIX_SHARED_SECRET_GID:-0}"
 
 if [ ! -d "$SECRETS_DIR" ]; then
   echo "ERROR: secrets directory not found: $SECRETS_DIR" >&2
@@ -26,12 +27,22 @@ for path in "$SECRETS_DIR"/*; do
   name=$(basename "$path")
   mode=$(file_mode "$path")
   owner=$(file_owner "$path")
-  if [ "$mode" != "400" ]; then
-    echo "ERROR: $name has mode $mode, expected 400" >&2
+  case "$name" in
+    admin_api_key|control_plane_pg_password)
+      expected_mode="440"
+      expected_owner="$EXPECTED_SHARED_OWNER"
+      ;;
+    *)
+      expected_mode="400"
+      expected_owner="$EXPECTED_OWNER"
+      ;;
+  esac
+  if [ "$mode" != "$expected_mode" ]; then
+    echo "ERROR: $name has mode $mode, expected $expected_mode" >&2
     fail=1
   fi
-  if [ "$owner" != "$EXPECTED_OWNER" ]; then
-    echo "ERROR: $name owner $owner, expected $EXPECTED_OWNER" >&2
+  if [ "$owner" != "$expected_owner" ]; then
+    echo "ERROR: $name owner $owner, expected $expected_owner" >&2
     fail=1
   fi
 done
