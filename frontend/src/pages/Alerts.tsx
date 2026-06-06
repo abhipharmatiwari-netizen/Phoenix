@@ -14,7 +14,7 @@ const Alerts: React.FC = () => {
       try {
         const response = await DefaultService.getHealthAlerts();
         if (active) {
-          setAlerts(response.alerts);
+          setAlerts(Array.isArray(response?.alerts) ? response.alerts : []);
         }
       } catch (err) {
         if (active) {

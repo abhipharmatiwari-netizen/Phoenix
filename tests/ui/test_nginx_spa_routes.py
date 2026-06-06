@@ -25,6 +25,8 @@ def test_public_health_routes_use_redacted_backend_endpoints():
 
     assert "proxy_pass http://backend/readyz-public;" in content
     assert "proxy_pass http://backend/health/summary-public;" in content
+    assert "location = /health/alerts" in content
+    assert "location = /health/mitigations" in content
 
 
 def test_frontend_assets_do_not_fall_back_to_spa_html():
@@ -78,3 +80,20 @@ def test_overview_tolerates_public_redacted_health_summary():
     assert "healthSummary?.degraded_reasons || []" in overview
     assert "healthSummary?.schema_status || healthSummary?.schema?.status || 'unknown'" in overview
     assert "publicHealth?.ready" in overview
+
+
+def test_alerts_and_mitigations_tolerate_missing_response_arrays():
+    alerts = (REPO_ROOT / "frontend" / "src" / "pages" / "Alerts.tsx").read_text(encoding="utf-8")
+    mitigations = (REPO_ROOT / "frontend" / "src" / "pages" / "Mitigations.tsx").read_text(encoding="utf-8")
+
+    assert "Array.isArray(response?.alerts) ? response.alerts : []" in alerts
+    assert "Array.isArray(response?.recent_events) ? response.recent_events : []" in mitigations
+    assert "fault_counts: response?.fault_counts && typeof response.fault_counts === 'object'" in mitigations
+
+
+def test_safety_treats_omitted_public_watchdog_as_unknown():
+    safety = (REPO_ROOT / "frontend" / "src" / "pages" / "Safety.tsx").read_text(encoding="utf-8")
+
+    assert "runtimeStatus(health?.watchdog_running)" in safety
+    assert "return { status: 'warning' as const, label: 'Unknown' };" in safety
+    assert "trackedAccountCount ?? 'Unknown'" in safety

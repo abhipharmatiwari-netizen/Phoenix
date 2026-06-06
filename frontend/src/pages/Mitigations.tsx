@@ -14,7 +14,15 @@ const Mitigations: React.FC = () => {
       try {
         const response = await DefaultService.getHealthMitigations();
         if (active) {
-          setMitigations(response);
+          setMitigations({
+            enabled: Boolean(response?.enabled),
+            rule_count: Number(response?.rule_count ?? 0),
+            total_events: Number(response?.total_events ?? 0),
+            recent_events: Array.isArray(response?.recent_events) ? response.recent_events : [],
+            fault_counts: response?.fault_counts && typeof response.fault_counts === 'object'
+              ? response.fault_counts
+              : {},
+          });
         }
       } catch (err) {
         if (active) {

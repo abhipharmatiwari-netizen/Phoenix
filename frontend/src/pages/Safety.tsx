@@ -93,6 +93,23 @@ const Safety: React.FC = () => {
   const shadowStatus = shadowIngestion?.status || 'unknown';
   const shadowRows = shadowIngestion?.option_chain?.today_row_count ?? 0;
   const shadowValidationReports = shadowIngestion?.validation_reports?.today_report_count ?? 0;
+  const runtimeStatus = (running: boolean | undefined) => {
+    if (running === true) {
+      return { status: 'ok' as const, label: 'Running' };
+    }
+    if (running === false) {
+      return { status: 'error' as const, label: 'Stopped' };
+    }
+    return { status: 'warning' as const, label: 'Unknown' };
+  };
+  const streamWorkerStatus = runtimeStatus(health?.stream_worker_running);
+  const watchdogStatus = runtimeStatus(health?.watchdog_running);
+  const trackedAccountCount = health?.tracked_account_count;
+  const shadowBadgeStatus = shadowStatus === 'ok' || shadowStatus === 'disabled'
+    ? 'ok'
+    : shadowStatus === 'degraded'
+      ? 'error'
+      : 'warning';
 
   const auditColumns: Column<AuditEvent & Record<string, unknown>>[] = useMemo(() => [
     { key: 'timestamp', header: 'Time', render: (row) => new Date(row.timestamp).toLocaleString() },
@@ -193,20 +210,20 @@ const Safety: React.FC = () => {
             {/* System Details */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', marginBottom: '1.5rem' }}>
               <Card title="Stream Worker">
-                <StatusBadge status={health?.stream_worker_running ? 'ok' : 'error'} label={health?.stream_worker_running ? 'Running' : 'Stopped'} />
+                <StatusBadge status={streamWorkerStatus.status} label={streamWorkerStatus.label} />
               </Card>
               <Card title="Watchdog">
-                <StatusBadge status={health?.watchdog_running ? 'ok' : 'error'} label={health?.watchdog_running ? 'Running' : 'Stopped'} />
+                <StatusBadge status={watchdogStatus.status} label={watchdogStatus.label} />
               </Card>
               <Card title="Schema">
                 <StatusBadge status={health?.schema_status === 'ok' ? 'ok' : 'warning'} label={health?.schema_status || 'unknown'} />
               </Card>
               <Card title="Tracked Accounts">
-                <span style={{ fontSize: '1.5rem', fontWeight: 700 }}>{health?.tracked_account_count ?? 0}</span>
+                <span style={{ fontSize: '1.5rem', fontWeight: 700 }}>{trackedAccountCount ?? 'Unknown'}</span>
               </Card>
               <Card title="OI/ML Shadow">
                 <StatusBadge
-                  status={shadowStatus === 'ok' || shadowStatus === 'disabled' ? 'ok' : 'error'}
+                  status={shadowBadgeStatus}
                   label={shadowStatus.toUpperCase()}
                 />
                 <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: '#4b5563' }}>

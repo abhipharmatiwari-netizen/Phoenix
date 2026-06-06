@@ -59,6 +59,16 @@ server {
         proxy_set_header Host $host;
     }
 
+    location = /health/alerts {
+        proxy_pass http://backend;
+        proxy_set_header Host $host;
+    }
+
+    location = /health/mitigations {
+        proxy_pass http://backend;
+        proxy_set_header Host $host;
+    }
+
     location /ready {
         proxy_pass http://backend;
         proxy_set_header Host $host;
