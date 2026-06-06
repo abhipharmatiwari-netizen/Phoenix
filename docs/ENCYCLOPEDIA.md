@@ -11,13 +11,13 @@ architecture document, runbooks, and operator playbooks.
 | Term | Current meaning |
 |---|---|
 | OCI VM | Current production source of truth for Phoenix runtime evidence. |
-| VM checkout | `/opt/phoenix/app`, branch `main`, latest verified runtime commit `4ba598f`. |
-| Deploy image tag | `local-4ba598f` for backend and nginx in the verified VM runtime. |
+| VM checkout | `/opt/phoenix/app`, branch `main`; latest verified runtime image source commit `2884a87`. |
+| Deploy image tag | `local-2884a87` for backend and nginx in the verified VM runtime. |
 | Backend | `phoenix-oci-backend`, running `python -m app.main`. |
 | Web | `phoenix-oci-web`, nginx frontend and reverse proxy. |
 | Database | `phoenix-oci-postgres`, VM-local Postgres container managed by the `vm-local-postgres` Compose profile. |
 | Watchdog | `phoenix-oci-watchdog`, observe-only Docker CLI sidecar with no Docker socket or mounts. |
-| OI/ML sidecar | `phoenix-oi-ml-shadow`, dry-run only and outside the live order authority path. Promotable decisions require validated model artifacts, fresh IV/Greek/source data, latest validation not `ERROR`, and terminal virtual lifecycle/PnL evidence. |
+| OI/ML sidecar | `phoenix-oi-ml-shadow`, dry-run only and outside the live order authority path. The current image is `phoenix-oi-ml-shadow:oi-ml-shadow-2884a87`; promotable decisions require validated model artifacts, fresh IV/Greek/source data, latest validation not `ERROR`, and terminal virtual lifecycle/PnL evidence. |
 
 ## Health And Readiness Surfaces
 

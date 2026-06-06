@@ -2,8 +2,8 @@
 
 Audit date: 2026-06-06. Runtime snapshot refreshed after the OCI LIVE hardening
 deploy, frontend static asset redeploy, redacted-health Overview fix,
-Alerts/Mitigations route fix, authenticated health-summary fix, and backend restart, with VM verification at
-14:19 UTC.
+Alerts/Mitigations route fix, authenticated health-summary fix, backend restart,
+and OI/ML shadow gate deploy, with VM verification at 16:07 UTC.
 
 Scope: repository documentation, environment examples, Compose comments, and
 operator-facing runbooks were checked against the running OCI VM. The OCI VM
@@ -14,12 +14,13 @@ overrides repo docs and historical plans when there is a conflict.
 | Area | Verified current state |
 |---|---|
 | Repo path | `/opt/phoenix/app` |
-| Active git | `main` at `4ba598f...`; deploy env image tag `local-4ba598f` |
+| Active git | `main`; runtime images built from `2884a87...`; deploy env image tag `local-2884a87` |
 | Compose project | `phoenix-oci-live` |
 | Compose files | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` |
 | Env file | `/opt/phoenix/phoenix-deploy.env` |
-| Backend | `phoenix-oci-backend`, `phoenix-local-backend:local-4ba598f`, healthy |
-| Web | `phoenix-oci-web`, `phoenix-local-nginx:local-4ba598f`, healthy |
+| Backend | `phoenix-oci-backend`, `phoenix-local-backend:local-2884a87`, healthy |
+| Web | `phoenix-oci-web`, `phoenix-local-nginx:local-2884a87`, healthy |
+| OI/ML shadow sidecar | `phoenix-oi-ml-shadow`, `phoenix-oi-ml-shadow:oi-ml-shadow-2884a87`, healthy and dry-run only |
 | Database | VM-local `phoenix-oci-postgres`, `postgres:16-alpine`, Compose-managed and Docker-healthy |
 | Watchdog | `phoenix-oci-watchdog`, observe-only, no Docker socket or mounts |
 | Runtime mode | `/health/summary` reports `HUB_AUTHORITATIVE`; `/health` reports `strategy_bridge_order_router` |
@@ -66,7 +67,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 
 | Prior mismatch | Current resolution |
 |---|---|
-| Docs described `local-e7f1e29` as current | Current operator docs now reference VM checkout `4ba598f` and backend/nginx images tagged `local-4ba598f` |
+| Docs described `local-e7f1e29` as current | Current operator docs now reference runtime image source `2884a87` and backend/nginx images tagged `local-2884a87` |
 | Docs described `phoenix-oci-postgres` as unmanaged and lacking health | Current docs describe the Compose-managed `vm-local-postgres` profile and healthy container evidence |
 | Docs described watchdog nginx stop/start behavior as current | Current docs describe the observe-only watchdog and treat Docker socket mounts or nginx mutations as drift |
 | Public `/readyz` and `/health/summary` were not distinguished from internal diagnostics | Current docs state that public nginx responses are redacted and backend-local endpoints carry full diagnostics |
@@ -74,7 +75,8 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | Alerts/Mitigations API paths fell through to SPA HTML | Current nginx repo and host-mounted templates explicitly proxy `/health/alerts` and `/health/mitigations` as JSON |
 | `/bff/health/summary` bypassed public health redaction | Direct BFF access to internal diagnostics is blocked; operator dashboards use authenticated `/admin/health/summary` |
 | There was no encyclopedia page for repeated endpoint terms | `docs/ENCYCLOPEDIA.md` now defines current runtime, health surfaces, dashboard health interpretation, static routing, watchdog contract, and runbook/playbook locations |
-| Runtime env examples referenced old verified local image tags | Current OCI env template references the `local-4ba598f` deploy tag |
+| Runtime env examples referenced old verified local image tags | Current OCI env template references the `local-2884a87` deploy tag |
+| OI/ML shadow gates allowed ambiguous promotion evidence | Current code and docs require validated LightGBM artifacts, fresh IV/Greeks/source timestamps, latest validation not `ERROR`, virtual fill/flat accounting, realized dry-run PnL, and 10 clean sessions |
 | Release evidence guidance treated Docker health as sufficient wait evidence | Current release guidance requires `/readyz` trading-readiness evidence in addition to liveness |
 
 ## Open Documentation-Backed Risks

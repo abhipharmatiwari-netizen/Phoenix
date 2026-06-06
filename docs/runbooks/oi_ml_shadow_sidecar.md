@@ -12,11 +12,11 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 
 | Area | State |
 |---|---|
-| Branch | `oi-ml-shadow-sidecar` |
-| Latest deployed sidecar commit | `536163d` sidecar image lineage |
-| OCI checkout | `/opt/phoenix/oi-ml-shadow-src` |
+| Branch | `main` for the current runtime image |
+| Latest deployed sidecar commit | `2884a87` |
+| OCI checkout | `/opt/phoenix/app` for the current image build; `/opt/phoenix/oi-ml-shadow-src` exists as a legacy sidecar checkout |
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
-| Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-536163d-greeks-20260527` |
+| Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-2884a87` |
 | Container | `phoenix-oi-ml-shadow` |
 | Database tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`, `public.option_chain_validation_reports` |
 | Default scorer | `missing` in compose; fail-closed until trained artifacts are configured |
@@ -33,13 +33,17 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 Recent validation:
 
 - Local focused OI/ML/data suite on 2026-06-06: `125 passed`.
-- 2026-06-06 OI/ML shadow evidence review found
-  `phoenix-oi-ml-shadow:oi-ml-shadow-536163d-greeks-20260527` healthy with
-  `dry_run_only=true`, `live_order_path_enabled=false`, `allow_naked=false`,
-  zero restarts, and no live order path. The same review found the strategy not
+- 2026-06-06 21:37 IST deployment built and restarted
+  `phoenix-oi-ml-shadow:oi-ml-shadow-2884a87` with `dry_run_only=true`,
+  `live_order_path_enabled=false`, `allow_naked=false`,
+  `OI_ML_SHADOW_SCORER=missing`, and
+  `OI_ML_SHADOW_ALLOW_CONSTANT_SCORER=false`. The sidecar was Docker-healthy
+  and logged `reason=outside_shadow_window` after restart.
+- The pre-fix 2026-06-06 OI/ML shadow evidence review found the strategy not
   promotion-ready because constant scoring, missing IV/Greeks, latest validation
-  errors, incomplete virtual lifecycle accounting, and negative shadow PnL still
-  blocked promotion.
+  errors, incomplete virtual lifecycle accounting, and negative shadow PnL
+  blocked promotion. The current repo enforces those findings as fail-closed
+  gates; 10 clean sessions remain unproven.
 - 2026-05-25 live backend/nginx deployment moved the main VM checkout to
   `e7f1e29` with backend/nginx images tagged `local-e7f1e29`. The sidecar
   image remains `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd` and remains
@@ -412,7 +416,7 @@ Restart the sidecar with smoke constants:
 
 ```bash
 cd /opt/phoenix
-IMAGE_TAG=oi-ml-shadow-536163d-greeks-20260527 \
+IMAGE_TAG=oi-ml-shadow-2884a87 \
 OI_ML_SHADOW_SCORER=constant \
 OI_ML_SHADOW_ALLOW_CONSTANT_SCORER=true \
 OI_ML_SHADOW_CONSTANT_PROBABILITY=0.64 \
@@ -462,9 +466,10 @@ OI_ML_SHADOW_REQUIRE_MODEL_VALIDATION_REPORT=true
 ```
 
 The sidecar compose mounts `/opt/phoenix/oi-ml-models` at `/app/models:ro`.
-Do not enable LightGBM mode until trained artifacts have passed walk-forward,
-the validation report contains `promotion.passed=true`, and market-session
-snapshot completeness checks pass.
+The deployed default remains `OI_ML_SHADOW_SCORER=missing`. Do not enable
+LightGBM mode until trained artifacts have passed walk-forward, the validation
+report contains `promotion.passed=true`, and market-session snapshot
+completeness checks pass.
 
 ## Virtual Lifecycle And PnL Evidence
 

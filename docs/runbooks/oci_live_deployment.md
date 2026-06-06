@@ -24,15 +24,15 @@ Current VM paths and containers:
 - logs: `/opt/phoenix/logs`
 - state helpers: `/opt/phoenix/state`
 - certs: `/opt/phoenix/certs`
-- OI/ML shadow checkout: `/opt/phoenix/oi-ml-shadow-src`
+- OI/ML shadow runtime image source: `/opt/phoenix/app` deploy commit; legacy sidecar checkout `/opt/phoenix/oi-ml-shadow-src` may exist but is not running-image proof
 - OI/ML shadow compose: `/opt/phoenix/oi-ml-shadow.yml`
 - OI/ML shadow container: `phoenix-oi-ml-shadow`
 
 Latest verified live deployment:
 
-- VM checkout: `main` at `4ba598f...`
-- backend image: `phoenix-local-backend:local-4ba598f`
-- nginx image: `phoenix-local-nginx:local-4ba598f`
+- VM runtime deploy: `main` at `2884a87...`
+- backend image: `phoenix-local-backend:local-2884a87`
+- nginx image: `phoenix-local-nginx:local-2884a87`
 - live strategy routing: EMA20-only; `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1`
   and non-EMA strategies disabled in `strategy_configs`
 - liveness: backend `/health` and nginx `/health` return HTTP 200
@@ -70,14 +70,14 @@ routing is enabled.
 
 Current sidecar evidence as of 2026-06-06 IST:
 
-- image: `phoenix-oi-ml-shadow:oi-ml-shadow-536163d-greeks-20260527`
-- checkout: `/opt/phoenix/oi-ml-shadow-src`
+- image: `phoenix-oi-ml-shadow:oi-ml-shadow-2884a87`
+- runtime image source: `/opt/phoenix/app` deploy commit; legacy sidecar checkout `/opt/phoenix/oi-ml-shadow-src` may exist but is not running-image proof
 - compose: `/opt/phoenix/oi-ml-shadow.yml`
 - tables: `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`,
   `public.option_chain_validation_reports`
-- scorer: promotable shadow requires validated LightGBM artifacts and a passed
-  model-validation report; `constant` is smoke-only and requires an explicit
-  override
+- scorer: deployed as `missing` and fail-closed; promotable shadow requires
+  validated LightGBM artifacts and a passed model-validation report; `constant`
+  is smoke-only and requires an explicit override
 - broker access: sidecar forwards backend broker proxy env and reuses the Angel
   quote session during snapshotting
 - health visibility: backend dashboard health uses
@@ -93,7 +93,7 @@ Current sidecar evidence as of 2026-06-06 IST:
   not supply IV, so it is not promotion evidence for IV enrichment
 - promotion blocker: market-session hard-field completeness, fresh source
   timestamps, IV/Greeks, latest validation not `ERROR`, terminal virtual
-  lifecycle/PnL, and 10 clean sessions still must be proven
+  lifecycle/PnL, acceptable metrics, and 10 clean sessions still must be proven
 
 Use [OI/ML Shadow Sidecar Runbook](oi_ml_shadow_sidecar.md) for sidecar-specific
 operations and proof gates.
@@ -209,9 +209,9 @@ Expected success evidence:
 
 - backend and web are running; after the 2026-05-21 liveness-healthcheck patch
   they remain Docker-healthy when `/health` is 200 even if `/readyz` is 503
-- backend image is `phoenix-local-backend:local-4ba598f` in the latest
+- backend image is `phoenix-local-backend:local-2884a87` in the latest
   verified deployment
-- web image is `phoenix-local-nginx:local-4ba598f` in the latest verified
+- web image is `phoenix-local-nginx:local-2884a87` in the latest verified
   deployment
 - `/opt/phoenix/phoenix-override.yml` must also use `/health` for nginx
   Docker health; a VM-local override that still checks `/readyz` will keep the
@@ -458,7 +458,7 @@ The operator owns:
 
 | Drift | Evidence | Risk |
 |---|---|---|
-| Local images instead of OCIR | `phoenix-local-backend:local-4ba598f`, `phoenix-local-nginx:local-4ba598f` verified on 2026-06-06 | Old OCIR docs do not describe current deploy/restart behavior |
+| Local images instead of OCIR | `phoenix-local-backend:local-2884a87`, `phoenix-local-nginx:local-2884a87` verified on 2026-06-06 | Old OCIR docs do not describe current deploy/restart behavior |
 | VM-local Postgres | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres`; container is Compose-managed and healthy | External DB backup/SSL assumptions are not current |
 | Source bind mounts | backend mounts selected `/opt/phoenix/app/app/...` files | Container image alone is not the full deployed code |
 | Watchdog must remain observe-only | watchdog inspect should report no mounts | Docker socket mounts or nginx stop/start logs indicate stale VM wiring or override drift |

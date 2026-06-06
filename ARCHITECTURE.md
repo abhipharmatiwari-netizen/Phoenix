@@ -19,16 +19,16 @@ The runtime glossary and operator-facing endpoint behavior index is
 Verified on 2026-06-06 from the running OCI VM:
 
 - Repo checkout: `/opt/phoenix/app`
-- Active branch/commit: `main` at `4ba598f...`; deploy env image tag
-  `local-4ba598f`
+- Active branch/commit: `main`, runtime images built from `2884a87...`; deploy
+  env image tag `local-2884a87`
 - Compose project: `phoenix-oci-live`
 - Compose files: `/opt/phoenix/app/docker-compose.oci-live.yml` plus `/opt/phoenix/phoenix-override.yml`
 - Env file: `/opt/phoenix/phoenix-deploy.env`
-- Backend: `phoenix-oci-backend`, image `phoenix-local-backend:local-4ba598f`, command `python -m app.main`
-- Web: `phoenix-oci-web`, image `phoenix-local-nginx:local-4ba598f`
+- Backend: `phoenix-oci-backend`, image `phoenix-local-backend:local-2884a87`, command `python -m app.main`
+- Web: `phoenix-oci-web`, image `phoenix-local-nginx:local-2884a87`
 - Database: VM-local `phoenix-oci-postgres`, image `postgres:16-alpine`, Compose-managed with Docker health status `healthy`
 - Watchdog: `phoenix-oci-watchdog`, image `docker:cli`, observe-only with no Docker socket or mounts
-- OI/ML shadow sidecar: `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-536163d-greeks-20260527`, dry-run only, no host ports
+- OI/ML shadow sidecar: `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-2884a87`, dry-run only, no host ports, fail-closed with `OI_ML_SHADOW_SCORER=missing`
 - Runtime health: backend `/health`, `/ready`, `/readyz`, and `/health/summary` return 200 from inside the backend container
 - Health evidence: `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE`; backend-local `/readyz` returns 200; public nginx `/readyz` and `/health/summary` are redacted; public nginx `/health/alerts` and `/health/mitigations` proxy JSON to support the operator screens
 - Frontend health rendering: the Overview and Safety dashboards use
