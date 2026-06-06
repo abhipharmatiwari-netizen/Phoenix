@@ -3,6 +3,8 @@ import { DefaultService } from '../client';
 import HealthTile from '../components/health/HealthTile';
 import { HealthSummary } from '../types/health';
 
+type PublicHealthSummary = HealthSummary & { ready?: boolean };
+
 const Overview: React.FC = () => {
   const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -37,8 +39,8 @@ const Overview: React.FC = () => {
     };
   }, []);
 
-  const getStatusColor = (status: string): 'green' | 'yellow' | 'red' => {
-    switch (status.toLowerCase()) {
+  const getStatusColor = (status: string | null | undefined): 'green' | 'yellow' | 'red' => {
+    switch (String(status || 'unknown').toLowerCase()) {
       case 'ok':
         return 'green';
       case 'running':
@@ -50,10 +52,34 @@ const Overview: React.FC = () => {
     }
   };
 
-  const overallReady = healthSummary?.readiness?.ready ?? healthSummary?.status === 'ok';
+  const publicHealth = healthSummary as PublicHealthSummary | null;
+  const overallReady = healthSummary?.readiness?.ready ?? publicHealth?.ready ?? healthSummary?.status === 'ok';
   const overallValue = overallReady
     ? (healthSummary?.status || 'ok')
     : (healthSummary?.readiness?.reason || healthSummary?.status || 'degraded');
+  const schemaStatus = healthSummary?.schema_status || healthSummary?.schema?.status || 'unknown';
+  const streamWorkerRunning = healthSummary?.stream_worker_running;
+  const streamWorkerExpected = healthSummary?.stream_worker_expected;
+  const watchdogRunning = healthSummary?.watchdog_running;
+  const trackedAccountCount = healthSummary?.tracked_account_count;
+  const firingAlertCount = healthSummary?.alerts?.firing_count ?? 0;
+  const degradedReasons = healthSummary?.degraded_reasons || [];
+
+  const getRuntimeTile = (running: boolean | undefined, expected: boolean | undefined) => {
+    if (running === true) {
+      return { status: 'green' as const, value: 'Running' };
+    }
+    if (expected === false) {
+      return { status: 'green' as const, value: 'N/A (Hub Mode)' };
+    }
+    if (running === false) {
+      return { status: 'red' as const, value: 'Stopped' };
+    }
+    return { status: 'yellow' as const, value: 'Unknown' };
+  };
+
+  const streamWorkerTile = getRuntimeTile(streamWorkerRunning, streamWorkerExpected);
+  const watchdogTile = getRuntimeTile(watchdogRunning, streamWorkerExpected);
 
   return (
     <div>
@@ -69,60 +95,36 @@ const Overview: React.FC = () => {
           />
           <HealthTile
             title="Stream Worker"
-            status={
-              healthSummary.stream_worker_running
-                ? 'green'
-                : healthSummary.stream_worker_expected === false
-                  ? 'green'
-                  : 'red'
-            }
-            value={
-              healthSummary.stream_worker_running
-                ? 'Running'
-                : healthSummary.stream_worker_expected === false
-                  ? 'N/A (Hub Mode)'
-                  : 'Stopped'
-            }
+            status={streamWorkerTile.status}
+            value={streamWorkerTile.value}
           />
           <HealthTile
             title="Watchdog"
-            status={
-              healthSummary.watchdog_running
-                ? 'green'
-                : healthSummary.stream_worker_expected === false
-                  ? 'green'
-                  : 'red'
-            }
-            value={
-              healthSummary.watchdog_running
-                ? 'Running'
-                : healthSummary.stream_worker_expected === false
-                  ? 'N/A (Hub Mode)'
-                  : 'Stopped'
-            }
+            status={watchdogTile.status}
+            value={watchdogTile.value}
           />
           <HealthTile
             title="Schema Status"
-            status={getStatusColor(healthSummary.schema_status)}
-            value={healthSummary.schema_status}
+            status={getStatusColor(schemaStatus)}
+            value={schemaStatus}
           />
           <HealthTile
             title="Tracked Accounts"
-            status={healthSummary.tracked_account_count > 0 ? 'green' : 'yellow'}
-            value={String(healthSummary.tracked_account_count)}
+            status={trackedAccountCount === undefined ? 'yellow' : trackedAccountCount > 0 ? 'green' : 'yellow'}
+            value={trackedAccountCount === undefined ? 'Unknown' : String(trackedAccountCount)}
           />
           <HealthTile
             title="Active Alerts"
-            status={healthSummary.alerts.firing_count > 0 ? 'yellow' : 'green'}
-            value={String(healthSummary.alerts.firing_count)}
+            status={firingAlertCount > 0 ? 'yellow' : 'green'}
+            value={String(firingAlertCount)}
           />
         </div>
       )}
-      {healthSummary && healthSummary.degraded_reasons.length > 0 && (
+      {healthSummary && degradedReasons.length > 0 && (
         <div style={{ marginTop: '1rem' }}>
           <h2>Degraded Reasons</h2>
           <ul>
-            {healthSummary.degraded_reasons.map((reason) => (
+            {degradedReasons.map((reason) => (
               <li key={reason}>{reason}</li>
             ))}
           </ul>
@@ -133,4 +135,3 @@ const Overview: React.FC = () => {
 };
 
 export default Overview;
-

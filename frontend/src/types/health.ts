@@ -7,17 +7,18 @@ export interface AccountStaleness {
 
 export interface HealthSummary {
   status: 'ok' | 'degraded' | 'unknown';
+  ready?: boolean;
   service: string;
   timestamp: string;
-  schema_status: string;
+  schema_status?: string;
   operating_mode: string | null;
-  stream_worker_running: boolean;
-  stream_worker_expected: boolean;
-  watchdog_running: boolean;
+  stream_worker_running?: boolean;
+  stream_worker_expected?: boolean;
+  watchdog_running?: boolean;
   last_position_sync_ok_ts: string | null;
   last_broker_blocked_or_rate_limited_ts: string | null;
-  tracked_account_count: number;
-  degraded_reasons: string[];
+  tracked_account_count?: number;
+  degraded_reasons?: string[];
   readiness?: {
     ready: boolean;
     http_status: number;
@@ -28,7 +29,7 @@ export interface HealthSummary {
     reconciling_positions?: number;
     blocking_count?: number;
   };
-  schema: { status: string; checked_at: string; missing_tables: string[]; missing_indexes: string[] };
+  schema?: { status: string; checked_at: string; missing_tables: string[]; missing_indexes: string[] };
   oi_ml_shadow_ingestion?: {
     enabled: boolean;
     status: 'ok' | 'degraded' | 'unknown' | 'disabled';
@@ -61,7 +62,7 @@ export interface HealthSummary {
   };
   watchdog: Record<string, unknown>;
   per_account_staleness: AccountStaleness[];
-  alerts: { firing_count: number; firing_rules: string[] };
+  alerts?: { firing_count: number; firing_rules: string[] };
   auto_mitigation: { enabled: boolean; total_events: number };
 }
 
