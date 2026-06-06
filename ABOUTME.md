@@ -9,8 +9,8 @@ This file is plain-language context only; it is not an operating runbook.
 The verified OCI VM deployment is a hub-authoritative Phoenix runtime behind
 nginx:
 
-- Latest verified VM checkout is `main` at `4f567bf`; backend and nginx are
-  running local images tagged `local-4f567bf`.
+- Latest verified VM checkout is `main` at `158549e`; backend and nginx are
+  running local images tagged `local-158549e`.
 - `phoenix-oci-backend` runs `python -m app.main`.
 - `phoenix-oci-web` serves the frontend and reverse-proxies current health/API
   paths. Public `/readyz` and `/health/summary` responses are redacted.
