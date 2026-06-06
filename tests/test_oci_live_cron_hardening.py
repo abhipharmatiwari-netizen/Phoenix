@@ -207,15 +207,18 @@ def test_redeploy_pulls_and_recreates_nginx_with_backend() -> None:
 def test_oci_runbook_documents_verified_vm_runtime() -> None:
     runbook = _read("docs/runbooks/oci_live_deployment.md")
 
-    assert "phoenix-local-backend:local-697409e" in runbook
-    assert "phoenix-local-nginx:local-697409e" in runbook
+    assert "phoenix-local-backend:local-4ba598f" in runbook
+    assert "phoenix-local-nginx:local-4ba598f" in runbook
     assert "phoenix-oci-postgres" in runbook
     assert "Docker health status `healthy`" in runbook
     assert "VM-local Postgres" in runbook
     assert "source-file bind mounts" in runbook
     assert "observe-only" in runbook
     assert "frontend health rendering" in runbook
-    assert "missing internal-only fields" in runbook
+    assert "/admin/health/summary" in runbook
+    assert "schema_status" in runbook
+    assert "tracked_account_count" in runbook
+    assert "/bff/health/summary" in runbook
     assert "fallback" in runbook
     assert "/health/alerts" in runbook
     assert "/health/mitigations" in runbook

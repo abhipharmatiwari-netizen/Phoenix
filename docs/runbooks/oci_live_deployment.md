@@ -30,9 +30,9 @@ Current VM paths and containers:
 
 Latest verified live deployment:
 
-- VM checkout: `main` at `697409e...`
-- backend image: `phoenix-local-backend:local-697409e`
-- nginx image: `phoenix-local-nginx:local-697409e`
+- VM checkout: `main` at `4ba598f...`
+- backend image: `phoenix-local-backend:local-4ba598f`
+- nginx image: `phoenix-local-nginx:local-4ba598f`
 - live strategy routing: EMA20-only; `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1`
   and non-EMA strategies disabled in `strategy_configs`
 - liveness: backend `/health` and nginx `/health` return HTTP 200
@@ -42,9 +42,11 @@ Latest verified live deployment:
 - health operations screens: nginx `/health/alerts` and `/health/mitigations`
   proxy JSON from the backend; verify the host-mounted nginx template contains
   these routes before recreating nginx
-- frontend health rendering: Overview renders from the redacted public
-  `/health/summary` payload and uses fallback values when internal-only
-  diagnostics are omitted
+- frontend health rendering: Overview/Safety use authenticated
+  `/admin/health/summary` for internal schema, watchdog, and account-count
+  fields, then fall back to redacted public `/health/summary`
+- BFF hardening: direct `/bff/health/summary`, `/bff/readyz`, and
+  `/bff/dashboard/status` are blocked so redaction cannot be bypassed
 - database: `phoenix-oci-postgres` is Compose-managed with Docker health
   status `healthy`
 - watchdog: `phoenix-oci-watchdog` has no Docker socket or other mounts
@@ -204,9 +206,9 @@ Expected success evidence:
 
 - backend and web are running; after the 2026-05-21 liveness-healthcheck patch
   they remain Docker-healthy when `/health` is 200 even if `/readyz` is 503
-- backend image is `phoenix-local-backend:local-697409e` in the latest
+- backend image is `phoenix-local-backend:local-4ba598f` in the latest
   verified deployment
-- web image is `phoenix-local-nginx:local-697409e` in the latest verified
+- web image is `phoenix-local-nginx:local-4ba598f` in the latest verified
   deployment
 - `/opt/phoenix/phoenix-override.yml` must also use `/health` for nginx
   Docker health; a VM-local override that still checks `/readyz` will keep the
@@ -254,9 +256,13 @@ Expected normal trading-readiness evidence:
 - Host/nginx `/health/alerts` and `/health/mitigations` must return
   `application/json`; if either returns SPA HTML, patch
   `/opt/phoenix/nginx-ssl-prerendered.conf.template` and recreate nginx.
-- The frontend Overview page must continue to render from the public redacted
-  `/health/summary`; missing internal-only fields should appear as fallback
-  values, not as a runtime error.
+- Authenticated `/admin/health/summary` should return detailed internal fields
+  such as `schema_status`, `tracked_account_count`, and `watchdog_running`.
+- Public `/bff/health/summary`, `/bff/readyz`, and `/bff/dashboard/status`
+  should return 404 to prevent bypassing redaction.
+- The frontend Overview page must continue to render if only the public
+  redacted `/health/summary` is available; missing internal-only fields should
+  appear as fallback values, not as a runtime error.
 
 Risk-halt or degraded evidence:
 
@@ -446,7 +452,7 @@ The operator owns:
 
 | Drift | Evidence | Risk |
 |---|---|---|
-| Local images instead of OCIR | `phoenix-local-backend:local-697409e`, `phoenix-local-nginx:local-697409e` verified on 2026-06-06 | Old OCIR docs do not describe current deploy/restart behavior |
+| Local images instead of OCIR | `phoenix-local-backend:local-4ba598f`, `phoenix-local-nginx:local-4ba598f` verified on 2026-06-06 | Old OCIR docs do not describe current deploy/restart behavior |
 | VM-local Postgres | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres`; container is Compose-managed and healthy | External DB backup/SSL assumptions are not current |
 | Source bind mounts | backend mounts selected `/opt/phoenix/app/app/...` files | Container image alone is not the full deployed code |
 | Watchdog must remain observe-only | watchdog inspect should report no mounts | Docker socket mounts or nginx stop/start logs indicate stale VM wiring or override drift |

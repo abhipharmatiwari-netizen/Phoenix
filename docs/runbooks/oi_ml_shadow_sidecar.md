@@ -32,7 +32,7 @@ Recent validation:
 
 - Local focused OI/ML suite: `159 passed`.
 - 2026-06-06 frontend static asset and redacted-health Overview redeploy moved
-  the main VM checkout plus backend/nginx runtime to `local-697409e`. The
+  the main VM checkout plus backend/nginx runtime to `local-4ba598f`. The
   sidecar image remains `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd` and remains
   dry-run only.
 - 2026-05-25 live backend/nginx deployment moved the main VM checkout to
