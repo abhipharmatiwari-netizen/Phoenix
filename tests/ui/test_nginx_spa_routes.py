@@ -27,6 +27,19 @@ def test_public_health_routes_use_redacted_backend_endpoints():
     assert "proxy_pass http://backend/health/summary-public;" in content
 
 
+def test_frontend_assets_do_not_fall_back_to_spa_html():
+    content = NGINX_TEMPLATE.read_text()
+
+    assert "location /static/" in content
+    assert "try_files $uri =404;" in content
+    assert "location = /manifest.json" in content
+    assert "try_files /manifest.json =404;" in content
+    assert "location = /favicon.svg" in content
+    assert "try_files /favicon.svg =404;" in content
+    assert "location = /favicon.ico" in content
+    assert "return 308 /favicon.svg;" in content
+
+
 def test_frontend_public_index_references_existing_static_assets():
     public_dir = REPO_ROOT / "frontend" / "public"
     index = (public_dir / "index.html").read_text(encoding="utf-8")
@@ -38,3 +51,5 @@ def test_frontend_public_index_references_existing_static_assets():
     assert refs
     for ref in refs:
         assert (public_dir / ref).is_file(), ref
+
+    assert "Loading Phoenix..." in index
