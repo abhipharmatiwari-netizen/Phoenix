@@ -9,11 +9,13 @@ This file is plain-language context only; it is not an operating runbook.
 The verified OCI VM deployment is a hub-authoritative Phoenix runtime behind
 nginx:
 
-- Latest verified VM checkout is `main` at `ce837e8`; backend and nginx are
-  running local images tagged `local-ce837e8`.
+- Latest verified VM checkout is `main` at `7c0330f`; backend and nginx are
+  running local images tagged `local-7c0330f`.
 - `phoenix-oci-backend` runs `python -m app.main`.
 - `phoenix-oci-web` serves the frontend and reverse-proxies current health/API
   paths. Public `/readyz` and `/health/summary` responses are redacted.
+  The Overview page must render against that redacted public summary and show
+  fallback values for internal-only diagnostics that are omitted.
 - `phoenix-oci-postgres` is the VM-local operational Postgres database and is
   now managed by the Compose `vm-local-postgres` profile with Docker health.
 - `phoenix-oci-watchdog` monitors backend `/health` in observe-only mode with

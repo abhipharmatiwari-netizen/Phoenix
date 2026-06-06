@@ -17,18 +17,21 @@ Current VM evidence is captured in [docs/OCI_VM_RUNTIME.md](docs/OCI_VM_RUNTIME.
 Verified on 2026-06-06 from the running OCI VM:
 
 - Repo checkout: `/opt/phoenix/app`
-- Active branch/commit: `main` at `ce837e8...`; deploy env image tag
-  `local-ce837e8`
+- Active branch/commit: `main` at `7c0330f...`; deploy env image tag
+  `local-7c0330f`
 - Compose project: `phoenix-oci-live`
 - Compose files: `/opt/phoenix/app/docker-compose.oci-live.yml` plus `/opt/phoenix/phoenix-override.yml`
 - Env file: `/opt/phoenix/phoenix-deploy.env`
-- Backend: `phoenix-oci-backend`, image `phoenix-local-backend:local-ce837e8`, command `python -m app.main`
-- Web: `phoenix-oci-web`, image `phoenix-local-nginx:local-ce837e8`
+- Backend: `phoenix-oci-backend`, image `phoenix-local-backend:local-7c0330f`, command `python -m app.main`
+- Web: `phoenix-oci-web`, image `phoenix-local-nginx:local-7c0330f`
 - Database: VM-local `phoenix-oci-postgres`, image `postgres:16-alpine`, Compose-managed with Docker health status `healthy`
 - Watchdog: `phoenix-oci-watchdog`, image `docker:cli`, observe-only with no Docker socket or mounts
 - OI/ML shadow sidecar: `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-bd999cd`, dry-run only, no host ports
 - Runtime health: backend `/health`, `/ready`, `/readyz`, and `/health/summary` return 200 from inside the backend container
 - Health evidence: `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE`; backend-local `/readyz` returns 200; public nginx `/readyz` and `/health/summary` are redacted
+- Frontend health rendering: the Overview dashboard renders from the redacted
+  public `/health/summary` payload and must not require internal-only schema,
+  alert, watchdog, or account-count fields to be present
 
 The current VM differs from the intended OCIR/external-Postgres shape in these
 important ways:
@@ -61,7 +64,9 @@ The production safety contract remains:
   kill-switch, tenant/account/subscription, strategy config, and trade/audit
   records.
 - Backend-local `/readyz` and `/health/summary` are the detailed readiness
-  evidence surfaces. Public nginx readiness/summary responses are redacted.
+  evidence surfaces. Public nginx readiness/summary responses are redacted, and
+  dashboard code must treat omitted internal diagnostics as unavailable instead
+  of crashing.
 - Secret values must come from runtime secret files or approved stores, never
   committed env files.
 - `DISABLE_STREAM_WORKER=true` is not an automated-LIVE profile unless an

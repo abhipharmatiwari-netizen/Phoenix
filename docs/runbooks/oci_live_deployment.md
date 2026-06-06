@@ -30,15 +30,18 @@ Current VM paths and containers:
 
 Latest verified live deployment:
 
-- VM checkout: `main` at `ce837e8...`
-- backend image: `phoenix-local-backend:local-ce837e8`
-- nginx image: `phoenix-local-nginx:local-ce837e8`
+- VM checkout: `main` at `7c0330f...`
+- backend image: `phoenix-local-backend:local-7c0330f`
+- nginx image: `phoenix-local-nginx:local-7c0330f`
 - live strategy routing: EMA20-only; `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1`
   and non-EMA strategies disabled in `strategy_configs`
 - liveness: backend `/health` and nginx `/health` return HTTP 200
 - readiness: backend-local `/readyz` and nginx `/readyz` return HTTP 200
 - public readiness/summary: nginx `/readyz` and `/health/summary` proxy to
   redacted backend endpoints
+- frontend health rendering: Overview renders from the redacted public
+  `/health/summary` payload and uses fallback values when internal-only
+  diagnostics are omitted
 - database: `phoenix-oci-postgres` is Compose-managed with Docker health
   status `healthy`
 - watchdog: `phoenix-oci-watchdog` has no Docker socket or other mounts
@@ -198,9 +201,9 @@ Expected success evidence:
 
 - backend and web are running; after the 2026-05-21 liveness-healthcheck patch
   they remain Docker-healthy when `/health` is 200 even if `/readyz` is 503
-- backend image is `phoenix-local-backend:local-ce837e8` in the latest
+- backend image is `phoenix-local-backend:local-7c0330f` in the latest
   verified deployment
-- web image is `phoenix-local-nginx:local-ce837e8` in the latest verified
+- web image is `phoenix-local-nginx:local-7c0330f` in the latest verified
   deployment
 - `/opt/phoenix/phoenix-override.yml` must also use `/health` for nginx
   Docker health; a VM-local override that still checks `/readyz` will keep the
@@ -238,8 +241,12 @@ Expected normal trading-readiness evidence:
 - `/health` includes `order_path` equal to `strategy_bridge_order_router`.
 - `/health/summary` includes `operating_mode` equal to `HUB_AUTHORITATIVE`.
 - `/readyz` includes `ready: true`.
-- Host/nginx `/readyz` returns only the redacted public readiness fields. Use
-  backend-local `/readyz` for full internal diagnostics.
+- Host/nginx `/readyz` and `/health/summary` return only redacted public
+  readiness fields. Use backend-local `/readyz` and `/health/summary` for full
+  internal diagnostics.
+- The frontend Overview page must continue to render from the public redacted
+  `/health/summary`; missing internal-only fields should appear as fallback
+  values, not as a runtime error.
 
 Risk-halt or degraded evidence:
 
@@ -429,7 +436,7 @@ The operator owns:
 
 | Drift | Evidence | Risk |
 |---|---|---|
-| Local images instead of OCIR | `phoenix-local-backend:local-ce837e8`, `phoenix-local-nginx:local-ce837e8` verified on 2026-06-06 | Old OCIR docs do not describe current deploy/restart behavior |
+| Local images instead of OCIR | `phoenix-local-backend:local-7c0330f`, `phoenix-local-nginx:local-7c0330f` verified on 2026-06-06 | Old OCIR docs do not describe current deploy/restart behavior |
 | VM-local Postgres | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres`; container is Compose-managed and healthy | External DB backup/SSL assumptions are not current |
 | Source bind mounts | backend mounts selected `/opt/phoenix/app/app/...` files | Container image alone is not the full deployed code |
 | Watchdog must remain observe-only | watchdog inspect should report no mounts | Docker socket mounts or nginx stop/start logs indicate stale VM wiring or override drift |

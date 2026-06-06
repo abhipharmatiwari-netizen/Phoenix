@@ -1,8 +1,8 @@
 # Documentation Audit
 
 Audit date: 2026-06-06. Runtime snapshot refreshed after the OCI LIVE hardening
-deploy, frontend static asset redeploy, and backend restart, with VM
-verification at 13:28 UTC.
+deploy, frontend static asset redeploy, redacted-health Overview fix, and
+backend restart, with VM verification at 13:42 UTC.
 
 Scope: repository documentation, environment examples, Compose comments, and
 operator-facing runbooks were checked against the running OCI VM. The OCI VM
@@ -13,16 +13,17 @@ overrides repo docs and historical plans when there is a conflict.
 | Area | Verified current state |
 |---|---|
 | Repo path | `/opt/phoenix/app` |
-| Active git | `main` at `ce837e8...`; deploy env image tag `local-ce837e8` |
+| Active git | `main` at `7c0330f...`; deploy env image tag `local-7c0330f` |
 | Compose project | `phoenix-oci-live` |
 | Compose files | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` |
 | Env file | `/opt/phoenix/phoenix-deploy.env` |
-| Backend | `phoenix-oci-backend`, `phoenix-local-backend:local-ce837e8`, healthy |
-| Web | `phoenix-oci-web`, `phoenix-local-nginx:local-ce837e8`, healthy |
+| Backend | `phoenix-oci-backend`, `phoenix-local-backend:local-7c0330f`, healthy |
+| Web | `phoenix-oci-web`, `phoenix-local-nginx:local-7c0330f`, healthy |
 | Database | VM-local `phoenix-oci-postgres`, `postgres:16-alpine`, Compose-managed and Docker-healthy |
 | Watchdog | `phoenix-oci-watchdog`, observe-only, no Docker socket or mounts |
 | Runtime mode | `/health/summary` reports `HUB_AUTHORITATIVE`; `/health` reports `strategy_bridge_order_router` |
 | Health endpoints | backend-local `/health`, `/ready`, `/readyz`, `/health/summary`; public nginx `/health`, redacted `/readyz`, redacted `/health/summary` |
+| Frontend health rendering | Overview uses redacted public `/health/summary` and falls back when internal-only diagnostics are omitted |
 | Storage | root filesystem expanded; latest evidence showed 63% used |
 | Secret model | `/run/secrets/*`; permission validator passes; docs may list names only |
 
@@ -62,11 +63,12 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 
 | Prior mismatch | Current resolution |
 |---|---|
-| Docs described `local-e7f1e29` as current | Current operator docs now reference VM checkout `ce837e8` and backend/nginx images tagged `local-ce837e8` |
+| Docs described `local-e7f1e29` as current | Current operator docs now reference VM checkout `7c0330f` and backend/nginx images tagged `local-7c0330f` |
 | Docs described `phoenix-oci-postgres` as unmanaged and lacking health | Current docs describe the Compose-managed `vm-local-postgres` profile and healthy container evidence |
 | Docs described watchdog nginx stop/start behavior as current | Current docs describe the observe-only watchdog and treat Docker socket mounts or nginx mutations as drift |
 | Public `/readyz` and `/health/summary` were not distinguished from internal diagnostics | Current docs state that public nginx responses are redacted and backend-local endpoints carry full diagnostics |
-| Runtime env examples referenced old verified local image tags | Current OCI env template references the `local-ce837e8` deploy tag |
+| Overview assumed full internal health summary fields from the public endpoint | Current frontend and docs treat the public health summary as redacted and tolerate omitted schema, alert, watchdog, and account fields |
+| Runtime env examples referenced old verified local image tags | Current OCI env template references the `local-7c0330f` deploy tag |
 | Release evidence guidance treated Docker health as sufficient wait evidence | Current release guidance requires `/readyz` trading-readiness evidence in addition to liveness |
 
 ## Open Documentation-Backed Risks
