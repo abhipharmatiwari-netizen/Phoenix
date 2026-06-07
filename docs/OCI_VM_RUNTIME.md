@@ -1,6 +1,6 @@
 # OCI VM Runtime Evidence
 
-Last verified: 2026-06-06 16:07 UTC from the running OCI VM.
+Last verified: 2026-06-07 05:20 UTC from the running OCI VM.
 OI/ML shadow sidecar evidence was rechecked as present, healthy, and dry-run
 only during the same review.
 
@@ -14,7 +14,7 @@ OCIDs, broker identifiers, and tokens are redacted.
 |---|---|---|---|---|
 | Host | `phoenix-vm`, `opc`, `/home/opc` | `hostname; date; whoami; pwd` | VM reachable through OCI Bastion; VM VNIC has no public IP | Do not document private IPs |
 | Deployed repo path | `/opt/phoenix/app` | Compose labels and `git -C` | Active checkout lives under `/opt/phoenix/app` | `/opt/phoenix` also contains operator-owned runtime files |
-| Active git commit/branch | `main`, runtime images built from `2884a87...` plus live operator config drift | `git -C /opt/phoenix/app branch --show-current`, `rev-parse HEAD`, mounted config/env evidence | VM runtime deploy used `main` at `2884a87...`; `/opt/phoenix/app/app/config/strategy_env.yaml` and `/opt/phoenix/phoenix-deploy.env` remain operator-owned runtime inputs | Deploy env image tag is `local-2884a87`; backend and nginx have been restarted/reconciled against that tag |
+| Active git commit/branch | `main`, repo checkout `bd66682...`, runtime images built from `2884a87...`, plus live operator config drift | `git -C /opt/phoenix/app branch --show-current`, `rev-parse HEAD`, mounted config/env evidence | VM checkout is `main` at `bd66682...`; `/opt/phoenix/app/app/config/strategy_env.yaml` and `/opt/phoenix/phoenix-deploy.env` remain operator-owned runtime inputs | Running backend/nginx image tag is still `local-2884a87`; do not infer image code solely from checkout state |
 | Compose project | `phoenix-oci-live` | `docker inspect ... Labels` | backend, nginx, watchdog, and Postgres have Compose labels | `phoenix-oci-postgres` is now managed by the opt-in `vm-local-postgres` profile |
 | Compose files used | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` | `com.docker.compose.project.config_files` labels | These are the active Phoenix Compose files for labelled containers | Runtime override must be treated as authoritative |
 | Env file used | `/opt/phoenix/phoenix-deploy.env` | runtime scripts and Compose commands | Non-secret deploy env file exists on VM | Document names only, not values |
@@ -42,7 +42,7 @@ OCIDs, broker identifiers, and tokens are redacted.
 | nginx health | host `http://localhost/health`, `/readyz`, `/health/summary`, `/health/alerts`, and `/health/mitigations` returned through nginx | `curl` on VM and public curl probes | nginx proxies current health paths | Public nginx `/readyz` and `/health/summary` use redacted backend endpoints; Alerts/Mitigations endpoints return JSON |
 | Release evidence endpoint | `/admin/release-evidence` returns 401 without admin key | `docker exec phoenix-oci-backend curl` | Endpoint exists and requires auth | Do not print admin key |
 | Database tables | `audit_events`, `broker_accounts`, `broker_credentials`, `internal_position_records`, `kill_switch_state`, `order_submission_outbox`, `position_ownership_ledger`, `schema_migrations`, `strategy_configs`, `strategy_config_candidates`, `trades`, tenant/user entitlement tables, and others | `docker exec phoenix-oci-postgres psql -U phoenix_app -d phoenix` | Operational DB schema exists in VM-local Postgres | Backend container does not include `psql` |
-| Cron/systemd | root cron starts at 03:30 UTC Mon-Fri and stops at 18:30 UTC Sun-Thu; root cert renewal; user safety watcher; weekly cleanup in `/etc/cron.d/phoenix-cleanup` | `crontab -l`, `sudo crontab -l`, `/etc/cron*` | Cron, not optimizer/reload systemd timers, controls current scheduled operations | `phoenix-runtime-secrets.service` exists but is inactive |
+| Cron/systemd | root cron starts at 03:30 UTC Mon-Fri and stops at 18:30 UTC Sun-Fri; root cert renewal; user safety watcher; weekly cleanup in `/etc/cron.d/phoenix-cleanup`; Aurelium backup/retrain cron permissions and backup image env were repaired | `crontab -l`, `sudo crontab -l`, `/etc/cron*`, `/home/opc/aurelium/.artifacts/dr-drill/pg-backup-latest.json` | Cron, not optimizer/reload systemd timers, controls current scheduled operations; latest Aurelium backup evidence is `2026-06-07T05:07:31Z` with a 3.2G dump uploaded to MinIO | `phoenix-runtime-secrets.service` exists but is inactive |
 | Optimizer/reload timers | `phoenix-optimizer.*` and `phoenix-backend-reload.*` not found | `systemctl status` | Not installed on VM | Docs must not claim they are active |
 | Watchdog behavior | watchdog inspect reports no mounts | `docker inspect phoenix-oci-watchdog --format '{{json .Mounts}}'` | Live watchdog is back on the base observe-only contract | Re-run `scripts/ops/recreate_oci_watchdog.sh` if future evidence shows Docker socket access or nginx stop/start actions |
 | Storage headroom | root filesystem is 133G with 51G available and 63% used | `df -h /` after boot-volume expansion | Root disk headroom is back within the operational target | The boot volume was expanded to 150 GB and the filesystem was grown |

@@ -41,6 +41,8 @@ def test_stop_phoenix_verifies_nginx_state_after_working_day_stop() -> None:
     assert "sleep 30" in script
     assert "Verified: nginx still running." in script
     assert "ALERT: nginx is NOT running after backend stop." in script
+    assert "30 18 * * 0-5" in script
+    assert "30 18 * * 0-4" not in script
     assert "nginx remains up" not in script
 
 
@@ -207,8 +209,8 @@ def test_redeploy_pulls_and_recreates_nginx_with_backend() -> None:
 def test_oci_runbook_documents_verified_vm_runtime() -> None:
     runbook = _read("docs/runbooks/oci_live_deployment.md")
 
-    assert "phoenix-local-backend:local-4ba598f" in runbook
-    assert "phoenix-local-nginx:local-4ba598f" in runbook
+    assert "phoenix-local-backend:local-2884a87" in runbook
+    assert "phoenix-local-nginx:local-2884a87" in runbook
     assert "phoenix-oci-postgres" in runbook
     assert "Docker health status `healthy`" in runbook
     assert "VM-local Postgres" in runbook

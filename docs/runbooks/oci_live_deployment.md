@@ -1,6 +1,6 @@
 # Phoenix OCI LIVE Deployment Runbook
 
-Status: current operator runbook for the OCI VM verified on 2026-06-06.
+Status: current operator runbook for the OCI VM verified on 2026-06-07.
 
 This runbook describes what is actually running on the OCI VM. It does not
 describe the older intended OCIR/external-Postgres deployment as current state.
@@ -30,7 +30,8 @@ Current VM paths and containers:
 
 Latest verified live deployment:
 
-- VM runtime deploy: `main` at `2884a87...`
+- VM repo checkout: `main` at `bd66682...`
+- running Phoenix image tag: `local-2884a87`
 - backend image: `phoenix-local-backend:local-2884a87`
 - nginx image: `phoenix-local-nginx:local-2884a87`
 - live strategy routing: EMA20-only; `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1`
@@ -366,7 +367,7 @@ Cron evidence observed:
 
 ```text
 30  3 * * 1-5 /opt/phoenix/start-phoenix.sh >> /opt/phoenix/logs/cron-scheduler.log 2>&1
-30 18 * * 0-4 /opt/phoenix/stop-phoenix.sh  >> /opt/phoenix/logs/cron-scheduler.log 2>&1
+30 18 * * 0-5 /opt/phoenix/stop-phoenix.sh  >> /opt/phoenix/logs/cron-scheduler.log 2>&1
 ```
 
 Run the migration and database preflight steps below before any backend/nginx

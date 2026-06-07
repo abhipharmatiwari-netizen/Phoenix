@@ -1,14 +1,14 @@
 #!/bin/sh
 # stop-phoenix.sh — graceful shutdown of Phoenix backend at market close
 #
-# Called by cron at 00:00 IST (18:30 UTC) Sun-Thu to stop the backend.
+# Called by cron at 00:00 IST Mon-Sat (18:30 UTC Sun-Fri) to stop the backend.
 # If the next trading morning (today IST, since we just crossed midnight) is an
 # NSE holiday, nginx is also stopped for a complete system shutdown.
 # Otherwise nginx stays up (serves 502 gracefully; LB health checks continue).
 #
 # Cron entry (on OCI VM, cron runs in UTC):
-#   30 18 * * 0-4 /opt/phoenix/stop-phoenix.sh >> /opt/phoenix/logs/cron-scheduler.log 2>&1
-#   (00:00 IST Mon-Fri = 18:30 UTC Sun-Thu)
+#   30 18 * * 0-5 /opt/phoenix/stop-phoenix.sh >> /opt/phoenix/logs/cron-scheduler.log 2>&1
+#   (00:00 IST Mon-Sat = 18:30 UTC Sun-Fri)
 
 set -eu
 
