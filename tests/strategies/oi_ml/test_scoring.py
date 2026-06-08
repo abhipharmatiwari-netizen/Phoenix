@@ -8,6 +8,7 @@ from app.strategies.oi_ml.scoring import (
     LightGbmOiMlScorer,
     MissingOiMlScorer,
     OiMlScore,
+    OiMlScorerNotConfiguredError,
 )
 
 
@@ -37,7 +38,7 @@ def test_score_validates_probability_and_mae(probability, mae):
 
 
 def test_missing_scorer_fails_closed():
-    with pytest.raises(RuntimeError, match="not configured"):
+    with pytest.raises(OiMlScorerNotConfiguredError, match="not configured"):
         MissingOiMlScorer().score({"feature": 1.0})
 
 

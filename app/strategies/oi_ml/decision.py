@@ -28,7 +28,12 @@ from app.strategies.oi_ml.greek_risk import (
     OiMlGreekRiskConfig,
     assess_candidate_greek_risk,
 )
-from app.strategies.oi_ml.scoring import MissingOiMlScorer, OiMlScore, OiMlScorer
+from app.strategies.oi_ml.scoring import (
+    MissingOiMlScorer,
+    OiMlScore,
+    OiMlScorer,
+    OiMlScorerNotConfiguredError,
+)
 
 
 class OiMlEntryAction(str, Enum):
@@ -158,6 +163,12 @@ class OiMlCeDecisionEngine:
                     decision_ts=decision,
                     tenant_id=tenant_id,
                     account_id=account_id,
+                )
+            except OiMlScorerNotConfiguredError:
+                return OiMlEntryDecision(
+                    action=OiMlEntryAction.NO_TRADE,
+                    reason="model_scorer_missing",
+                    evaluated=tuple(evaluated),
                 )
             except Exception as exc:
                 return OiMlEntryDecision(

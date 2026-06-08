@@ -329,4 +329,4 @@ def test_decision_engine_fails_closed_when_scorer_is_missing():
     )
 
     assert decision.action == OiMlEntryAction.NO_TRADE
-    assert decision.reason == "decision_engine_error:RuntimeError"
+    assert decision.reason == "model_scorer_missing"

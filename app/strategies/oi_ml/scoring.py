@@ -37,6 +37,10 @@ class OiMlScorer(Protocol):
         """Score one feature vector."""
 
 
+class OiMlScorerNotConfiguredError(RuntimeError):
+    """Raised when OI/ML scoring is intentionally fail-closed."""
+
+
 @dataclass(frozen=True)
 class ConstantOiMlScorer:
     """Deterministic scorer for tests, dry-runs, and fail-fast wiring checks."""
@@ -56,7 +60,7 @@ class MissingOiMlScorer:
     """Fail-closed scorer used when no trained artifact is configured."""
 
     def score(self, features: Mapping[str, Any]) -> OiMlScore:
-        raise RuntimeError("OI/ML scorer is not configured")
+        raise OiMlScorerNotConfiguredError("OI/ML scorer is not configured")
 
 
 @dataclass(frozen=True)
@@ -168,4 +172,5 @@ __all__ = [
     "MissingOiMlScorer",
     "OiMlScore",
     "OiMlScorer",
+    "OiMlScorerNotConfiguredError",
 ]

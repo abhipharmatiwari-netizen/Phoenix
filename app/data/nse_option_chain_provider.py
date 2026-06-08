@@ -80,14 +80,10 @@ class NseWebOptionChainClient:
             ) as response:
                 payload = json.loads(response.read().decode("utf-8", errors="replace"))
         except Exception as exc:  # noqa: BLE001 - validation fallback may still work.
-            logger.warning(
-                "NSE option-chain API failed for symbol=%s; trying live-derivatives fallback: %s",
-                resolved_symbol,
-                exc,
-            )
-            fallback_payload = self._fetch_live_equity_derivatives(
+            fallback_payload = self._fetch_live_equity_derivatives_after_primary_error(
                 opener,
                 symbol=resolved_symbol,
+                primary_error=exc,
             )
             if fallback_payload is not None:
                 return fallback_payload
@@ -102,10 +98,52 @@ class NseWebOptionChainClient:
             symbol=resolved_symbol,
         )
         if fallback_payload is not None:
+            logger.info(
+                "NSE option-chain API returned no comparable rows for symbol=%s; "
+                "using live-derivatives fallback",
+                resolved_symbol,
+            )
             return fallback_payload
         raise ValueError(
             f"NSE option-chain payload contained no comparable rows for symbol={resolved_symbol}"
         )
+
+    def _fetch_live_equity_derivatives_after_primary_error(
+        self,
+        opener: Any,
+        *,
+        symbol: str,
+        primary_error: Exception,
+    ) -> Mapping[str, Any] | None:
+        try:
+            fallback_payload = self._fetch_live_equity_derivatives(
+                opener,
+                symbol=symbol,
+            )
+        except Exception as fallback_error:  # noqa: BLE001 - surfaced by validator.
+            logger.warning(
+                "NSE option-chain API failed for symbol=%s and live-derivatives "
+                "fallback also failed: primary_error=%s fallback_error=%s",
+                symbol,
+                primary_error,
+                fallback_error,
+            )
+            raise fallback_error from primary_error
+        if fallback_payload is not None:
+            logger.info(
+                "NSE option-chain API failed for symbol=%s; using live-derivatives "
+                "fallback: %s",
+                symbol,
+                primary_error,
+            )
+            return fallback_payload
+        logger.warning(
+            "NSE option-chain API failed for symbol=%s and live-derivatives "
+            "fallback returned no comparable rows: %s",
+            symbol,
+            primary_error,
+        )
+        return None
 
     def _fetch_live_equity_derivatives(
         self,

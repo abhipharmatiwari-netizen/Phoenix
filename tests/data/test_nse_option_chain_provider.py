@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 import json
+import logging
 from urllib.error import HTTPError
 
 from app.data.nse_option_chain_provider import (
@@ -221,7 +222,7 @@ def test_web_client_falls_back_to_live_equity_derivatives_when_option_chain_empt
     assert any("liveEquity-derivatives" in url for url in opener.urls)
 
 
-def test_web_client_falls_back_to_live_equity_derivatives_when_option_chain_errors():
+def test_web_client_falls_back_to_live_equity_derivatives_when_option_chain_errors(caplog):
     class FakeResponse:
         def __init__(self, payload):
             self.payload = payload
@@ -265,8 +266,11 @@ def test_web_client_falls_back_to_live_equity_derivatives_when_option_chain_erro
     opener = FakeOpener()
     client = NseWebOptionChainClient(opener_factory=lambda: opener)
 
+    caplog.set_level(logging.INFO)
     payload = client.fetch_option_chain(symbol="nifty")
 
     assert payload["__phoenix_nse_source"] == NSE_LIVE_EQUITY_SOURCE
     assert any("option-chain-indices" in url for url in opener.urls)
     assert any("liveEquity-derivatives" in url for url in opener.urls)
+    assert "using live-derivatives fallback" in caplog.text
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
