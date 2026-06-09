@@ -282,9 +282,10 @@ def _candidate_quality_failure(
     if cfg.require_source_ts and row.source_ts is None:
         return "missing_source_ts"
     if row.source_ts is not None:
-        lag_seconds = (_aware_utc(row.snapshot_ts) - _aware_utc(row.source_ts)).total_seconds()
-        if lag_seconds < -5:
+        source_ts = _aware_utc(row.source_ts)
+        if source_ts > decision_ts + timedelta(seconds=5):
             return "future_source_seconds"
+        lag_seconds = (_aware_utc(row.snapshot_ts) - source_ts).total_seconds()
         if lag_seconds > max(0, int(cfg.max_snapshot_age_seconds)):
             return "stale_source_seconds"
     if _aware_utc(row.snapshot_ts) > decision_ts:

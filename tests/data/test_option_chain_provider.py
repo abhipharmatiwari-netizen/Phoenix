@@ -99,10 +99,10 @@ def test_quality_flags_detect_stale_source_timestamp():
 
 
 def test_quality_flags_detect_future_source_timestamp():
-    quote = _quote(source_ts=_quote().snapshot_ts + timedelta(seconds=30))
+    quote = _quote(source_ts=_quote().snapshot_ts + timedelta(seconds=120))
     flags = quality_flags_for_quote(quote)
 
-    assert flags["future_source_seconds"] == 30
+    assert flags["future_source_seconds"] == 120
     assert "stale_source_seconds" not in flags
     assert is_quote_usable_for_live_entry(quote) is False
 

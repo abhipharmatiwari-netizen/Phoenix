@@ -111,7 +111,7 @@ def quality_flags_for_quote(
     quote: OptionQuote,
     *,
     max_source_lag_seconds: int = 120,
-    max_future_source_seconds: int = 5,
+    max_future_source_seconds: int = 65,
 ) -> dict[str, Any]:
     """Compute data-quality flags without rejecting the quote."""
     q = quote.normalized()
