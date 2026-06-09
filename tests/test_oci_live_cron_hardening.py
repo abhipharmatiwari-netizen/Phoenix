@@ -68,7 +68,8 @@ def test_oci_container_healthchecks_use_liveness_not_readiness() -> None:
         "http://localhost:8080/health",
     ]
     nginx_probe = " ".join(services["nginx"]["healthcheck"]["test"])
-    assert "https://127.0.0.1:8443/health" in nginx_probe
+    assert "https://127.0.0.1:8443/nginx-health" in nginx_probe
+    assert "https://127.0.0.1:8443/health" not in nginx_probe
     assert "/readyz" not in nginx_probe
 
 
@@ -76,7 +77,8 @@ def test_oci_override_template_nginx_healthcheck_uses_liveness() -> None:
     override = _read("phoenix-override.yml.example")
     healthcheck_block = override.split("healthcheck:", 1)[1].split("ports:", 1)[0]
 
-    assert "https://127.0.0.1:8443/health" in healthcheck_block
+    assert "https://127.0.0.1:8443/nginx-health" in healthcheck_block
+    assert "https://127.0.0.1:8443/health" not in healthcheck_block
     assert "/readyz" not in healthcheck_block
 
 

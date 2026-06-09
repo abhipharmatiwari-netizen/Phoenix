@@ -236,6 +236,7 @@ docker exec phoenix-oci-backend curl -sS http://localhost:8080/health/summary
 Host/nginx checks:
 
 ```bash
+curl -k -sS https://localhost:8443/nginx-health
 curl -sS http://localhost/health
 curl -sS http://localhost/readyz
 curl -sS http://localhost/health/summary
@@ -250,6 +251,8 @@ curl -k -sS https://localhost:8443/health/mitigations
 
 Expected normal trading-readiness evidence:
 
+- `/nginx-health` returns `ok`; this is nginx-only liveness and does not require
+  the backend to be running.
 - HTTP status `200` for all commands above.
 - `/health` includes `order_path` equal to `strategy_bridge_order_router`.
 - `/health/summary` includes `operating_mode` equal to `HUB_AUTHORITATIVE`.

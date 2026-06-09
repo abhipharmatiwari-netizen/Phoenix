@@ -31,6 +31,12 @@ server {
     add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
 
     # API and BFF proxy
+    location = /nginx-health {
+        access_log off;
+        add_header Content-Type text/plain;
+        return 200 "ok\n";
+    }
+
     location /bff/ {
         limit_req zone=general burst=30 nodelay;
         proxy_pass http://backend;

@@ -23,6 +23,8 @@ def test_index_html_is_marked_non_cacheable_for_route_refreshes():
 def test_public_health_routes_use_redacted_backend_endpoints():
     content = NGINX_TEMPLATE.read_text()
 
+    assert "location = /nginx-health" in content
+    assert 'return 200 "ok\\n";' in content
     assert "proxy_pass http://backend/readyz-public;" in content
     assert "proxy_pass http://backend/health/summary-public;" in content
     assert "location = /health/alerts" in content

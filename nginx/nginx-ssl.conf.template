@@ -13,6 +13,12 @@ server {
     listen 80;
     server_name _;
 
+    location = /nginx-health {
+        access_log off;
+        add_header Content-Type text/plain;
+        return 200 "ok\n";
+    }
+
     # OCI Load Balancer health check hits port 80 — must return 200, not 301
     location = /health {
         proxy_pass http://backend;
@@ -69,6 +75,12 @@ server {
     # CSP: unsafe-inline/unsafe-eval are required by the current React build (inline styles + CRA).
     # TODO: migrate to nonce-based CSP when build pipeline supports it (tracked: F-13 hardening gap).
     add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' wss: https:; font-src 'self' data:; frame-ancestors 'self';" always;
+
+    location = /nginx-health {
+        access_log off;
+        add_header Content-Type text/plain;
+        return 200 "ok\n";
+    }
 
     location /bff/ {
         limit_req zone=general burst=30 nodelay;
