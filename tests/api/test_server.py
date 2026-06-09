@@ -299,6 +299,7 @@ def test_admin_health_summary_requires_auth_and_returns_internal_fields(api_clie
     client, runtime = api_client
     runtime.worker_running_state = True
     runtime.watchdog_running_state = True
+    monkeypatch.delenv("DASHBOARD_AUTH_DISABLED", raising=False)
     monkeypatch.setattr(
         server,
         "get_hub_runtime",
