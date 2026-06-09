@@ -301,7 +301,7 @@ Verified on 2026-06-06 21:37 IST:
 | Container | `phoenix-oi-ml-shadow`, no host ports published |
 | Scorer | Deployed as `OI_ML_SHADOW_SCORER=missing`; promotable repo path requires validated LightGBM artifacts; `constant` scorer is smoke-only and requires explicit override |
 | Risk posture | `OI_ML_SHADOW_ALLOW_NAKED=false`; sidecar records shadow intents only |
-| Health visibility | Backend observes the external sidecar with `OI_ML_SHADOW_HEALTH_ENABLED=true`; sidecar Docker healthcheck runs `python -m app.strategies.oi_ml.shadow_health` |
+| Health visibility | Backend observes the external sidecar with `OI_ML_SHADOW_HEALTH_ENABLED=true`; sidecar Docker healthcheck runs `python -m app.strategies.oi_ml.shadow_liveness`; use `python -m app.strategies.oi_ml.shadow_health` for readiness and data-quality evidence |
 | Tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`, `public.option_chain_validation_reports` |
 | Expiry handling | Startup resolves listed NIFTY expiry from Angel scrip master; latest observed `calendar_default=2026-06-11 listed=2026-06-09` |
 | Input hardening | Provider fetches/stamps NIFTY spot and India VIX context LTPs; candidate generation now blocks missing or stale source timestamps, missing IV, and missing Greeks |

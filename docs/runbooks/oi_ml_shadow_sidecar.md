@@ -198,16 +198,24 @@ field for this path and always carries the dry-run invariant
 `live_order_path_enabled=false`; do not remediate sidecar ingestion by enabling
 any live order path.
 
-The sidecar container has its own Docker healthcheck:
+The sidecar container has its own Docker liveness healthcheck:
+
+```bash
+python -m app.strategies.oi_ml.shadow_liveness
+```
+
+The command prints sanitized JSON and exits non-zero only when the shadow runner
+process is not visible. Readiness and data-quality evidence remain available
+through:
 
 ```bash
 python -m app.strategies.oi_ml.shadow_health
 ```
 
-The command prints sanitized JSON and exits non-zero when the expected sidecar
-evidence is degraded or unavailable. Freshness is enforced only during the
-snapshot window; after the window closes, today's completed snapshot remains
-healthy instead of being marked stale overnight.
+`shadow_health` exits non-zero when expected sidecar evidence is degraded or
+unavailable. Freshness is enforced only during the snapshot window; after the
+window closes, today's completed snapshot remains healthy instead of being
+marked stale overnight.
 
 ## Remaining Promotion Gate
 

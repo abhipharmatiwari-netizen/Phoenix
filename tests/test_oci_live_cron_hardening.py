@@ -92,6 +92,20 @@ def test_oi_ml_shadow_compose_does_not_blank_proxy_env_file_values() -> None:
     assert "HTTPS_PROXY" not in environment
 
 
+def test_oi_ml_shadow_docker_healthcheck_uses_liveness_not_readiness() -> None:
+    compose = yaml.safe_load(_read("ops/compose/docker-compose.oi-ml-shadow.yml"))
+    healthcheck = compose["services"]["oi-ml-shadow"]["healthcheck"]["test"]
+
+    assert healthcheck == [
+        "CMD",
+        "python",
+        "-m",
+        "app.strategies.oi_ml.shadow_liveness",
+    ]
+    assert "shadow_health" not in " ".join(healthcheck)
+    assert "CONTROL_PLANE_PG_PASSWORD" not in " ".join(healthcheck)
+
+
 def test_optimizer_service_is_profile_only_one_shot_using_backend_image() -> None:
     compose = _oci_compose()
     services = compose["services"]

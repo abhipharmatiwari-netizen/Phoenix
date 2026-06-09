@@ -133,8 +133,10 @@ services:
     healthcheck:
       test:
         [
-          "CMD-SHELL",
-          "export CONTROL_PLANE_PG_PASSWORD=\"$$(cat /run/secrets/control_plane_pg_password 2>/dev/null || true)\"; python -m app.strategies.oi_ml.shadow_health",
+          "CMD",
+          "python",
+          "-m",
+          "app.strategies.oi_ml.shadow_liveness",
         ]
       interval: 60s
       timeout: 15s
