@@ -111,6 +111,7 @@ def quality_flags_for_quote(
     quote: OptionQuote,
     *,
     max_source_lag_seconds: int = 120,
+    max_future_source_seconds: int = 5,
 ) -> dict[str, Any]:
     """Compute data-quality flags without rejecting the quote."""
     q = quote.normalized()
@@ -160,10 +161,15 @@ def quality_flags_for_quote(
 
     if q.source_ts is not None:
         lag_seconds = (q.snapshot_ts - q.source_ts).total_seconds()
-        if lag_seconds > max_source_lag_seconds:
+        if lag_seconds < -max(0, int(max_future_source_seconds)):
+            flags["future_source_seconds"] = int(abs(lag_seconds))
+            flags.pop("stale_source_seconds", None)
+        elif lag_seconds > max_source_lag_seconds:
             flags["stale_source_seconds"] = int(lag_seconds)
+            flags.pop("future_source_seconds", None)
         else:
             flags.pop("stale_source_seconds", None)
+            flags.pop("future_source_seconds", None)
     return flags
 
 
@@ -175,6 +181,7 @@ def is_quote_usable_for_live_entry(quote: OptionQuote) -> bool:
         "missing_symbol_token",
         "invalid_option_type",
         "bad_bid_ask",
+        "future_source_seconds",
         "stale_source_seconds",
     }
     return not any(name in flags for name in hard_flags)

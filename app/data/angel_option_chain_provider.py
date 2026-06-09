@@ -10,11 +10,13 @@ import hashlib
 import json
 import logging
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 from app.data.option_chain_provider import OptionQuote
 
 
 logger = logging.getLogger(__name__)
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class MarketQuoteFetcher(Protocol):
@@ -368,15 +370,15 @@ def _parse_datetime(value: Any) -> datetime | None:
     if value is None or value == "":
         return None
     if isinstance(value, datetime):
-        return _aware_utc(value)
+        return _aware_source_time(value)
     text = str(value).strip().replace("Z", "+00:00")
     for fmt in ("%d-%b-%Y %H:%M:%S", "%d%b%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
         try:
-            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+            return _aware_source_time(datetime.strptime(text, fmt))
         except ValueError:
             continue
     try:
-        return _aware_utc(datetime.fromisoformat(text))
+        return _aware_source_time(datetime.fromisoformat(text))
     except ValueError:
         return None
 
@@ -479,6 +481,12 @@ def _decimal(value: Any) -> Decimal | None:
 def _aware_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _aware_source_time(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=IST).astimezone(timezone.utc)
     return value.astimezone(timezone.utc)
 
 

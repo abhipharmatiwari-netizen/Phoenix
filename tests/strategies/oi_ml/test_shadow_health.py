@@ -116,6 +116,43 @@ def test_shadow_ingestion_missing_rows_is_visible_degraded():
     assert status["live_order_path_enabled"] is False
 
 
+def test_shadow_ingestion_degrades_on_validation_error_and_future_source_ts():
+    status = collect_shadow_ingestion_status(
+        now=datetime(2026, 5, 20, 10, 0, tzinfo=IST),
+        env={
+            "OI_ML_SHADOW_ENABLED": "true",
+            "OI_ML_SHADOW_PROVIDER": "angel",
+            "OI_ML_SHADOW_UNDERLYING": "NIFTY",
+        },
+        conn_factory=lambda: _Conn([
+            {
+                "today_row_count": 220,
+                "latest_ingested_at": datetime(2026, 5, 20, 9, 59, tzinfo=IST),
+                "latest_source_ts": datetime(2026, 5, 20, 15, 29, tzinfo=IST),
+            },
+            {
+                "today_report_count": 2,
+                "latest_validation_ts": datetime(2026, 5, 20, 9, 59, tzinfo=IST),
+            },
+            {
+                "status": "ERROR",
+                "severity": "ERROR",
+                "primary_quote_count": 202,
+                "reference_quote_count": 0,
+            },
+            {"today_intent_count": 0},
+        ]),
+    )
+
+    assert status["status"] == "degraded"
+    assert "option_chain_future_source_ts" in status["reason"]
+    assert "validation_latest_error" in status["reason"]
+    assert status["option_chain"]["latest_source_future_seconds"] > 0
+    assert status["validation_reports"]["latest_status"] == "ERROR"
+    assert status["validation_reports"]["latest_reference_quote_count"] == 0
+    assert "timestamp parsing" in status["operator_hint"]
+
+
 def test_shadow_ingestion_after_window_accepts_today_close_snapshot():
     status = collect_shadow_ingestion_status(
         now=datetime(2026, 5, 20, 21, 0, tzinfo=IST),
