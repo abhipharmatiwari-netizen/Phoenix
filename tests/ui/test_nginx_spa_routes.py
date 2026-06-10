@@ -4,6 +4,7 @@ import re
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NGINX_TEMPLATE = REPO_ROOT / "nginx" / "nginx.conf.template"
+NGINX_SSL_TEMPLATE = REPO_ROOT / "nginx" / "nginx-ssl.conf.template"
 
 
 def test_positions_route_is_not_proxied_over_spa():
@@ -42,6 +43,22 @@ def test_frontend_assets_do_not_fall_back_to_spa_html():
     assert "try_files /favicon.svg =404;" in content
     assert "location = /favicon.ico" in content
     assert "rewrite ^ /favicon.svg last;" in content
+
+
+def test_sensitive_probe_paths_do_not_fall_back_to_spa_html():
+    for template in (NGINX_TEMPLATE, NGINX_SSL_TEMPLATE):
+        content = template.read_text()
+
+        assert "location ~ /\\.(?!well-known/acme-challenge/)" in content
+        assert "location ~* ^/(?:___proxy_subdomain_whm|cgi-bin|phpmyadmin" in content
+        assert "location ~* ^/(?:wp-config(?:\\.|/|$)|login\\.html$)" in content
+        assert "return 404;" in content
+
+        first_sensitive_location = content.index(
+            "location ~* ^/(?:___proxy_subdomain_whm|cgi-bin|phpmyadmin"
+        )
+        spa_fallback = content.rindex("try_files $uri $uri/ /index.html;")
+        assert first_sensitive_location < spa_fallback
 
 
 def test_frontend_public_index_references_existing_static_assets():
