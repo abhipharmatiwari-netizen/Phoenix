@@ -214,6 +214,8 @@ images, build cache, old date-stamped log directories, and older local Phoenix
 rollback images. It must preserve images currently used by running containers,
 keep the latest configured rollback set, and never prune Docker volumes,
 backups, `/run/secrets`, or database files.
+The rollback image scope includes `phoenix-local-backend`,
+`phoenix-local-nginx`, `phoenix-oi-ml-shadow`, and `aurelium` tags.
 
 Preview the cleanup command first:
 

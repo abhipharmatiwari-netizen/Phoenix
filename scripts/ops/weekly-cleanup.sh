@@ -60,9 +60,9 @@ log "dangling images..."
 run_cmd docker image prune -f
 
 log "old local Phoenix rollback images..."
-for repo in phoenix-local-backend phoenix-local-nginx aurelium; do
+for repo in phoenix-local-backend phoenix-local-nginx phoenix-oi-ml-shadow aurelium; do
   docker images --format "{{.Repository}}:{{.Tag}}" "$repo" 2>/dev/null \
-    | grep -E ':(local-|live-)?[0-9a-f]{7,40}$|:live-' \
+    | grep -E ':(local-|live-|oi-ml-shadow-)?[0-9a-f]{7,40}$|:live-' \
     | sort -r \
     | awk -v keep="$KEEP_LIVE_TAGS" 'NR > keep {print}' \
     | while IFS= read -r image; do
