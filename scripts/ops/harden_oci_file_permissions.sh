@@ -39,6 +39,6 @@ find "$PHOENIX_ROOT" -maxdepth 1 -type f \
     chmod 600 "$path"
 done
 
-"$(dirname "$0")/check_env_secret_material.sh"
+sh "$(dirname "$0")/check_env_secret_material.sh"
 "$(dirname "$0")/../validate-live-secret-perms.sh"
 echo "OCI Phoenix file permissions hardened"
