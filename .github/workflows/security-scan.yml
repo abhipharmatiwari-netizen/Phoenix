@@ -106,24 +106,42 @@ jobs:
       - name: Build nginx image for scanning
         run: docker build -t phoenix-nginx-scan:pr -f nginx/Dockerfile .
 
-      - name: Scan backend image with trivy
+      - name: Scan backend image with trivy table
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: phoenix-backend-scan:pr
+          format: table
+          exit-code: '0'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Scan nginx image with trivy table
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: phoenix-nginx-scan:pr
+          format: table
+          exit-code: '0'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Generate backend trivy SARIF
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: phoenix-backend-scan:pr
           format: sarif
           output: trivy-backend.sarif
-          exit-code: '1'
+          exit-code: '0'
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           limit-severities-for-sarif: true
 
-      - name: Scan nginx image with trivy
+      - name: Generate nginx trivy SARIF
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: phoenix-nginx-scan:pr
           format: sarif
           output: trivy-nginx.sarif
-          exit-code: '1'
+          exit-code: '0'
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           limit-severities-for-sarif: true
@@ -141,3 +159,21 @@ jobs:
         with:
           sarif_file: trivy-nginx.sarif
           category: trivy-nginx
+
+      - name: Enforce backend trivy findings
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: phoenix-backend-scan:pr
+          format: table
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Enforce nginx trivy findings
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: phoenix-nginx-scan:pr
+          format: table
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true

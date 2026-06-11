@@ -47,6 +47,11 @@ class OiSnapshotterRuntimeConfig:
     nse_validation_log_all: bool = True
     nse_validation_fail_on_error: bool = False
     nse_validation_timeout_seconds: int = 10
+    nse_validation_max_attempts: int = 3
+    nse_validation_retry_backoff_seconds: float = 0.5
+    nse_validation_retry_jitter_seconds: float = 0.25
+    nse_validation_error_rate_window: int = 20
+    nse_validation_error_rate_warn_threshold: float = 0.25
     nse_validation_oi_abs_tolerance: int = 0
     nse_validation_volume_abs_tolerance: int = 250
     nse_validation_volume_pct_tolerance: float = 0.05
@@ -137,6 +142,31 @@ def load_runtime_config(
             10,
             minimum=1,
         ),
+        nse_validation_max_attempts=_int_value(
+            source.get("OI_ML_NSE_VALIDATION_MAX_ATTEMPTS"),
+            3,
+            minimum=1,
+        ),
+        nse_validation_retry_backoff_seconds=_float_value(
+            source.get("OI_ML_NSE_VALIDATION_RETRY_BACKOFF_SECONDS"),
+            0.5,
+            minimum=0.0,
+        ),
+        nse_validation_retry_jitter_seconds=_float_value(
+            source.get("OI_ML_NSE_VALIDATION_RETRY_JITTER_SECONDS"),
+            0.25,
+            minimum=0.0,
+        ),
+        nse_validation_error_rate_window=_int_value(
+            source.get("OI_ML_NSE_VALIDATION_ERROR_RATE_WINDOW"),
+            20,
+            minimum=1,
+        ),
+        nse_validation_error_rate_warn_threshold=_float_value(
+            source.get("OI_ML_NSE_VALIDATION_ERROR_RATE_WARN_THRESHOLD"),
+            0.25,
+            minimum=0.0,
+        ),
         nse_validation_oi_abs_tolerance=_int_value(
             source.get("OI_ML_NSE_VALIDATION_OI_ABS_TOLERANCE"),
             0,
@@ -219,6 +249,9 @@ def _build_nse_validator(
     nse_provider = NseOptionChainProvider(
         NseWebOptionChainClient(
             timeout_seconds=float(config.nse_validation_timeout_seconds),
+            max_attempts=config.nse_validation_max_attempts,
+            retry_backoff_seconds=config.nse_validation_retry_backoff_seconds,
+            retry_jitter_seconds=config.nse_validation_retry_jitter_seconds,
         )
     )
     quote_store = OptionChainStore(conn, commit=True) if config.nse_validation_store_quotes else None
@@ -231,6 +264,10 @@ def _build_nse_validator(
             store_reference_quotes=config.nse_validation_store_quotes,
             log_all_observations=config.nse_validation_log_all,
             fail_on_error=config.nse_validation_fail_on_error,
+            source_error_window_size=config.nse_validation_error_rate_window,
+            source_error_rate_warn_threshold=(
+                config.nse_validation_error_rate_warn_threshold
+            ),
             validation_config=OptionChainValidationConfig(
                 oi_abs_tolerance=config.nse_validation_oi_abs_tolerance,
                 volume_abs_tolerance=config.nse_validation_volume_abs_tolerance,

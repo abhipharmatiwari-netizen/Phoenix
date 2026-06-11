@@ -37,7 +37,21 @@ def test_oci_file_hardening_script_does_not_print_secret_values() -> None:
     assert "chmod 400" in script
     assert "chmod 440" in script
     assert "chmod 600" in script
+    assert "check_env_secret_material.sh" in script
     assert "validate-live-secret-perms.sh" in script
+
+
+def test_env_secret_material_scanner_flags_secret_keys_without_values() -> None:
+    script = (
+        REPO_ROOT / "scripts" / "ops" / "check_env_secret_material.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "ADMIN_API_KEY" not in script
+    assert "*API_KEY*" in script
+    assert "forbidden secret-like key" in script
+    assert "forbidden token-like value" in script
+    assert "line $line_no" in script
+    assert "Deployment env secret-material check OK" in script
 
 
 def test_oci_storage_report_is_non_destructive() -> None:
@@ -50,6 +64,21 @@ def test_oci_storage_report_is_non_destructive() -> None:
     assert "docker images" in script
     assert " prune" not in script
     assert " rm " not in script
+
+
+def test_weekly_cleanup_preserves_active_images_and_volumes() -> None:
+    script = (
+        REPO_ROOT / "scripts" / "ops" / "weekly-cleanup.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "KEEP_LIVE_TAGS" in script
+    assert "PHOENIX_CLEANUP_DRY_RUN" in script
+    assert "is_active_image" in script
+    assert "preserving active image" in script
+    assert "docker volume prune" not in script
+    assert "docker system prune" not in script
+    assert "/run/secrets" not in script
+    assert "/opt/phoenix/backups" not in script
 
 
 def test_watchdog_recreate_verifies_socket_absent() -> None:

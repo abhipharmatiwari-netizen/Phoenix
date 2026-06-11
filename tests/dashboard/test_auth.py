@@ -97,6 +97,31 @@ async def test_get_admin_context_accepts_hmac_headers_when_enabled(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_admin_context_hmac_uses_asgi_scope_path(monkeypatch):
+    monkeypatch.setattr(
+        auth,
+        'get_settings',
+        lambda: _settings(
+            dashboard_hmac_auth_enabled=True,
+            dashboard_hmac_secret='hmac-secret',
+        ),
+    )
+    timestamp = str(int(time.time()))
+    request = _request('/malformed-host-derived-path')
+    request.scope = {'path': '/admin/tenants'}
+    payload = f'{timestamp}:GET:/admin/tenants'.encode('utf-8')
+    signature = hmac.new(b'hmac-secret', payload, hashlib.sha256).hexdigest()
+
+    ctx = await auth.get_admin_context(
+        request=request,
+        x_admin_timestamp=timestamp,
+        x_admin_signature=signature,
+    )
+
+    assert ctx.auth_source == 'admin_hmac'
+
+
+@pytest.mark.asyncio
 async def test_get_admin_context_rejects_expired_hmac_timestamp(monkeypatch):
     monkeypatch.setattr(
         auth,

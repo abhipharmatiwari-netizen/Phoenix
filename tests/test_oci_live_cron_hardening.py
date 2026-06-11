@@ -90,6 +90,10 @@ def test_oi_ml_shadow_compose_does_not_blank_proxy_env_file_values() -> None:
     assert "/opt/phoenix/phoenix-deploy.env" in sidecar["env_file"]
     assert "ANGEL_HTTPS_PROXY" not in environment
     assert "HTTPS_PROXY" not in environment
+    assert environment["OI_ML_NSE_VALIDATION_MAX_ATTEMPTS"].endswith(":-3}")
+    assert environment["OI_ML_NSE_VALIDATION_ERROR_RATE_WARN_THRESHOLD"].endswith(
+        ":-0.25}"
+    )
 
 
 def test_oi_ml_shadow_docker_healthcheck_uses_liveness_not_readiness() -> None:

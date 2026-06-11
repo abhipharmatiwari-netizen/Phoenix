@@ -9,6 +9,7 @@ from app.data.nse_option_chain_provider import (
     NSE_LIVE_EQUITY_SOURCE,
     NseOptionChainProvider,
     NseWebOptionChainClient,
+    classify_nse_reference_error,
     parse_nse_option_chain_payload,
 )
 
@@ -274,3 +275,68 @@ def test_web_client_falls_back_to_live_equity_derivatives_when_option_chain_erro
     assert any("liveEquity-derivatives" in url for url in opener.urls)
     assert "using live-derivatives fallback" in caplog.text
     assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+
+
+def test_web_client_retries_timeout_before_recording_reference_failure():
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+        def close(self):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeOpener:
+        def __init__(self):
+            self.urls = []
+            self.live_calls = 0
+
+        def open(self, request, timeout):
+            self.urls.append(request.full_url)
+            if "option-chain-indices" in request.full_url:
+                raise TimeoutError("The read operation timed out")
+            if "liveEquity-derivatives" in request.full_url:
+                self.live_calls += 1
+                if self.live_calls == 1:
+                    raise TimeoutError("The read operation timed out")
+                return FakeResponse(
+                    {
+                        "timestamp": "22-May-2026 15:30:00",
+                        "data": [
+                            {
+                                "underlying": "NIFTY",
+                                "expiryDate": "26-May-2026",
+                                "strikePrice": 23800,
+                                "optionType": "Call",
+                            }
+                        ],
+                    }
+                )
+            return FakeResponse({"page": True})
+
+    opener = FakeOpener()
+    sleeps = []
+    client = NseWebOptionChainClient(
+        max_attempts=2,
+        retry_backoff_seconds=0.1,
+        retry_jitter_seconds=0,
+        opener_factory=lambda: opener,
+        sleep=sleeps.append,
+    )
+
+    payload = client.fetch_option_chain(symbol="NIFTY")
+
+    assert payload["__phoenix_nse_source"] == NSE_LIVE_EQUITY_SOURCE
+    assert opener.live_calls == 2
+    assert sleeps == [0.1]
+    assert classify_nse_reference_error(
+        RuntimeError("The read operation timed out")
+    ) == "provider_timeout"

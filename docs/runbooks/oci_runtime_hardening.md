@@ -178,3 +178,73 @@ runtime drift. Recreate the watchdog with
 `scripts/ops/recreate_oci_watchdog.sh` during an approved maintenance window and
 capture `docker inspect phoenix-oci-watchdog --format '{{json .Mounts}}'` as
 post-change evidence.
+
+## Phase 5 - Secret And Env File Hygiene
+
+Run after secret rotation or before any deployment evidence capture:
+
+```bash
+sudo PHOENIX_ROOT=/opt/phoenix \
+  /opt/phoenix/app/scripts/ops/harden_oci_file_permissions.sh
+```
+
+This sets owner-only permissions on `/run/secrets/*`, active
+`/opt/phoenix/phoenix-deploy.env`, and `phoenix-deploy.env` backups, then runs:
+
+```bash
+sudo PHOENIX_ROOT=/opt/phoenix \
+  /opt/phoenix/app/scripts/ops/check_env_secret_material.sh
+sudo /opt/phoenix/app/scripts/validate-live-secret-perms.sh
+```
+
+Both checks report file names and key names only. Do not paste env values,
+secret file contents, broker credentials, cloud keys, or screenshots containing
+those values into GitHub issues or runbooks.
+
+## Phase 6 - Storage And Cleanup
+
+Capture storage evidence before cleanup:
+
+```bash
+/opt/phoenix/app/scripts/ops/oci_storage_report.sh
+```
+
+The weekly cleanup script is allowed to prune stopped containers, dangling
+images, build cache, old date-stamped log directories, and older local Phoenix
+rollback images. It must preserve images currently used by running containers,
+keep the latest configured rollback set, and never prune Docker volumes,
+backups, `/run/secrets`, or database files.
+
+Preview the cleanup command first:
+
+```bash
+PHOENIX_CLEANUP_DRY_RUN=true \
+  PHOENIX_CLEANUP_KEEP_LIVE_TAGS=3 \
+  /opt/phoenix/app/scripts/ops/weekly-cleanup.sh
+```
+
+Run the cleanup only after backups and active image tags have been recorded:
+
+```bash
+PHOENIX_CLEANUP_KEEP_LIVE_TAGS=3 \
+  /opt/phoenix/app/scripts/ops/weekly-cleanup.sh
+```
+
+## Phase 7 - Host Isolation Review
+
+Phoenix LIVE should run on a dedicated VM. If another public workload remains
+on the same host, record explicit risk acceptance and verify all of the
+following before market operation:
+
+- no unrelated container publishes public host ports that bypass the intended
+  LB/security-list path;
+- unrelated containers have CPU, memory, restart, log-retention, and storage
+  limits;
+- Docker storage, root filesystem headroom, and journal noise are reviewed after
+  the co-tenant workload is running;
+- the migration plan to move Phoenix or the co-tenant workload is tracked in
+  the production backlog.
+
+Do not close the host-isolation finding from repository changes alone. It
+requires VM evidence showing a dedicated host or documented compensating
+controls.

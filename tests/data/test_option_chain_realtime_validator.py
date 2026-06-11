@@ -272,4 +272,52 @@ def test_realtime_validator_records_error_without_raising_by_default():
     assert result.status == "ERROR"
     assert result.severity == "ERROR"
     assert result.error == "nse timeout"
-    assert report_store.calls[0]["payload"]["metadata"]["error"] == "nse timeout"
+    metadata = report_store.calls[0]["payload"]["metadata"]
+    assert metadata["error"] == "nse timeout"
+    assert metadata["error_classification"] == "provider_timeout"
+    assert metadata["reference_error_rate"] == 1.0
+    assert metadata["reference_error_rate_state"] == "breach"
+
+
+def test_realtime_validator_records_rolling_reference_error_rate():
+    class FlakyReferenceProvider:
+        def __init__(self):
+            self.calls = 0
+
+        def fetch_chain(self, *, underlying, expiry, snapshot_ts):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("nse timeout")
+            return [_quote(provider="nse_web")]
+
+    report_store = FakeReportStore()
+    validator = RealtimeOptionChainValidator(
+        reference_provider=FlakyReferenceProvider(),
+        report_store=report_store,
+        config=RealtimeOptionChainValidationConfig(
+            enabled=True,
+            source_error_window_size=2,
+            source_error_rate_warn_threshold=0.5,
+        ),
+    )
+
+    first = validator.validate(
+        primary_quotes=[_quote()],
+        underlying="NIFTY",
+        expiry=date(2026, 5, 19),
+        snapshot_ts=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+    )
+    second = validator.validate(
+        primary_quotes=[_quote()],
+        underlying="NIFTY",
+        expiry=date(2026, 5, 19),
+        snapshot_ts=datetime(2026, 5, 18, 10, 1, tzinfo=timezone.utc),
+    )
+
+    assert first is not None and first.status == "ERROR"
+    assert second is not None and second.status == "OK"
+    metadata = report_store.calls[1]["payload"]["metadata"]
+    assert metadata["reference_error_window_count"] == 2
+    assert metadata["reference_error_count"] == 1
+    assert metadata["reference_error_rate"] == 0.5
+    assert metadata["reference_error_rate_state"] == "breach"

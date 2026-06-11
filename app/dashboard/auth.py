@@ -365,11 +365,13 @@ def _is_valid_admin_hmac(
         if request is not None and getattr(request, "method", None)
         else "GET"
     )
-    path = (
-        request.url.path
-        if request is not None and getattr(request, "url", None) is not None
-        else ""
-    )
+    path = ""
+    if request is not None:
+        scope_path = getattr(request, "scope", {}).get("path")
+        if isinstance(scope_path, str) and scope_path:
+            path = scope_path
+        elif getattr(request, "url", None) is not None:
+            path = request.url.path
     payload = f"{timestamp_value}:{method}:{path}".encode("utf-8")
     expected_signature = hmac.new(
         secret.encode("utf-8"),

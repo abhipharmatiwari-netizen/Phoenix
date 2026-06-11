@@ -37,8 +37,11 @@ Collect all of the following without printing secret values:
 | Direct BFF diagnostic bypass | `/bff/health/summary`, `/bff/readyz`, and `/bff/dashboard/status` return 404 |
 | Static asset routing | current `/static/*` bundle assets return the correct content type; stale `/static/*` paths return 404 instead of SPA HTML |
 | Secret permissions | `scripts/validate-live-secret-perms.sh` passes on the VM |
+| Deploy env secret scan | `scripts/ops/check_env_secret_material.sh` passes without printing values |
+| Host-header boundary | malformed `Host` values return HTTP 400 before admin/BFF auth handling |
 | Watchdog contract | `docker inspect phoenix-oci-watchdog --format '{{json .Mounts}}'` returns an empty list |
 | Disk headroom | root filesystem has safe free-space buffer |
+| Cleanup and isolation | active image tags, rollback set, co-tenant workloads, and storage headroom are documented |
 | Release evidence endpoint | authenticated `/admin/release-evidence` passes the criteria below |
 
 ## Release Evidence Fields
@@ -88,11 +91,24 @@ operator risk-halt or rollback decision is recorded.
 4. Validate hardening invariants:
    ```bash
    sudo sh /opt/phoenix/app/scripts/validate-live-secret-perms.sh
+   sudo PHOENIX_ROOT=/opt/phoenix \
+     /opt/phoenix/app/scripts/ops/check_env_secret_material.sh
    docker inspect phoenix-oci-postgres --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}'
    docker inspect phoenix-oci-watchdog --format '{{json .Mounts}}'
+   /opt/phoenix/app/scripts/ops/oci_storage_report.sh
    df -h /
    ```
-5. Collect the authenticated release bundle:
+5. Verify malformed Host handling:
+   ```bash
+   curl -sk -H 'Host: phoenix.invalid%2fadmin' \
+     -o /dev/null -w "%{http_code}\n" \
+     https://127.0.0.1:8443/admin/health/summary
+   curl -sk -H 'Host: phoenix.invalid%2fbff' \
+     -o /dev/null -w "%{http_code}\n" \
+     https://127.0.0.1:8443/bff/health/summary
+   ```
+   Both commands should print `400`.
+6. Collect the authenticated release bundle:
    ```bash
    ADMIN_KEY="$(sudo cat /run/secrets/admin_api_key)"
    curl -sk -H "X-Admin-Key: ${ADMIN_KEY}" \
@@ -103,9 +119,9 @@ operator risk-halt or rollback decision is recorded.
      https://127.0.0.1:8443/bff/health/summary
    unset ADMIN_KEY
    ```
-6. Review every field against the pass criteria table.
-7. If all criteria pass, record the generated timestamp in the deployment log.
-8. If any criterion fails, roll back or hold the stack stopped and investigate.
+7. Review every field against the pass criteria table.
+8. If all criteria pass, record the generated timestamp in the deployment log.
+9. If any criterion fails, roll back or hold the stack stopped and investigate.
 
 The PowerShell helper remains available for local/operator workstations:
 

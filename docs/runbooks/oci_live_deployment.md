@@ -176,6 +176,18 @@ Current live permission model:
 - backend-only runtime files use UID 100/GID 101 and mode `0400`;
 - `scripts/validate-live-secret-perms.sh` must pass before a LIVE deployment is
   treated as hardened.
+- `scripts/ops/check_env_secret_material.sh` must pass for
+  `/opt/phoenix/phoenix-deploy.env` and any retained backups before a LIVE
+  deployment is treated as hardened.
+
+Host-header boundary:
+
+- set `PHOENIX_DOMAIN` to the public Phoenix hostname;
+- set `PHOENIX_ALLOWED_HOSTS` when additional internal hostnames are required,
+  using a comma-separated allow-list;
+- malformed `Host` headers containing path, query, fragment, whitespace, or
+  encoded path material must return HTTP 400 before admin or BFF auth logic
+  runs.
 
 ## Secret Redaction Rule
 

@@ -330,6 +330,28 @@ def test_bff_blocks_direct_internal_health_summary_bypass(api_client):
         assert resp.status_code == 404
 
 
+@pytest.mark.parametrize(
+    "path",
+    ["/admin/health/summary", "/bff/health/summary"],
+)
+def test_malformed_host_header_rejected_before_protected_routes(api_client, path):
+    client, _ = api_client
+
+    resp = client.get(path, headers={"Host": "testserver%2fadmin.local"})
+
+    assert resp.status_code == 400
+    assert resp.text == "Invalid Host header"
+
+
+def test_host_header_guard_allows_local_health_hosts_when_domain_set(monkeypatch):
+    monkeypatch.setenv("PHOENIX_DOMAIN", "phoenix.example.com")
+
+    assert server._is_invalid_host_header("localhost:8080") is False
+    assert server._is_invalid_host_header("127.0.0.1:8080") is False
+    assert server._is_invalid_host_header("phoenix.example.com") is False
+    assert server._is_invalid_host_header("phoenix.example.com%2fadmin") is True
+
+
 def test_readyz_public_redacts_runner_and_lease_internals(monkeypatch):
     async def fake_readyz():
         return server.JSONResponse(

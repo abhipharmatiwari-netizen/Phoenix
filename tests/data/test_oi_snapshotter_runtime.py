@@ -41,6 +41,11 @@ def test_runtime_config_reads_nse_validation_settings():
             "OI_ML_NSE_VALIDATION_LOG_ALL": "false",
             "OI_ML_NSE_VALIDATION_FAIL_ON_ERROR": "true",
             "OI_ML_NSE_VALIDATION_TIMEOUT_SECONDS": "7",
+            "OI_ML_NSE_VALIDATION_MAX_ATTEMPTS": "4",
+            "OI_ML_NSE_VALIDATION_RETRY_BACKOFF_SECONDS": "0.2",
+            "OI_ML_NSE_VALIDATION_RETRY_JITTER_SECONDS": "0.05",
+            "OI_ML_NSE_VALIDATION_ERROR_RATE_WINDOW": "12",
+            "OI_ML_NSE_VALIDATION_ERROR_RATE_WARN_THRESHOLD": "0.4",
             "OI_ML_NSE_VALIDATION_VOLUME_ABS_TOLERANCE": "100",
             "OI_ML_NSE_VALIDATION_PRICE_PCT_TOLERANCE": "0.02",
         }
@@ -51,6 +56,11 @@ def test_runtime_config_reads_nse_validation_settings():
     assert config.nse_validation_log_all is False
     assert config.nse_validation_fail_on_error is True
     assert config.nse_validation_timeout_seconds == 7
+    assert config.nse_validation_max_attempts == 4
+    assert config.nse_validation_retry_backoff_seconds == 0.2
+    assert config.nse_validation_retry_jitter_seconds == 0.05
+    assert config.nse_validation_error_rate_window == 12
+    assert config.nse_validation_error_rate_warn_threshold == 0.4
     assert config.nse_validation_volume_abs_tolerance == 100
     assert config.nse_validation_price_pct_tolerance == 0.02
 
