@@ -5,6 +5,7 @@ import re
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NGINX_TEMPLATE = REPO_ROOT / "nginx" / "nginx.conf.template"
 NGINX_SSL_TEMPLATE = REPO_ROOT / "nginx" / "nginx-ssl.conf.template"
+NGINX_DOCKERFILE = REPO_ROOT / "nginx" / "Dockerfile"
 
 
 def test_positions_route_is_not_proxied_over_spa():
@@ -30,6 +31,21 @@ def test_public_health_routes_use_redacted_backend_endpoints():
     assert "proxy_pass http://backend/health/summary-public;" in content
     assert "location = /health/alerts" in content
     assert "location = /health/mitigations" in content
+
+
+def test_public_health_routes_use_internal_backend_host_header():
+    for template in (NGINX_TEMPLATE, NGINX_SSL_TEMPLATE):
+        content = template.read_text()
+
+        for path in ("/health", "/health/summary", "/readyz"):
+            pattern = rf"location\s+=\s+{re.escape(path)}\s+\{{.*?proxy_set_header Host backend;"
+            assert re.search(pattern, content, flags=re.S), f"{template.name} {path}"
+
+
+def test_nginx_runtime_contains_healthcheck_binary():
+    dockerfile = NGINX_DOCKERFILE.read_text()
+
+    assert "apt-get install -y --no-install-recommends wget" in dockerfile
 
 
 def test_frontend_assets_do_not_fall_back_to_spa_html():
