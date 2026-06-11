@@ -75,6 +75,8 @@ def test_weekly_cleanup_preserves_active_images_and_volumes() -> None:
     assert "PHOENIX_CLEANUP_DRY_RUN" in script
     assert "is_active_image" in script
     assert "preserving active image" in script
+    assert "phoenix-oi-ml-shadow" in script
+    assert "oi-ml-shadow-" in script
     assert "docker volume prune" not in script
     assert "docker system prune" not in script
     assert "/run/secrets" not in script
