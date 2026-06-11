@@ -68,7 +68,8 @@ def test_oci_container_healthchecks_use_liveness_not_readiness() -> None:
         "http://localhost:8080/health",
     ]
     nginx_probe = " ".join(services["nginx"]["healthcheck"]["test"])
-    assert "https://127.0.0.1:8443/health" in nginx_probe
+    assert "https://127.0.0.1:8443/nginx-health" in nginx_probe
+    assert "https://127.0.0.1:8443/health" not in nginx_probe
     assert "/readyz" not in nginx_probe
 
 
@@ -76,7 +77,8 @@ def test_oci_override_template_nginx_healthcheck_uses_liveness() -> None:
     override = _read("phoenix-override.yml.example")
     healthcheck_block = override.split("healthcheck:", 1)[1].split("ports:", 1)[0]
 
-    assert "https://127.0.0.1:8443/health" in healthcheck_block
+    assert "https://127.0.0.1:8443/nginx-health" in healthcheck_block
+    assert "https://127.0.0.1:8443/health" not in healthcheck_block
     assert "/readyz" not in healthcheck_block
 
 
@@ -88,6 +90,24 @@ def test_oi_ml_shadow_compose_does_not_blank_proxy_env_file_values() -> None:
     assert "/opt/phoenix/phoenix-deploy.env" in sidecar["env_file"]
     assert "ANGEL_HTTPS_PROXY" not in environment
     assert "HTTPS_PROXY" not in environment
+    assert environment["OI_ML_NSE_VALIDATION_MAX_ATTEMPTS"].endswith(":-3}")
+    assert environment["OI_ML_NSE_VALIDATION_ERROR_RATE_WARN_THRESHOLD"].endswith(
+        ":-0.25}"
+    )
+
+
+def test_oi_ml_shadow_docker_healthcheck_uses_liveness_not_readiness() -> None:
+    compose = yaml.safe_load(_read("ops/compose/docker-compose.oi-ml-shadow.yml"))
+    healthcheck = compose["services"]["oi-ml-shadow"]["healthcheck"]["test"]
+
+    assert healthcheck == [
+        "CMD",
+        "python",
+        "-m",
+        "app.strategies.oi_ml.shadow_liveness",
+    ]
+    assert "shadow_health" not in " ".join(healthcheck)
+    assert "CONTROL_PLANE_PG_PASSWORD" not in " ".join(healthcheck)
 
 
 def test_optimizer_service_is_profile_only_one_shot_using_backend_image() -> None:

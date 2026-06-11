@@ -20,15 +20,25 @@ IST = ZoneInfo("Asia/Kolkata")
 DEFAULT_MAX_STALE_SECONDS = 180
 
 _OPTION_CHAIN_STATUS_SQL = """
+WITH rows AS (
+    SELECT snapshot_ts, source_ts, ingested_at
+    FROM public.option_chain_1m
+    WHERE provider = %(provider)s
+      AND underlying = %(underlying)s
+      AND ingested_at >= %(day_start)s
+      AND ingested_at < %(day_end)s
+),
+latest AS (
+    SELECT source_ts
+    FROM rows
+    ORDER BY ingested_at DESC, snapshot_ts DESC
+    LIMIT 1
+)
 SELECT COUNT(*) AS today_row_count,
        MAX(snapshot_ts) AS latest_snapshot_ts,
-       MAX(source_ts) AS latest_source_ts,
+       (SELECT source_ts FROM latest) AS latest_source_ts,
        MAX(ingested_at) AS latest_ingested_at
-FROM public.option_chain_1m
-WHERE provider = %(provider)s
-  AND underlying = %(underlying)s
-  AND ingested_at >= %(day_start)s
-  AND ingested_at < %(day_end)s
+FROM rows
 """
 
 _VALIDATION_STATUS_SQL = """
@@ -124,6 +134,8 @@ def collect_shadow_ingestion_status(
     latest_source_ts = _row_value(option_rows, "latest_source_ts")
     latest_validation_ts = _row_value(validation_rows, "latest_validation_ts")
     latest_intent_ts = _row_value(intent_rows, "latest_intent_created_at")
+    latest_validation_status = str(_row_value(latest_validation, "status") or "")
+    latest_validation_severity = str(_row_value(latest_validation, "severity") or "")
 
     snapshot_expected = _snapshot_expected(current, config.snapshot_start_time)
     snapshot_window_active = _within_window(
@@ -144,6 +156,7 @@ def collect_shadow_ingestion_status(
     if config.capture_snapshot and snapshot_expected and option_count <= 0:
         reasons.append("option_chain_rows_missing")
     latest_ingested_age = _age_seconds(latest_ingested_at, current)
+    latest_source_future_seconds = _future_seconds(latest_source_ts, current)
     if (
         config.capture_snapshot
         and snapshot_window_active
@@ -152,8 +165,24 @@ def collect_shadow_ingestion_status(
         and latest_ingested_age > max_stale_seconds
     ):
         reasons.append("option_chain_stale")
+    if (
+        config.capture_snapshot
+        and snapshot_window_active
+        and latest_source_future_seconds is not None
+        and latest_source_future_seconds > 5
+    ):
+        reasons.append("option_chain_future_source_ts")
     if validation_required and snapshot_expected and validation_count <= 0:
         reasons.append("validation_reports_missing")
+    if (
+        snapshot_window_active
+        and validation_count > 0
+        and (
+            latest_validation_status.upper() == "ERROR"
+            or latest_validation_severity.upper() == "ERROR"
+        )
+    ):
+        reasons.append("validation_latest_error")
 
     status = "degraded" if reasons else "ok"
     reason = ",".join(reasons) if reasons else None
@@ -180,12 +209,13 @@ def collect_shadow_ingestion_status(
             "latest_source_ts": _iso_or_none(latest_source_ts),
             "latest_ingested_at": _iso_or_none(latest_ingested_at),
             "latest_ingested_age_seconds": latest_ingested_age,
+            "latest_source_future_seconds": latest_source_future_seconds,
         },
         "validation_reports": {
             "today_report_count": validation_count,
             "latest_validation_ts": _iso_or_none(latest_validation_ts),
-            "latest_status": str(_row_value(latest_validation, "status") or ""),
-            "latest_severity": str(_row_value(latest_validation, "severity") or ""),
+            "latest_status": latest_validation_status,
+            "latest_severity": latest_validation_severity,
             "latest_primary_quote_count": _row_int(
                 latest_validation,
                 "primary_quote_count",
@@ -216,8 +246,12 @@ def _operator_hint(reasons: list[str]) -> str | None:
         )
     if "option_chain_stale" in reasons:
         return "check sidecar ingestion loop, provider latency, and Postgres writes"
+    if "option_chain_future_source_ts" in reasons:
+        return "check broker exchange timestamp parsing and source freshness gates"
     if "validation_reports_missing" in reasons:
         return "check NSE validation loop and option_chain_validation_reports writes"
+    if "validation_latest_error" in reasons:
+        return "check NSE validation timeout/fallback logs and reference quote counts"
     return "check sidecar logs and database evidence"
 
 
@@ -269,6 +303,18 @@ def _age_seconds(value: Any, now: datetime) -> int | None:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     return max(0, int((now.astimezone(timezone.utc) - ts.astimezone(timezone.utc)).total_seconds()))
+
+
+def _future_seconds(value: Any, now: datetime) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        return None
+    ts = value
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    delta = int((ts.astimezone(timezone.utc) - now.astimezone(timezone.utc)).total_seconds())
+    return delta if delta > 0 else 0
 
 
 def _env_int(value: object, default: int, *, minimum: int) -> int:

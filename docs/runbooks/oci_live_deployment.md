@@ -176,6 +176,18 @@ Current live permission model:
 - backend-only runtime files use UID 100/GID 101 and mode `0400`;
 - `scripts/validate-live-secret-perms.sh` must pass before a LIVE deployment is
   treated as hardened.
+- `scripts/ops/check_env_secret_material.sh` must pass for
+  `/opt/phoenix/phoenix-deploy.env` and any retained backups before a LIVE
+  deployment is treated as hardened.
+
+Host-header boundary:
+
+- set `PHOENIX_DOMAIN` to the public Phoenix hostname;
+- set `PHOENIX_ALLOWED_HOSTS` when additional internal hostnames are required,
+  using a comma-separated allow-list;
+- malformed `Host` headers containing path, query, fragment, whitespace, or
+  encoded path material must return HTTP 400 before admin or BFF auth logic
+  runs.
 
 ## Secret Redaction Rule
 
@@ -236,6 +248,7 @@ docker exec phoenix-oci-backend curl -sS http://localhost:8080/health/summary
 Host/nginx checks:
 
 ```bash
+curl -k -sS https://localhost:8443/nginx-health
 curl -sS http://localhost/health
 curl -sS http://localhost/readyz
 curl -sS http://localhost/health/summary
@@ -250,6 +263,8 @@ curl -k -sS https://localhost:8443/health/mitigations
 
 Expected normal trading-readiness evidence:
 
+- `/nginx-health` returns `ok`; this is nginx-only liveness and does not require
+  the backend to be running.
 - HTTP status `200` for all commands above.
 - `/health` includes `order_path` equal to `strategy_bridge_order_router`.
 - `/health/summary` includes `operating_mode` equal to `HUB_AUTHORITATIVE`.

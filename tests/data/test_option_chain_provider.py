@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from app.data.option_chain_provider import (
@@ -95,6 +95,15 @@ def test_quality_flags_detect_stale_source_timestamp():
     flags = quality_flags_for_quote(quote, max_source_lag_seconds=120)
 
     assert flags["stale_source_seconds"] == 300
+    assert is_quote_usable_for_live_entry(quote) is False
+
+
+def test_quality_flags_detect_future_source_timestamp():
+    quote = _quote(source_ts=_quote().snapshot_ts + timedelta(seconds=120))
+    flags = quality_flags_for_quote(quote)
+
+    assert flags["future_source_seconds"] == 120
+    assert "stale_source_seconds" not in flags
     assert is_quote_usable_for_live_entry(quote) is False
 
 

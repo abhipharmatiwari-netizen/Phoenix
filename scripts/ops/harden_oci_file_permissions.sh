@@ -37,7 +37,8 @@ find "$PHOENIX_ROOT" -maxdepth 1 -type f \
   \( -name 'phoenix-deploy.env.*' -o -name 'phoenix-deploy.env.bak*' \) \
   -print | while IFS= read -r path; do
     chmod 600 "$path"
-  done
+done
 
+"$(dirname "$0")/check_env_secret_material.sh"
 "$(dirname "$0")/../validate-live-secret-perms.sh"
 echo "OCI Phoenix file permissions hardened"

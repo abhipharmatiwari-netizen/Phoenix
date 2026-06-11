@@ -565,3 +565,36 @@ def test_shadow_once_blocks_latest_validation_error(monkeypatch):
 
     assert result.decision_action == "NO_TRADE"
     assert result.reason == "validation_gate_failed:latest_validation_error"
+
+
+def test_shadow_once_refreshes_validation_gate_timestamp_after_snapshot(monkeypatch):
+    conn = FakeConn()
+    start = datetime(2026, 5, 19, 10, 0, tzinfo=IST)
+    after_snapshot = datetime(2026, 5, 19, 10, 0, 35, tzinfo=IST)
+    clock = iter((start, after_snapshot))
+    gate_times = []
+
+    monkeypatch.setattr(shadow_runner, "_current_ist", lambda: next(clock))
+    monkeypatch.setattr(shadow_runner, "get_control_plane_dsn", lambda: "dsn")
+    monkeypatch.setattr(shadow_runner, "connect_with_retry", lambda *_, **__: conn)
+    monkeypatch.setattr(shadow_runner, "_capture_snapshot", lambda cfg: 198)
+    monkeypatch.setattr(shadow_runner, "PostgresOiMlShadowLifecycleStore", FakeStore)
+    monkeypatch.setattr(shadow_runner, "OiMlCeDecisionEngine", FakeDecisionEngine)
+
+    def fake_validation_gate(conn, *, config, now):
+        gate_times.append(now)
+        return shadow_runner._ValidationGateResult(allowed=True)
+
+    monkeypatch.setattr(shadow_runner, "_latest_validation_gate", fake_validation_gate)
+    cfg = OiMlShadowRunnerConfig(
+        enabled=True,
+        expiry=date(2026, 5, 21),
+        market_window_only=False,
+    )
+
+    result = run_shadow_once(cfg)
+
+    assert result.decision_action == "NO_TRADE"
+    assert result.reason == "no_fresh_option_snapshot"
+    assert result.snapshot_stored_rows == 198
+    assert gate_times == [after_snapshot]

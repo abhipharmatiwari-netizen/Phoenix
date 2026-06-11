@@ -10,7 +10,10 @@ ENV REACT_APP_TENANT_ID=tenant-1
 RUN npm run build
 
 # Stage 2: Serve with nginx
-FROM nginx:alpine
+FROM nginx:1.29.3-trixie
+RUN apt-get update && \
+    apt-get upgrade -y --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/build /usr/share/nginx/html
 COPY nginx/nginx.conf.template /tmp/nginx.conf.template
 RUN { \

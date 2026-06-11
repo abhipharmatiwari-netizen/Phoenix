@@ -198,16 +198,24 @@ field for this path and always carries the dry-run invariant
 `live_order_path_enabled=false`; do not remediate sidecar ingestion by enabling
 any live order path.
 
-The sidecar container has its own Docker healthcheck:
+The sidecar container has its own Docker liveness healthcheck:
+
+```bash
+python -m app.strategies.oi_ml.shadow_liveness
+```
+
+The command prints sanitized JSON and exits non-zero only when the shadow runner
+process is not visible. Readiness and data-quality evidence remain available
+through:
 
 ```bash
 python -m app.strategies.oi_ml.shadow_health
 ```
 
-The command prints sanitized JSON and exits non-zero when the expected sidecar
-evidence is degraded or unavailable. Freshness is enforced only during the
-snapshot window; after the window closes, today's completed snapshot remains
-healthy instead of being marked stale overnight.
+`shadow_health` exits non-zero when expected sidecar evidence is degraded or
+unavailable. Freshness is enforced only during the snapshot window; after the
+window closes, today's completed snapshot remains healthy instead of being
+marked stale overnight.
 
 ## Remaining Promotion Gate
 
@@ -295,6 +303,14 @@ while shadow trade decisions remain restricted to `09:45` to `14:30` IST.
   reference IV, or fetch errors;
 - a full JSON report in `public.option_chain_validation_reports` for EOD review.
 
+The NSE web client retries transient timeout, rate-limit, network, and HTTP 5xx
+failures with bounded exponential backoff plus jitter. Failed validation still
+persists `ERROR/ERROR` and remains a decision-admission blocker when the shadow
+validation gate requires a fresh non-error report. Report metadata includes
+`error_classification`, `reference_error_rate`, `reference_error_count`, and the
+rolling `reference_error_window_count` so operators can distinguish an isolated
+timeout from a burst.
+
 When the live-derivatives fallback is used, reference quotes are tagged with
 `nse_source=live_equity_derivatives`. The realtime validator records
 `reference_sources=["live_equity_derivatives"]` and
@@ -330,11 +346,22 @@ OI_ML_NSE_VALIDATION_STORE_QUOTES=true
 OI_ML_NSE_VALIDATION_LOG_ALL=true
 OI_ML_NSE_VALIDATION_FAIL_ON_ERROR=false
 OI_ML_NSE_VALIDATION_TIMEOUT_SECONDS=10
+OI_ML_NSE_VALIDATION_MAX_ATTEMPTS=3
+OI_ML_NSE_VALIDATION_RETRY_BACKOFF_SECONDS=0.5
+OI_ML_NSE_VALIDATION_RETRY_JITTER_SECONDS=0.25
+OI_ML_NSE_VALIDATION_ERROR_RATE_WINDOW=20
+OI_ML_NSE_VALIDATION_ERROR_RATE_WARN_THRESHOLD=0.25
 ```
 
 `FAIL_ON_ERROR=false` is deliberate for shadow mode: validation failures are
 logged and persisted without stopping Angel snapshot ingestion. Do not wire this
 table into live order routing.
+
+Operator SLO: during the market validation window, the rolling NSE validation
+reference error rate should stay below `25%` over the last `20` validation
+attempts. If the latest reports show `reference_error_rate_state=breach`, keep
+OI/ML promotion blocked, inspect NSE timeout logs, and do not relax the
+fail-closed shadow validation gate.
 
 Compare the latest stored Angel snapshot against a saved NSE payload:
 
@@ -394,7 +421,9 @@ Recent abnormal observations:
 docker exec phoenix-oci-postgres psql -U phoenix_app -d phoenix -c "
 SELECT validation_ts, snapshot_ts, underlying, expiry, status, severity,
        compared_contracts, mismatch_count, primary_only_count,
-       reference_only_count, missing_primary_iv, missing_reference_iv
+       reference_only_count, missing_primary_iv, missing_reference_iv,
+       report_payload->'metadata'->>'error_classification' AS error_classification,
+       report_payload->'metadata'->>'reference_error_rate' AS reference_error_rate
 FROM public.option_chain_validation_reports
 WHERE validation_ts::date = CURRENT_DATE
   AND status <> 'OK'

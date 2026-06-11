@@ -299,6 +299,7 @@ def test_admin_health_summary_requires_auth_and_returns_internal_fields(api_clie
     client, runtime = api_client
     runtime.worker_running_state = True
     runtime.watchdog_running_state = True
+    monkeypatch.delenv("DASHBOARD_AUTH_DISABLED", raising=False)
     monkeypatch.setattr(
         server,
         "get_hub_runtime",
@@ -327,6 +328,28 @@ def test_bff_blocks_direct_internal_health_summary_bypass(api_client):
     for path in ("/bff/health/summary", "/bff/readyz", "/bff/dashboard/status"):
         resp = client.get(path)
         assert resp.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/admin/health/summary", "/bff/health/summary"],
+)
+def test_malformed_host_header_rejected_before_protected_routes(api_client, path):
+    client, _ = api_client
+
+    resp = client.get(path, headers={"Host": "testserver%2fadmin.local"})
+
+    assert resp.status_code == 400
+    assert resp.text == "Invalid Host header"
+
+
+def test_host_header_guard_allows_local_health_hosts_when_domain_set(monkeypatch):
+    monkeypatch.setenv("PHOENIX_DOMAIN", "phoenix.example.com")
+
+    assert server._is_invalid_host_header("localhost:8080") is False
+    assert server._is_invalid_host_header("127.0.0.1:8080") is False
+    assert server._is_invalid_host_header("phoenix.example.com") is False
+    assert server._is_invalid_host_header("phoenix.example.com%2fadmin") is True
 
 
 def test_readyz_public_redacts_runner_and_lease_internals(monkeypatch):

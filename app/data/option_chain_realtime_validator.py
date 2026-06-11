@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 import logging
@@ -35,6 +36,8 @@ class RealtimeOptionChainValidationConfig:
     store_reference_quotes: bool = True
     log_all_observations: bool = True
     fail_on_error: bool = False
+    source_error_window_size: int = 20
+    source_error_rate_warn_threshold: float = 0.25
     validation_config: OptionChainValidationConfig = field(
         default_factory=OptionChainValidationConfig
     )
@@ -70,6 +73,7 @@ class RealtimeOptionChainValidator:
     )
     primary_provider_name: str = "angel"
     reference_provider_name: str = "nse_web"
+    _source_error_window: deque[bool] = field(default_factory=deque, init=False, repr=False)
 
     def validate(
         self,
@@ -106,6 +110,7 @@ class RealtimeOptionChainValidator:
                 )
                 if self.config.fail_on_error:
                     raise RuntimeError(error)
+                source_metrics = self._record_source_observation(failed=True)
                 result = self._record_error(
                     underlying=normalized_underlying,
                     expiry=expiry,
@@ -113,8 +118,11 @@ class RealtimeOptionChainValidator:
                     validation_ts=validation_ts,
                     error=error,
                     primary_quote_count=len(primary_quotes),
+                    source_metrics=source_metrics,
+                    error_classification="reference_quotes_empty",
                 )
                 return result
+            source_metrics = self._record_source_observation(failed=False)
             stored_reference_rows = 0
             if self.config.store_reference_quotes and self.reference_quote_store is not None:
                 stored_reference_rows = int(self.reference_quote_store.upsert_quotes(reference_quotes))
@@ -163,6 +171,7 @@ class RealtimeOptionChainValidator:
                 "reference_quote_count": len(reference_quotes),
                 "stored_reference_rows": stored_reference_rows,
             }
+            metadata.update(source_metrics)
             reference_sources = _reference_sources(reference_quotes)
             if reference_sources:
                 metadata["reference_sources"] = reference_sources
@@ -214,6 +223,8 @@ class RealtimeOptionChainValidator:
                 validation_ts=validation_ts,
                 error=str(exc),
                 primary_quote_count=len(primary_quotes),
+                source_metrics=self._record_source_observation(failed=True),
+                error_classification=classify_reference_validation_error(exc),
             )
             if self.config.fail_on_error:
                 raise
@@ -228,7 +239,23 @@ class RealtimeOptionChainValidator:
         validation_ts: datetime,
         error: str,
         primary_quote_count: int,
+        source_metrics: Mapping[str, Any] | None = None,
+        error_classification: str | None = None,
     ) -> RealtimeOptionChainValidationResult:
+        metadata = {
+            "auto_realtime_validation": True,
+            "validation_only": True,
+            "snapshot_ts": snapshot_ts.isoformat(),
+            "validation_ts": validation_ts.isoformat(),
+            "primary_provider": self.primary_provider_name,
+            "reference_provider": self.reference_provider_name,
+            "primary_quote_count": primary_quote_count,
+            "reference_quote_count": 0,
+            "error": error,
+        }
+        if error_classification:
+            metadata["error_classification"] = error_classification
+        metadata.update(dict(source_metrics or {}))
         payload = {
             "underlying": underlying,
             "expiry": expiry.isoformat(),
@@ -239,17 +266,7 @@ class RealtimeOptionChainValidator:
             "mismatches": [],
             "missing_angel_iv": 0,
             "missing_nse_iv": 0,
-            "metadata": {
-                "auto_realtime_validation": True,
-                "validation_only": True,
-                "snapshot_ts": snapshot_ts.isoformat(),
-                "validation_ts": validation_ts.isoformat(),
-                "primary_provider": self.primary_provider_name,
-                "reference_provider": self.reference_provider_name,
-                "primary_quote_count": primary_quote_count,
-                "reference_quote_count": 0,
-                "error": error,
-            },
+            "metadata": metadata,
         }
         try:
             stored = self.report_store.insert_report(
@@ -324,6 +341,24 @@ class RealtimeOptionChainValidator:
             result.missing_reference_iv,
         )
 
+    def _record_source_observation(self, *, failed: bool) -> dict[str, Any]:
+        max_size = max(1, int(self.config.source_error_window_size))
+        while len(self._source_error_window) >= max_size:
+            self._source_error_window.popleft()
+        self._source_error_window.append(bool(failed))
+        count = len(self._source_error_window)
+        failures = sum(1 for item in self._source_error_window if item)
+        rate = failures / count if count else 0.0
+        threshold = max(0.0, float(self.config.source_error_rate_warn_threshold))
+        return {
+            "reference_error_window_size": max_size,
+            "reference_error_window_count": count,
+            "reference_error_count": failures,
+            "reference_error_rate": round(rate, 4),
+            "reference_error_rate_warn_threshold": threshold,
+            "reference_error_rate_state": "breach" if rate >= threshold else "ok",
+        }
+
 
 def _status_and_severity(payload: Mapping[str, Any]) -> tuple[str, str]:
     if payload.get("ok") is True and not _has_missing_reference_iv(payload):
@@ -331,6 +366,17 @@ def _status_and_severity(payload: Mapping[str, Any]) -> tuple[str, str]:
     if payload.get("metadata", {}).get("error"):
         return "ERROR", "ERROR"
     return "MISMATCH", "WARN"
+
+
+def classify_reference_validation_error(exc: Exception) -> str:
+    if isinstance(exc, TimeoutError):
+        return "provider_timeout"
+    message = str(exc or "").lower()
+    if "timeout" in message or "timed out" in message:
+        return "provider_timeout"
+    if "login" in message or "auth" in message:
+        return "provider_login_failed"
+    return type(exc).__name__
 
 
 def _reference_sources(quotes: Sequence[OptionQuote]) -> list[str]:
@@ -368,4 +414,5 @@ __all__ = [
     "RealtimeOptionChainValidationConfig",
     "RealtimeOptionChainValidationResult",
     "RealtimeOptionChainValidator",
+    "classify_reference_validation_error",
 ]

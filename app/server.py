@@ -566,6 +566,68 @@ app.add_middleware(
 )
 
 
+def _configured_allowed_hosts() -> tuple[str, ...]:
+    raw = os.getenv("PHOENIX_ALLOWED_HOSTS", "").strip()
+    hosts = [
+        "localhost",
+        "127.0.0.1",
+        "0.0.0.0",
+        "[::1]",
+        "testserver",
+        "backend",
+        "nginx",
+        "phoenix-oci-backend",
+        "phoenix-oci-web",
+    ]
+    hosts.extend(host.strip().lower() for host in raw.split(",") if host.strip())
+    domain = os.getenv("PHOENIX_DOMAIN", "").strip().lower()
+    if domain:
+        hosts.append(domain)
+    return tuple(dict.fromkeys(hosts))
+
+
+def _host_without_port(host: str) -> str:
+    token = host.strip().lower()
+    if token.startswith("["):
+        end = token.find("]")
+        return token[: end + 1] if end >= 0 else token
+    return token.split(":", 1)[0]
+
+
+def _host_matches_allowed(host: str, allowed_hosts: tuple[str, ...]) -> bool:
+    if not allowed_hosts:
+        return True
+    host_name = _host_without_port(host)
+    for allowed in allowed_hosts:
+        if allowed == "*":
+            return True
+        if allowed.startswith("*.") and host_name.endswith(allowed[1:]):
+            return True
+        if host_name == allowed or host.lower() == allowed:
+            return True
+    return False
+
+
+def _is_invalid_host_header(host: str | None) -> bool:
+    if host is None:
+        return False
+    value = host.strip()
+    if not value:
+        return True
+    if any(char.isspace() for char in value):
+        return True
+    if any(char in value for char in ("/", "\\", "?", "#", "@", "%")):
+        return True
+    return not _host_matches_allowed(value, _configured_allowed_hosts())
+
+
+@app.middleware("http")
+async def host_header_guard_middleware(request: Request, call_next):
+    if _is_invalid_host_header(request.headers.get("host")):
+        return PlainTextResponse("Invalid Host header", status_code=400)
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def correlation_context_middleware(request: Request, call_next):
     correlation_id = (

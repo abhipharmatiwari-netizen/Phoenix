@@ -114,6 +114,11 @@ services:
       OI_ML_NSE_VALIDATION_LOG_ALL: "${OI_ML_NSE_VALIDATION_LOG_ALL:-true}"
       OI_ML_NSE_VALIDATION_FAIL_ON_ERROR: "${OI_ML_NSE_VALIDATION_FAIL_ON_ERROR:-false}"
       OI_ML_NSE_VALIDATION_TIMEOUT_SECONDS: "${OI_ML_NSE_VALIDATION_TIMEOUT_SECONDS:-10}"
+      OI_ML_NSE_VALIDATION_MAX_ATTEMPTS: "${OI_ML_NSE_VALIDATION_MAX_ATTEMPTS:-3}"
+      OI_ML_NSE_VALIDATION_RETRY_BACKOFF_SECONDS: "${OI_ML_NSE_VALIDATION_RETRY_BACKOFF_SECONDS:-0.5}"
+      OI_ML_NSE_VALIDATION_RETRY_JITTER_SECONDS: "${OI_ML_NSE_VALIDATION_RETRY_JITTER_SECONDS:-0.25}"
+      OI_ML_NSE_VALIDATION_ERROR_RATE_WINDOW: "${OI_ML_NSE_VALIDATION_ERROR_RATE_WINDOW:-20}"
+      OI_ML_NSE_VALIDATION_ERROR_RATE_WARN_THRESHOLD: "${OI_ML_NSE_VALIDATION_ERROR_RATE_WARN_THRESHOLD:-0.25}"
     volumes:
       - /run/secrets/control_plane_pg_password:/run/secrets/control_plane_pg_password:ro
       - /opt/phoenix/logs/oi-ml-shadow:/app/logs
@@ -133,8 +138,10 @@ services:
     healthcheck:
       test:
         [
-          "CMD-SHELL",
-          "export CONTROL_PLANE_PG_PASSWORD=\"$$(cat /run/secrets/control_plane_pg_password 2>/dev/null || true)\"; python -m app.strategies.oi_ml.shadow_health",
+          "CMD",
+          "python",
+          "-m",
+          "app.strategies.oi_ml.shadow_liveness",
         ]
       interval: 60s
       timeout: 15s

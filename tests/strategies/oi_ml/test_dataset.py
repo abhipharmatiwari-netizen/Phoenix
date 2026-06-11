@@ -116,6 +116,21 @@ def test_select_candidate_quotes_rejects_future_feature_snapshot():
         )
 
 
+def test_select_candidate_quotes_rejects_future_source_timestamp():
+    quote = replace(
+        _quote(25200, "CE"),
+        source_ts=DECISION_TS + timedelta(seconds=30),
+    )
+
+    candidates = select_candidate_quotes(
+        [quote],
+        decision_ts=DECISION_TS,
+        config=OiMlDatasetConfig(option_type="CE"),
+    )
+
+    assert candidates == []
+
+
 class FakeRepository:
     def __init__(self, snapshot, windows):
         self.snapshot = snapshot

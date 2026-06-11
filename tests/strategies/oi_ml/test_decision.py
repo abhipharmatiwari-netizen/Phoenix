@@ -12,7 +12,6 @@ from app.strategies.oi_ml.decision import (
     OiMlDecisionConfig,
     OiMlEntryAction,
 )
-from app.strategies.oi_ml.greek_risk import OiMlGreekRiskConfig
 from app.strategies.oi_ml.scoring import ConstantOiMlScorer
 
 

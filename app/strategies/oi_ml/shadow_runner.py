@@ -195,7 +195,7 @@ def run_shadow_once(
     if not config.enabled:
         return OiMlShadowRunResult(decision_action="DISABLED", reason="shadow_runner_disabled")
 
-    current = (now or datetime.now(IST)).astimezone(IST)
+    current = (now or _current_ist()).astimezone(IST)
     inside_entry_window = _within_window(current, config.start_time, config.end_time)
     inside_snapshot_window = _within_window(
         current,
@@ -258,7 +258,8 @@ def run_shadow_once(
                 lifecycle_updates=lifecycle_updates,
             )
 
-        validation_gate = _latest_validation_gate(conn, config=config, now=current)
+        validation_gate_now = current if now is not None else _current_ist()
+        validation_gate = _latest_validation_gate(conn, config=config, now=validation_gate_now)
         if not validation_gate.allowed:
             return OiMlShadowRunResult(
                 decision_action="NO_TRADE",
@@ -662,6 +663,10 @@ def _within_window(value: datetime, start: time, end: time) -> bool:
 
 def _time_at_or_after(value: datetime, threshold: time) -> bool:
     return value.astimezone(IST).time() >= threshold
+
+
+def _current_ist() -> datetime:
+    return datetime.now(IST)
 
 
 def _row_mapping(row: Any, description: Any) -> dict[str, Any]:

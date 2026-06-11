@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from app.data.angel_option_chain_provider import AngelOptionChainProvider, listed_option_expiries
 
@@ -83,7 +83,48 @@ def test_angel_provider_maps_scrip_master_and_full_quotes_to_option_quotes():
     assert ce.oi == 120000
     assert str(ce.bid) == "42.5"
     assert str(ce.ask) == "43.0"
+    assert ce.source_ts == datetime(2026, 5, 19, 4, 30, tzinfo=timezone.utc)
     assert ce.raw_hash
+
+
+def test_angel_provider_treats_naive_exchange_feed_time_as_ist():
+    class NaiveTimeFetcher:
+        def fetch_market_quotes(self, *, mode, exchange_to_tokens):
+            assert mode == "FULL"
+            assert exchange_to_tokens == {"NFO": ["111"]}
+            return [
+                {
+                    "exchange": "NFO",
+                    "symbolToken": "111",
+                    "ltp": "42.8",
+                    "opnInterest": "120000",
+                    "tradeVolume": "1500",
+                    "bid": "42.5",
+                    "ask": "43.0",
+                    "exchFeedTime": "09-Jun-2026 09:34:26",
+                }
+            ]
+
+    provider = AngelOptionChainProvider(
+        NaiveTimeFetcher(),
+        [
+            {
+                "symbol": "NIFTY09JUN2625200CE",
+                "expiry": "09JUN2026",
+                "strike": "2520000",
+                "exch_seg": "NFO",
+                "token": "111",
+            },
+        ],
+    )
+
+    quote = provider.fetch_chain(
+        underlying="NIFTY",
+        expiry=date(2026, 6, 9),
+        snapshot_ts=datetime(2026, 6, 9, 4, 4, tzinfo=timezone.utc),
+    )[0].normalized()
+
+    assert quote.source_ts == datetime(2026, 6, 9, 4, 4, 26, tzinfo=timezone.utc)
 
 
 def test_angel_provider_preserves_contract_with_missing_quote_payload_flag():

@@ -15,8 +15,11 @@ from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import logging
+import random
+import time
 from typing import Any, Protocol
 from urllib.parse import urlencode
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener
 from zoneinfo import ZoneInfo
 
@@ -55,24 +58,64 @@ class NseWebOptionChainClient:
     """
 
     timeout_seconds: float = 10.0
+    max_attempts: int = 3
+    retry_backoff_seconds: float = 0.5
+    retry_jitter_seconds: float = 0.25
     user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/125.0 Safari/537.36"
     )
     opener_factory: Callable[..., Any] = build_opener
+    sleep: Callable[[float], None] = time.sleep
+    jitter_factory: Callable[[], float] = random.random
 
     def fetch_option_chain(self, *, symbol: str) -> Mapping[str, Any]:
         resolved_symbol = str(symbol or "").strip().upper()
         if not resolved_symbol:
             raise ValueError("NSE option-chain symbol is required")
-        opener = self.opener_factory()
+        attempts = max(1, int(self.max_attempts))
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            opener = self.opener_factory()
+            try:
+                return self._fetch_option_chain_once(
+                    opener,
+                    symbol=resolved_symbol,
+                )
+            except Exception as exc:
+                last_error = exc
+                classification = classify_nse_reference_error(exc)
+                if attempt >= attempts or not _is_retryable_nse_error(exc):
+                    raise
+                delay = self._retry_delay(attempt)
+                logger.warning(
+                    "NSE option-chain fetch failed; retrying symbol=%s "
+                    "attempt=%d/%d classification=%s delay_seconds=%.2f error=%s",
+                    resolved_symbol,
+                    attempt,
+                    attempts,
+                    classification,
+                    delay,
+                    exc,
+                )
+                self.sleep(delay)
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("NSE option-chain fetch failed without an error")
+
+    def _fetch_option_chain_once(
+        self,
+        opener: Any,
+        *,
+        symbol: str,
+    ) -> Mapping[str, Any]:
         headers = self._headers(referer=NSE_OPTION_CHAIN_URL)
         opener.open(
             Request(NSE_OPTION_CHAIN_URL, headers=headers),
             timeout=float(self.timeout_seconds),
         ).close()
-        api_url = f"{NSE_OPTION_CHAIN_API_URL}?{urlencode({'symbol': resolved_symbol})}"
+        api_url = f"{NSE_OPTION_CHAIN_API_URL}?{urlencode({'symbol': symbol})}"
         try:
             with opener.open(
                 Request(api_url, headers=self._headers(referer=NSE_OPTION_CHAIN_URL)),
@@ -82,7 +125,7 @@ class NseWebOptionChainClient:
         except Exception as exc:  # noqa: BLE001 - validation fallback may still work.
             fallback_payload = self._fetch_live_equity_derivatives_after_primary_error(
                 opener,
-                symbol=resolved_symbol,
+                symbol=symbol,
                 primary_error=exc,
             )
             if fallback_payload is not None:
@@ -95,18 +138,26 @@ class NseWebOptionChainClient:
 
         fallback_payload = self._fetch_live_equity_derivatives(
             opener,
-            symbol=resolved_symbol,
+            symbol=symbol,
         )
         if fallback_payload is not None:
             logger.info(
                 "NSE option-chain API returned no comparable rows for symbol=%s; "
                 "using live-derivatives fallback",
-                resolved_symbol,
+                symbol,
             )
             return fallback_payload
         raise ValueError(
-            f"NSE option-chain payload contained no comparable rows for symbol={resolved_symbol}"
+            f"NSE option-chain payload contained no comparable rows for symbol={symbol}"
         )
+
+    def _retry_delay(self, attempt: int) -> float:
+        base = max(0.0, float(self.retry_backoff_seconds))
+        delay = base * (2 ** max(0, int(attempt) - 1))
+        jitter = max(0.0, float(self.retry_jitter_seconds))
+        if jitter:
+            delay += self.jitter_factory() * jitter
+        return delay
 
     def _fetch_live_equity_derivatives_after_primary_error(
         self,
@@ -425,6 +476,38 @@ def _has_live_equity_rows(payload: Mapping[str, Any]) -> bool:
     return isinstance(data, Sequence) and not isinstance(data, (str, bytes)) and bool(data)
 
 
+def classify_nse_reference_error(exc: Exception) -> str:
+    if isinstance(exc, TimeoutError):
+        return "provider_timeout"
+    if isinstance(exc, HTTPError):
+        status = int(getattr(exc, "code", 0) or 0)
+        if status == 429:
+            return "provider_rate_limited"
+        if status >= 500:
+            return "provider_http_5xx"
+        if status >= 400:
+            return "provider_http_4xx"
+    if isinstance(exc, URLError):
+        reason = str(getattr(exc, "reason", "") or "").lower()
+        if "timeout" in reason or "timed out" in reason:
+            return "provider_timeout"
+        return "provider_network_error"
+    message = str(exc or "").lower()
+    if "timeout" in message or "timed out" in message:
+        return "provider_timeout"
+    return type(exc).__name__
+
+
+def _is_retryable_nse_error(exc: Exception) -> bool:
+    classification = classify_nse_reference_error(exc)
+    return classification in {
+        "provider_timeout",
+        "provider_rate_limited",
+        "provider_http_5xx",
+        "provider_network_error",
+    }
+
+
 def _first(payload: Mapping[str, Any], *keys: str) -> Any:
     for key in keys:
         if key in payload and payload[key] not in (None, ""):
@@ -556,5 +639,6 @@ __all__ = [
     "NSE_OPTION_CHAIN_URL",
     "NseOptionChainProvider",
     "NseWebOptionChainClient",
+    "classify_nse_reference_error",
     "parse_nse_option_chain_payload",
 ]

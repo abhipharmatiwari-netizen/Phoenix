@@ -1,75 +1,104 @@
 #!/bin/bash
 # /opt/phoenix/scripts/weekly-cleanup.sh
-# Weekly OCI VM cleanup — every Sunday 2:00 AM IST (Saturday 20:30 UTC)
-# Managed by: /etc/cron.d/phoenix-cleanup
+# Weekly OCI VM cleanup. Does not remove volumes, backups, or secrets.
 
 set -uo pipefail
 
-LOG=/opt/phoenix/logs/cron-cleanup.log
-TS()  { date "+%Y-%m-%d %H:%M:%S IST"; }
+PHOENIX_ROOT="${PHOENIX_ROOT:-/opt/phoenix}"
+LOG="${PHOENIX_CLEANUP_LOG:-$PHOENIX_ROOT/logs/cron-cleanup.log}"
+KEEP_LIVE_TAGS="${PHOENIX_CLEANUP_KEEP_LIVE_TAGS:-3}"
+LOG_RETENTION_DAYS="${PHOENIX_LOG_RETENTION_DAYS:-7}"
+SCRIP_MASTER_KEEP="${PHOENIX_SCRIP_MASTER_KEEP:-1}"
+DRY_RUN="${PHOENIX_CLEANUP_DRY_RUN:-false}"
+
+TS() { date "+%Y-%m-%d %H:%M:%S IST"; }
 log() { echo "[$(TS)] $*" | tee -a "$LOG"; }
-logq(){ echo "[$(TS)] $*" >> "$LOG"; }
+logq() { echo "[$(TS)] $*" >> "$LOG"; }
+
+run_cmd() {
+  if [ "$DRY_RUN" = "true" ]; then
+    log "dry-run: $*"
+    return 0
+  fi
+  "$@" >> "$LOG" 2>&1
+}
+
+active_images_file="$(mktemp)"
+trap 'rm -f "$active_images_file"' EXIT
+
+docker ps --format "{{.Image}}" | sort -u > "$active_images_file"
+
+is_active_image() {
+  grep -Fxq "$1" "$active_images_file"
+}
+
+prune_image_if_safe() {
+  image="$1"
+  if is_active_image "$image"; then
+    log "  preserving active image $image"
+    return 0
+  fi
+  log "  removing stale image $image"
+  run_cmd docker rmi "$image" || true
+}
 
 log "=== weekly-cleanup started ==="
+log "configuration dry_run=$DRY_RUN keep_live_tags=$KEEP_LIVE_TAGS log_retention_days=$LOG_RETENTION_DAYS"
 
-# ── 1. Stopped containers ──────────────────────────────────────────────────
-log "stopped containers..."
-docker container prune -f >> "$LOG" 2>&1
-
-# ── 2. Dangling images ─────────────────────────────────────────────────────
-log "dangling images..."
-docker image prune -f >> "$LOG" 2>&1
-
-# ── 3. Old aurelium SHA-tagged builds (keep latest + most recent live-*) ──
-log "old aurelium SHA builds..."
-docker images --format "{{.Repository}}:{{.Tag}}" aurelium 2>/dev/null \
-    | grep -E ':[0-9a-f]{40}$' \
-    | xargs -r docker rmi >> "$LOG" 2>&1 || true
-
-# Keep only the single most-recent live-* tag; remove the rest
-LIVE_TAGS=$(docker images --format "{{.Tag}}" aurelium 2>/dev/null \
-    | grep "^live-" | sort -r)
-FIRST=1
-while IFS= read -r tag; do
-    if [ "$FIRST" = "1" ]; then
-        FIRST=0
-        continue
-    fi
-    log "  removing aurelium:${tag}"
-    docker rmi "aurelium:${tag}" >> "$LOG" 2>&1 || true
-done <<< "$LIVE_TAGS"
-
-# ── 4. Build cache ─────────────────────────────────────────────────────────
-log "build cache..."
-docker buildx prune -f >> "$LOG" 2>&1
-docker builder prune -f >> "$LOG" 2>&1
-
-# ── 5. Old phoenix log directories (> 7 days old by directory name) ────────
-log "old log directories (> 7 days)..."
-CUTOFF=$(date -d "7 days ago" +%Y-%m-%d)
-find /opt/phoenix/logs -maxdepth 1 -type d -name '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' \
-    | while read -r dir; do
-        dirdate=$(basename "$dir")
-        if [[ "$dirdate" < "$CUTOFF" ]]; then
-            log "  removing $dir"
-            rm -rf "$dir" >> "$LOG" 2>&1 || true
-        fi
-      done
-
-# ── 6. Old scrip_master files (keep only the most recent) ─────────────────
-log "old scrip_master files..."
-OLDEST=$(ls -t /opt/phoenix/logs/scrip_master_*.json 2>/dev/null | tail -n +2)
-if [ -n "$OLDEST" ]; then
-    echo "$OLDEST" | while read -r f; do
-        log "  removing $f"
-        rm -f "$f" >> "$LOG" 2>&1 || true
-    done
-fi
-
-# ── 7. Summary ─────────────────────────────────────────────────────────────
-log "summary:"
+log "pre-cleanup docker system df:"
 docker system df 2>&1 | while IFS= read -r line; do logq "  $line"; done
-AVAIL=$(df -h / | awk 'NR==2 {print $4}')
-USED=$(df -h /  | awk 'NR==2 {print $3}')
+log "active images:"
+while IFS= read -r image; do
+  [ -n "$image" ] || continue
+  logq "  $image"
+done < "$active_images_file"
+
+log "stopped containers..."
+run_cmd docker container prune -f
+
+log "dangling images..."
+run_cmd docker image prune -f
+
+log "old local Phoenix rollback images..."
+for repo in phoenix-local-backend phoenix-local-nginx aurelium; do
+  docker images --format "{{.Repository}}:{{.Tag}}" "$repo" 2>/dev/null \
+    | grep -E ':(local-|live-)?[0-9a-f]{7,40}$|:live-' \
+    | sort -r \
+    | awk -v keep="$KEEP_LIVE_TAGS" 'NR > keep {print}' \
+    | while IFS= read -r image; do
+        [ -n "$image" ] || continue
+        prune_image_if_safe "$image"
+      done
+done
+
+log "build cache..."
+run_cmd docker buildx prune -f
+run_cmd docker builder prune -f
+
+log "old log directories (> ${LOG_RETENTION_DAYS} days)..."
+CUTOFF="$(date -d "${LOG_RETENTION_DAYS} days ago" +%Y-%m-%d)"
+find "$PHOENIX_ROOT/logs" -maxdepth 1 -type d -name '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' \
+  | while IFS= read -r dir; do
+      dirdate="$(basename "$dir")"
+      if [[ "$dirdate" < "$CUTOFF" ]]; then
+        log "  removing old log dir $dir"
+        run_cmd rm -rf "$dir"
+      fi
+    done
+
+log "old scrip_master files..."
+find "$PHOENIX_ROOT/logs" -maxdepth 1 -type f -name 'scrip_master_*.json' \
+  | sort -r \
+  | awk -v keep="$SCRIP_MASTER_KEEP" 'NR > keep {print}' \
+  | while IFS= read -r file; do
+      [ -n "$file" ] || continue
+      log "  removing old scrip master $file"
+      run_cmd rm -f "$file"
+    done
+
+log "post-cleanup docker system df:"
+docker system df 2>&1 | while IFS= read -r line; do logq "  $line"; done
+AVAIL="$(df -h / | awk 'NR==2 {print $4}')"
+USED="$(df -h / | awk 'NR==2 {print $3}')"
 log "  disk used=${USED} avail=${AVAIL}"
 log "=== weekly-cleanup done ==="

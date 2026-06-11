@@ -31,6 +31,29 @@ server {
     add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
 
     # API and BFF proxy
+    location = /nginx-health {
+        access_log off;
+        add_header Content-Type text/plain;
+        return 200 "ok\n";
+    }
+
+    location ^~ /.well-known/acme-challenge/ {
+        try_files $uri =404;
+    }
+
+    # Do not let sensitive scanner paths fall through to the React SPA.
+    location ~ /\.(?!well-known/acme-challenge/) {
+        return 404;
+    }
+
+    location ~* ^/(?:___proxy_subdomain_whm|cgi-bin|phpmyadmin|pma|wp-admin|wp-content|wp-includes|wp-json|sslvpn|manager/html)(?:/|$) {
+        return 404;
+    }
+
+    location ~* ^/(?:wp-config(?:\.|/|$)|login\.html$) {
+        return 404;
+    }
+
     location /bff/ {
         limit_req zone=general burst=30 nodelay;
         proxy_pass http://backend;
