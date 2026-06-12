@@ -73,8 +73,15 @@ def test_weekly_cleanup_preserves_active_images_and_volumes() -> None:
 
     assert "KEEP_LIVE_TAGS" in script
     assert "PHOENIX_CLEANUP_DRY_RUN" in script
+    assert 'log "dry-run: $*"' in script
+    assert "run_cmd docker container prune -f" in script
+    assert "run_cmd docker image prune -f" in script
+    assert "run_cmd docker buildx prune -f" in script
+    assert "run_cmd docker builder prune -f" in script
+    assert 'run_cmd rm -rf "$dir"' in script
     assert "is_active_image" in script
     assert "preserving active image" in script
+    assert "old aurelium SHA builds" not in script
     assert "phoenix-oi-ml-shadow" in script
     assert "oi-ml-shadow-" in script
     assert "docker volume prune" not in script

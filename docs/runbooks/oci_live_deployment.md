@@ -54,7 +54,9 @@ Latest verified live deployment:
 - database: `phoenix-oci-postgres` is Compose-managed with Docker health
   status `healthy`
 - watchdog: `phoenix-oci-watchdog` has no Docker socket or other mounts
-- root filesystem: expanded boot volume, 63% used at the latest verification
+- root filesystem: 133G total with 3.6G available and 98% used at the
+  2026-06-12 cleanup verification; keep issue #345 open until durable headroom
+  and retention controls are restored
 
 Non-current for this VM unless a later evidence capture proves otherwise:
 
