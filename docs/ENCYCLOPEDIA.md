@@ -1,6 +1,6 @@
 # Phoenix Encyclopedia
 
-Last updated: 2026-06-06.
+Last updated: 2026-06-12.
 
 This is the quick-reference index for the current Phoenix OCI VM runtime. It
 explains terms and endpoint behavior that appear across the README,
@@ -11,13 +11,13 @@ architecture document, runbooks, and operator playbooks.
 | Term | Current meaning |
 |---|---|
 | OCI VM | Current production source of truth for Phoenix runtime evidence. |
-| VM checkout | `/opt/phoenix/app`, branch `main`; latest verified runtime image source commit `2884a87`. |
-| Deploy image tag | `local-2884a87` for backend and nginx in the verified VM runtime. |
+| VM checkout | `/opt/phoenix/app`, branch `main`; verify the checkout SHA and running image tags during each rollout. |
+| Deploy image tag | Verify with `docker ps --filter name=phoenix --format '{{.Names}} {{.Image}}'`; backend/nginx use local image tags on the current VM. |
 | Backend | `phoenix-oci-backend`, running `python -m app.main`. |
 | Web | `phoenix-oci-web`, nginx frontend and reverse proxy. |
 | Database | `phoenix-oci-postgres`, VM-local Postgres container managed by the `vm-local-postgres` Compose profile. |
 | Watchdog | `phoenix-oci-watchdog`, observe-only Docker CLI sidecar with no Docker socket or mounts. |
-| OI/ML sidecar | `phoenix-oi-ml-shadow`, dry-run only and outside the live order authority path. The current image is `phoenix-oi-ml-shadow:oi-ml-shadow-2884a87`; promotable decisions require validated model artifacts, fresh IV/Greek/source data, latest validation not `ERROR`, and terminal virtual lifecycle/PnL evidence. |
+| OI/ML sidecar | `phoenix-oi-ml-shadow`, dry-run only and outside the live order authority path. Verify the running sidecar image with `docker ps --filter name=phoenix-oi-ml-shadow`; promotable decisions require validated model artifacts, fresh IV/Greek/source data, latest validation not `ERROR`, and terminal virtual lifecycle/PnL evidence. |
 
 ## Health And Readiness Surfaces
 
