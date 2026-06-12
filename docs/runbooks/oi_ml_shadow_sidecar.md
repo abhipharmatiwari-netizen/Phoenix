@@ -1,7 +1,7 @@
 # OI/ML Shadow Sidecar Runbook
 
 Status: current progress record for the OI/ML CE seller shadow sidecar as of
-2026-06-06 IST.
+2026-06-12 IST.
 
 This sidecar is a dry-run research and validation process. It must not place,
 modify, cancel, or exit live orders. It runs beside the live OCI stack, publishes
@@ -13,10 +13,10 @@ to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
 | Area | State |
 |---|---|
 | Branch | `main` for the current runtime image |
-| Latest deployed sidecar commit | `2884a87` |
+| Latest deployed sidecar commit | Verify the running `phoenix-oi-ml-shadow` image tag with `docker ps`; the image tag is the source of truth |
 | OCI checkout | `/opt/phoenix/app` for the current image build; `/opt/phoenix/oi-ml-shadow-src` exists as a legacy sidecar checkout |
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
-| Running image | `phoenix-oi-ml-shadow:oi-ml-shadow-2884a87` |
+| Running image | Verify with `docker ps --filter name=phoenix-oi-ml-shadow` |
 | Container | `phoenix-oi-ml-shadow` |
 | Database tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`, `public.option_chain_validation_reports` |
 | Default scorer | `missing` in compose; fail-closed until trained artifacts are configured |
@@ -216,6 +216,15 @@ python -m app.strategies.oi_ml.shadow_health
 unavailable. Freshness is enforced only during the snapshot window; after the
 window closes, today's completed snapshot remains healthy instead of being
 marked stale overnight.
+
+Before the snapshot window starts, `shadow_health` should return `ok` with
+reason `before_shadow_snapshot_window` without opening Postgres. During and
+after the snapshot window, the sidecar uses the VM-local
+`CONTROL_PLANE_DB_DSN` from `ops/compose/docker-compose.oi-ml-shadow.yml` to
+read persisted option-chain, validation, and intent evidence. Do not add
+`CONTROL_PLANE_PG_PASSWORD` to the sidecar environment or paste secret values
+into logs; if readiness reports `shadow_ingestion_evidence_unavailable`, first
+verify the running compose includes the non-secret VM-local DSN.
 
 ## Remaining Promotion Gate
 
@@ -439,13 +448,15 @@ Inspect sidecar status:
 docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" \
   | grep -E "phoenix-oci|phoenix-oi-ml"
 docker logs phoenix-oi-ml-shadow --tail 80
+docker exec phoenix-oi-ml-shadow python -m app.strategies.oi_ml.shadow_liveness
+docker exec phoenix-oi-ml-shadow python -m app.strategies.oi_ml.shadow_health
 ```
 
 Restart the sidecar with smoke constants:
 
 ```bash
 cd /opt/phoenix
-IMAGE_TAG=oi-ml-shadow-2884a87 \
+IMAGE_TAG=oi-ml-shadow-<deployed-git-sha> \
 OI_ML_SHADOW_SCORER=constant \
 OI_ML_SHADOW_ALLOW_CONSTANT_SCORER=true \
 OI_ML_SHADOW_CONSTANT_PROBABILITY=0.64 \
@@ -456,6 +467,10 @@ docker compose -f /opt/phoenix/oi-ml-shadow.yml \
   --env-file /opt/phoenix/phoenix-deploy.env \
   up -d oi-ml-shadow
 ```
+
+The sidecar compose must include the VM-local non-secret
+`CONTROL_PLANE_DB_DSN` so readiness and market-window evidence checks can query
+Postgres without exposing the database password in the sidecar environment.
 
 This smoke mode is for connectivity only. It is not model validation, not
 shadow-promotion evidence, and must not be used for Paper or Live gates.

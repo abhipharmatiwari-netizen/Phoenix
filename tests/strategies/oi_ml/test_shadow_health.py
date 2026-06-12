@@ -63,6 +63,37 @@ def test_shadow_ingestion_disabled_does_not_open_db():
     assert opened is False
 
 
+def test_shadow_ingestion_before_snapshot_window_does_not_open_db():
+    opened = False
+
+    def _factory():
+        nonlocal opened
+        opened = True
+        raise AssertionError("DB should not be opened before the snapshot window")
+
+    status = collect_shadow_ingestion_status(
+        now=datetime(2026, 5, 20, 8, 34, tzinfo=IST),
+        env={
+            "OI_ML_SHADOW_ENABLED": "true",
+            "OI_ML_SHADOW_PROVIDER": "angel",
+            "OI_ML_SHADOW_UNDERLYING": "NIFTY",
+            "OI_ML_SHADOW_SNAPSHOT_START_TIME": "09:15",
+        },
+        conn_factory=_factory,
+    )
+
+    assert status["status"] == "ok"
+    assert status["reason"] == "before_shadow_snapshot_window"
+    assert status["snapshot_expected"] is False
+    assert status["snapshot_window_active"] is False
+    assert status["option_chain"]["today_row_count"] == 0
+    assert status["validation_reports"]["today_report_count"] == 0
+    assert status["shadow_intents"]["today_intent_count"] == 0
+    assert status["dry_run_only"] is True
+    assert status["live_order_path_enabled"] is False
+    assert opened is False
+
+
 def test_shadow_health_override_observes_external_sidecar():
     status = collect_shadow_ingestion_status(
         now=datetime(2026, 5, 20, 10, 0, tzinfo=IST),

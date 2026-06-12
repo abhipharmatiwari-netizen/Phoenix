@@ -63,6 +63,7 @@ services:
       CONTROL_PLANE_PG_DB: "${CONTROL_PLANE_PG_DB:?Set CONTROL_PLANE_PG_DB in phoenix-deploy.env}"
       CONTROL_PLANE_PG_USER: "${CONTROL_PLANE_PG_USER:?Set CONTROL_PLANE_PG_USER in phoenix-deploy.env}"
       CONTROL_PLANE_PG_SSLMODE: "prefer"
+      CONTROL_PLANE_DB_DSN: "postgresql://${CONTROL_PLANE_PG_USER:?Set CONTROL_PLANE_PG_USER in phoenix-deploy.env}@phoenix-oci-postgres:5432/${CONTROL_PLANE_PG_DB:?Set CONTROL_PLANE_PG_DB in phoenix-deploy.env}?sslmode=prefer"
       LIVE_PG_SSL_SKIP_CHECK: "true"
       REMOTE_DEPLOYMENT: "false"
       POSTGRES_CONNECT_TIMEOUT_SECONDS: "10"
