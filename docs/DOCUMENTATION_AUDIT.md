@@ -1,7 +1,7 @@
 # Documentation Audit
 
 Audit date: 2026-06-12. Runtime snapshot refreshed after the OCI LIVE hardening
-deploy series and OI/ML shadow readiness review.
+deploy series, OI/ML shadow readiness review, and cleanup-script sync.
 
 Scope: repository documentation, environment examples, Compose comments, and
 operator-facing runbooks were checked against the running OCI VM. The OCI VM
@@ -24,7 +24,7 @@ overrides repo docs and historical plans when there is a conflict.
 | Runtime mode | `/health/summary` reports `HUB_AUTHORITATIVE`; `/health` reports `strategy_bridge_order_router` |
 | Health endpoints | backend-local `/health`, `/ready`, `/readyz`, `/health/summary`, `/health/alerts`, `/health/mitigations`; public nginx `/health`, redacted `/readyz`, redacted `/health/summary`, JSON `/health/alerts`, JSON `/health/mitigations` |
 | Frontend health rendering | Overview and Safety use authenticated `/admin/health/summary` for internal diagnostics and fall back to redacted public `/health/summary` |
-| Storage | root filesystem expanded, but current evidence still requires issue #345 headroom follow-up |
+| Storage | root filesystem is 133G with 3.6G available and 98% used after the OI/ML sidecar rebuild; issue #345 remains open |
 | Secret model | `/run/secrets/*`; permission validator passes; docs may list names only |
 
 Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
@@ -76,6 +76,8 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | Runtime env examples referenced old verified local image tags | Current OCI docs describe intended `local-<git-sha>` tags and require VM verification during each rollout |
 | OI/ML shadow gates allowed ambiguous promotion evidence | Current code and docs require validated LightGBM artifacts, fresh IV/Greeks/source timestamps, latest validation not `ERROR`, virtual fill/flat accounting, realized dry-run PnL, and 10 clean sessions |
 | Release evidence guidance treated Docker health as sufficient wait evidence | Current release guidance requires `/readyz` trading-readiness evidence in addition to liveness |
+| VM cleanup cron used a stale script path with unsafe dry-run behavior | The cron path is now documented as `/opt/phoenix/scripts/weekly-cleanup.sh`, the sync/hash check is in the hardening runbook, and regression tests assert destructive commands route through dry-run logging |
+| Docker journal warnings were unclassified review noise | `docs/OCI_VM_RUNTIME.md` now classifies the 2026-06-12 BuildKit, Docker socket, security-option, image-signature, and health-check warning samples |
 
 ## Open Documentation-Backed Risks
 
@@ -84,7 +86,6 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | Previously exposed secret values still require rotation | P0 | `docs/OCI_VM_RUNTIME.md`, `README.md` |
 | Phoenix still shares the VM with unrelated public workloads | P1 | `docs/OCI_VM_RUNTIME.md`, `README.md`, `ARCHITECTURE.md` |
 | Disk alerting and retention policy are not complete | P1 | `docs/OCI_VM_RUNTIME.md`, `docs/runbooks/oci_runtime_hardening.md` |
-| Stale artifact and journal-warning cleanup needs a focused pass | P2 | `docs/OCI_VM_RUNTIME.md` |
 | Deployment-env backup retention and forbidden secret-like scanning remain open | P1 | `docs/OCI_VM_RUNTIME.md`, `docs/runbooks/oci_live_deployment.md` |
 
 ## Canonical Operator Map

@@ -217,20 +217,44 @@ backups, `/run/secrets`, or database files.
 The rollback image scope includes `phoenix-local-backend`,
 `phoenix-local-nginx`, `phoenix-oi-ml-shadow`, and `aurelium` tags.
 
+On the OCI VM, cron runs `/opt/phoenix/scripts/weekly-cleanup.sh`. After
+deploying a repo change that updates `scripts/ops/weekly-cleanup.sh`, sync the
+cron path and confirm the hashes match before relying on dry-run output:
+
+```bash
+sudo install -m 0755 \
+  /opt/phoenix/app/scripts/ops/weekly-cleanup.sh \
+  /opt/phoenix/scripts/weekly-cleanup.sh
+sha256sum \
+  /opt/phoenix/app/scripts/ops/weekly-cleanup.sh \
+  /opt/phoenix/scripts/weekly-cleanup.sh
+```
+
 Preview the cleanup command first:
 
 ```bash
 PHOENIX_CLEANUP_DRY_RUN=true \
   PHOENIX_CLEANUP_KEEP_LIVE_TAGS=3 \
-  /opt/phoenix/app/scripts/ops/weekly-cleanup.sh
+  /opt/phoenix/scripts/weekly-cleanup.sh
 ```
+
+The dry-run log must include `dry-run:` for destructive Docker prune commands.
+If it does not, stop and resync the cron script before running cleanup.
 
 Run the cleanup only after backups and active image tags have been recorded:
 
 ```bash
 PHOENIX_CLEANUP_KEEP_LIVE_TAGS=3 \
-  /opt/phoenix/app/scripts/ops/weekly-cleanup.sh
+  /opt/phoenix/scripts/weekly-cleanup.sh
 ```
+
+Classify Docker journal warnings as part of the cleanup review. BuildKit
+attestation export warnings, transient Docker socket preface disconnects during
+deploys, and one-off health-check timeouts are review notes when container
+health and release evidence are green. Repeated image-signature validation
+warnings, security-option deprecation warnings, or health-check timeouts outside
+deploy windows should stay on the production backlog until the root cause or
+explicit acceptance is documented.
 
 ## Phase 7 - Host Isolation Review
 

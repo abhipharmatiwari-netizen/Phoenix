@@ -1,8 +1,8 @@
 # OCI VM Runtime Evidence
 
-Last verified: 2026-06-12 03:04 UTC from the running OCI VM.
-OI/ML shadow sidecar evidence was rechecked as present, healthy, and dry-run
-only during the same review.
+Last verified: 2026-06-12 05:47 UTC from the running OCI VM.
+OI/ML shadow sidecar evidence was rechecked as present, healthy, DB-backed, and
+dry-run only during the same review.
 
 The OCI VM is the production source of truth. This file intentionally records
 what is running, including drift from repo templates. Secret values, private IPs,
@@ -36,16 +36,16 @@ OCIDs, broker identifiers, and tokens are redacted.
 | Backend mounts | `/opt/phoenix/logs`, `/opt/phoenix/state`, `/opt/phoenix/certs`, `/run/secrets/*`, plus source-file bind mounts | `docker inspect .Mounts` | Runtime includes host state/log/cert mounts and source overlays | Source bind mounts are current drift |
 | Web mounts | `/opt/phoenix/nginx-ssl-prerendered.conf.template`, `/opt/phoenix/certs`, `/opt/phoenix/acme-challenge`, `/run/secrets/admin_api_key` | `docker inspect .Mounts` | nginx uses a prerendered host template | Repo nginx template is not directly mounted today; this host template was patched with `/health/alerts` and `/health/mitigations` before the latest nginx recreate |
 | Postgres mounts | `/opt/phoenix/pgdata` to `/var/lib/postgresql/data` | `docker inspect .Mounts` | DB data is local VM disk path | Backup/restore docs must use this fact |
-| Logs | `/opt/phoenix/logs`, date-partitioned app logs, audit JSONL, scheduler logs, cert renewal log | `find /opt/phoenix/logs` | Current logs include 2026-06-06 hardening/deployment evidence and root log files | `/opt/phoenix/logs` is writable by container UID |
+| Logs | `/opt/phoenix/logs`, date-partitioned app logs, audit JSONL, scheduler logs, cert renewal log | `find /opt/phoenix/logs` and weekly cleanup dry-run | Current logs include 2026-06-12 hardening/deployment evidence and root log files; stale 2026-06-01 through 2026-06-04 dated log directories were removed by root cleanup on 2026-06-12 | Historical permission-denied lines remain in `cron-cleanup.log` from the stale cleanup script; the cron path now matches the repo script and dry-run logs `dry-run:` for destructive commands |
 | State files | `/opt/phoenix/state/risk_positions.json` and `.bak` | `ls -la /opt/phoenix/state` | Restart helper files exist | Not authoritative over Postgres |
 | Health endpoints | backend container `/health` returns 200; backend `/readyz` returns 200 | `docker exec phoenix-oci-backend curl ...` | Backend liveness and readiness are green; LIVE universe health is part of the readiness gate | `/readyz` must fail when LIVE universe/quote-auth health is failed |
 | nginx health | host `http://localhost/health`, `/readyz`, `/health/summary`, `/health/alerts`, and `/health/mitigations` returned through nginx | `curl` on VM and public curl probes | nginx proxies current health paths | Public nginx `/readyz` and `/health/summary` use redacted backend endpoints; Alerts/Mitigations endpoints return JSON |
 | Release evidence endpoint | `/admin/release-evidence` returns 401 without admin key | `docker exec phoenix-oci-backend curl` | Endpoint exists and requires auth | Do not print admin key |
 | Database tables | `audit_events`, `broker_accounts`, `broker_credentials`, `internal_position_records`, `kill_switch_state`, `order_submission_outbox`, `position_ownership_ledger`, `schema_migrations`, `strategy_configs`, `strategy_config_candidates`, `trades`, tenant/user entitlement tables, and others | `docker exec phoenix-oci-postgres psql -U phoenix_app -d phoenix` | Operational DB schema exists in VM-local Postgres | Backend container does not include `psql` |
-| Cron/systemd | root cron starts at 03:30 UTC Mon-Fri and stops at 18:30 UTC Sun-Fri; root cert renewal; user safety watcher; weekly cleanup in `/etc/cron.d/phoenix-cleanup`; Aurelium backup/retrain cron permissions and backup image env were repaired | `crontab -l`, `sudo crontab -l`, `/etc/cron*`, `/home/opc/aurelium/.artifacts/dr-drill/pg-backup-latest.json` | Cron, not optimizer/reload systemd timers, controls current scheduled operations; latest Aurelium backup evidence is `2026-06-07T05:07:31Z` with a 3.2G dump uploaded to MinIO | `phoenix-runtime-secrets.service` exists but is inactive |
+| Cron/systemd | root cron starts at 03:30 UTC Mon-Fri and stops at 18:30 UTC Sun-Fri; root cert renewal; user safety watcher; weekly cleanup in `/etc/cron.d/phoenix-cleanup`; Aurelium backup/retrain cron permissions and backup image env were repaired | `crontab -l`, `sudo crontab -l`, `/etc/cron*`, `/home/opc/aurelium/.artifacts/dr-drill/pg-backup-latest.json` | Cron, not optimizer/reload systemd timers, controls current scheduled operations; latest Aurelium backup evidence is `2026-06-07T05:07:31Z` with a 3.2G dump uploaded to MinIO; `/opt/phoenix/scripts/weekly-cleanup.sh` was synced from `/opt/phoenix/app/scripts/ops/weekly-cleanup.sh` and hash-verified on 2026-06-12 | `phoenix-runtime-secrets.service` exists but is inactive; after repo deploys, verify the cron cleanup path still matches the repo script before relying on dry-run semantics |
 | Optimizer/reload timers | `phoenix-optimizer.*` and `phoenix-backend-reload.*` not found | `systemctl status` | Not installed on VM | Docs must not claim they are active |
 | Watchdog behavior | watchdog inspect reports no mounts | `docker inspect phoenix-oci-watchdog --format '{{json .Mounts}}'` | Live watchdog is back on the base observe-only contract | Re-run `scripts/ops/recreate_oci_watchdog.sh` if future evidence shows Docker socket access or nginx stop/start actions |
-| Storage headroom | root filesystem is 133G with 51G available and 63% used | `df -h /` after boot-volume expansion | Root disk headroom is back within the operational target | The boot volume was expanded to 150 GB and the filesystem was grown |
+| Storage headroom | root filesystem is 133G with 3.6G available and 98% used after the 2026-06-12 sidecar image build and cleanup-script sync | `df -h /` and `docker system df` | Root disk headroom is unsafe again; issue #345 remains open | The boot volume was expanded earlier, but active co-tenant Docker volumes still dominate disk use; do not run additional image builds without cleanup, volume migration, or capacity expansion evidence |
 | OCI network | VM VNIC has private IP only, no public IP, no NSGs; subnet security list includes SSH, 80, 443, 8443, and ICMP | OCI network read-only inspection | VM is reached through private networking/Bastion/LB path | CIDRs and IPs redacted |
 
 ## 2026-06-06 Production Review / Hardening Backlog
@@ -104,8 +104,53 @@ Operator interpretation for the current dashboard:
 Remaining backlog items require credential or infrastructure owner action:
 
 - rotate the previously exposed secret values and broker credentials;
+- restore durable root-disk headroom through volume migration, capacity
+  expansion, or explicit retention controls;
 - isolate or explicitly risk-accept the unrelated public workloads that still
   share the Phoenix VM.
+
+## 2026-06-12 OI/ML Shadow And Cleanup Verification
+
+Commit `e5e13bd` was deployed to the OI/ML shadow sidecar only as
+`phoenix-oi-ml-shadow:oi-ml-shadow-e5e13bd`. Backend and nginx remained on the
+previous active local image tags during this sidecar-only rollout.
+
+Post-deploy evidence at 2026-06-12 05:42 UTC:
+
+- `phoenix-oi-ml-shadow` was running, Docker-healthy, restart count `0`, and
+  not OOM-killed.
+- Sidecar liveness returned `status=ok`.
+- Sidecar readiness returned `status=ok`, `dry_run_only=true`, and
+  `live_order_path_enabled=false`.
+- DB-backed option-chain evidence since 09:15 IST showed 43,560 rows,
+  split evenly between `angel` and `nse_web`, with 110 validation reports, all
+  `OK`/`INFO`.
+- Shadow order intents remained `0`, which is expected while promoted trading
+  criteria are not met.
+- Secret-permission validation returned `LIVE secret permissions OK`.
+
+The cleanup pass found that `/opt/phoenix/scripts/weekly-cleanup.sh` on the VM
+was stale and ignored `PHOENIX_CLEANUP_DRY_RUN=true` for build-cache pruning.
+It removed the old 2026-06-01 through 2026-06-04 dated log directories, then the
+cron path was synced from `/opt/phoenix/app/scripts/ops/weekly-cleanup.sh` and
+hash-verified. A follow-up dry run logged `dry-run:` for destructive Docker
+prune commands and preserved the active image set.
+
+Docker journal warning sample classification from 2026-06-12:
+
+- `forcibly turning on oci-mediatype mode for attestations`: BuildKit export
+  warning during local image builds; investigate only if paired with a failed
+  build or missing image.
+- `http2: server: error reading preface from client` on `/run/docker.sock`:
+  transient Docker client disconnect noise during CLI/Compose activity; verify
+  container health if it appears outside deploy windows.
+- `Security options with ':' as a separator are deprecated`: Compose/security
+  option syntax warning; clean up during the next compose hardening pass.
+- `failed to validate image signature`: image-signature validation warning;
+  track repeats for active runtime images, but it was not paired with a failed
+  sidecar deployment in this review.
+- Docker health-check timeout: operational warning; current Phoenix containers
+  were healthy during the same evidence capture.
 
 ## 2026-05-20 Position-Authority Recovery
 
