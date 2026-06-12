@@ -94,6 +94,12 @@ def test_oi_ml_shadow_compose_does_not_blank_proxy_env_file_values() -> None:
     assert environment["OI_ML_NSE_VALIDATION_ERROR_RATE_WARN_THRESHOLD"].endswith(
         ":-0.25}"
     )
+    assert (
+        environment["CONTROL_PLANE_DB_DSN"]
+        == "postgresql://${CONTROL_PLANE_PG_USER:?Set CONTROL_PLANE_PG_USER in phoenix-deploy.env}@phoenix-oci-postgres:5432/${CONTROL_PLANE_PG_DB:?Set CONTROL_PLANE_PG_DB in phoenix-deploy.env}?sslmode=prefer"
+    )
+    assert "CONTROL_PLANE_PG_PASSWORD" not in environment
+    assert "PASSWORD" not in environment["CONTROL_PLANE_DB_DSN"]
 
 
 def test_oi_ml_shadow_docker_healthcheck_uses_liveness_not_readiness() -> None:
@@ -229,8 +235,9 @@ def test_redeploy_pulls_and_recreates_nginx_with_backend() -> None:
 def test_oci_runbook_documents_verified_vm_runtime() -> None:
     runbook = _read("docs/runbooks/oci_live_deployment.md")
 
-    assert "phoenix-local-backend:local-2884a87" in runbook
-    assert "phoenix-local-nginx:local-2884a87" in runbook
+    assert "phoenix-local-backend:local-<git-sha>" in runbook
+    assert "phoenix-local-nginx:local-<git-sha>" in runbook
+    assert "docker ps --filter name=phoenix" in runbook
     assert "phoenix-oci-postgres" in runbook
     assert "Docker health status `healthy`" in runbook
     assert "VM-local Postgres" in runbook

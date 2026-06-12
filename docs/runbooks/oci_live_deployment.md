@@ -1,6 +1,6 @@
 # Phoenix OCI LIVE Deployment Runbook
 
-Status: current operator runbook for the OCI VM verified on 2026-06-07.
+Status: current operator runbook for the OCI VM verified on 2026-06-12.
 
 This runbook describes what is actually running on the OCI VM. It does not
 describe the older intended OCIR/external-Postgres deployment as current state.
@@ -30,10 +30,13 @@ Current VM paths and containers:
 
 Latest verified live deployment:
 
-- VM repo checkout: `main` at `bd66682...`
-- running Phoenix image tag: `local-2884a87`
-- backend image: `phoenix-local-backend:local-2884a87`
-- nginx image: `phoenix-local-nginx:local-2884a87`
+- VM repo checkout: verify with `git -C /opt/phoenix/app rev-parse --short HEAD`
+- running Phoenix image tags: verify with
+  `docker ps --filter name=phoenix --format '{{.Names}} {{.Image}}'`
+- backend image: must be the intended `phoenix-local-backend:local-<git-sha>`
+  or approved replacement image for the rollout
+- nginx image: must be the intended `phoenix-local-nginx:local-<git-sha>` or
+  approved replacement image for the rollout
 - live strategy routing: EMA20-only; `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1`
   and non-EMA strategies disabled in `strategy_configs`
 - liveness: backend `/health` and nginx `/health` return HTTP 200
@@ -69,9 +72,10 @@ dry-run only, publishes no host ports, and records option-chain snapshots plus
 shadow order intents in Postgres. It must not be used as evidence that live order
 routing is enabled.
 
-Current sidecar evidence as of 2026-06-06 IST:
+Current sidecar evidence is the running `phoenix-oi-ml-shadow` image tag and
+compose file on the VM. Verify it with `docker ps` and `docker inspect` during
+each deployment; do not rely on older hard-coded SHA examples.
 
-- image: `phoenix-oi-ml-shadow:oi-ml-shadow-2884a87`
 - runtime image source: `/opt/phoenix/app` deploy commit; legacy sidecar checkout `/opt/phoenix/oi-ml-shadow-src` may exist but is not running-image proof
 - compose: `/opt/phoenix/oi-ml-shadow.yml`
 - tables: `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`,
@@ -84,7 +88,9 @@ Current sidecar evidence as of 2026-06-06 IST:
 - health visibility: backend dashboard health uses
   `OI_ML_SHADOW_HEALTH_ENABLED=true` to observe the external sidecar without
   enabling the runner inside the live backend; the sidecar also has a Docker
-  healthcheck
+  liveness healthcheck. Sidecar readiness/data-quality checks use
+  `python -m app.strategies.oi_ml.shadow_health` and require the sidecar
+  compose to provide the VM-local non-secret `CONTROL_PLANE_DB_DSN`.
 - NSE validation: the sidecar falls back to NSE live-derivatives rows when the
   classic NSE option-chain JSON endpoint returns an empty payload; this fallback
   validates OI/volume/LTP only and records skipped IV/bid/ask fields in report
@@ -222,10 +228,10 @@ Expected success evidence:
 
 - backend and web are running; after the 2026-05-21 liveness-healthcheck patch
   they remain Docker-healthy when `/health` is 200 even if `/readyz` is 503
-- backend image is `phoenix-local-backend:local-2884a87` in the latest
-  verified deployment
-- web image is `phoenix-local-nginx:local-2884a87` in the latest verified
-  deployment
+- backend image tag matches the intended deployment SHA or approved replacement
+  image for the rollout
+- web image tag matches the intended deployment SHA or approved replacement
+  image for the rollout
 - `/opt/phoenix/phoenix-override.yml` must also use `/health` for nginx
   Docker health; a VM-local override that still checks `/readyz` will keep the
   web container unhealthy during an intentional trading-readiness halt.
@@ -474,7 +480,7 @@ The operator owns:
 
 | Drift | Evidence | Risk |
 |---|---|---|
-| Local images instead of OCIR | `phoenix-local-backend:local-2884a87`, `phoenix-local-nginx:local-2884a87` verified on 2026-06-06 | Old OCIR docs do not describe current deploy/restart behavior |
+| Local images instead of OCIR | `phoenix-local-backend:local-<git-sha>` and `phoenix-local-nginx:local-<git-sha>` verified from `docker ps` during each rollout | Old OCIR docs do not describe current deploy/restart behavior |
 | VM-local Postgres | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres`; container is Compose-managed and healthy | External DB backup/SSL assumptions are not current |
 | Source bind mounts | backend mounts selected `/opt/phoenix/app/app/...` files | Container image alone is not the full deployed code |
 | Watchdog must remain observe-only | watchdog inspect should report no mounts | Docker socket mounts or nginx stop/start logs indicate stale VM wiring or override drift |

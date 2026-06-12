@@ -97,6 +97,52 @@ def collect_shadow_ingestion_status(
     if not enabled:
         return base
 
+    snapshot_expected = _snapshot_expected(current, config.snapshot_start_time)
+    snapshot_window_active = _within_window(
+        current,
+        config.snapshot_start_time,
+        config.snapshot_end_time,
+    )
+    max_stale_seconds = _env_int(
+        source.get("OI_ML_SHADOW_MAX_STALE_SECONDS"),
+        DEFAULT_MAX_STALE_SECONDS,
+        minimum=30,
+    )
+    if not snapshot_expected:
+        return {
+            **base,
+            "status": "ok",
+            "reason": "before_shadow_snapshot_window",
+            "operator_hint": None,
+            "snapshot_expected": snapshot_expected,
+            "snapshot_window_active": snapshot_window_active,
+            "snapshot_window": {
+                "start": config.snapshot_start_time.isoformat(timespec="minutes"),
+                "end": config.snapshot_end_time.isoformat(timespec="minutes"),
+            },
+            "max_stale_seconds": max_stale_seconds,
+            "option_chain": {
+                "today_row_count": 0,
+                "latest_snapshot_ts": None,
+                "latest_source_ts": None,
+                "latest_ingested_at": None,
+                "latest_ingested_age_seconds": None,
+                "latest_source_future_seconds": None,
+            },
+            "validation_reports": {
+                "today_report_count": 0,
+                "latest_validation_ts": None,
+                "latest_status": "",
+                "latest_severity": "",
+                "latest_primary_quote_count": 0,
+                "latest_reference_quote_count": 0,
+            },
+            "shadow_intents": {
+                "today_intent_count": 0,
+                "latest_created_at": None,
+            },
+        }
+
     day_start = datetime.combine(current.date(), time.min, tzinfo=IST)
     day_end = day_start + timedelta(days=1)
     params = {
@@ -137,17 +183,6 @@ def collect_shadow_ingestion_status(
     latest_validation_status = str(_row_value(latest_validation, "status") or "")
     latest_validation_severity = str(_row_value(latest_validation, "severity") or "")
 
-    snapshot_expected = _snapshot_expected(current, config.snapshot_start_time)
-    snapshot_window_active = _within_window(
-        current,
-        config.snapshot_start_time,
-        config.snapshot_end_time,
-    )
-    max_stale_seconds = _env_int(
-        source.get("OI_ML_SHADOW_MAX_STALE_SECONDS"),
-        DEFAULT_MAX_STALE_SECONDS,
-        minimum=30,
-    )
     validation_required = _env_bool(
         source.get("OI_ML_SHADOW_VALIDATION_REQUIRED"),
         default=False,
