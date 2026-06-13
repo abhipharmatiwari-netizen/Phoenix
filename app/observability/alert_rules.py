@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -442,7 +443,56 @@ def build_default_alert_rules() -> list[AlertRule]:
         labels={"component": "dashboard"},
     ))
 
-    # 14. Leader lease renewal failure
+    # 14. Host disk headroom.
+    def _check_disk_headroom() -> tuple[bool, Any, str]:
+        enabled = str(
+            os.getenv("ALERT_DISK_HEADROOM_ENABLED", "false") or "false"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if not enabled:
+            return False, 0.0, ""
+        path = os.getenv("ALERT_DISK_HEADROOM_PATH", "/app/logs") or "/app/logs"
+        try:
+            usage = shutil.disk_usage(path)
+        except FileNotFoundError:
+            usage = shutil.disk_usage("/")
+            path = "/"
+        total = float(usage.total)
+        used = float(usage.used)
+        free = float(usage.free)
+        used_percent = (used / total * 100.0) if total > 0 else 100.0
+        free_gb = free / (1024.0 ** 3)
+        try:
+            min_free_gb = float(os.getenv("ALERT_DISK_MIN_FREE_GB", "10"))
+            max_used_percent = float(os.getenv("ALERT_DISK_MAX_USED_PERCENT", "90"))
+        except (TypeError, ValueError) as exc:
+            return (
+                True,
+                None,
+                f"Disk headroom alert threshold invalid: {exc}",
+            )
+        if free_gb < min_free_gb or used_percent > max_used_percent:
+            return (
+                True,
+                round(free_gb, 2),
+                (
+                    "Disk headroom below threshold: "
+                    f"path={path} free_gb={free_gb:.2f} "
+                    f"used_percent={used_percent:.1f}% "
+                    f"min_free_gb={min_free_gb:.2f} "
+                    f"max_used_percent={max_used_percent:.1f}%"
+                ),
+            )
+        return False, round(free_gb, 2), ""
+
+    rules.append(AlertRule(
+        name="disk_headroom_low",
+        description="Host-backed filesystem free space is below the production buffer",
+        severity=AlertSeverity.CRITICAL,
+        evaluate_fn=_check_disk_headroom,
+        labels={"component": "storage"},
+    ))
+
+    # 15. Leader lease renewal failure
     def _check_leader_lease_failure() -> tuple[bool, Any, str]:
         from app.observability.prometheus_metrics import _METRICS_STORE
 
@@ -462,7 +512,7 @@ def build_default_alert_rules() -> list[AlertRule]:
         labels={"component": "leader_election"},
     ))
 
-    # 15. Readiness-critical position authority blockers.
+    # 16. Readiness-critical position authority blockers.
     def _check_position_authority_degraded() -> tuple[bool, Any, str]:
         if str(os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper() != "LIVE":
             return False, 0, ""
@@ -510,7 +560,7 @@ def build_default_alert_rules() -> list[AlertRule]:
         labels={"component": "readiness"},
     ))
 
-    # 16. OI/ML shadow ingestion visibility.
+    # 17. OI/ML shadow ingestion visibility.
     def _check_oi_ml_shadow_ingestion() -> tuple[bool, Any, str]:
         try:
             from app.strategies.oi_ml.shadow_health import collect_shadow_ingestion_status

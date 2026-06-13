@@ -1,6 +1,6 @@
 # OCI VM Runtime Evidence
 
-Last verified: 2026-06-12 05:47 UTC from the running OCI VM.
+Last verified: 2026-06-13 06:15 UTC from the running OCI VM.
 OI/ML shadow sidecar evidence was rechecked as present, healthy, DB-backed, and
 dry-run only during the same review.
 
@@ -18,8 +18,8 @@ OCIDs, broker identifiers, and tokens are redacted.
 | Compose project | `phoenix-oci-live` | `docker inspect ... Labels` | backend, nginx, watchdog, and Postgres have Compose labels | `phoenix-oci-postgres` is now managed by the opt-in `vm-local-postgres` profile |
 | Compose files used | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` | `com.docker.compose.project.config_files` labels | These are the active Phoenix Compose files for labelled containers | Runtime override must be treated as authoritative |
 | Env file used | `/opt/phoenix/phoenix-deploy.env` | runtime scripts and Compose commands | Non-secret deploy env file exists on VM | Document names only, not values |
-| Running Phoenix containers | `phoenix-oci-backend`, `phoenix-oci-web`, `phoenix-oci-watchdog`, `phoenix-oci-postgres`, `phoenix-oi-ml-shadow` | `docker ps`, `docker inspect` | Live stack containers and the dry-run sidecar were running during audit | Aurelium containers also run on the host but are outside Phoenix docs |
-| Stopped Phoenix containers | none shown by name | `docker ps -a` | `phoenix-oci-optimizer` is not present | Optimizer systemd units are also absent |
+| Running Phoenix containers | `phoenix-oci-web`, `phoenix-oci-watchdog`, `phoenix-oci-postgres`, `phoenix-oi-ml-shadow`; verify backend runtime state during each rollout | `docker ps`, `docker inspect` | nginx, watchdog, Postgres, and the dry-run sidecar were running during the 2026-06-13 audit | Aurelium containers also run on the host but are outside Phoenix docs |
+| Stopped Phoenix containers | `phoenix-oci-backend` was stopped by the scheduled 18:30 UTC off-hours cron during the 2026-06-13 audit; `phoenix-oci-optimizer` is not present | `docker ps -a`, scheduler log, backend logs | Backend shutdown was graceful with exit code 143 and `OOMKilled=false` | Cron starts backend at 03:30 UTC Monday-Friday and stops it at 18:30 UTC Sunday-Friday |
 | Backend image | Verify with `docker inspect phoenix-oci-backend` | `docker inspect phoenix-oci-backend` | Local image, not OCIR | Source bind mounts are still active |
 | Web image | Verify with `docker inspect phoenix-oci-web` | `docker inspect phoenix-oci-web` | Local image, not OCIR | Public nginx `/readyz` and `/health/summary` proxy to redacted backend endpoints; `/health/alerts` and `/health/mitigations` proxy JSON for the Alerts and Mitigations screens; Overview/Safety use authenticated `/admin/health/summary` for schema, watchdog, and account-count details; `/bff/health/summary`, `/bff/readyz`, and `/bff/dashboard/status` are blocked from direct diagnostic bypass; `/manifest.json`, `/favicon.svg`, and `/favicon.ico` are served as static assets; stale `/static/*` assets return 404 instead of SPA HTML; frontend runtime failures render a visible recovery screen instead of a blank root |
 | Database image | `postgres:16-alpine` | `docker inspect phoenix-oci-postgres` | Compose-managed VM-local Postgres container with Docker health status `healthy` | Container uses the existing `/opt/phoenix/pgdata` mount and password-file env, not a plaintext password value |
@@ -38,14 +38,15 @@ OCIDs, broker identifiers, and tokens are redacted.
 | Postgres mounts | `/opt/phoenix/pgdata` to `/var/lib/postgresql/data` | `docker inspect .Mounts` | DB data is local VM disk path | Backup/restore docs must use this fact |
 | Logs | `/opt/phoenix/logs`, date-partitioned app logs, audit JSONL, scheduler logs, cert renewal log | `find /opt/phoenix/logs` and weekly cleanup dry-run | Current logs include 2026-06-12 hardening/deployment evidence and root log files; stale 2026-06-01 through 2026-06-04 dated log directories were removed by root cleanup on 2026-06-12 | Historical permission-denied lines remain in `cron-cleanup.log` from the stale cleanup script; the cron path now matches the repo script and dry-run logs `dry-run:` for destructive commands |
 | State files | `/opt/phoenix/state/risk_positions.json` and `.bak` | `ls -la /opt/phoenix/state` | Restart helper files exist | Not authoritative over Postgres |
-| Health endpoints | backend container `/health` returns 200; backend `/readyz` returns 200 | `docker exec phoenix-oci-backend curl ...` | Backend liveness and readiness are green; LIVE universe health is part of the readiness gate | `/readyz` must fail when LIVE universe/quote-auth health is failed |
+| Health endpoints | backend endpoints are verified during active runtime; nginx `/nginx-health` remains available while backend is intentionally stopped by cron | `docker exec phoenix-oci-backend curl ...`, scheduler log | Backend liveness/readiness must be green before market operation; LIVE universe health is part of the readiness gate | `/readyz` must fail when LIVE universe/quote-auth health is failed |
 | nginx health | host `http://localhost/health`, `/readyz`, `/health/summary`, `/health/alerts`, and `/health/mitigations` returned through nginx | `curl` on VM and public curl probes | nginx proxies current health paths | Public nginx `/readyz` and `/health/summary` use redacted backend endpoints; Alerts/Mitigations endpoints return JSON |
 | Release evidence endpoint | `/admin/release-evidence` returns 401 without admin key | `docker exec phoenix-oci-backend curl` | Endpoint exists and requires auth | Do not print admin key |
 | Database tables | `audit_events`, `broker_accounts`, `broker_credentials`, `internal_position_records`, `kill_switch_state`, `order_submission_outbox`, `position_ownership_ledger`, `schema_migrations`, `strategy_configs`, `strategy_config_candidates`, `trades`, tenant/user entitlement tables, and others | `docker exec phoenix-oci-postgres psql -U phoenix_app -d phoenix` | Operational DB schema exists in VM-local Postgres | Backend container does not include `psql` |
-| Cron/systemd | root cron starts at 03:30 UTC Mon-Fri and stops at 18:30 UTC Sun-Fri; root cert renewal; user safety watcher; weekly cleanup in `/etc/cron.d/phoenix-cleanup`; Aurelium backup/retrain cron permissions and backup image env were repaired | `crontab -l`, `sudo crontab -l`, `/etc/cron*`, `/home/opc/aurelium/.artifacts/dr-drill/pg-backup-latest.json` | Cron, not optimizer/reload systemd timers, controls current scheduled operations; latest Aurelium backup evidence is `2026-06-07T05:07:31Z` with a 3.2G dump uploaded to MinIO; `/opt/phoenix/scripts/weekly-cleanup.sh` was synced from `/opt/phoenix/app/scripts/ops/weekly-cleanup.sh` and hash-verified on 2026-06-12 | `phoenix-runtime-secrets.service` exists but is inactive; after repo deploys, verify the cron cleanup path still matches the repo script before relying on dry-run semantics |
+| Cron/systemd | root cron starts at 03:30 UTC Mon-Fri and stops at 18:30 UTC Sun-Fri; root cert renewal; user safety watcher; weekly cleanup in `/etc/cron.d/phoenix-cleanup`; Aurelium backup/retrain cron permissions and backup image env were repaired | `crontab -l`, `sudo crontab -l`, `/etc/cron*`, `/home/opc/aurelium/.artifacts/dr-drill/pg-backup-latest.json` | Cron, not optimizer/reload systemd timers, controls current scheduled operations; latest Aurelium backup evidence is `2026-06-07T05:07:31Z` with a 3.2G dump uploaded to MinIO; `/opt/phoenix/scripts/weekly-cleanup.sh` was synced from `/opt/phoenix/app/scripts/ops/weekly-cleanup.sh` and hash-verified on 2026-06-12; co-tenant resource-cap cron is installed from `scripts/ops/enforce_cotenant_resource_caps.sh` during isolation remediation | `phoenix-runtime-secrets.service` exists but is inactive; after repo deploys, verify the cron cleanup path still matches the repo script before relying on dry-run semantics |
 | Optimizer/reload timers | `phoenix-optimizer.*` and `phoenix-backend-reload.*` not found | `systemctl status` | Not installed on VM | Docs must not claim they are active |
 | Watchdog behavior | watchdog inspect reports no mounts | `docker inspect phoenix-oci-watchdog --format '{{json .Mounts}}'` | Live watchdog is back on the base observe-only contract | Re-run `scripts/ops/recreate_oci_watchdog.sh` if future evidence shows Docker socket access or nginx stop/start actions |
-| Storage headroom | root filesystem is 133G with 3.6G available and 98% used after the 2026-06-12 sidecar image build and cleanup-script sync | `df -h /` and `docker system df` | Root disk headroom is unsafe again; issue #345 remains open | The boot volume was expanded earlier, but active co-tenant Docker volumes still dominate disk use; do not run additional image builds without cleanup, volume migration, or capacity expansion evidence |
+| Storage headroom | root filesystem is 183G with 45G available and 76% used after the 2026-06-13 storage verification; Docker reported 9.381G images, 1.086G containers, 91.5G local volumes, and 1.399G build cache | `df -h /`, `lsblk`, and `docker system df` | Root disk headroom is back inside the production buffer; `/health/alerts` now has the `disk_headroom_low` rule enabled by OCI Compose | Keep weekly cleanup and disk alerts active before large local image builds |
+| Co-tenant resource controls | Aurelium remains on the host with reviewed public ports and explicit Docker CPU/memory/PID caps enforced by `/opt/phoenix/scripts/enforce-cotenant-resource-caps.sh` plus cron | `docker ps`, `docker inspect .HostConfig`, `/etc/cron.d/phoenix-cotenant-resource-caps` | Shared-host operation is a compensating-control state, not the preferred architecture | Dedicated Phoenix hosting remains the preferred target for future capacity work |
 | OCI network | VM VNIC has private IP only, no public IP, no NSGs; subnet security list includes SSH, 80, 443, 8443, and ICMP | OCI network read-only inspection | VM is reached through private networking/Bastion/LB path | CIDRs and IPs redacted |
 
 ## 2026-06-06 Production Review / Hardening Backlog
@@ -83,7 +84,8 @@ Implemented and deployed in the hardening pass:
 - authenticated `/admin/health/summary` now provides operator-only internal
   schema/watchdog/account diagnostics, and direct BFF diagnostic bypasses are
   blocked;
-- root disk was expanded and Docker build cache was pruned;
+- root disk was expanded, Docker build cache was pruned, and a critical
+  `disk_headroom_low` alert now guards the 10G/90% production buffer;
 - `phoenix-oci-postgres` was adopted into the Compose `vm-local-postgres`
   profile with Docker health metadata;
 - `phoenix-oci-watchdog` was recreated with no Docker socket and no mounts.
@@ -104,10 +106,8 @@ Operator interpretation for the current dashboard:
 Remaining backlog items require credential or infrastructure owner action:
 
 - rotate the previously exposed secret values and broker credentials;
-- restore durable root-disk headroom through volume migration, capacity
-  expansion, or explicit retention controls;
-- isolate or explicitly risk-accept the unrelated public workloads that still
-  share the Phoenix VM.
+- move Phoenix to a dedicated host when capacity allows; until then, keep the
+  co-tenant resource-cap cron and public-port review evidence current.
 
 ## 2026-06-12 OI/ML Shadow And Cleanup Verification
 
@@ -407,6 +407,6 @@ option_chain_validation_reports
 | P1 | Production docs previously described OCIR images and external OCI DB as current | VM runs `phoenix-local-*` images and `phoenix-oci-postgres` | Keep docs tied to VM evidence until deployment changes |
 | P1 | Source-file bind mounts in backend | backend mounts multiple `/opt/phoenix/app/app/...` files | Treat as current drift; remove only through an approved deployment change |
 | P1 | Secret values exposed before hardening still require rotation | 2026-06-06 production review | Rotate admin/auth/DB/broker/dashboard credentials through approved owner workflows |
-| P1 | Phoenix VM still hosts unrelated public workloads | OCI VM process/container inventory | Move the co-tenant workloads or formally risk-accept the shared host |
+| P2 | Phoenix VM still hosts capped unrelated workloads | OCI VM process/container inventory and resource-cap cron | Prefer dedicated Phoenix hosting in future capacity work; keep public-port review and Docker cap evidence current while shared-host operation remains accepted |
 | P2 | Optimizer/reload timers are documented in older docs but not installed | `systemctl status` | Mark optimizer/reload timer docs as non-current until installed |
 | P2 | `/api/health` is not a health endpoint through nginx | curl returned SPA HTML | Use `/health` and `/readyz` |

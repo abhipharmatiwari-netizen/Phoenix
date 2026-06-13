@@ -45,7 +45,7 @@ pager policy.
 | `phoenix_orders_submitted_total` | gauge | signal metrics bridge | Mirrored from in-memory signal summary |
 | `phoenix_uptime_app_seconds` | gauge | signal metrics bridge | App uptime from signal metrics |
 
-The alert rules also read optional metrics such as `phoenix_quote_age_seconds`, `phoenix_broker_sync_age_seconds`, `phoenix_stuck_orders_count`, `phoenix_reconciliation_backlog_count`, `phoenix_outbox_pending_count`, `phoenix_ownership_conflicts_total`, `phoenix_deadletter_count`, `phoenix_dashboard_lag_seconds`, and `phoenix_lease_renewal_failures_total` when those are populated by runtime components.
+The alert rules also read optional metrics such as `phoenix_quote_age_seconds`, `phoenix_broker_sync_age_seconds`, `phoenix_stuck_orders_count`, `phoenix_reconciliation_backlog_count`, `phoenix_outbox_pending_count`, `phoenix_ownership_conflicts_total`, `phoenix_deadletter_count`, `phoenix_dashboard_lag_seconds`, and `phoenix_lease_renewal_failures_total` when those are populated by runtime components. The `disk_headroom_low` rule reads host-backed filesystem usage directly for the configured alert path.
 
 ## Day-1 Alert Rules
 
@@ -64,6 +64,7 @@ The alert rules also read optional metrics such as `phoenix_quote_age_seconds`, 
 | `ownership_conflicts` | critical | ownership conflicts > 3 |
 | `deadletter_growth` | warning | deadletter count > 0 |
 | `dashboard_freshness_lag` | info | dashboard lag > 10 seconds |
+| `disk_headroom_low` | critical | enabled disk path has less than 10G free or more than 90% used by default; malformed thresholds fail closed |
 | `leader_lease_failure` | critical | leader lease renewal failure > 0 |
 
 ## Cutover Expectations

@@ -40,8 +40,8 @@ Collect all of the following without printing secret values:
 | Deploy env secret scan | `scripts/ops/check_env_secret_material.sh` passes without printing values |
 | Host-header boundary | malformed `Host` values return HTTP 400 before admin/BFF auth handling |
 | Watchdog contract | `docker inspect phoenix-oci-watchdog --format '{{json .Mounts}}'` returns an empty list |
-| Disk headroom | root filesystem has safe free-space buffer |
-| Cleanup and isolation | active image tags, rollback set, co-tenant workloads, and storage headroom are documented |
+| Disk headroom | root filesystem has safe free-space buffer and `/health/alerts` includes `disk_headroom_low` |
+| Cleanup and isolation | active image tags, rollback set, co-tenant workloads, Docker resource caps, and storage headroom are documented |
 | Release evidence endpoint | authenticated `/admin/release-evidence` passes the criteria below |
 
 ## Release Evidence Fields

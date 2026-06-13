@@ -16,25 +16,28 @@ The runtime glossary and operator-facing endpoint behavior index is
 
 ### 0.1 Verified OCI VM Runtime
 
-Verified on 2026-06-06 from the running OCI VM:
+Verified on 2026-06-13 from the running OCI VM:
 
 - Repo checkout: `/opt/phoenix/app`
-- Active branch/commit: `main`, runtime images built from `2884a87...`; deploy
-  env image tag `local-2884a87`
+- Active branch/commit: `main`; verify checkout SHA and running image tags from
+  release evidence for each rollout
 - Compose project: `phoenix-oci-live`
 - Compose files: `/opt/phoenix/app/docker-compose.oci-live.yml` plus `/opt/phoenix/phoenix-override.yml`
 - Env file: `/opt/phoenix/phoenix-deploy.env`
-- Backend: `phoenix-oci-backend`, image `phoenix-local-backend:local-2884a87`, command `python -m app.main`
-- Web: `phoenix-oci-web`, image `phoenix-local-nginx:local-2884a87`
+- Backend: `phoenix-oci-backend`, image `phoenix-local-backend:local-<git-sha>`, command `python -m app.main`; cron stops it outside scheduled runtime
+- Web: `phoenix-oci-web`, image `phoenix-local-nginx:local-<git-sha>`
 - Database: VM-local `phoenix-oci-postgres`, image `postgres:16-alpine`, Compose-managed with Docker health status `healthy`
 - Watchdog: `phoenix-oci-watchdog`, image `docker:cli`, observe-only with no Docker socket or mounts
-- OI/ML shadow sidecar: `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-2884a87`, dry-run only, no host ports, fail-closed with `OI_ML_SHADOW_SCORER=missing`
-- Runtime health: backend `/health`, `/ready`, `/readyz`, and `/health/summary` return 200 from inside the backend container
-- Health evidence: `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE`; backend-local `/readyz` returns 200; public nginx `/readyz` and `/health/summary` are redacted; public nginx `/health/alerts` and `/health/mitigations` proxy JSON to support the operator screens
+- OI/ML shadow sidecar: `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-<git-sha>`, dry-run only, no host ports, fail-closed with `OI_ML_SHADOW_SCORER=missing`
+- Runtime health: during active runtime, backend `/health`, `/ready`, `/readyz`, and `/health/summary` return 200 from inside the backend container
+- Health evidence: during active runtime, `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE`; backend-local `/readyz` returns 200; public nginx `/readyz` and `/health/summary` are redacted; public nginx `/health/alerts` and `/health/mitigations` proxy JSON to support the operator screens
 - Frontend health rendering: the Overview and Safety dashboards use
   authenticated `/admin/health/summary` for internal-only schema, watchdog, and
   account-count fields; they fall back to redacted public `/health/summary`
   without crashing when authentication is unavailable
+- Root filesystem: 183G total with 45G available and 76% used at the
+  2026-06-13 storage verification; `disk_headroom_low` alerts before the
+  10G/90% production buffer is breached
 
 The current VM differs from the intended OCIR/external-Postgres shape in these
 important ways:
@@ -44,8 +47,9 @@ important ways:
 - The backend has source-file bind mounts from `/opt/phoenix/app`.
 - `CONTROL_PLANE_PG_SSLMODE=prefer` and `LIVE_PG_SSL_SKIP_CHECK=true` are present for the local DB path.
 - The nginx container mounts `/opt/phoenix/nginx-ssl-prerendered.conf.template`, not the repo nginx template directly. Keep this host template in sync with repo route changes before recreating nginx.
-- Phoenix still shares the VM with unrelated public workloads until the
-  isolation backlog is resolved or risk-accepted.
+- Phoenix still shares the VM with unrelated public workloads, but the residual
+  co-tenant workload has public-port review and Docker CPU/memory/PID caps as
+  compensating controls. Dedicated Phoenix hosting remains preferred.
 
 These facts are operational state, not recommendations. Any future move to OCIR
 images or external Postgres requires a fresh VM evidence capture and doc update.
