@@ -4,8 +4,9 @@ Phoenix is currently operated from an OCI VM. The running OCI VM is the only
 source of truth for production documentation; repo manifests and historical
 runbooks are secondary evidence only when they match that VM.
 
-Last verified against the VM: 2026-06-06 16:07 UTC.
-OI/ML shadow sidecar deployment was verified on 2026-06-06 21:37 IST.
+Last verified against the VM: 2026-06-13 06:15 UTC.
+OI/ML shadow sidecar deployment was rechecked as healthy and dry-run only during
+the same review.
 
 ## Current OCI VM State
 
@@ -13,15 +14,15 @@ OI/ML shadow sidecar deployment was verified on 2026-06-06 21:37 IST.
 |---|---|
 | Host | `phoenix-vm` |
 | Repo checkout | `/opt/phoenix/app` |
-| Git state on VM | branch `main`; runtime images built from commit `2884a87`; deploy env image tag `local-2884a87` |
+| Git state on VM | branch `main`; verify checkout SHA and running image tags from release evidence for each rollout |
 | Compose project | `phoenix-oci-live` |
 | Compose files in use | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` |
 | Env file in use | `/opt/phoenix/phoenix-deploy.env` |
-| Backend container | `phoenix-oci-backend`, image `phoenix-local-backend:local-2884a87`, healthy |
-| Web container | `phoenix-oci-web`, image `phoenix-local-nginx:local-2884a87`, healthy |
+| Backend container | `phoenix-oci-backend`, local `phoenix-local-backend:local-<git-sha>` image; cron stops it outside scheduled runtime |
+| Web container | `phoenix-oci-web`, local `phoenix-local-nginx:local-<git-sha>` image, healthy |
 | Database | VM-local `phoenix-oci-postgres` container, `postgres:16-alpine`, Compose-managed and Docker-healthy |
 | Watchdog | `phoenix-oci-watchdog`, `docker:cli`; observe-only, no Docker socket or mounts |
-| OI/ML shadow sidecar | `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-2884a87`, dry-run only; deployed fail-closed with `OI_ML_SHADOW_SCORER=missing` until validated LightGBM artifacts are configured |
+| OI/ML shadow sidecar | `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-<git-sha>`, dry-run only; deployed fail-closed with `OI_ML_SHADOW_SCORER=missing` until validated LightGBM artifacts are configured |
 | Backend command | `python -m app.main` |
 | Public backend exposure | backend port `8080` is container-only; nginx exposes host ports `80` and `8443` |
 | Health checks | backend container: `/health`, `/ready`, `/readyz`, `/health/summary`, `/health/alerts`, `/health/mitigations`; nginx/host: `/health`, redacted `/readyz`, redacted `/health/summary`, JSON `/health/alerts`, JSON `/health/mitigations` |
@@ -32,12 +33,13 @@ OI/ML shadow sidecar deployment was verified on 2026-06-06 21:37 IST.
 
 Current drift that operators must not normalize:
 
-- The VM is not running OCIR images; Phoenix backend and nginx are running local
-  images tagged `local-2884a87`.
+- The VM is not running OCIR images; Phoenix backend and nginx run local
+  images tagged `local-<git-sha>`.
 - The VM is not using an external OCI Database for PostgreSQL; it is using a VM-local Postgres container.
 - The backend has source-file bind mounts from `/opt/phoenix/app` into the container.
 - `CONTROL_PLANE_PG_SSLMODE=prefer` and `LIVE_PG_SSL_SKIP_CHECK=true` are present because the DB is local to the VM.
-- Phoenix still shares the VM with unrelated public workloads until issue #349 is resolved or explicitly risk-accepted.
+- Phoenix still shares the VM with capped unrelated public workloads; dedicated
+  Phoenix hosting remains the preferred future capacity state.
 - Previously exposed secret values still require rotation even though file permissions are now hardened.
 
 See [OCI VM Runtime Evidence](docs/OCI_VM_RUNTIME.md) for the evidence table.

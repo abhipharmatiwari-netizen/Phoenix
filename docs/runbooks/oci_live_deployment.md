@@ -1,6 +1,6 @@
 # Phoenix OCI LIVE Deployment Runbook
 
-Status: current operator runbook for the OCI VM verified on 2026-06-12.
+Status: current operator runbook for the OCI VM verified on 2026-06-13.
 
 This runbook describes what is actually running on the OCI VM. It does not
 describe the older intended OCIR/external-Postgres deployment as current state.
@@ -54,9 +54,12 @@ Latest verified live deployment:
 - database: `phoenix-oci-postgres` is Compose-managed with Docker health
   status `healthy`
 - watchdog: `phoenix-oci-watchdog` has no Docker socket or other mounts
-- root filesystem: 133G total with 3.6G available and 98% used at the
-  2026-06-12 cleanup verification; keep issue #345 open until durable headroom
-  and retention controls are restored
+- root filesystem: 183G total with 45G available and 76% used at the
+  2026-06-13 storage verification; `/health/alerts` includes the
+  `disk_headroom_low` rule with a 10G free-space and 90% used-space threshold
+- co-tenant controls: Aurelium remains on the host only with compensating
+  resource-cap enforcement from
+  `/opt/phoenix/scripts/enforce-cotenant-resource-caps.sh`
 
 Non-current for this VM unless a later evidence capture proves otherwise:
 

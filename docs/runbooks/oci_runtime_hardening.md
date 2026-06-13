@@ -248,6 +248,18 @@ PHOENIX_CLEANUP_KEEP_LIVE_TAGS=3 \
   /opt/phoenix/scripts/weekly-cleanup.sh
 ```
 
+The OCI LIVE Compose manifest enables the `disk_headroom_low` alert in
+`/health/alerts` with these default thresholds:
+
+- `ALERT_DISK_HEADROOM_PATH=/app/logs`
+- `ALERT_DISK_MIN_FREE_GB=10`
+- `ALERT_DISK_MAX_USED_PERCENT=90`
+
+Capture `df -h /`, `docker system df`, and `/health/alerts` output after any
+volume expansion, image build, or cleanup run. The disk alert must remain wired
+before closing storage-headroom incidents; malformed alert thresholds fail
+closed as a critical storage alert.
+
 Classify Docker journal warnings as part of the cleanup review. BuildKit
 attestation export warnings, transient Docker socket preface disconnects during
 deploys, and one-off health-check timeouts are review notes when container
@@ -271,6 +283,32 @@ following before market operation:
 - the migration plan to move Phoenix or the co-tenant workload is tracked in
   the production backlog.
 
+When the Aurelium co-tenant remains on the Phoenix host, deploy the resource
+cap enforcement script and a root cron entry so container restarts cannot leave
+the workload uncapped:
+
+```bash
+sudo install -m 0755 \
+  /opt/phoenix/app/scripts/ops/enforce_cotenant_resource_caps.sh \
+  /opt/phoenix/scripts/enforce-cotenant-resource-caps.sh
+
+sudo tee /etc/cron.d/phoenix-cotenant-resource-caps >/dev/null <<'EOF'
+*/5 * * * * root /opt/phoenix/scripts/enforce-cotenant-resource-caps.sh >> /opt/phoenix/logs/cotenant-resource-caps.log 2>&1
+EOF
+sudo chmod 0644 /etc/cron.d/phoenix-cotenant-resource-caps
+
+sudo /opt/phoenix/scripts/enforce-cotenant-resource-caps.sh
+```
+
+The script uses `docker update` only. It must not stop, start, remove, or
+recreate co-tenant containers. Verify active caps without printing env values:
+
+```bash
+docker inspect \
+  aurelium-api-1 aurelium-clickhouse-1 aurelium-postgres-1 \
+  --format '{{.Name}} cpus={{.HostConfig.NanoCpus}} memory={{.HostConfig.Memory}} pids={{.HostConfig.PidsLimit}}'
+```
+
 Do not close the host-isolation finding from repository changes alone. It
 requires VM evidence showing a dedicated host or documented compensating
-controls.
+controls, including current public-port review and resource-cap evidence.

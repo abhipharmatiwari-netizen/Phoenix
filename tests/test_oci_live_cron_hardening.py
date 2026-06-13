@@ -73,6 +73,42 @@ def test_oci_container_healthchecks_use_liveness_not_readiness() -> None:
     assert "/readyz" not in nginx_probe
 
 
+def test_oci_backend_enables_disk_headroom_alert() -> None:
+    compose = _oci_compose()
+    environment = compose["x-live-backend-env"]
+
+    assert environment["ALERT_DISK_HEADROOM_ENABLED"] == "true"
+    assert environment["ALERT_DISK_HEADROOM_PATH"] == "/app/logs"
+    assert environment["ALERT_DISK_MIN_FREE_GB"].endswith(":-10}")
+    assert environment["ALERT_DISK_MAX_USED_PERCENT"].endswith(":-90}")
+
+
+def test_cotenant_resource_cap_script_is_idempotent_runtime_only() -> None:
+    script = _read("scripts/ops/enforce_cotenant_resource_caps.sh")
+
+    assert "docker update" in script
+    assert "--cpus" in script
+    assert "--memory" in script
+    assert "--memory-swap" in script
+    assert "--pids-limit" in script
+    assert "COTENANT_CONTAINER_PREFIX" in script
+    assert 'apply_cap "${PREFIX}api-1" "2.0" "6g" "1024"' in script
+    assert 'apply_cap "${PREFIX}clickhouse-1" "2.0" "6g" "2048"' in script
+
+    forbidden_fragments = (
+        "docker stop",
+        "docker start",
+        "docker restart",
+        "docker rm",
+        "docker compose",
+        "docker-compose",
+        "down ",
+        "up -d",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in script
+
+
 def test_oci_override_template_nginx_healthcheck_uses_liveness() -> None:
     override = _read("phoenix-override.yml.example")
     healthcheck_block = override.split("healthcheck:", 1)[1].split("ports:", 1)[0]

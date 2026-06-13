@@ -216,6 +216,33 @@ class TestBuiltInRules:
         assert alert.value == 0
         assert "option_chain_rows_missing" in alert.message
 
+    def test_disk_headroom_alert_fires_when_enabled(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ALERT_DISK_HEADROOM_ENABLED", "true")
+        monkeypatch.setenv("ALERT_DISK_HEADROOM_PATH", str(tmp_path))
+        monkeypatch.setenv("ALERT_DISK_MIN_FREE_GB", "999999")
+        monkeypatch.setenv("ALERT_DISK_MAX_USED_PERCENT", "1")
+
+        ev = get_alert_evaluator()
+        results = ev.evaluate_all()
+        alert = next(r for r in results if r.rule_name == "disk_headroom_low")
+
+        assert alert.state == AlertState.FIRING
+        assert alert.severity == AlertSeverity.CRITICAL
+        assert "Disk headroom below threshold" in alert.message
+
+    def test_disk_headroom_alert_fails_closed_on_bad_threshold(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ALERT_DISK_HEADROOM_ENABLED", "true")
+        monkeypatch.setenv("ALERT_DISK_HEADROOM_PATH", str(tmp_path))
+        monkeypatch.setenv("ALERT_DISK_MIN_FREE_GB", "not-a-number")
+
+        ev = get_alert_evaluator()
+        results = ev.evaluate_all()
+        alert = next(r for r in results if r.rule_name == "disk_headroom_low")
+
+        assert alert.state == AlertState.FIRING
+        assert alert.severity == AlertSeverity.CRITICAL
+        assert "Disk headroom alert threshold invalid" in alert.message
+
     def test_stuck_orders_alert_fires(self):
         gauge_set("phoenix_stuck_orders_count", 1)
         ev = get_alert_evaluator()

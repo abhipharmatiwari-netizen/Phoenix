@@ -1,7 +1,8 @@
 # Documentation Audit
 
-Audit date: 2026-06-12. Runtime snapshot refreshed after the OCI LIVE hardening
-deploy series, OI/ML shadow readiness review, and cleanup-script sync.
+Audit date: 2026-06-13. Runtime snapshot refreshed after the OCI LIVE hardening
+deploy series, OI/ML shadow readiness review, cleanup-script sync, storage
+headroom verification, and co-tenant isolation remediation.
 
 Scope: repository documentation, environment examples, Compose comments, and
 operator-facing runbooks were checked against the running OCI VM. The OCI VM
@@ -16,7 +17,7 @@ overrides repo docs and historical plans when there is a conflict.
 | Compose project | `phoenix-oci-live` |
 | Compose files | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` |
 | Env file | `/opt/phoenix/phoenix-deploy.env` |
-| Backend | `phoenix-oci-backend`, local Phoenix backend image verified from `docker ps`, healthy |
+| Backend | `phoenix-oci-backend`, local Phoenix backend image verified during each rollout; cron stops it outside scheduled runtime |
 | Web | `phoenix-oci-web`, local Phoenix nginx image verified from `docker ps`, healthy |
 | OI/ML shadow sidecar | `phoenix-oi-ml-shadow`, sidecar image verified from `docker ps`, healthy and dry-run only |
 | Database | VM-local `phoenix-oci-postgres`, `postgres:16-alpine`, Compose-managed and Docker-healthy |
@@ -24,7 +25,7 @@ overrides repo docs and historical plans when there is a conflict.
 | Runtime mode | `/health/summary` reports `HUB_AUTHORITATIVE`; `/health` reports `strategy_bridge_order_router` |
 | Health endpoints | backend-local `/health`, `/ready`, `/readyz`, `/health/summary`, `/health/alerts`, `/health/mitigations`; public nginx `/health`, redacted `/readyz`, redacted `/health/summary`, JSON `/health/alerts`, JSON `/health/mitigations` |
 | Frontend health rendering | Overview and Safety use authenticated `/admin/health/summary` for internal diagnostics and fall back to redacted public `/health/summary` |
-| Storage | root filesystem is 133G with 3.6G available and 98% used after the OI/ML sidecar rebuild; issue #345 remains open |
+| Storage | root filesystem is 183G with 45G available and 76% used; OCI Compose enables the `disk_headroom_low` alert |
 | Secret model | `/run/secrets/*`; permission validator passes; docs may list names only |
 
 Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
@@ -78,14 +79,15 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | Release evidence guidance treated Docker health as sufficient wait evidence | Current release guidance requires `/readyz` trading-readiness evidence in addition to liveness |
 | VM cleanup cron used a stale script path with unsafe dry-run behavior | The cron path is now documented as `/opt/phoenix/scripts/weekly-cleanup.sh`, the sync/hash check is in the hardening runbook, and regression tests assert destructive commands route through dry-run logging |
 | Docker journal warnings were unclassified review noise | `docs/OCI_VM_RUNTIME.md` now classifies the 2026-06-12 BuildKit, Docker socket, security-option, image-signature, and health-check warning samples |
+| Root disk headroom and disk alerting were incomplete | `docs/OCI_VM_RUNTIME.md` records the 2026-06-13 45G free/76% used root filesystem evidence; `docker-compose.oci-live.yml` enables the `disk_headroom_low` alert |
+| Co-tenant workload lacked explicit runtime caps | `scripts/ops/enforce_cotenant_resource_caps.sh` applies Docker CPU, memory, swap, and PID caps idempotently; the hardening runbook installs it with cron |
 
 ## Open Documentation-Backed Risks
 
 | Risk | Severity | Current doc location |
 |---|---|---|
 | Previously exposed secret values still require rotation | P0 | `docs/OCI_VM_RUNTIME.md`, `README.md` |
-| Phoenix still shares the VM with unrelated public workloads | P1 | `docs/OCI_VM_RUNTIME.md`, `README.md`, `ARCHITECTURE.md` |
-| Disk alerting and retention policy are not complete | P1 | `docs/OCI_VM_RUNTIME.md`, `docs/runbooks/oci_runtime_hardening.md` |
+| Phoenix still shares the VM with capped unrelated workloads | P2 | `docs/OCI_VM_RUNTIME.md`, `docs/runbooks/oci_runtime_hardening.md` |
 | Deployment-env backup retention and forbidden secret-like scanning remain open | P1 | `docs/OCI_VM_RUNTIME.md`, `docs/runbooks/oci_live_deployment.md` |
 
 ## Canonical Operator Map
