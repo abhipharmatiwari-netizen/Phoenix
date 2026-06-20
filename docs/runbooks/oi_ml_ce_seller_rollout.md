@@ -4,6 +4,11 @@ Status: promotion and rollback checklist for the intraday NIFTY OI/ML CE seller.
 Use this after the shadow sidecar gate in `oi_ml_shadow_sidecar.md` has fresh
 market-session evidence.
 
+Current operational state (2026-06-20): the sidecar is dormant, its runner,
+snapshotter, restart policy, and backend monitoring are disabled, and no fresh
+promotion evidence is accumulating. Promotion is blocked until an explicitly
+approved reactivation produces new clean-session evidence.
+
 This runbook does not authorize live orders by itself. `oi_ml_ce_seller` remains
 disabled by default in `app/config/strategy_env.yaml`, with `allow_naked=false`,
 and must not be added to selector dispatch or live routing until every gate below

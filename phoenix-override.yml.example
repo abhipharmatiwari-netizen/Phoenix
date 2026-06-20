@@ -1,7 +1,7 @@
 # phoenix-override.yml.example
 #
 # Status: mirrors the current /opt/phoenix/phoenix-override.yml shape verified on
-# the OCI VM on 2026-06-06. Keep filled copies off git.
+# the OCI VM on 2026-06-20. Keep filled copies off git.
 #
 # This is a current-state template, not a target-state recommendation. It
 # includes local images, VM-local Postgres wiring, nginx prerendered config, and
@@ -19,7 +19,10 @@ services:
       ANGEL_HTTPS_PROXY: "http://<PROXY_HOST>:8888"
       HTTPS_PROXY: "http://<PROXY_HOST>:8888"
 
+      PHOENIX_DOMAIN: "<PHOENIX_DOMAIN>"
+      PHOENIX_ALLOWED_HOSTS: ""
       CORS_ORIGINS: "https://<PHOENIX_DOMAIN>"
+      OI_ML_SHADOW_HEALTH_ENABLED: "false"
 
       # Current VM-local Postgres path.
       CONTROL_PLANE_DB_DSN: "postgresql://phoenix_app@phoenix-oci-postgres:5432/phoenix"

@@ -16,11 +16,11 @@ The runtime glossary and operator-facing endpoint behavior index is
 
 ### 0.1 Verified OCI VM Runtime
 
-Verified on 2026-06-13 from the running OCI VM:
+Verified on 2026-06-20 from the running OCI VM:
 
 - Repo checkout: `/opt/phoenix/app`
-- Active branch/commit: `main`; verify checkout SHA and running image tags from
-  release evidence for each rollout
+- Active branch/commit: `main` at `1d0ca01`; backend and nginx images are
+  `local-1d0ca01`
 - Compose project: `phoenix-oci-live`
 - Compose files: `/opt/phoenix/app/docker-compose.oci-live.yml` plus `/opt/phoenix/phoenix-override.yml`
 - Env file: `/opt/phoenix/phoenix-deploy.env`
@@ -28,13 +28,21 @@ Verified on 2026-06-13 from the running OCI VM:
 - Web: `phoenix-oci-web`, image `phoenix-local-nginx:local-<git-sha>`
 - Database: VM-local `phoenix-oci-postgres`, image `postgres:16-alpine`, Compose-managed with Docker health status `healthy`
 - Watchdog: `phoenix-oci-watchdog`, image `docker:cli`, observe-only with no Docker socket or mounts
-- OI/ML shadow sidecar: `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-<git-sha>`, dry-run only, no host ports, fail-closed with `OI_ML_SHADOW_SCORER=missing`
+- Runtime authority: `APP_ENV=production`, `TRADE_MODE=LIVE`,
+  `REQUIRE_LIVE_TRADE_MODE=true`, LIVE leader lease `phoenix-oci-live`, and
+  EMA20-only routing with one active strategy per underlying
+- OI/ML shadow sidecar: retained `phoenix-oi-ml-shadow` image
+  `oi-ml-shadow-e5e13bd`, stopped with restart policy `no`; runner,
+  snapshotter, and backend health monitoring disabled
 - Runtime health: during active runtime, backend `/health`, `/ready`, `/readyz`, and `/health/summary` return 200 from inside the backend container
 - Health evidence: during active runtime, `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE`; backend-local `/readyz` returns 200; public nginx `/readyz` and `/health/summary` are redacted; public nginx `/health/alerts` and `/health/mitigations` proxy JSON to support the operator screens
 - Frontend health rendering: the Overview and Safety dashboards use
   authenticated `/admin/health/summary` for internal-only schema, watchdog, and
   account-count fields; they fall back to redacted public `/health/summary`
   without crashing when authentication is unavailable
+- Host boundary: the canonical deployment domain is forwarded to the backend
+  Host allow-list; malformed and unapproved Host values remain rejected before
+  authentication and protected routes
 - Root filesystem: 183G total with 45G available and 76% used at the
   2026-06-13 storage verification; `disk_headroom_low` alerts before the
   10G/90% production buffer is breached
@@ -54,9 +62,10 @@ important ways:
 These facts are operational state, not recommendations. Any future move to OCIR
 images or external Postgres requires a fresh VM evidence capture and doc update.
 
-The OI/ML CE seller sidecar is not part of the live order authority path. It is
-currently a shadow-only process that writes `option_chain_1m` and
-`oi_ml_shadow_order_intents` records for validation. Promotable shadow decisions
+The OI/ML CE seller sidecar is not part of the live order authority path and is
+currently dormant. Its historical `option_chain_1m`,
+`oi_ml_shadow_order_intents`, validation reports, image, and logs are retained,
+but no new ingestion or decisions run. Promotable shadow decisions
 must use trained/validated model artifacts, fresh source timestamps, IV and
 Greeks on candidate quotes, latest validation status not `ERROR`, and dry-run
 virtual lifecycle evidence that reaches `FLAT` with realized paper PnL by the

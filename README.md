@@ -4,9 +4,9 @@ Phoenix is currently operated from an OCI VM. The running OCI VM is the only
 source of truth for production documentation; repo manifests and historical
 runbooks are secondary evidence only when they match that VM.
 
-Last verified against the VM: 2026-06-13 06:15 UTC.
-OI/ML shadow sidecar deployment was rechecked as healthy and dry-run only during
-the same review.
+Last verified against the VM: 2026-06-20 12:48 UTC.
+EMA20 is enabled for the intended LIVE account and the OI/ML research sidecar
+is persistently dormant with its historical database, image, and logs retained.
 
 ## Current OCI VM State
 
@@ -22,14 +22,28 @@ the same review.
 | Web container | `phoenix-oci-web`, local `phoenix-local-nginx:local-<git-sha>` image, healthy |
 | Database | VM-local `phoenix-oci-postgres` container, `postgres:16-alpine`, Compose-managed and Docker-healthy |
 | Watchdog | `phoenix-oci-watchdog`, `docker:cli`; observe-only, no Docker socket or mounts |
-| OI/ML shadow sidecar | `phoenix-oi-ml-shadow`, image `phoenix-oi-ml-shadow:oi-ml-shadow-<git-sha>`, dry-run only; deployed fail-closed with `OI_ML_SHADOW_SCORER=missing` until validated LightGBM artifacts are configured |
+| OI/ML shadow sidecar | `phoenix-oi-ml-shadow`, retained image `phoenix-oi-ml-shadow:oi-ml-shadow-e5e13bd`, stopped with restart policy `no`; runner and snapshotter disabled, backend monitoring disabled, historical Postgres/image/log evidence preserved |
 | Backend command | `python -m app.main` |
 | Public backend exposure | backend port `8080` is container-only; nginx exposes host ports `80` and `8443` |
 | Health checks | backend container: `/health`, `/ready`, `/readyz`, `/health/summary`, `/health/alerts`, `/health/mitigations`; nginx/host: `/health`, redacted `/readyz`, redacted `/health/summary`, JSON `/health/alerts`, JSON `/health/mitigations` |
 | Frontend health rendering | Overview/Safety use authenticated `/admin/health/summary` for internal schema, watchdog, and account-count fields, then fall back to redacted public `/health/summary` |
-| Runtime mode evidence | `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE` |
+| Runtime mode evidence | `APP_ENV=production`, `TRADE_MODE=LIVE`, `REQUIRE_LIVE_TRADE_MODE=true`; `/health` reports `order_path=strategy_bridge_order_router`; `/health/summary` reports `operating_mode=HUB_AUTHORITATIVE` |
 | Readiness evidence | backend-local `/readyz` returned HTTP 200; public `/readyz` returned only redacted readiness and universe-health fields |
 | Secrets | secret files under `/run/secrets`; deployed permission validator passes; values must never be copied into git |
+
+## 2026-06-20 Runtime Changes
+
+- EMA20-only LIVE routing was enabled for the intended Angel account. Broker
+  login, strict startup recovery, fresh position/order sync, flat broker and
+  ownership state, inactive kill switch, and `/readyz=200` were verified.
+- The LIVE leader lease is `phoenix-oci-live`; non-EMA strategy configs remain
+  disabled and `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1`.
+- The canonical Phoenix hostname is forwarded to the backend Host guard. Login
+  now reaches normal request validation while malformed/unapproved hosts remain
+  rejected.
+- The OI/ML sidecar was made dormant. No data was deleted; reactivation requires
+  an explicit reviewed change to both runner/snapshotter enablement and backend
+  monitoring.
 
 Current drift that operators must not normalize:
 
@@ -121,7 +135,8 @@ OI/ML shadow decisions are not promotable when produced by
 `OI_ML_SHADOW_SCORER=constant`. Promotable shadow evidence requires trained
 LightGBM artifacts, a passed model-validation report, fresh FULL quotes with IV
 and Greeks, latest validation status not `ERROR`, and virtual lifecycle rows
-that reach `FLAT` with realized dry-run PnL by the cutoff. The current deployed
-sidecar keeps the scorer at `missing` and `OI_ML_SHADOW_ALLOW_CONSTANT_SCORER=false`,
-so it can ingest and report health but cannot produce promotable shadow entries
-until the model and 10 clean-session proof are supplied.
+that reach `FLAT` with realized dry-run PnL by the cutoff. The retained sidecar
+configuration keeps the scorer at `missing`, but the runner, snapshotter,
+restart policy, and backend monitoring are disabled. It cannot ingest or
+produce shadow entries until an explicit reviewed reactivation; the model and
+10 clean-session proof are still required afterward.

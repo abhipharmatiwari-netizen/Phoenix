@@ -1,34 +1,47 @@
 # OI/ML Shadow Sidecar Runbook
 
-Status: current progress record for the OI/ML CE seller shadow sidecar as of
-2026-06-12 IST.
+Status: dormant operator record for the OI/ML CE seller shadow sidecar as of
+2026-06-20 IST.
 
-This sidecar is a dry-run research and validation process. It must not place,
-modify, cancel, or exit live orders. It runs beside the live OCI stack, publishes
-no host ports, writes normalized option-chain snapshots and shadow order intents
-to Postgres, and keeps `OI_ML_SHADOW_ALLOW_NAKED=false`.
+This sidecar is a dry-run research and validation component. It must not place,
+modify, cancel, or exit live orders. It is currently stopped and persistently
+dormant: no snapshots or intents are generated. Historical Postgres rows, the
+retained image, and logs are preserved for review.
 
 ## Current State
 
 | Area | State |
 |---|---|
 | Branch | `main` for the current runtime image |
-| Latest deployed sidecar commit | Verify the running `phoenix-oi-ml-shadow` image tag with `docker ps`; the image tag is the source of truth |
-| OCI checkout | `/opt/phoenix/app` for the current image build; `/opt/phoenix/oi-ml-shadow-src` exists as a legacy sidecar checkout |
+| Retained sidecar image | `phoenix-oi-ml-shadow:oi-ml-shadow-e5e13bd`; verify with `docker inspect phoenix-oi-ml-shadow` |
+| OCI checkout | `/opt/phoenix/app` was the retained image build source; `/opt/phoenix/oi-ml-shadow-src` exists as a legacy sidecar checkout |
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
-| Running image | Verify with `docker ps --filter name=phoenix-oi-ml-shadow` |
-| Container | `phoenix-oi-ml-shadow` |
+| Container | `phoenix-oi-ml-shadow`, stopped with exit 143 and restart policy `no` |
+| Persistent enablement | `OI_ML_SHADOW_ENABLED=false`, `OI_SNAPSHOTTER_ENABLED=false` |
+| Backend monitoring | `OI_ML_SHADOW_HEALTH_ENABLED=false`; health summary reports OI/ML `disabled` without degrading LIVE readiness |
 | Database tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`, `public.option_chain_validation_reports` |
-| Default scorer | `missing` in compose; fail-closed until trained artifacts are configured |
+| Retained scorer | `missing`; fail-closed if the runner is explicitly reactivated without trained artifacts |
 | Smoke scorer | `constant` is blocked unless `OI_ML_SHADOW_ALLOW_CONSTANT_SCORER=true`; it is connectivity-only and never promotion evidence |
-| Dry-run spread risk | Current VM smoke values are `OI_ML_SHADOW_SPREAD_WIDTH_POINTS=50` and `OI_ML_SHADOW_MAX_SPREAD_LOSS_RUPEES=2000`; both apply only to the dry-run sidecar |
+| Dry-run spread risk | Last VM smoke values were `OI_ML_SHADOW_SPREAD_WIDTH_POINTS=50` and `OI_ML_SHADOW_MAX_SPREAD_LOSS_RUPEES=2000`; both apply only to an explicitly enabled dry-run sidecar |
 | Virtual spread cap | `OI_ML_SHADOW_MAX_OPEN_SPREADS=1`; open virtual spreads block repeat staging |
-| Broker proxy/session | Sidecar now forwards backend broker proxy env and reuses the Angel quote session during the snapshotter session |
+| Broker proxy/session | Preserved for a future reviewed run; inactive while dormant |
 | LightGBM support | Implemented with `lightgbm==4.6.0`; artifact paths and a passed model-validation report must be explicit |
-| Continuous NSE validation | Enabled in deployed sidecar; latest `ERROR` report blocks new shadow entries |
+| Continuous NSE validation | Inactive while dormant; latest `ERROR` must block entries after reactivation |
 | Snapshot validation window | `09:15`-`15:30` IST; trade-decision window remains `09:45`-`14:30` IST |
 | Virtual lifecycle | `STAGED -> VIRTUAL_FILLED -> VIRTUAL_EXITED event -> FLAT`; realized dry-run PnL is stored |
-| Live order routing | Not used by the sidecar |
+| Live order routing | Not used by the sidecar; dormancy did not change LIVE EMA20 authority |
+
+### 2026-06-20 Dormancy Evidence
+
+- Final healthy runtime used image `oi-ml-shadow-e5e13bd`, restart count `0`,
+  and no live order path.
+- Postgres retained 4,953,052 option-chain rows and 47 intent rows. None had a
+  virtual entry or flat event, and realized paper PnL was zero.
+- The operator compose now uses restart policy `no` and disables both runner
+  and snapshotter. The existing container was stopped without deleting data,
+  image, models, or logs.
+- Reactivation is a reviewed operational change. It requires explicit runner,
+  snapshotter, and backend-monitoring enablement plus the promotion gates below.
 
 Recent validation:
 
@@ -169,7 +182,7 @@ caching.
 
 ### Ingestion visibility
 
-The main dashboard health summary exposes read-only sidecar evidence under
+The main dashboard health summary exposes the sidecar state under
 `oi_ml_shadow_ingestion`:
 
 ```bash
@@ -177,10 +190,12 @@ docker exec phoenix-oci-backend \
   curl -sS http://localhost:8080/health/summary
 ```
 
-The live backend observes the separate sidecar with
-`OI_ML_SHADOW_HEALTH_ENABLED=true`. This is a dashboard-only health flag: it
-does not start the shadow runner in the backend and does not create an order
-route. The payload includes today's `option_chain_1m` row count, latest
+The live backend currently sets `OI_ML_SHADOW_HEALTH_ENABLED=false`, so the
+payload reports `enabled=false`, `status=disabled`, and
+`live_order_path_enabled=false` without stale-ingestion alerts. For a reviewed
+reactivation, setting the health flag true observes the separate sidecar; it
+does not start the runner or create an order route. When enabled, the payload
+includes today's `option_chain_1m` row count, latest
 snapshot/source/ingest timestamps, validation report count, shadow intent count,
 and a dry-run invariant (`live_order_path_enabled=false`). If the sidecar is
 expected after the snapshot window starts and no option-chain rows are present,
@@ -198,7 +213,7 @@ field for this path and always carries the dry-run invariant
 `live_order_path_enabled=false`; do not remediate sidecar ingestion by enabling
 any live order path.
 
-The sidecar container has its own Docker liveness healthcheck:
+When enabled, the sidecar container has its own Docker liveness healthcheck:
 
 ```bash
 python -m app.strategies.oi_ml.shadow_liveness
@@ -442,21 +457,24 @@ LIMIT 50;"
 
 ## Safe Operations
 
-Inspect sidecar status:
+Inspect dormant sidecar status and retained evidence:
 
 ```bash
-docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" \
+docker ps -a --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" \
   | grep -E "phoenix-oci|phoenix-oi-ml"
+docker inspect phoenix-oi-ml-shadow \
+  --format 'status={{.State.Status}} restart={{.HostConfig.RestartPolicy.Name}} image={{.Config.Image}}'
 docker logs phoenix-oi-ml-shadow --tail 80
-docker exec phoenix-oi-ml-shadow python -m app.strategies.oi_ml.shadow_liveness
-docker exec phoenix-oi-ml-shadow python -m app.strategies.oi_ml.shadow_health
 ```
 
-Restart the sidecar with smoke constants:
+Reactivation requires explicit operator approval. For an approved connectivity
+smoke only, override every dormant gate explicitly:
 
 ```bash
 cd /opt/phoenix
 IMAGE_TAG=oi-ml-shadow-<deployed-git-sha> \
+OI_ML_SHADOW_ENABLED=true \
+OI_SNAPSHOTTER_ENABLED=true \
 OI_ML_SHADOW_SCORER=constant \
 OI_ML_SHADOW_ALLOW_CONSTANT_SCORER=true \
 OI_ML_SHADOW_CONSTANT_PROBABILITY=0.64 \
@@ -467,6 +485,11 @@ docker compose -f /opt/phoenix/oi-ml-shadow.yml \
   --env-file /opt/phoenix/phoenix-deploy.env \
   up -d oi-ml-shadow
 ```
+
+After the approved run, restore `OI_ML_SHADOW_ENABLED=false`,
+`OI_SNAPSHOTTER_ENABLED=false`, restart policy `no`, stop the container, and
+keep backend `OI_ML_SHADOW_HEALTH_ENABLED=false`. Do not leave a smoke scorer
+running unattended.
 
 The sidecar compose must include the VM-local non-secret
 `CONTROL_PLANE_DB_DSN` so readiness and market-window evidence checks can query
@@ -510,7 +533,7 @@ OI_ML_SHADOW_REQUIRE_MODEL_VALIDATION_REPORT=true
 ```
 
 The sidecar compose mounts `/opt/phoenix/oi-ml-models` at `/app/models:ro`.
-The deployed default remains `OI_ML_SHADOW_SCORER=missing`. Do not enable
+The retained default remains `OI_ML_SHADOW_SCORER=missing`. Do not enable
 LightGBM mode until trained artifacts have passed walk-forward, the validation
 report contains `promotion.passed=true`, and market-session snapshot
 completeness checks pass.

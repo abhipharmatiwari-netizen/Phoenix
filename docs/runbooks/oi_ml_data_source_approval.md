@@ -4,6 +4,10 @@ This record implements the Phase 0 approval gate for `oi_ml_ce_seller`.
 It approves the data-source shape and the automated quality gate; it does not
 enable live orders by itself.
 
+Operational status as of 2026-06-20: the OI/ML sidecar and snapshotter are
+dormant, so no new approval evidence is accumulating. Historical rows are
+retained; a future evidence run requires explicit reviewed reactivation.
+
 ## Decision
 
 - Primary live snapshot source: Angel One FULL quote over the broker session

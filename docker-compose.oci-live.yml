@@ -71,6 +71,8 @@ x-live-backend-env: &live-backend-env
   HOST: "0.0.0.0"
   PORT: "8080"
   BACKEND_URL: "http://127.0.0.1:8080"
+  PHOENIX_DOMAIN: "${PHOENIX_DOMAIN:?Set PHOENIX_DOMAIN to the production domain}"
+  PHOENIX_ALLOWED_HOSTS: "${PHOENIX_ALLOWED_HOSTS:-}"
   CORS_ORIGINS: "https://${PHOENIX_DOMAIN:?Set PHOENIX_DOMAIN to the production domain}"
 
   CONTROL_PLANE_BACKEND: "postgres"
@@ -252,9 +254,9 @@ x-live-backend-env: &live-backend-env
   ML_MODE: "OFF"
 
   # Dashboard-only health contract for the separate OI/ML shadow sidecar.
-  # This does not enable the shadow runner inside the live backend and does
-  # not create any live order route.
-  OI_ML_SHADOW_HEALTH_ENABLED: "${OI_ML_SHADOW_HEALTH_ENABLED:-true}"
+  # Dormant by default as of 2026-06-20. Enabling this only observes an
+  # independently enabled sidecar; it never creates a live order route.
+  OI_ML_SHADOW_HEALTH_ENABLED: "${OI_ML_SHADOW_HEALTH_ENABLED:-false}"
   OI_ML_SHADOW_UNDERLYING: "${OI_ML_SHADOW_UNDERLYING:-NIFTY}"
   OI_ML_SHADOW_PROVIDER: "${OI_ML_SHADOW_PROVIDER:-angel}"
   OI_ML_SHADOW_CAPTURE_SNAPSHOT: "${OI_ML_SHADOW_CAPTURE_SNAPSHOT:-true}"

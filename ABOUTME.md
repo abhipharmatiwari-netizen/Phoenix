@@ -11,8 +11,8 @@ runtime glossary and endpoint behavior index live in
 The verified OCI VM deployment is a hub-authoritative Phoenix runtime behind
 nginx:
 
-- Latest verified VM checkout is `main` at `4ba598f`; backend and nginx are
-  running local images tagged `local-4ba598f`.
+- Latest verified VM checkout is `main` at `1d0ca01`; backend and nginx are
+  running local images tagged `local-1d0ca01`.
 - `phoenix-oci-backend` runs `python -m app.main`.
 - `phoenix-oci-web` serves the frontend and reverse-proxies current health/API
   paths. Public `/readyz` and `/health/summary` responses are redacted, while
@@ -28,6 +28,14 @@ nginx:
   no Docker socket or mounts.
 - The backend reports `HUB_AUTHORITATIVE` mode and
   `strategy_bridge_order_router` order path through health endpoints.
+- The backend is in `APP_ENV=production`, `TRADE_MODE=LIVE`, with EMA20 as the
+  only enabled strategy for the intended LIVE account. Broker state was flat,
+  the kill switch inactive, and `/readyz` green at the 2026-06-20 verification.
+- The retained `phoenix-oi-ml-shadow` research container is stopped with restart
+  policy `no`; its runner, snapshotter, and backend ingestion monitoring are
+  disabled without deleting its historical database, image, or logs.
+- The canonical deployment hostname is passed into the backend Host guard so
+  browser login works without weakening malformed/unapproved Host rejection.
 
 This is not a pure OCIR/external-Postgres deployment today. The VM currently
 uses local Phoenix images, a local Postgres container, and several source-file

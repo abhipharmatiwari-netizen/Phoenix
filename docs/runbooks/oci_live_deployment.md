@@ -1,6 +1,6 @@
 # Phoenix OCI LIVE Deployment Runbook
 
-Status: current operator runbook for the OCI VM verified on 2026-06-13.
+Status: current operator runbook for the OCI VM verified on 2026-06-20.
 
 This runbook describes what is actually running on the OCI VM. It does not
 describe the older intended OCIR/external-Postgres deployment as current state.
@@ -24,9 +24,9 @@ Current VM paths and containers:
 - logs: `/opt/phoenix/logs`
 - state helpers: `/opt/phoenix/state`
 - certs: `/opt/phoenix/certs`
-- OI/ML shadow runtime image source: `/opt/phoenix/app` deploy commit; legacy sidecar checkout `/opt/phoenix/oi-ml-shadow-src` may exist but is not running-image proof
+- OI/ML shadow retained image source: stopped container/image inspection; legacy sidecar checkout `/opt/phoenix/oi-ml-shadow-src` may exist but is not current execution evidence
 - OI/ML shadow compose: `/opt/phoenix/oi-ml-shadow.yml`
-- OI/ML shadow container: `phoenix-oi-ml-shadow`
+- OI/ML shadow container: `phoenix-oi-ml-shadow`, intentionally stopped with restart policy `no`
 
 Latest verified live deployment:
 
@@ -39,6 +39,9 @@ Latest verified live deployment:
   approved replacement image for the rollout
 - live strategy routing: EMA20-only; `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1`
   and non-EMA strategies disabled in `strategy_configs`
+- live runtime: `APP_ENV=production`, `TRADE_MODE=LIVE`,
+  `REQUIRE_LIVE_TRADE_MODE=true`, `HUB_INSTANCE_NAME=phoenix-oci-prod`, and
+  `LEADER_LEASE_ID=phoenix-oci-live`
 - liveness: backend `/health` and nginx `/health` return HTTP 200
 - readiness: backend-local `/readyz` and nginx `/readyz` return HTTP 200
 - public readiness/summary: nginx `/readyz` and `/health/summary` proxy to
@@ -51,6 +54,9 @@ Latest verified live deployment:
   fields, then fall back to redacted public `/health/summary`
 - BFF hardening: direct `/bff/health/summary`, `/bff/readyz`, and
   `/bff/dashboard/status` are blocked so redaction cannot be bypassed
+- Host hardening: `PHOENIX_DOMAIN` and optional `PHOENIX_ALLOWED_HOSTS` are
+  passed to the backend; the canonical login host is allowed while malformed
+  and unapproved Host headers are rejected before authentication
 - database: `phoenix-oci-postgres` is Compose-managed with Docker health
   status `healthy`
 - watchdog: `phoenix-oci-watchdog` has no Docker socket or other mounts
@@ -72,28 +78,28 @@ Non-current for this VM unless a later evidence capture proves otherwise:
 
 ## OI/ML Shadow Sidecar
 
-The OI/ML CE seller sidecar is separate from the live backend/nginx stack. It is
-dry-run only, publishes no host ports, and records option-chain snapshots plus
-shadow order intents in Postgres. It must not be used as evidence that live order
-routing is enabled.
+The OI/ML CE seller sidecar is separate from the live backend/nginx stack and is
+currently dormant. It publishes no host ports and has no live order authority.
+Its historical Postgres rows, retained image, and logs remain available for
+review, but no snapshots or intents are currently generated.
 
-Current sidecar evidence is the running `phoenix-oi-ml-shadow` image tag and
-compose file on the VM. Verify it with `docker ps` and `docker inspect` during
-each deployment; do not rely on older hard-coded SHA examples.
+Current sidecar evidence is the stopped `phoenix-oi-ml-shadow` container and
+operator compose file. Verify it with `docker ps -a` and `docker inspect`.
 
-- runtime image source: `/opt/phoenix/app` deploy commit; legacy sidecar checkout `/opt/phoenix/oi-ml-shadow-src` may exist but is not running-image proof
+- retained image: `phoenix-oi-ml-shadow:oi-ml-shadow-e5e13bd`
 - compose: `/opt/phoenix/oi-ml-shadow.yml`
+- persistent dormancy: `restart: "no"`, `OI_ML_SHADOW_ENABLED=false`, and
+  `OI_SNAPSHOTTER_ENABLED=false`
 - tables: `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`,
   `public.option_chain_validation_reports`
-- scorer: deployed as `missing` and fail-closed; promotable shadow requires
+- scorer: retained configuration is `missing`; promotable shadow requires
   validated LightGBM artifacts and a passed model-validation report; `constant`
   is smoke-only and requires an explicit override
-- broker access: sidecar forwards backend broker proxy env and reuses the Angel
-  quote session during snapshotting
-- health visibility: backend dashboard health uses
-  `OI_ML_SHADOW_HEALTH_ENABLED=true` to observe the external sidecar without
-  enabling the runner inside the live backend; the sidecar also has a Docker
-  liveness healthcheck. Sidecar readiness/data-quality checks use
+- broker access when explicitly enabled: sidecar forwards backend broker proxy
+  env and reuses the Angel quote session during snapshotting
+- health visibility: backend currently sets
+  `OI_ML_SHADOW_HEALTH_ENABLED=false` and reports OI/ML status `disabled`.
+  When explicitly re-enabled, sidecar readiness/data-quality checks use
   `python -m app.strategies.oi_ml.shadow_health` and require the sidecar
   compose to provide the VM-local non-secret `CONTROL_PLANE_DB_DSN`.
 - NSE validation: the sidecar falls back to NSE live-derivatives rows when the
@@ -103,7 +109,8 @@ each deployment; do not rely on older hard-coded SHA examples.
 - IV handling: missing Angel IV is enriched at read time only when fresh
   exact-contract `nse_web` rows contain IV; the live-derivatives fallback does
   not supply IV, so it is not promotion evidence for IV enrichment
-- promotion blocker: market-session hard-field completeness, fresh source
+- reactivation/promotion blocker: explicit operator review, market-session and
+  market-calendar gating, hard-field completeness, fresh source
   timestamps, IV/Greeks, latest validation not `ERROR`, terminal virtual
   lifecycle/PnL, acceptable metrics, and 10 clean sessions still must be proven
 
@@ -152,13 +159,14 @@ OCIR_NAMESPACE
 OCIR_REGION
 PHOENIX_CERTS_HOST_PATH
 PHOENIX_DOMAIN
+PHOENIX_ALLOWED_HOSTS
 PHOENIX_LOG_HOST_PATH
 PHOENIX_STATE_HOST_PATH
 PROFIT_DAILY_TARGET
 RISK_MAX_DAILY_LOSS
 ```
 
-Current live strategy posture as of 2026-06-03: set
+Current live strategy posture as of 2026-06-20: set
 `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1` for EMA20-only routing. Do not
 restore older multi-strategy values unless selector mappings, instrument
 allow-lists, `strategy_configs`, tests, and release evidence are updated

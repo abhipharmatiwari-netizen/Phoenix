@@ -2,7 +2,8 @@
 #
 # Run this beside the live stack from a separate checkout/image. It publishes no
 # ports, starts no nginx, and runs the standalone shadow runner instead of
-# app.main. It records dry-run shadow intents only.
+# app.main. It records dry-run shadow intents only. The service is dormant by
+# default as of 2026-06-20 and requires explicit enablement for a reviewed run.
 
 name: phoenix-oi-ml-shadow
 
@@ -41,7 +42,7 @@ services:
     image: phoenix-oi-ml-shadow:${IMAGE_TAG:-local}
     container_name: phoenix-oi-ml-shadow
     init: true
-    restart: unless-stopped
+    restart: "no"
     depends_on:
       oi-ml-migrator:
         condition: service_completed_successfully
@@ -75,7 +76,7 @@ services:
       ENABLE_MULTI_HUB: "false"
       USE_HUB_ROUTER: "false"
       LEADER_LEASE_ENABLED: "false"
-      OI_ML_SHADOW_ENABLED: "true"
+      OI_ML_SHADOW_ENABLED: "${OI_ML_SHADOW_ENABLED:-false}"
       OI_ML_SHADOW_UNDERLYING: "${OI_ML_SHADOW_UNDERLYING:-NIFTY}"
       OI_ML_SHADOW_PROVIDER: "${OI_ML_SHADOW_PROVIDER:-angel}"
       OI_ML_SHADOW_CADENCE_SECONDS: "${OI_ML_SHADOW_CADENCE_SECONDS:-60}"
@@ -107,7 +108,7 @@ services:
       OI_ML_SHADOW_VIRTUAL_FLAT_TIME: "${OI_ML_SHADOW_VIRTUAL_FLAT_TIME:-15:20}"
       OI_ML_SHADOW_VIRTUAL_LIFECYCLE_END_TIME: "${OI_ML_SHADOW_VIRTUAL_LIFECYCLE_END_TIME:-15:45}"
       OI_ML_SHADOW_ALLOW_NAKED: "false"
-      OI_SNAPSHOTTER_ENABLED: "true"
+      OI_SNAPSHOTTER_ENABLED: "${OI_SNAPSHOTTER_ENABLED:-false}"
       OI_SNAPSHOTTER_REUSE_BROKER_SESSION: "${OI_SNAPSHOTTER_REUSE_BROKER_SESSION:-true}"
       OI_SNAPSHOTTER_SESSION_MAX_AGE_MINUTES: "${OI_SNAPSHOTTER_SESSION_MAX_AGE_MINUTES:-600}"
       OI_ML_ENABLE_NSE_VALIDATION: "${OI_ML_ENABLE_NSE_VALIDATION:-true}"

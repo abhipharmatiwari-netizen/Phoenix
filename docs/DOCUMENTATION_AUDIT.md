@@ -1,8 +1,8 @@
 # Documentation Audit
 
-Audit date: 2026-06-13. Runtime snapshot refreshed after the OCI LIVE hardening
-deploy series, OI/ML shadow readiness review, cleanup-script sync, storage
-headroom verification, and co-tenant isolation remediation.
+Audit date: 2026-06-20. Runtime snapshot refreshed after EMA20-only LIVE
+enablement, canonical-host login repair, and persistent OI/ML sidecar dormancy,
+in addition to the prior OCI hardening and storage/isolation work.
 
 Scope: repository documentation, environment examples, Compose comments, and
 operator-facing runbooks were checked against the running OCI VM. The OCI VM
@@ -19,10 +19,10 @@ overrides repo docs and historical plans when there is a conflict.
 | Env file | `/opt/phoenix/phoenix-deploy.env` |
 | Backend | `phoenix-oci-backend`, local Phoenix backend image verified during each rollout; cron stops it outside scheduled runtime |
 | Web | `phoenix-oci-web`, local Phoenix nginx image verified from `docker ps`, healthy |
-| OI/ML shadow sidecar | `phoenix-oi-ml-shadow`, sidecar image verified from `docker ps`, healthy and dry-run only |
+| OI/ML shadow sidecar | `phoenix-oi-ml-shadow`, retained image stopped with restart `no`; runner/snapshotter/backend monitoring disabled, data preserved |
 | Database | VM-local `phoenix-oci-postgres`, `postgres:16-alpine`, Compose-managed and Docker-healthy |
 | Watchdog | `phoenix-oci-watchdog`, observe-only, no Docker socket or mounts |
-| Runtime mode | `/health/summary` reports `HUB_AUTHORITATIVE`; `/health` reports `strategy_bridge_order_router` |
+| Runtime mode | `APP_ENV=production`, `TRADE_MODE=LIVE`, EMA20-only; `/health/summary` reports `HUB_AUTHORITATIVE` and `/health` reports `strategy_bridge_order_router` |
 | Health endpoints | backend-local `/health`, `/ready`, `/readyz`, `/health/summary`, `/health/alerts`, `/health/mitigations`; public nginx `/health`, redacted `/readyz`, redacted `/health/summary`, JSON `/health/alerts`, JSON `/health/mitigations` |
 | Frontend health rendering | Overview and Safety use authenticated `/admin/health/summary` for internal diagnostics and fall back to redacted public `/health/summary` |
 | Storage | root filesystem is 183G with 45G available and 76% used; OCI Compose enables the `disk_headroom_low` alert |
@@ -49,7 +49,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | `docs/kpis_slos.md` | observability/KPI reference | MATCHES_CURRENT_ENDPOINTS | KEEP CURRENT |
 | `docs/runbooks/update_broker_credentials.md` | broker credential rotation | MATCHES_OCI_VM | KEEP CURRENT |
 | `docs/runbooks/dashboard-kill-switch.md` | kill-switch dashboard playbook | CURRENT_WITH_KILL_SWITCH_AUTHORITY | KEEP CURRENT |
-| `docs/runbooks/oi_ml_shadow_sidecar.md` | OI/ML shadow sidecar | CURRENT_FOR_SIDECAR | KEEP CURRENT |
+| `docs/runbooks/oi_ml_shadow_sidecar.md` | OI/ML shadow sidecar | CURRENT_DORMANT | KEEP CURRENT |
 | `docs/runbooks/docker_desktop_live_deployment.md` | Docker Desktop reference | NON_CURRENT_PRODUCTION | KEEP WITH BANNER |
 | `docs/runbooks/cloud_run_live_deployment.md` | Cloud Run reference | ROADMAP_ONLY | KEEP WITH BANNER |
 | `docs/runbooks/blue_green_cutover.md` | cutover plan | ROADMAP_ONLY_FOR_CURRENT_VM | KEEP WITH BANNER |
@@ -81,6 +81,8 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | Docker journal warnings were unclassified review noise | `docs/OCI_VM_RUNTIME.md` now classifies the 2026-06-12 BuildKit, Docker socket, security-option, image-signature, and health-check warning samples |
 | Root disk headroom and disk alerting were incomplete | `docs/OCI_VM_RUNTIME.md` records the 2026-06-13 45G free/76% used root filesystem evidence; `docker-compose.oci-live.yml` enables the `disk_headroom_low` alert |
 | Co-tenant workload lacked explicit runtime caps | `scripts/ops/enforce_cotenant_resource_caps.sh` applies Docker CPU, memory, swap, and PID caps idempotently; the hardening runbook installs it with cron |
+| Browser login returned `Invalid Host header` for the canonical domain | `PHOENIX_DOMAIN` and optional `PHOENIX_ALLOWED_HOSTS` are now forwarded to the backend Host guard; canonical login reaches validation while malformed hosts remain blocked |
+| Current docs described OI/ML as running and continuously monitored | Sidecar compose now defaults dormant, the retained VM container is stopped with restart `no`, backend monitoring is disabled, and reactivation requires an explicit reviewed override |
 
 ## Open Documentation-Backed Risks
 

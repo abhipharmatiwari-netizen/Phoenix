@@ -1,8 +1,8 @@
 # OCI VM Runtime Evidence
 
-Last verified: 2026-06-13 06:15 UTC from the running OCI VM.
-OI/ML shadow sidecar evidence was rechecked as present, healthy, DB-backed, and
-dry-run only during the same review.
+Last verified: 2026-06-20 12:48 UTC from the running OCI VM.
+EMA20-only LIVE authority, canonical-host login, and persistent OI/ML sidecar
+dormancy were verified during the same review.
 
 The OCI VM is the production source of truth. This file intentionally records
 what is running, including drift from repo templates. Secret values, private IPs,
@@ -18,8 +18,8 @@ OCIDs, broker identifiers, and tokens are redacted.
 | Compose project | `phoenix-oci-live` | `docker inspect ... Labels` | backend, nginx, watchdog, and Postgres have Compose labels | `phoenix-oci-postgres` is now managed by the opt-in `vm-local-postgres` profile |
 | Compose files used | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` | `com.docker.compose.project.config_files` labels | These are the active Phoenix Compose files for labelled containers | Runtime override must be treated as authoritative |
 | Env file used | `/opt/phoenix/phoenix-deploy.env` | runtime scripts and Compose commands | Non-secret deploy env file exists on VM | Document names only, not values |
-| Running Phoenix containers | `phoenix-oci-web`, `phoenix-oci-watchdog`, `phoenix-oci-postgres`, `phoenix-oi-ml-shadow`; verify backend runtime state during each rollout | `docker ps`, `docker inspect` | nginx, watchdog, Postgres, and the dry-run sidecar were running during the 2026-06-13 audit | Aurelium containers also run on the host but are outside Phoenix docs |
-| Stopped Phoenix containers | `phoenix-oci-backend` was stopped by the scheduled 18:30 UTC off-hours cron during the 2026-06-13 audit; `phoenix-oci-optimizer` is not present | `docker ps -a`, scheduler log, backend logs | Backend shutdown was graceful with exit code 143 and `OOMKilled=false` | Cron starts backend at 03:30 UTC Monday-Friday and stops it at 18:30 UTC Sunday-Friday |
+| Running Phoenix containers | `phoenix-oci-backend`, `phoenix-oci-web`, `phoenix-oci-watchdog`, `phoenix-oci-postgres` | `docker ps`, `docker inspect` | backend/nginx images are `local-1d0ca01`; backend, nginx, and Postgres were healthy after the 2026-06-20 LIVE/dormancy changes | Aurelium containers also run on the host but are outside Phoenix docs |
+| Stopped Phoenix containers | `phoenix-oi-ml-shadow` is intentionally dormant; `phoenix-oci-optimizer` is not present | `docker ps -a`, `docker inspect` | sidecar exit `143`, running `false`, restart policy `no`; runner and snapshotter disabled in `/opt/phoenix/oi-ml-shadow.yml` | Historical sidecar database rows, image, and logs are retained; cron still controls the backend schedule |
 | Backend image | Verify with `docker inspect phoenix-oci-backend` | `docker inspect phoenix-oci-backend` | Local image, not OCIR | Source bind mounts are still active |
 | Web image | Verify with `docker inspect phoenix-oci-web` | `docker inspect phoenix-oci-web` | Local image, not OCIR | Public nginx `/readyz` and `/health/summary` proxy to redacted backend endpoints; `/health/alerts` and `/health/mitigations` proxy JSON for the Alerts and Mitigations screens; Overview/Safety use authenticated `/admin/health/summary` for schema, watchdog, and account-count details; `/bff/health/summary`, `/bff/readyz`, and `/bff/dashboard/status` are blocked from direct diagnostic bypass; `/manifest.json`, `/favicon.svg`, and `/favicon.ico` are served as static assets; stale `/static/*` assets return 404 instead of SPA HTML; frontend runtime failures render a visible recovery screen instead of a blank root |
 | Database image | `postgres:16-alpine` | `docker inspect phoenix-oci-postgres` | Compose-managed VM-local Postgres container with Docker health status `healthy` | Container uses the existing `/opt/phoenix/pgdata` mount and password-file env, not a plaintext password value |
@@ -27,9 +27,9 @@ OCIDs, broker identifiers, and tokens are redacted.
 | Backend command | `python -m app.main` via `docker-entrypoint.sh` | `docker inspect` | FastAPI backend runs in backend container | Port 8080 is container-only |
 | Web command | `nginx -g 'daemon off;'` | `docker inspect` | nginx serves frontend and reverse proxy | Host ports 80 and 8443 |
 | Restart policy | `unless-stopped` for Phoenix backend/web/postgres/watchdog | `docker inspect` | Containers restart unless stopped | `phoenix-oci-postgres` now reports Docker health status |
-| Runtime mode | `HUB_AUTHORITATIVE` | `/health/summary` | Health summary reports hub-authoritative mode | `TRADE_MODE` env was not present in selected env check |
+| Runtime mode | `HUB_AUTHORITATIVE`, `APP_ENV=production`, `TRADE_MODE=LIVE`, `REQUIRE_LIVE_TRADE_MODE=true` | backend env, `/health/summary`, `/readyz` | intended Angel account runner is LIVE; leader lease ID is `phoenix-oci-live`; `/readyz=200` | Secondary shadow account has no enabled strategies; OI/ML sidecar is separate and dormant |
 | Order path | `strategy_bridge_order_router` | `/health` | Broker-facing order path is the strategy bridge/order router path | Do not document legacy path as current authority |
-| Backend env mode | `APP_ENV=production`, `CONTROL_PLANE_BACKEND=postgres`, `ENABLE_MULTI_HUB=true`, `DISABLE_CONTROL_TOWER_ROUTES=true` | selected `docker exec phoenix-oci-backend sh -lc 'printenv ...'` | Current backend env aligns with hub/Postgres authority | Secret-like values were redacted; Control Tower read-only status endpoints remain mounted, while mutating management controls stay disabled unless the LIVE mutation gate is explicitly enabled |
+| Backend env mode | `APP_ENV=production`, `TRADE_MODE=LIVE`, `REQUIRE_LIVE_TRADE_MODE=true`, `CONTROL_PLANE_BACKEND=postgres`, `ENABLE_MULTI_HUB=true`, `DISABLE_CONTROL_TOWER_ROUTES=true`, `OI_ML_SHADOW_HEALTH_ENABLED=false` | selected backend env | Current backend env aligns with LIVE hub/Postgres authority and intentionally omits dormant sidecar degradation | Secret-like values were redacted; Control Tower read-only status endpoints remain mounted, while mutating management controls stay disabled unless the LIVE mutation gate is explicitly enabled |
 | Live strategy routing | EMA20-only: enabled strategy names are `ema20_strategy`; enabled NIFTY_IDX, BANKNIFTY_IDX, and NG_FUT allow only `ema20_strategy`; selector mappings contain no non-EMA names; `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1` | container config validation and Postgres `strategy_configs` query | `exclusive_nifty_ce_buy`, `put_momentum_scalper`, and `nifty_weekly_credit_spreads` are disabled at config, instrument policy, selector, and control-plane layers | Latest readiness verification was green; routing changes do not clear or override kill-switch state |
 | Database backend | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres`, `CONTROL_PLANE_PG_SSLMODE=prefer`, `LIVE_PG_SSL_SKIP_CHECK=true` | selected backend env | VM-local Postgres, not external OCI DB | Remote/cloud Postgres docs are non-current |
 | Secret model | `/run/secrets/admin_api_key`, `/run/secrets/auth_token_secret`, `/run/secrets/control_plane_pg_password`, `/run/secrets/angel_postback_token`, `/run/secrets/admin_kill_switch_override` | mounts/env/runbook evidence and `scripts/validate-live-secret-perms.sh` | Secret values are mounted as files; kill-switch override is file-only; permission validator passes | Shared runtime secret files are `0440` for UID 100/root group compatibility, and backend-only secrets are `0400`; never copy values into docs or env examples |
@@ -39,7 +39,7 @@ OCIDs, broker identifiers, and tokens are redacted.
 | Logs | `/opt/phoenix/logs`, date-partitioned app logs, audit JSONL, scheduler logs, cert renewal log | `find /opt/phoenix/logs` and weekly cleanup dry-run | Current logs include 2026-06-12 hardening/deployment evidence and root log files; stale 2026-06-01 through 2026-06-04 dated log directories were removed by root cleanup on 2026-06-12 | Historical permission-denied lines remain in `cron-cleanup.log` from the stale cleanup script; the cron path now matches the repo script and dry-run logs `dry-run:` for destructive commands |
 | State files | `/opt/phoenix/state/risk_positions.json` and `.bak` | `ls -la /opt/phoenix/state` | Restart helper files exist | Not authoritative over Postgres |
 | Health endpoints | backend endpoints are verified during active runtime; nginx `/nginx-health` remains available while backend is intentionally stopped by cron | `docker exec phoenix-oci-backend curl ...`, scheduler log | Backend liveness/readiness must be green before market operation; LIVE universe health is part of the readiness gate | `/readyz` must fail when LIVE universe/quote-auth health is failed |
-| nginx health | host `http://localhost/health`, `/readyz`, `/health/summary`, `/health/alerts`, and `/health/mitigations` returned through nginx | `curl` on VM and public curl probes | nginx proxies current health paths | Public nginx `/readyz` and `/health/summary` use redacted backend endpoints; Alerts/Mitigations endpoints return JSON |
+| nginx health and Host boundary | host `http://localhost/health`, `/readyz`, `/health/summary`, `/health/alerts`, and `/health/mitigations` returned through nginx; canonical-domain login POST reached request validation | VM/public curl probes and backend env | nginx proxies current health paths; `PHOENIX_DOMAIN` is passed to the backend Host allow-list | Public nginx `/readyz` and `/health/summary` use redacted backend endpoints; malformed/unapproved Host values remain blocked |
 | Release evidence endpoint | `/admin/release-evidence` returns 401 without admin key | `docker exec phoenix-oci-backend curl` | Endpoint exists and requires auth | Do not print admin key |
 | Database tables | `audit_events`, `broker_accounts`, `broker_credentials`, `internal_position_records`, `kill_switch_state`, `order_submission_outbox`, `position_ownership_ledger`, `schema_migrations`, `strategy_configs`, `strategy_config_candidates`, `trades`, tenant/user entitlement tables, and others | `docker exec phoenix-oci-postgres psql -U phoenix_app -d phoenix` | Operational DB schema exists in VM-local Postgres | Backend container does not include `psql` |
 | Cron/systemd | root cron starts at 03:30 UTC Mon-Fri and stops at 18:30 UTC Sun-Fri; root cert renewal; user safety watcher; weekly cleanup in `/etc/cron.d/phoenix-cleanup`; Aurelium backup/retrain cron permissions and backup image env were repaired | `crontab -l`, `sudo crontab -l`, `/etc/cron*`, `/home/opc/aurelium/.artifacts/dr-drill/pg-backup-latest.json` | Cron, not optimizer/reload systemd timers, controls current scheduled operations; latest Aurelium backup evidence is `2026-06-07T05:07:31Z` with a 3.2G dump uploaded to MinIO; `/opt/phoenix/scripts/weekly-cleanup.sh` was synced from `/opt/phoenix/app/scripts/ops/weekly-cleanup.sh` and hash-verified on 2026-06-12; co-tenant resource-cap cron is installed from `scripts/ops/enforce_cotenant_resource_caps.sh` during isolation remediation | `phoenix-runtime-secrets.service` exists but is inactive; after repo deploys, verify the cron cleanup path still matches the repo script before relying on dry-run semantics |
@@ -108,6 +108,40 @@ Remaining backlog items require credential or infrastructure owner action:
 - rotate the previously exposed secret values and broker credentials;
 - move Phoenix to a dedicated host when capacity allows; until then, keep the
   co-tenant resource-cap cron and public-port review evidence current.
+
+## 2026-06-20 EMA20 LIVE, Host Guard, And OI/ML Dormancy
+
+The intended Angel account subscription was changed from SHADOW to LIVE and
+the backend override restored the production contract:
+
+- `APP_ENV=production`, `TRADE_MODE=LIVE`,
+  `REQUIRE_LIVE_TRADE_MODE=true`, `HUB_INSTANCE_NAME=phoenix-oci-prod`, and
+  `LEADER_LEASE_ID=phoenix-oci-live`;
+- `ema20_strategy` is the only enabled strategy, non-EMA strategy configs are
+  disabled, and `AUTO_STRATEGY_MAX_ACTIVE_PER_UNDERLYING=1`;
+- Angel login succeeded, strict startup/outbox recovery completed, broker and
+  ownership positions were flat, the durable kill switch was inactive, fresh
+  position/order syncs were present, and backend/public `/readyz` returned 200;
+- no outbox order was created during the after-hours enablement or subsequent
+  configuration restarts.
+
+The canonical deployment hostname was added to the backend environment used by
+the Host guard. A public empty login POST now reaches schema validation instead
+of returning `Invalid Host header`; malformed or unapproved Host values remain
+blocked before authentication.
+
+The OI/ML research sidecar was then made persistently dormant:
+
+- final pre-dormancy evidence: image `oi-ml-shadow-e5e13bd`, Docker healthy,
+  restart count `0`, 4,953,052 retained option-chain rows, 47 retained inert
+  intent rows, zero virtual entries/flats, and zero realized paper PnL;
+- `/opt/phoenix/oi-ml-shadow.yml` now sets `restart: "no"`,
+  `OI_ML_SHADOW_ENABLED=false`, and `OI_SNAPSHOTTER_ENABLED=false`;
+- the retained container is stopped with exit 143 and restart policy `no`;
+- backend `OI_ML_SHADOW_HEALTH_ENABLED=false` reports the component as
+  `disabled` without degrading LIVE health;
+- Postgres rows, the sidecar image, and logs were preserved. Reactivation must
+  be an explicit reviewed change and does not imply any live order authority.
 
 ## 2026-06-12 OI/ML Shadow And Cleanup Verification
 
@@ -335,18 +369,20 @@ Final deployment evidence for `e7f1e29`:
 
 ## OI/ML Shadow Sidecar Evidence
 
-Verified on 2026-06-06 21:37 IST:
+Verified dormant on 2026-06-20 18:18 IST. Historical rows below remain useful
+as provenance, but the sidecar is not currently running or monitored.
 
 | Area | Verified current state |
 |---|---|
-| Purpose | Dry-run OI/ML CE seller validation; no live order routing |
-| Runtime image source | `/opt/phoenix/app` deploy commit from the running `phoenix-oi-ml-shadow` image tag; legacy sidecar checkout `/opt/phoenix/oi-ml-shadow-src` exists but the running image tag is the authority |
+| Purpose | Retained dry-run OI/ML CE seller research evidence; no live order routing |
+| Runtime image source | Retained image `phoenix-oi-ml-shadow:oi-ml-shadow-e5e13bd`; legacy sidecar checkout `/opt/phoenix/oi-ml-shadow-src` also remains |
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
-| Image | Verify with `docker ps --filter name=phoenix-oi-ml-shadow`; the running tag is deployment evidence |
-| Container | `phoenix-oi-ml-shadow`, no host ports published |
-| Scorer | Deployed as `OI_ML_SHADOW_SCORER=missing`; promotable repo path requires validated LightGBM artifacts; `constant` scorer is smoke-only and requires explicit override |
-| Risk posture | `OI_ML_SHADOW_ALLOW_NAKED=false`; sidecar records shadow intents only |
-| Health visibility | Backend observes the external sidecar with `OI_ML_SHADOW_HEALTH_ENABLED=true`; sidecar Docker healthcheck runs `python -m app.strategies.oi_ml.shadow_liveness`; use `python -m app.strategies.oi_ml.shadow_health` for readiness and data-quality evidence. The sidecar compose must provide the VM-local non-secret `CONTROL_PLANE_DB_DSN` for readiness DB queries |
+| Image | Preserved locally; verify stopped-container image with `docker inspect phoenix-oi-ml-shadow` |
+| Container | `phoenix-oi-ml-shadow`, stopped, restart policy `no`, no host ports |
+| Enablement | `OI_ML_SHADOW_ENABLED=false`, `OI_SNAPSHOTTER_ENABLED=false`; restart requires an explicit reviewed override |
+| Scorer | Retained configuration is `missing`; validated LightGBM artifacts and a passed report remain mandatory after any future reactivation |
+| Risk posture | `OI_ML_SHADOW_ALLOW_NAKED=false`; no sidecar process or order-intent generation currently runs |
+| Health visibility | Backend sets `OI_ML_SHADOW_HEALTH_ENABLED=false` and reports OI/ML status `disabled`; no stale-ingestion degradation is expected while dormant |
 | Tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`, `public.option_chain_validation_reports` |
 | Expiry handling | Startup resolves listed NIFTY expiry from Angel scrip master; latest observed `calendar_default=2026-06-11 listed=2026-06-09` |
 | Input hardening | Provider fetches/stamps NIFTY spot and India VIX context LTPs; candidate generation now blocks missing or stale source timestamps, missing IV, and missing Greeks |
@@ -354,7 +390,8 @@ Verified on 2026-06-06 21:37 IST:
 | Smoke proof | 2026-05-18 21:11 IST off-market run fetched/stored `220` NIFTY rows through Angel FULL/LTP quote APIs; no shadow intent was recorded |
 | NSE validation | Falls back to NSE `liveEquity-derivatives` rows when the classic option-chain JSON endpoint is empty; latest smoke returned `288` reference rows and `288` compared contracts |
 | IV handling | Missing Angel IV is enriched at read time only from fresh exact-contract `nse_web` rows that contain IV; the live-derivatives fallback does not supply IV/bid/ask |
-| Remaining gate | Trained/validated scorer artifacts, fresh IV/Greeks/source timestamps, latest validation not `ERROR`, terminal virtual lifecycle/PnL, acceptable metrics, and 10 clean sessions still need proof before promotion beyond shadow |
+| Preserved evidence | 4,953,052 option-chain rows and 47 inert intent rows at dormancy; zero virtual entries/flats and zero realized PnL |
+| Remaining gate | Explicit reactivation approval, trained/validated scorer artifacts, market-calendar gating, fresh IV/Greeks/source timestamps, latest validation not `ERROR`, terminal virtual lifecycle/PnL, acceptable metrics, and 10 clean sessions still need proof before promotion beyond shadow |
 
 Operator runbook: [OI/ML Shadow Sidecar Runbook](runbooks/oi_ml_shadow_sidecar.md).
 

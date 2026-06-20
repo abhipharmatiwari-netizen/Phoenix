@@ -138,6 +138,24 @@ def test_oi_ml_shadow_compose_does_not_blank_proxy_env_file_values() -> None:
     assert "PASSWORD" not in environment["CONTROL_PLANE_DB_DSN"]
 
 
+def test_oi_ml_shadow_compose_defaults_to_persistent_dormancy() -> None:
+    compose = yaml.safe_load(_read("ops/compose/docker-compose.oi-ml-shadow.yml"))
+    sidecar = compose["services"]["oi-ml-shadow"]
+    environment = sidecar["environment"]
+
+    assert sidecar["restart"] == "no"
+    assert environment["OI_ML_SHADOW_ENABLED"].endswith(":-false}")
+    assert environment["OI_SNAPSHOTTER_ENABLED"].endswith(":-false}")
+
+
+def test_live_backend_forwards_host_guard_config_and_disables_dormant_monitoring() -> None:
+    environment = _oci_compose()["x-live-backend-env"]
+
+    assert environment["PHOENIX_DOMAIN"].startswith("${PHOENIX_DOMAIN:?")
+    assert environment["PHOENIX_ALLOWED_HOSTS"].endswith(":-}")
+    assert environment["OI_ML_SHADOW_HEALTH_ENABLED"].endswith(":-false}")
+
+
 def test_oi_ml_shadow_docker_healthcheck_uses_liveness_not_readiness() -> None:
     compose = yaml.safe_load(_read("ops/compose/docker-compose.oi-ml-shadow.yml"))
     healthcheck = compose["services"]["oi-ml-shadow"]["healthcheck"]["test"]
