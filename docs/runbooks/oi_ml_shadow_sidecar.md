@@ -1,22 +1,23 @@
 # OI/ML Shadow Sidecar Runbook
 
 Status: dormant operator record for the OI/ML CE seller shadow sidecar as of
-2026-06-20 IST.
+2026-06-21 IST.
 
 This sidecar is a dry-run research and validation component. It must not place,
-modify, cancel, or exit live orders. It is currently stopped and persistently
+modify, cancel, or exit live orders. It is currently absent and persistently
 dormant: no snapshots or intents are generated. Historical Postgres rows, the
-retained image, and logs are preserved for review.
+retained image, and logs are preserved for review. The stopped container was
+subsequently removed; there is no sidecar container to restart implicitly.
 
 ## Current State
 
 | Area | State |
 |---|---|
 | Branch | `main` for the current runtime image |
-| Retained sidecar image | `phoenix-oi-ml-shadow:oi-ml-shadow-e5e13bd`; verify with `docker inspect phoenix-oi-ml-shadow` |
+| Retained sidecar image | `phoenix-oi-ml-shadow:oi-ml-shadow-e5e13bd`; verify with `docker image inspect phoenix-oi-ml-shadow:oi-ml-shadow-e5e13bd` |
 | OCI checkout | `/opt/phoenix/app` was the retained image build source; `/opt/phoenix/oi-ml-shadow-src` exists as a legacy sidecar checkout |
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
-| Container | `phoenix-oi-ml-shadow`, stopped with exit 143 and restart policy `no` |
+| Container | Not present; operator Compose retains restart policy `no` |
 | Persistent enablement | `OI_ML_SHADOW_ENABLED=false`, `OI_SNAPSHOTTER_ENABLED=false` |
 | Backend monitoring | `OI_ML_SHADOW_HEALTH_ENABLED=false`; health summary reports OI/ML `disabled` without degrading LIVE readiness |
 | Database tables | `public.option_chain_1m`, `public.oi_ml_shadow_order_intents`, `public.option_chain_validation_reports` |
@@ -38,8 +39,8 @@ retained image, and logs are preserved for review.
 - Postgres retained 4,953,052 option-chain rows and 47 intent rows. None had a
   virtual entry or flat event, and realized paper PnL was zero.
 - The operator compose now uses restart policy `no` and disables both runner
-  and snapshotter. The existing container was stopped without deleting data,
-  image, models, or logs.
+  and snapshotter. The container was stopped and later removed without deleting
+  data, image, models, or logs.
 - Reactivation is a reviewed operational change. It requires explicit runner,
   snapshotter, and backend-monitoring enablement plus the promotion gates below.
 

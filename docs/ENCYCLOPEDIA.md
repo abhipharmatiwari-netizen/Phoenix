@@ -18,7 +18,7 @@ architecture document, runbooks, and operator playbooks.
 | Database | `phoenix-oci-postgres`, VM-local Postgres container managed by the `vm-local-postgres` Compose profile. |
 | Watchdog | `phoenix-oci-watchdog`, observe-only Docker CLI sidecar with no Docker socket or mounts. |
 | LIVE strategy authority | EMA20-only for the intended Angel account; `TRADE_MODE=LIVE`, one active strategy per underlying, flat broker/ownership state and green readiness were verified on 2026-06-20. |
-| OI/ML sidecar | `phoenix-oi-ml-shadow`, retained but dormant and outside the live order authority path. Container stopped, restart `no`, runner/snapshotter/health monitoring disabled; data, image, and logs preserved. |
+| OI/ML sidecar | Dormant and outside the live order authority path. No container is present; the retained image and operator Compose remain with restart `no`, runner/snapshotter/health monitoring disabled, and historical data/log evidence preserved. |
 | Host allow-list | The canonical deployment domain is passed to the backend. Approved browser login works; malformed or unapproved Host values are rejected before protected routes. |
 
 ## Health And Readiness Surfaces

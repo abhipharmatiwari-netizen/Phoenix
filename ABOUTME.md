@@ -31,9 +31,10 @@ nginx:
 - The backend is in `APP_ENV=production`, `TRADE_MODE=LIVE`, with EMA20 as the
   only enabled strategy for the intended LIVE account. Broker state was flat,
   the kill switch inactive, and `/readyz` green at the 2026-06-20 verification.
-- The retained `phoenix-oi-ml-shadow` research container is stopped with restart
-  policy `no`; its runner, snapshotter, and backend ingestion monitoring are
-  disabled without deleting its historical database, image, or logs.
+- No `phoenix-oi-ml-shadow` container is present. Its retained image and operator
+  Compose remain with restart policy `no`; runner, snapshotter, and backend
+  ingestion monitoring are disabled without deleting historical database,
+  image, or log evidence.
 - The canonical deployment hostname is passed into the backend Host guard so
   browser login works without weakening malformed/unapproved Host rejection.
 

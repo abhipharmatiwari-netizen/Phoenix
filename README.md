@@ -22,7 +22,7 @@ is persistently dormant with its historical database, image, and logs retained.
 | Web container | `phoenix-oci-web`, local `phoenix-local-nginx:local-<git-sha>` image, healthy |
 | Database | VM-local `phoenix-oci-postgres` container, `postgres:16-alpine`, Compose-managed and Docker-healthy |
 | Watchdog | `phoenix-oci-watchdog`, `docker:cli`; observe-only, no Docker socket or mounts |
-| OI/ML shadow sidecar | `phoenix-oi-ml-shadow`, retained image `phoenix-oi-ml-shadow:oi-ml-shadow-e5e13bd`, stopped with restart policy `no`; runner and snapshotter disabled, backend monitoring disabled, historical Postgres/image/log evidence preserved |
+| OI/ML shadow sidecar | No container is present; retained image `phoenix-oi-ml-shadow:oi-ml-shadow-e5e13bd` and operator Compose remain with restart policy `no`, runner/snapshotter/backend monitoring disabled, and historical Postgres/image/log evidence preserved |
 | Backend command | `python -m app.main` |
 | Public backend exposure | backend port `8080` is container-only; nginx exposes host ports `80` and `8443` |
 | Health checks | backend container: `/health`, `/ready`, `/readyz`, `/health/summary`, `/health/alerts`, `/health/mitigations`; nginx/host: `/health`, redacted `/readyz`, redacted `/health/summary`, JSON `/health/alerts`, JSON `/health/mitigations` |

@@ -1,6 +1,6 @@
 # Phoenix OCI LIVE Deployment Runbook
 
-Status: current operator runbook for the OCI VM verified on 2026-06-20.
+Status: current operator runbook for the OCI VM verified on 2026-06-21.
 
 This runbook describes what is actually running on the OCI VM. It does not
 describe the older intended OCIR/external-Postgres deployment as current state.
@@ -24,9 +24,9 @@ Current VM paths and containers:
 - logs: `/opt/phoenix/logs`
 - state helpers: `/opt/phoenix/state`
 - certs: `/opt/phoenix/certs`
-- OI/ML shadow retained image source: stopped container/image inspection; legacy sidecar checkout `/opt/phoenix/oi-ml-shadow-src` may exist but is not current execution evidence
+- OI/ML shadow retained image source: image inspection; legacy sidecar checkout `/opt/phoenix/oi-ml-shadow-src` may exist but is not current execution evidence
 - OI/ML shadow compose: `/opt/phoenix/oi-ml-shadow.yml`
-- OI/ML shadow container: `phoenix-oi-ml-shadow`, intentionally stopped with restart policy `no`
+- OI/ML shadow container: absent; retained image and operator Compose remain with restart policy `no`
 
 Latest verified live deployment:
 
@@ -83,8 +83,9 @@ currently dormant. It publishes no host ports and has no live order authority.
 Its historical Postgres rows, retained image, and logs remain available for
 review, but no snapshots or intents are currently generated.
 
-Current sidecar evidence is the stopped `phoenix-oi-ml-shadow` container and
-operator compose file. Verify it with `docker ps -a` and `docker inspect`.
+Current sidecar evidence is the absence of a `phoenix-oi-ml-shadow` container,
+the retained image, and the operator Compose file. Verify it with `docker ps -a`,
+`docker image inspect`, and the operator Compose file without printing env values.
 
 - retained image: `phoenix-oi-ml-shadow:oi-ml-shadow-e5e13bd`
 - compose: `/opt/phoenix/oi-ml-shadow.yml`

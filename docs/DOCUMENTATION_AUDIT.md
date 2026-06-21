@@ -19,7 +19,7 @@ overrides repo docs and historical plans when there is a conflict.
 | Env file | `/opt/phoenix/phoenix-deploy.env` |
 | Backend | `phoenix-oci-backend`, local Phoenix backend image verified during each rollout; cron stops it outside scheduled runtime |
 | Web | `phoenix-oci-web`, local Phoenix nginx image verified from `docker ps`, healthy |
-| OI/ML shadow sidecar | `phoenix-oi-ml-shadow`, retained image stopped with restart `no`; runner/snapshotter/backend monitoring disabled, data preserved |
+| OI/ML shadow sidecar | No container present; retained image and operator Compose use restart `no`, runner/snapshotter/backend monitoring are disabled, and historical data is preserved |
 | Database | VM-local `phoenix-oci-postgres`, `postgres:16-alpine`, Compose-managed and Docker-healthy |
 | Watchdog | `phoenix-oci-watchdog`, observe-only, no Docker socket or mounts |
 | Runtime mode | `APP_ENV=production`, `TRADE_MODE=LIVE`, EMA20-only; `/health/summary` reports `HUB_AUTHORITATIVE` and `/health` reports `strategy_bridge_order_router` |
@@ -82,7 +82,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | Root disk headroom and disk alerting were incomplete | `docs/OCI_VM_RUNTIME.md` records the 2026-06-13 45G free/76% used root filesystem evidence; `docker-compose.oci-live.yml` enables the `disk_headroom_low` alert |
 | Co-tenant workload lacked explicit runtime caps | `scripts/ops/enforce_cotenant_resource_caps.sh` applies Docker CPU, memory, swap, and PID caps idempotently; the hardening runbook installs it with cron |
 | Browser login returned `Invalid Host header` for the canonical domain | `PHOENIX_DOMAIN` and optional `PHOENIX_ALLOWED_HOSTS` are now forwarded to the backend Host guard; canonical login reaches validation while malformed hosts remain blocked |
-| Current docs described OI/ML as running and continuously monitored | Sidecar compose now defaults dormant, the retained VM container is stopped with restart `no`, backend monitoring is disabled, and reactivation requires an explicit reviewed override |
+| Current docs described OI/ML as running and continuously monitored | Sidecar Compose now defaults dormant, no VM container is present, the retained image and historical data remain, backend monitoring is disabled, and reactivation requires an explicit reviewed override |
 
 ## Open Documentation-Backed Risks
 

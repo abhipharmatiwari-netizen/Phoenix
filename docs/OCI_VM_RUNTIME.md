@@ -19,7 +19,7 @@ OCIDs, broker identifiers, and tokens are redacted.
 | Compose files used | `/opt/phoenix/app/docker-compose.oci-live.yml`, `/opt/phoenix/phoenix-override.yml` | `com.docker.compose.project.config_files` labels | These are the active Phoenix Compose files for labelled containers | Runtime override must be treated as authoritative |
 | Env file used | `/opt/phoenix/phoenix-deploy.env` | runtime scripts and Compose commands | Non-secret deploy env file exists on VM | Document names only, not values |
 | Running Phoenix containers | `phoenix-oci-backend`, `phoenix-oci-web`, `phoenix-oci-watchdog`, `phoenix-oci-postgres` | `docker ps`, `docker inspect` | backend/nginx images are `local-1d0ca01`; backend, nginx, and Postgres were healthy after the 2026-06-20 LIVE/dormancy changes | Aurelium containers also run on the host but are outside Phoenix docs |
-| Stopped Phoenix containers | `phoenix-oi-ml-shadow` is intentionally dormant; `phoenix-oci-optimizer` is not present | `docker ps -a`, `docker inspect` | sidecar exit `143`, running `false`, restart policy `no`; runner and snapshotter disabled in `/opt/phoenix/oi-ml-shadow.yml` | Historical sidecar database rows, image, and logs are retained; cron still controls the backend schedule |
+| Dormant/absent Phoenix containers | `phoenix-oi-ml-shadow` and `phoenix-oci-optimizer` are not present | `docker ps -a`, `docker image inspect`, operator Compose inspection | retained sidecar image exists; restart policy `no`, runner disabled, and snapshotter disabled in `/opt/phoenix/oi-ml-shadow.yml` | Historical sidecar database rows, image, and logs are retained; cron still controls the backend schedule |
 | Backend image | Verify with `docker inspect phoenix-oci-backend` | `docker inspect phoenix-oci-backend` | Local image, not OCIR | Source bind mounts are still active |
 | Web image | Verify with `docker inspect phoenix-oci-web` | `docker inspect phoenix-oci-web` | Local image, not OCIR | Public nginx `/readyz` and `/health/summary` proxy to redacted backend endpoints; `/health/alerts` and `/health/mitigations` proxy JSON for the Alerts and Mitigations screens; Overview/Safety use authenticated `/admin/health/summary` for schema, watchdog, and account-count details; `/bff/health/summary`, `/bff/readyz`, and `/bff/dashboard/status` are blocked from direct diagnostic bypass; `/manifest.json`, `/favicon.svg`, and `/favicon.ico` are served as static assets; stale `/static/*` assets return 404 instead of SPA HTML; frontend runtime failures render a visible recovery screen instead of a blank root |
 | Database image | `postgres:16-alpine` | `docker inspect phoenix-oci-postgres` | Compose-managed VM-local Postgres container with Docker health status `healthy` | Container uses the existing `/opt/phoenix/pgdata` mount and password-file env, not a plaintext password value |
@@ -137,7 +137,8 @@ The OI/ML research sidecar was then made persistently dormant:
   intent rows, zero virtual entries/flats, and zero realized paper PnL;
 - `/opt/phoenix/oi-ml-shadow.yml` now sets `restart: "no"`,
   `OI_ML_SHADOW_ENABLED=false`, and `OI_SNAPSHOTTER_ENABLED=false`;
-- the retained container is stopped with exit 143 and restart policy `no`;
+- the sidecar container was removed after shutdown; the retained image and
+  operator Compose remain, with restart policy `no`;
 - backend `OI_ML_SHADOW_HEALTH_ENABLED=false` reports the component as
   `disabled` without degrading LIVE health;
 - Postgres rows, the sidecar image, and logs were preserved. Reactivation must
@@ -377,8 +378,8 @@ as provenance, but the sidecar is not currently running or monitored.
 | Purpose | Retained dry-run OI/ML CE seller research evidence; no live order routing |
 | Runtime image source | Retained image `phoenix-oi-ml-shadow:oi-ml-shadow-e5e13bd`; legacy sidecar checkout `/opt/phoenix/oi-ml-shadow-src` also remains |
 | Compose file | `/opt/phoenix/oi-ml-shadow.yml` |
-| Image | Preserved locally; verify stopped-container image with `docker inspect phoenix-oi-ml-shadow` |
-| Container | `phoenix-oi-ml-shadow`, stopped, restart policy `no`, no host ports |
+| Image | Preserved locally; verify with `docker image inspect phoenix-oi-ml-shadow:oi-ml-shadow-e5e13bd` |
+| Container | Not present; retained image and operator Compose remain, restart policy `no`, no host ports |
 | Enablement | `OI_ML_SHADOW_ENABLED=false`, `OI_SNAPSHOTTER_ENABLED=false`; restart requires an explicit reviewed override |
 | Scorer | Retained configuration is `missing`; validated LightGBM artifacts and a passed report remain mandatory after any future reactivation |
 | Risk posture | `OI_ML_SHADOW_ALLOW_NAKED=false`; no sidecar process or order-intent generation currently runs |
