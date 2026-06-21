@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
   supply-chain-and-secrets:
     runs-on: ubuntu-latest
@@ -147,15 +151,21 @@ jobs:
           limit-severities-for-sarif: true
 
       - name: Upload trivy SARIF results
-        if: always() && hashFiles('trivy-backend.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        if: >-
+          always() && hashFiles('trivy-backend.sarif') != '' &&
+          (github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-backend.sarif
           category: trivy-backend
 
       - name: Upload trivy nginx SARIF
-        if: always() && hashFiles('trivy-nginx.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        if: >-
+          always() && hashFiles('trivy-nginx.sarif') != '' &&
+          (github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-nginx.sarif
           category: trivy-nginx
