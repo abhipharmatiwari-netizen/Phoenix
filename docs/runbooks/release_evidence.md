@@ -39,6 +39,7 @@ Collect all of the following without printing secret values:
 | Secret permissions | `scripts/validate-live-secret-perms.sh` passes on the VM |
 | Deploy env secret scan | `scripts/ops/check_env_secret_material.sh` passes without printing values |
 | Host-header boundary | malformed `Host` values return HTTP 400 before admin/BFF auth handling |
+| Phoenix DB backup automation | `/etc/cron.d/phoenix-postgres-backup` is installed, dry-run schema dump/restore-list verification passes, and the latest full backup evidence is current or a manual full backup is captured before database-affecting maintenance |
 | Watchdog contract | `docker inspect phoenix-oci-watchdog --format '{{json .Mounts}}'` returns an empty list |
 | Disk headroom | root filesystem has safe free-space buffer and `/health/alerts` includes `disk_headroom_low` |
 | Cleanup and isolation | active image tags, rollback set, co-tenant workloads, Docker resource caps, and storage headroom are documented |
@@ -94,6 +95,10 @@ operator risk-halt or rollback decision is recorded.
    sudo PHOENIX_ROOT=/opt/phoenix \
      /opt/phoenix/app/scripts/ops/check_env_secret_material.sh
    docker inspect phoenix-oci-postgres --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}'
+   sudo cat /etc/cron.d/phoenix-postgres-backup
+   sudo PHOENIX_PG_BACKUP_DRY_RUN=true /opt/phoenix/scripts/backup-postgres.sh
+   sudo tail -n 80 /opt/phoenix/logs/phoenix-postgres-backup.log
+   sudo cat /opt/phoenix/backups/postgres/latest.json 2>/dev/null || true
    docker inspect phoenix-oci-watchdog --format '{{json .Mounts}}'
    /opt/phoenix/app/scripts/ops/oci_storage_report.sh
    df -h /
@@ -146,10 +151,13 @@ has zero non-terminal position records.
 - That broker credentials are correct beyond observed login/sync evidence.
 - That capital limits are economically appropriate.
 - That previously exposed credentials have been rotated.
+- That a restore from the latest Phoenix DB backup has been completed; restore
+  proof comes from the restore drill runbook.
 
 ## Related
 
 - [OCI LIVE Deployment](oci_live_deployment.md)
 - [OCI Runtime Hardening](oci_runtime_hardening.md)
+- [Phoenix Postgres Backup](postgres_backup.md)
 - [Kill Switch](kill_switch.md)
 - [Break-Glass Flatten](break_glass_flatten.md)

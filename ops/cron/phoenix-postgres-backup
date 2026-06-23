@@ -1,0 +1,6 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Phoenix VM-local Postgres backup.
+# Runs at 23:30 IST Monday-Friday (18:00 UTC Monday-Friday).
+0 18 * * 1-5 root /opt/phoenix/scripts/backup-postgres.sh

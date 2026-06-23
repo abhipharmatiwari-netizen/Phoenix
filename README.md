@@ -5,6 +5,8 @@ source of truth for production documentation; repo manifests and historical
 runbooks are secondary evidence only when they match that VM.
 
 Last verified against the VM: 2026-06-20 12:48 UTC.
+Phoenix DB backup cron verified on the VM: 2026-06-23 14:21 UTC
+with a schema-only dump and restore-list dry run.
 EMA20 is enabled for the intended LIVE account and the OI/ML research sidecar
 is persistently dormant with its historical database, image, and logs retained.
 
@@ -21,6 +23,7 @@ is persistently dormant with its historical database, image, and logs retained.
 | Backend container | `phoenix-oci-backend`, local `phoenix-local-backend:local-<git-sha>` image; cron stops it outside scheduled runtime |
 | Web container | `phoenix-oci-web`, local `phoenix-local-nginx:local-<git-sha>` image, healthy |
 | Database | VM-local `phoenix-oci-postgres` container, `postgres:16-alpine`, Compose-managed and Docker-healthy |
+| Database backup | Root cron `/etc/cron.d/phoenix-postgres-backup` runs `/opt/phoenix/scripts/backup-postgres.sh` at 23:30 IST Monday-Friday; dumps are stored under `/opt/phoenix/backups/postgres` and verified with `pg_restore -l` |
 | Watchdog | `phoenix-oci-watchdog`, `docker:cli`; observe-only, no Docker socket or mounts |
 | OI/ML shadow sidecar | No container is present; retained image `phoenix-oi-ml-shadow:oi-ml-shadow-e5e13bd` and operator Compose remain with restart policy `no`, runner/snapshotter/backend monitoring disabled, and historical Postgres/image/log evidence preserved |
 | Backend command | `python -m app.main` |
@@ -68,12 +71,13 @@ See [OCI VM Runtime Evidence](docs/OCI_VM_RUNTIME.md) for the evidence table.
 6. [Release Evidence](docs/runbooks/release_evidence.md)
 7. [OCI Runtime Hardening](docs/runbooks/oci_runtime_hardening.md)
 8. [Strategy Runtime Diagnostics](docs/runbooks/strategy_runtime_diagnostics.md)
-9. [OI/ML Shadow Sidecar](docs/runbooks/oi_ml_shadow_sidecar.md)
-10. [OI/ML Data Source Approval](docs/runbooks/oi_ml_data_source_approval.md)
-11. [OI/ML CE Seller Rollout](docs/runbooks/oi_ml_ce_seller_rollout.md)
-12. [Kill Switch](docs/runbooks/kill_switch.md)
-13. [Broker Credential Update](docs/runbooks/update_broker_credentials.md)
-14. [Restore Drill](docs/runbooks/restore_drill.md)
+9. [Phoenix Postgres Backup](docs/runbooks/postgres_backup.md)
+10. [OI/ML Shadow Sidecar](docs/runbooks/oi_ml_shadow_sidecar.md)
+11. [OI/ML Data Source Approval](docs/runbooks/oi_ml_data_source_approval.md)
+12. [OI/ML CE Seller Rollout](docs/runbooks/oi_ml_ce_seller_rollout.md)
+13. [Kill Switch](docs/runbooks/kill_switch.md)
+14. [Broker Credential Update](docs/runbooks/update_broker_credentials.md)
+15. [Restore Drill](docs/runbooks/restore_drill.md)
 
 Docker Desktop, Cloud Run, GCP, Firestore, BigQuery, and local development
 material are not current production operating models unless a future VM audit
@@ -97,6 +101,8 @@ curl -k -sS https://localhost:8443/readyz
 
 docker logs --tail=300 phoenix-oci-backend
 docker inspect phoenix-oci-postgres --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}'
+sudo cat /etc/cron.d/phoenix-postgres-backup
+sudo tail -n 80 /opt/phoenix/logs/phoenix-postgres-backup.log
 docker inspect phoenix-oci-watchdog --format '{{json .Mounts}}'
 ```
 
@@ -112,10 +118,12 @@ frontend/                         React operations console
 nginx/                            Reverse proxy and frontend image config
 migrations/                       SQL migrations and bootstrap assets
 scripts/                          Operator and release utility scripts
+ops/cron/                         Root cron definitions for VM-installed jobs
 tests/                            Pytest suite
 docs/OCI_VM_RUNTIME.md            Current VM evidence snapshot
 docs/ENCYCLOPEDIA.md              Current runtime glossary and endpoint behavior
 docs/runbooks/oci_live_deployment.md Current OCI VM operator runbook
+docs/runbooks/postgres_backup.md  VM-local Postgres backup automation runbook
 docs/runbooks/oi_ml_shadow_sidecar.md OI/ML shadow sidecar progress and gates
 docs/runbooks/oi_ml_data_source_approval.md OI/ML option-chain data source approval gate
 docs/runbooks/oi_ml_ce_seller_rollout.md OI/ML promotion and rollback gates

@@ -5,8 +5,9 @@ trading behavior during normal documentation or review work.
 
 Status: the 2026-06-06 hardening pass has already applied the Postgres
 compose-adoption, watchdog no-socket recreation, secret-permission validation,
-and storage expansion steps on the current OCI VM. Keep this runbook for
-evidence capture, repeatable maintenance, and rollback.
+and storage expansion steps on the current OCI VM. The Phoenix DB backup cron
+was installed and dry-run verified on 2026-06-23. Keep this runbook for evidence
+capture, repeatable maintenance, and rollback.
 
 Scope: the current OCI VM deployment only. Do not apply these steps to the live
 VM without an approved maintenance window, a fresh database backup, and operator
@@ -24,7 +25,10 @@ approval to restart containers.
 ## Preconditions
 
 - Live trading is stopped or the operator has approved the maintenance action.
-- `/opt/phoenix/pgdata` has a verified backup.
+- `/opt/phoenix/pgdata` has a verified backup. Use
+  `docs/runbooks/postgres_backup.md` and confirm the log contains
+  `backup complete` and `verified=true` before maintenance that can affect the
+  database or its container.
 - The current runtime evidence in `docs/OCI_VM_RUNTIME.md` has been refreshed.
 - `/run/secrets/control_plane_pg_password` exists on the VM.
 - `/opt/phoenix/phoenix-deploy.env` sets `CONTROL_PLANE_PG_SSLMODE_HOST=prefer`
@@ -90,12 +94,11 @@ start beside production.
 Maintenance-window migration outline:
 
 1. Capture release evidence.
-2. Capture and verify a database backup:
+2. Capture and verify a database backup with the installed VM backup script:
    ```bash
-   sudo install -d -m 700 /opt/phoenix/backups
-   BACKUP="/opt/phoenix/backups/phoenix_$(date -u +%Y%m%dT%H%M%SZ).dump"
-   sudo sh -c "docker exec phoenix-oci-postgres pg_dump -U phoenix_app -d phoenix -Fc > '$BACKUP'"
-   sudo sh -c "docker exec -i phoenix-oci-postgres pg_restore -l < '$BACKUP' >/dev/null"
+   sudo /opt/phoenix/scripts/backup-postgres.sh
+   sudo tail -n 80 /opt/phoenix/logs/phoenix-postgres-backup.log
+   sudo cat /opt/phoenix/backups/postgres/latest.json
    ```
 3. Stop live trading services, including the watchdog, through the current
    Compose files:
@@ -201,7 +204,48 @@ Both checks report file names and key names only. Do not paste env values,
 secret file contents, broker credentials, cloud keys, or screenshots containing
 those values into GitHub issues or runbooks.
 
-## Phase 6 - Storage And Cleanup
+## Phase 6 - Database Backup, Storage And Cleanup
+
+The VM-local Phoenix Postgres backup cron is installed as:
+
+```text
+/etc/cron.d/phoenix-postgres-backup
+0 18 * * 1-5 root /opt/phoenix/scripts/backup-postgres.sh
+```
+
+This is 23:30 IST Monday-Friday and intentionally skips Saturday/Sunday. The
+script stores verified custom-format dumps in
+`/opt/phoenix/backups/postgres`, writes evidence to
+`/opt/phoenix/backups/postgres/latest.json`, logs to
+`/opt/phoenix/logs/phoenix-postgres-backup.log`, uses `flock`, keeps local dumps
+for 14 days by default, and requires 10 GB free space by default.
+
+After deploying a repo change that updates `scripts/ops/backup_oci_postgres.sh`
+or `ops/cron/phoenix-postgres-backup`, sync the installed VM paths and run the
+non-data dry run:
+
+```bash
+sudo install -o root -g root -m 0755 \
+  /opt/phoenix/app/scripts/ops/backup_oci_postgres.sh \
+  /opt/phoenix/scripts/backup-postgres.sh
+
+sudo install -o root -g root -m 0644 \
+  /opt/phoenix/app/ops/cron/phoenix-postgres-backup \
+  /etc/cron.d/phoenix-postgres-backup
+
+sudo bash -n /opt/phoenix/scripts/backup-postgres.sh
+sudo PHOENIX_PG_BACKUP_DRY_RUN=true /opt/phoenix/scripts/backup-postgres.sh
+sudo tail -n 80 /opt/phoenix/logs/phoenix-postgres-backup.log
+```
+
+The dry run must include schema-only `pg_dump` and `pg_restore -l`
+verification. It must not create a full `.dump` file. Run a full backup before
+database-affecting maintenance:
+
+```bash
+sudo /opt/phoenix/scripts/backup-postgres.sh
+sudo cat /opt/phoenix/backups/postgres/latest.json
+```
 
 Capture storage evidence before cleanup:
 

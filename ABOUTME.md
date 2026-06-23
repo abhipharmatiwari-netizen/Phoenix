@@ -24,6 +24,9 @@ nginx:
   fallback values for internal-only diagnostics that are omitted.
 - `phoenix-oci-postgres` is the VM-local operational Postgres database and is
   now managed by the Compose `vm-local-postgres` profile with Docker health.
+- A root cron job backs up the VM-local Phoenix database at 23:30 IST
+  Monday-Friday to `/opt/phoenix/backups/postgres`, with restore-list
+  verification before each dump is published.
 - `phoenix-oci-watchdog` monitors backend `/health` in observe-only mode with
   no Docker socket or mounts.
 - The backend reports `HUB_AUTHORITATIVE` mode and
@@ -66,7 +69,7 @@ production operating model:
 ## Operator Responsibility
 
 Operators must keep `/opt/phoenix/phoenix-deploy.env`, `/run/secrets`, the local
-Postgres container, the source checkout at `/opt/phoenix/app`, cron jobs, and
-nginx certificates consistent with the current OCI runbook. Secret values and
-private infrastructure details must be redacted from logs, docs, commits, and
-screenshots.
+Postgres container, the source checkout at `/opt/phoenix/app`, cron jobs,
+database backup evidence, and nginx certificates consistent with the current
+OCI runbook. Secret values and private infrastructure details must be redacted
+from logs, docs, commits, and screenshots.

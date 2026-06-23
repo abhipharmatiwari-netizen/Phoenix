@@ -1,8 +1,9 @@
 # Documentation Audit
 
-Audit date: 2026-06-20. Runtime snapshot refreshed after EMA20-only LIVE
-enablement, canonical-host login repair, and persistent OI/ML sidecar dormancy,
-in addition to the prior OCI hardening and storage/isolation work.
+Audit date: 2026-06-23. Runtime snapshot refreshed after EMA20-only LIVE
+enablement, canonical-host login repair, persistent OI/ML sidecar dormancy, and
+Phoenix DB backup cron installation, in addition to the prior OCI hardening and
+storage/isolation work.
 
 Scope: repository documentation, environment examples, Compose comments, and
 operator-facing runbooks were checked against the running OCI VM. The OCI VM
@@ -21,6 +22,7 @@ overrides repo docs and historical plans when there is a conflict.
 | Web | `phoenix-oci-web`, local Phoenix nginx image verified from `docker ps`, healthy |
 | OI/ML shadow sidecar | No container present; retained image and operator Compose use restart `no`, runner/snapshotter/backend monitoring are disabled, and historical data is preserved |
 | Database | VM-local `phoenix-oci-postgres`, `postgres:16-alpine`, Compose-managed and Docker-healthy |
+| Database backup | `/etc/cron.d/phoenix-postgres-backup` runs the VM-local backup script at 23:30 IST Monday-Friday; dry-run schema dump and restore-list verification passed on 2026-06-23 |
 | Watchdog | `phoenix-oci-watchdog`, observe-only, no Docker socket or mounts |
 | Runtime mode | `APP_ENV=production`, `TRADE_MODE=LIVE`, EMA20-only; `/health/summary` reports `HUB_AUTHORITATIVE` and `/health` reports `strategy_bridge_order_router` |
 | Health endpoints | backend-local `/health`, `/ready`, `/readyz`, `/health/summary`, `/health/alerts`, `/health/mitigations`; public nginx `/health`, redacted `/readyz`, redacted `/health/summary`, JSON `/health/alerts`, JSON `/health/mitigations` |
@@ -41,6 +43,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | `docs/OCI_VM_RUNTIME.md` | evidence snapshot | MATCHES_OCI_VM | KEEP CURRENT |
 | `docs/runbooks/oci_live_deployment.md` | OCI operations | MATCHES_OCI_VM | KEEP CURRENT |
 | `docs/runbooks/oci_runtime_hardening.md` | runtime hardening | MATCHES_OCI_VM | KEEP CURRENT |
+| `docs/runbooks/postgres_backup.md` | VM-local Postgres backup automation | MATCHES_OCI_VM | KEEP CURRENT |
 | `docs/runbooks/oci-live.env.example` | OCI env template | MATCHES_OCI_VM | KEEP CURRENT |
 | `phoenix-override.yml.example` | OCI override template | MATCHES_OCI_VM_SHAPE | KEEP CURRENT |
 | `docker-compose.oci-live.yml` | base Compose manifest | CURRENT_WITH_OVERRIDE_CONTEXT | KEEP CURRENT |
@@ -83,12 +86,14 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | Co-tenant workload lacked explicit runtime caps | `scripts/ops/enforce_cotenant_resource_caps.sh` applies Docker CPU, memory, swap, and PID caps idempotently; the hardening runbook installs it with cron |
 | Browser login returned `Invalid Host header` for the canonical domain | `PHOENIX_DOMAIN` and optional `PHOENIX_ALLOWED_HOSTS` are now forwarded to the backend Host guard; canonical login reaches validation while malformed hosts remain blocked |
 | Current docs described OI/ML as running and continuously monitored | Sidecar Compose now defaults dormant, no VM container is present, the retained image and historical data remain, backend monitoring is disabled, and reactivation requires an explicit reviewed override |
+| Phoenix DB backup automation was not represented in operator docs | The root cron schedule, installed script path, local dump path, log path, retention, restore-list verification, and dry-run check are documented in the Postgres backup, OCI deployment, hardening, restore, and release-evidence runbooks |
 
 ## Open Documentation-Backed Risks
 
 | Risk | Severity | Current doc location |
 |---|---|---|
 | Previously exposed secret values still require rotation | P0 | `docs/OCI_VM_RUNTIME.md`, `README.md` |
+| Phoenix DB backups are VM-local only and do not provide PITR/off-host recovery | P1 | `docs/runbooks/postgres_backup.md`, `docs/runbooks/restore_drill.md` |
 | Phoenix still shares the VM with capped unrelated workloads | P2 | `docs/OCI_VM_RUNTIME.md`, `docs/runbooks/oci_runtime_hardening.md` |
 | Deployment-env backup retention and forbidden secret-like scanning remain open | P1 | `docs/OCI_VM_RUNTIME.md`, `docs/runbooks/oci_live_deployment.md` |
 
@@ -103,6 +108,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | `ARCHITECTURE.md` | production contract with current runtime preface |
 | `docs/runbooks/release_evidence.md` | approval evidence standard |
 | `docs/runbooks/oci_runtime_hardening.md` | hardening state, repeatable checks, and rollback notes |
+| `docs/runbooks/postgres_backup.md` | VM-local Postgres backup schedule, verification, and failure handling |
 | `docs/runbooks/update_broker_credentials.md` | broker credential rotation without leaking values |
 
 ## Validation Record

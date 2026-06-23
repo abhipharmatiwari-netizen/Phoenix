@@ -40,10 +40,10 @@ For the current OCI VM, release approval also requires backend-local `/readyz`,
 backend-local `/health/summary`, authenticated `/admin/health/summary`,
 redacted public `/readyz` and `/health/summary`, JSON `/health/alerts` and
 `/health/mitigations`, blocked BFF diagnostic bypasses, Postgres health,
-watchdog no-mount evidence, static-asset routing evidence, secret-permission
-validation, and disk-headroom evidence. Those checks are listed in the release
-evidence runbook and should be captured in the deployment record, not committed
-here by default.
+Phoenix DB backup cron/dry-run evidence, watchdog no-mount evidence,
+static-asset routing evidence, secret-permission validation, and disk-headroom
+evidence. Those checks are listed in the release evidence runbook and should be
+captured in the deployment record, not committed here by default.
 
 ## Restore drill records
 

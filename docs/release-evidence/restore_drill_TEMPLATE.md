@@ -17,6 +17,8 @@
 | Reviewer / witness | (name / handle) |
 | Postgres host used | (e.g. `host.docker.internal:5432` or Cloud SQL instance) |
 | Backup snapshot date | YYYY-MM-DD HH:MM UTC |
+| Backup source path | (e.g. `/opt/phoenix/backups/postgres/phoenix_YYYYMMDDTHHMMSSZ.dump`) |
+| Backup automation evidence | (cron/manual command and log timestamp) |
 | Phoenix version / commit | (git SHA) |
 
 ---
@@ -26,6 +28,7 @@
 | Check | Result | Notes |
 |---|---|---|
 | Backup snapshot located and accessible | PASS / FAIL | |
+| Backup restore-list verification passed | PASS / FAIL | `pg_restore -l` evidence: |
 | Restore completed without errors | PASS / FAIL | |
 | Schema guard passed post-restore | PASS / FAIL | |
 | `order_submission_outbox` rows present | PASS / FAIL | count: |

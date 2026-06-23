@@ -1,6 +1,6 @@
 # Phoenix Encyclopedia
 
-Last updated: 2026-06-20.
+Last updated: 2026-06-23.
 
 This is the quick-reference index for the current Phoenix OCI VM runtime. It
 explains terms and endpoint behavior that appear across the README,
@@ -16,6 +16,7 @@ architecture document, runbooks, and operator playbooks.
 | Backend | `phoenix-oci-backend`, running `python -m app.main`. |
 | Web | `phoenix-oci-web`, nginx frontend and reverse proxy. |
 | Database | `phoenix-oci-postgres`, VM-local Postgres container managed by the `vm-local-postgres` Compose profile. |
+| Database backup | Root cron `/etc/cron.d/phoenix-postgres-backup` runs `/opt/phoenix/scripts/backup-postgres.sh` at 23:30 IST Monday-Friday; full dumps are stored under `/opt/phoenix/backups/postgres` after `pg_restore -l` verification. |
 | Watchdog | `phoenix-oci-watchdog`, observe-only Docker CLI sidecar with no Docker socket or mounts. |
 | LIVE strategy authority | EMA20-only for the intended Angel account; `TRADE_MODE=LIVE`, one active strategy per underlying, flat broker/ownership state and green readiness were verified on 2026-06-20. |
 | OI/ML sidecar | Dormant and outside the live order authority path. No container is present; the retained image and operator Compose remain with restart `no`, runner/snapshotter/health monitoring disabled, and historical data/log evidence preserved. |
@@ -90,6 +91,7 @@ playbooks are embedded in the runbooks, especially:
 - `docs/runbooks/oci_live_deployment.md`
 - `docs/runbooks/release_evidence.md`
 - `docs/runbooks/oci_runtime_hardening.md`
+- `docs/runbooks/postgres_backup.md`
 - `docs/runbooks/strategy_runtime_diagnostics.md`
 - `docs/runbooks/dashboard-kill-switch.md`
 - `docs/runbooks/kill_switch.md`

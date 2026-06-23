@@ -1,6 +1,8 @@
 # Phoenix OCI LIVE Deployment Runbook
 
-Status: current operator runbook for the OCI VM verified on 2026-06-21.
+Status: current operator runbook for the OCI VM. Core runtime was verified on
+2026-06-21; Phoenix DB backup cron was installed and dry-run verified on
+2026-06-23.
 
 This runbook describes what is actually running on the OCI VM. It does not
 describe the older intended OCIR/external-Postgres deployment as current state.
@@ -23,6 +25,7 @@ Current VM paths and containers:
 - watchdog: `phoenix-oci-watchdog`
 - logs: `/opt/phoenix/logs`
 - state helpers: `/opt/phoenix/state`
+- database backups: `/opt/phoenix/backups/postgres`
 - certs: `/opt/phoenix/certs`
 - OI/ML shadow retained image source: image inspection; legacy sidecar checkout `/opt/phoenix/oi-ml-shadow-src` may exist but is not current execution evidence
 - OI/ML shadow compose: `/opt/phoenix/oi-ml-shadow.yml`
@@ -59,6 +62,9 @@ Latest verified live deployment:
   and unapproved Host headers are rejected before authentication
 - database: `phoenix-oci-postgres` is Compose-managed with Docker health
   status `healthy`
+- database backup: `/etc/cron.d/phoenix-postgres-backup` runs
+  `/opt/phoenix/scripts/backup-postgres.sh` at 23:30 IST Monday-Friday and
+  writes verified dumps under `/opt/phoenix/backups/postgres`
 - watchdog: `phoenix-oci-watchdog` has no Docker socket or other mounts
 - root filesystem: 183G total with 45G available and 76% used at the
   2026-06-13 storage verification; `/health/alerts` includes the
@@ -127,6 +133,9 @@ operations and proof gates.
   `8443` for host-level health checks.
 - `phoenix-oci-postgres` is a VM-local Postgres container with data mounted from
   `/opt/phoenix/pgdata`.
+- Phoenix DB backups are VM-local custom-format dumps under
+  `/opt/phoenix/backups/postgres`; use the Postgres backup runbook before
+  maintenance that can affect the database or its container.
 - The current backend image has source-file bind mounts; do not add or remove
   those mounts during documentation or evidence capture.
 
@@ -334,6 +343,7 @@ docker logs --tail=120 phoenix-oci-watchdog
 
 find /opt/phoenix/logs -maxdepth 2 -type f | sort | tail -50
 tail -n 200 /opt/phoenix/logs/cron-scheduler.log 2>/dev/null || true
+tail -n 200 /opt/phoenix/logs/phoenix-postgres-backup.log 2>/dev/null || true
 tail -n 200 /opt/phoenix/logs/cert-renewal.log 2>/dev/null || true
 ```
 
@@ -391,6 +401,47 @@ docker exec phoenix-oci-postgres \
   -c "select broker_account_id, api_key is not null as has_api_key, client_code is not null as has_client_code, updated_at from broker_credentials order by broker_account_id;"
 ```
 
+## Database Backup Automation
+
+Use the VM-local backup runbook for detailed operation:
+[Phoenix Postgres Backup](postgres_backup.md).
+
+Current installed cron:
+
+```text
+0 18 * * 1-5 root /opt/phoenix/scripts/backup-postgres.sh
+```
+
+This is 23:30 IST Monday-Friday. It intentionally skips Saturday and Sunday.
+
+Read-only backup evidence:
+
+```bash
+sudo cat /etc/cron.d/phoenix-postgres-backup
+sudo tail -n 80 /opt/phoenix/logs/phoenix-postgres-backup.log
+sudo ls -lh /opt/phoenix/backups/postgres
+sudo cat /opt/phoenix/backups/postgres/latest.json 2>/dev/null || true
+```
+
+Dry-run verification, which performs a schema-only dump and restore-list check
+without creating a full data dump:
+
+```bash
+sudo PHOENIX_PG_BACKUP_DRY_RUN=true /opt/phoenix/scripts/backup-postgres.sh
+```
+
+Before any maintenance that can affect `/opt/phoenix/pgdata`,
+`phoenix-oci-postgres`, migrations, or restore testing, run a full backup and
+confirm the log contains `backup complete` and `verified=true`:
+
+```bash
+sudo /opt/phoenix/scripts/backup-postgres.sh
+sudo cat /opt/phoenix/backups/postgres/latest.json
+```
+
+Do not restore over the active LIVE database from this runbook. Use the restore
+drill runbook and an isolated target database for restore validation.
+
 ## Start, Stop, and Restart
 
 Current scheduled scripts:
@@ -404,6 +455,9 @@ Cron evidence observed:
 30  3 * * 1-5 /opt/phoenix/start-phoenix.sh >> /opt/phoenix/logs/cron-scheduler.log 2>&1
 30 18 * * 0-5 /opt/phoenix/stop-phoenix.sh  >> /opt/phoenix/logs/cron-scheduler.log 2>&1
 ```
+
+Database backup cron is managed separately in
+`/etc/cron.d/phoenix-postgres-backup`.
 
 Run the migration and database preflight steps below before any backend/nginx
 recreate for a release that changes `migrations/`, schema guard requirements, or
@@ -486,7 +540,7 @@ The operator owns:
 - `/opt/phoenix/pgdata`
 - `/opt/phoenix/logs`
 - `/opt/phoenix/state`
-- cron entries for start/stop/cert/cleanup
+- cron entries for start/stop/cert/cleanup/database backup
 - certificate renewal and nginx health
 - release evidence capture before any go-live or restart approval
 
@@ -495,7 +549,7 @@ The operator owns:
 | Drift | Evidence | Risk |
 |---|---|---|
 | Local images instead of OCIR | `phoenix-local-backend:local-<git-sha>` and `phoenix-local-nginx:local-<git-sha>` verified from `docker ps` during each rollout | Old OCIR docs do not describe current deploy/restart behavior |
-| VM-local Postgres | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres`; container is Compose-managed and healthy | External DB backup/SSL assumptions are not current |
+| VM-local Postgres | `CONTROL_PLANE_PG_HOST=phoenix-oci-postgres`; container is Compose-managed and healthy; local backup cron writes verified dumps under `/opt/phoenix/backups/postgres` | External DB backup/SSL assumptions are not current |
 | Source bind mounts | backend mounts selected `/opt/phoenix/app/app/...` files | Container image alone is not the full deployed code |
 | Watchdog must remain observe-only | watchdog inspect should report no mounts | Docker socket mounts or nginx stop/start logs indicate stale VM wiring or override drift |
 | Optimizer/reload timers absent | `systemctl status` not found | Do not claim scheduled optimizer/reload is installed |

@@ -261,6 +261,47 @@ def test_backend_reload_timer_is_conditional_and_fail_closed() -> None:
     assert "copytruncate" in logrotate
 
 
+def test_phoenix_postgres_backup_cron_runs_weekdays_at_2330_ist() -> None:
+    cron = _read("ops/cron/phoenix-postgres-backup")
+
+    assert "0 18 * * 1-5 root /opt/phoenix/scripts/backup-postgres.sh" in cron
+    assert "23:30 IST Monday-Friday" in cron
+    assert "SHELL=/bin/bash" in cron
+
+
+def test_phoenix_postgres_backup_script_is_local_verified_and_retained() -> None:
+    script = _read("scripts/ops/backup_oci_postgres.sh")
+
+    assert "phoenix-oci-postgres" in script
+    assert "DB_NAME=\"${PHOENIX_PG_DATABASE:-phoenix}\"" in script
+    assert "DB_USER=\"${PHOENIX_PG_USER:-phoenix_app}\"" in script
+    assert "flock -n 9" in script
+    assert "pg_dump -U \"$DB_USER\" -d \"$DB_NAME\" -Fc" in script
+    assert "pg_dump -U \"$DB_USER\" -d \"$DB_NAME\" -Fc --schema-only" in script
+    assert "pg_restore -l" in script
+    assert "phoenix_${stamp}.dump" in script
+    assert "latest.json" in script
+    assert "PHOENIX_PG_BACKUP_KEEP_DAYS" in script
+    assert "PHOENIX_PG_BACKUP_MIN_FREE_GB" in script
+    assert "df -Pk \"$BACKUP_DIR\"" in script
+    assert "find \"$BACKUP_DIR\" -maxdepth 1 -type f -name 'phoenix_*.dump'" in script
+    assert "/run/secrets" not in script
+    assert "PASSWORD" not in script
+
+
+def test_phoenix_postgres_backup_runbook_documents_schedule_and_limits() -> None:
+    runbook = _read("docs/runbooks/postgres_backup.md")
+
+    assert "/etc/cron.d/phoenix-postgres-backup" in runbook
+    assert "0 18 * * 1-5 root /opt/phoenix/scripts/backup-postgres.sh" in runbook
+    assert "23:30 IST Monday-Friday" in runbook
+    assert "/opt/phoenix/backups/postgres" in runbook
+    assert "pg_restore -l" in runbook
+    assert "PHOENIX_PG_BACKUP_DRY_RUN=true" in runbook
+    assert "VM-local backup job" in runbook
+    assert "Off-host replication requires a separate approved job" in runbook
+
+
 def test_oci_build_scripts_build_backend_and_nginx_image_pair() -> None:
     for rel_path in (
         "scripts/ops/build_and_push_image.sh",
@@ -309,6 +350,9 @@ def test_oci_runbook_documents_verified_vm_runtime() -> None:
     assert "Docker socket mounts or nginx stop/start logs indicate stale VM wiring" in runbook
     assert "optimizer and backend-reload systemd timers" in runbook
     assert "not current" in runbook
+    assert "phoenix-postgres-backup" in runbook
+    assert "backup-postgres.sh" in runbook
+    assert "23:30 IST Monday-Friday" in runbook
 
 
 def test_oi_ml_rollout_runbook_pins_promotion_and_rollback_gates() -> None:
