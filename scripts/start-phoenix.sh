@@ -21,8 +21,19 @@ OVERRIDE_FILE="/opt/phoenix/phoenix-override.yml"
 ENV_FILE="/opt/phoenix/phoenix-deploy.env"
 HOLIDAYS_FILE="/opt/phoenix/nse-holidays.txt"
 LOG_TAG="start-phoenix"
+BACKEND_RUNTIME_UID="${PHOENIX_BACKEND_RUNTIME_UID:-100}"
+BACKEND_RUNTIME_GID="${PHOENIX_BACKEND_RUNTIME_GID:-101}"
+LOG_DIR="${PHOENIX_LOG_HOST_PATH:-/opt/phoenix/logs}"
+STATE_DIR="${PHOENIX_STATE_HOST_PATH:-/opt/phoenix/state}"
 
 log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') [$LOG_TAG] $*"; }
+
+ensure_backend_runtime_dirs() {
+    mkdir -p "$LOG_DIR" "$STATE_DIR"
+    chown -R "$BACKEND_RUNTIME_UID:$BACKEND_RUNTIME_GID" "$LOG_DIR" "$STATE_DIR"
+    chmod 755 "$LOG_DIR"
+    chmod 700 "$STATE_DIR"
+}
 
 backend_readyz_status() {
     docker exec phoenix-oci-backend \
@@ -112,6 +123,8 @@ else
 fi
 
 log "Today (IST): $TODAY_IST"
+
+ensure_backend_runtime_dirs
 
 # Check if today is an NSE holiday.
 if [ -f "$HOLIDAYS_FILE" ]; then
