@@ -10,6 +10,9 @@ ENV_FILE="${PHOENIX_ENV_FILE:-/opt/phoenix/phoenix-deploy.env}"
 STATE_DIR="${PHOENIX_STATE_HOST_PATH:-/opt/phoenix/state}"
 LOCK_FILE="${BACKEND_RELOAD_LOCK_FILE:-$STATE_DIR/backend-reload.lock}"
 LOG_TAG="backend-reload"
+BACKEND_RUNTIME_UID="${PHOENIX_BACKEND_RUNTIME_UID:-100}"
+BACKEND_RUNTIME_GID="${PHOENIX_BACKEND_RUNTIME_GID:-101}"
+LOG_DIR="${PHOENIX_LOG_HOST_PATH:-/opt/phoenix/logs}"
 
 log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') [$LOG_TAG] $*"; }
 
@@ -27,7 +30,10 @@ command -v docker >/dev/null 2>&1 || fatal "docker CLI is not available."
 [ -f "$COMPOSE_FILE" ] || fatal "compose file missing: $COMPOSE_FILE"
 [ -f "$OVERRIDE_FILE" ] || fatal "compose override missing: $OVERRIDE_FILE"
 [ -f "$ENV_FILE" ] || fatal "deploy env file missing: $ENV_FILE"
-mkdir -p "$STATE_DIR" /opt/phoenix/logs
+mkdir -p "$STATE_DIR" "$LOG_DIR"
+chown -R "$BACKEND_RUNTIME_UID:$BACKEND_RUNTIME_GID" "$STATE_DIR" "$LOG_DIR"
+chmod 700 "$STATE_DIR"
+chmod 755 "$LOG_DIR"
 
 if [ "${BACKEND_RELOAD_LOCK_HELD:-false}" != "true" ]; then
     if command -v flock >/dev/null 2>&1; then
