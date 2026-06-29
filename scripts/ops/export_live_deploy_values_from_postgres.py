@@ -71,6 +71,9 @@ def _risk_max_daily_loss_from_meta(meta: Mapping[str, Any]) -> str | None:
 
 
 def _conninfo_from_env() -> str:
+    host = os.getenv("CONTROL_PLANE_PG_HOST")
+    if str(host or "").strip().lower() == "host.docker.internal":
+        host = os.getenv("CONTROL_PLANE_PG_HOST_LOCAL") or "127.0.0.1"
     password = (
         os.getenv("CONTROL_PLANE_PG_PASSWORD_HOST")
         or os.getenv("CONTROL_PLANE_PG_PASSWORD")
@@ -79,7 +82,7 @@ def _conninfo_from_env() -> str:
     missing = [
         name
         for name, value in {
-            "CONTROL_PLANE_PG_HOST": os.getenv("CONTROL_PLANE_PG_HOST"),
+            "CONTROL_PLANE_PG_HOST": host,
             "CONTROL_PLANE_PG_DB": os.getenv("CONTROL_PLANE_PG_DB"),
             "CONTROL_PLANE_PG_USER": os.getenv("CONTROL_PLANE_PG_USER"),
             "CONTROL_PLANE_PG_PASSWORD_HOST": password,
@@ -91,7 +94,7 @@ def _conninfo_from_env() -> str:
             "Missing Postgres bootstrap settings: " + ", ".join(missing)
         )
     return make_conninfo(
-        host=os.getenv("CONTROL_PLANE_PG_HOST"),
+        host=host,
         port=int(os.getenv("CONTROL_PLANE_PG_PORT") or "5432"),
         dbname=os.getenv("CONTROL_PLANE_PG_DB"),
         user=os.getenv("CONTROL_PLANE_PG_USER"),

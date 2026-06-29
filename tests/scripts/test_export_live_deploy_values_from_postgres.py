@@ -57,3 +57,21 @@ def test_risk_max_daily_loss_reads_nested_or_flat_meta():
         module._risk_max_daily_loss_from_meta({"risk_max_daily_loss": "12000"})
         == "12000"
     )
+
+
+def test_host_docker_internal_maps_to_localhost_for_host_side_query(monkeypatch):
+    captured = {}
+
+    def fake_make_conninfo(**kwargs):
+        captured.update(kwargs)
+        return "dsn"
+
+    monkeypatch.setattr(module, "make_conninfo", fake_make_conninfo)
+    monkeypatch.setenv("CONTROL_PLANE_PG_HOST", "host.docker.internal")
+    monkeypatch.setenv("CONTROL_PLANE_PG_DB", "phoenix")
+    monkeypatch.setenv("CONTROL_PLANE_PG_USER", "phoenix_app")
+    monkeypatch.setenv("CONTROL_PLANE_PG_PASSWORD_HOST", "secret")
+    monkeypatch.setenv("CONTROL_PLANE_PG_SSLMODE", "prefer")
+
+    assert module._conninfo_from_env() == "dsn"
+    assert captured["host"] == "127.0.0.1"
