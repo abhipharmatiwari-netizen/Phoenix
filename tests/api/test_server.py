@@ -158,6 +158,12 @@ def _fetch_dashboard_ws_ticket(client: TestClient, mode: str = "delta") -> str:
     assert response.status_code == 200
     payload = response.json()
     assert payload["mode"] == mode
+    set_cookie = response.headers.get("set-cookie", "")
+    assert f"{server._DASHBOARD_WS_TICKET_COOKIE}=" in set_cookie
+    assert "HttpOnly" in set_cookie
+    assert "Path=/ws/dashboard" in set_cookie
+    assert "SameSite=strict" in set_cookie
+    assert response.headers.get("cache-control") == "no-store"
     return str(payload["ticket"])
 
 
@@ -655,10 +661,10 @@ def test_dashboard_ws_delta_mode_emits_delta_then_compaction(api_client, monkeyp
         ),
     )
     monkeypatch.setattr(server.asyncio, "sleep", _fast_sleep)
-    ticket = _fetch_dashboard_ws_ticket(client, mode="delta")
+    _fetch_dashboard_ws_ticket(client, mode="delta")
 
     with client.websocket_connect(
-        f"/ws/dashboard?ticket={ticket}&mode=delta",
+        "/ws/dashboard?mode=delta",
     ) as websocket:
         first_text = websocket.receive_text()
         second_text = websocket.receive_text()
@@ -685,8 +691,16 @@ def test_dashboard_ws_rejects_invalid_or_expired_ticket(api_client, monkeypatch)
         ),
     )
 
-    with pytest.raises(WebSocketDisconnect) as invalid_exc:
+    with pytest.raises(WebSocketDisconnect) as query_exc:
         with client.websocket_connect("/ws/dashboard?ticket=invalid-ticket&mode=delta"):
+            pass
+    assert query_exc.value.code == 1008
+
+    with pytest.raises(WebSocketDisconnect) as invalid_exc:
+        with client.websocket_connect(
+            "/ws/dashboard?mode=delta",
+            headers={"cookie": f"{server._DASHBOARD_WS_TICKET_COOKIE}=invalid-ticket"},
+        ):
             pass
     assert invalid_exc.value.code == 1008
 
@@ -704,10 +718,31 @@ def test_dashboard_ws_rejects_invalid_or_expired_ticket(api_client, monkeypatch)
 
     with pytest.raises(WebSocketDisconnect) as expired_exc:
         with client.websocket_connect(
-            f"/ws/dashboard?ticket={expired_ticket}&mode=delta"
+            "/ws/dashboard?mode=delta",
+            headers={"cookie": f"{server._DASHBOARD_WS_TICKET_COOKIE}={expired_ticket}"},
         ):
             pass
     assert expired_exc.value.code == 1008
+
+
+def test_dashboard_ws_rejects_cross_origin_cookie_ticket(api_client, monkeypatch):
+    client, _ = api_client
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            runtime=SimpleNamespace(app_env="production", dashboard_auth_disabled=False)
+        ),
+    )
+    _fetch_dashboard_ws_ticket(client, mode="delta")
+
+    with pytest.raises(WebSocketDisconnect) as origin_exc:
+        with client.websocket_connect(
+            "/ws/dashboard?mode=delta",
+            headers={"origin": "https://evil.example"},
+        ):
+            pass
+    assert origin_exc.value.code == 1008
 
 
 def test_lifespan_uses_app_runtime_start_stop(monkeypatch):

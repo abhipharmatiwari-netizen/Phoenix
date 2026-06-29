@@ -593,7 +593,6 @@ export async function createDashboardWebSocketUrl(
     body: {},
   });
   const url = new URL('/ws/dashboard', `${inferDashboardWebSocketBaseUrl()}/`);
-  url.searchParams.set('ticket', payload.ticket);
   url.searchParams.set('mode', payload.mode || mode);
   return url.toString();
 }
