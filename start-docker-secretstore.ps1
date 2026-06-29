@@ -174,6 +174,10 @@ try {
         $env:LIVE_PG_SSL_SKIP_CHECK = "true"
         Write-Host "  [local-deploy] LIVE_PG_SSL_SKIP_CHECK=true (local Postgres without SSL)" -ForegroundColor Yellow
     }
+    # This launcher always targets docker-compose.live.single.yml. Set TRADE_MODE
+    # in the host process so the pre-compose capital/risk gates cannot fall
+    # through to non-LIVE defaults before Compose injects TRADE_MODE=LIVE.
+    $env:TRADE_MODE = "LIVE"
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_TENANT_ID" -DefaultValue "tenant-1"
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_BROKER_ACCOUNT_ID" -DefaultValue "A1"
 
