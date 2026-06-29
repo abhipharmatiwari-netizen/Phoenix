@@ -111,6 +111,50 @@ function Set-EnvFromSecretOrDefault {
     throw "Required value '$EnvName' is missing in both the current PowerShell session and SecretStore secret '$SecretName'."
 }
 
+function Get-LiveDeployValuesFromPostgres {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TenantId,
+        [Parameter(Mandatory = $true)]
+        [string]$BrokerAccountId
+    )
+
+    $helper = Join-Path $repoRoot "scripts\ops\export_live_deploy_values_from_postgres.py"
+    if (-not (Test-Path -LiteralPath $helper)) {
+        throw "Postgres deploy-value helper not found: $helper"
+    }
+
+    $output = & python $helper --tenant-id $TenantId --broker-account-id $BrokerAccountId 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to load deployment values from Postgres: $output"
+    }
+    try {
+        return ($output | ConvertFrom-Json)
+    }
+    catch {
+        throw "Postgres deploy-value helper returned invalid JSON."
+    }
+}
+
+function Set-EnvFromValueOrThrow {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$EnvName,
+        [string]$Value,
+        [Parameter(Mandatory = $true)]
+        [string]$Source
+    )
+
+    $currentValue = [Environment]::GetEnvironmentVariable($EnvName, "Process")
+    if (-not [string]::IsNullOrWhiteSpace($currentValue)) {
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        throw "$EnvName is missing from $Source."
+    }
+    Set-Item -Path "Env:$EnvName" -Value $Value
+}
+
 function Invoke-External {
     param(
         [Parameter(Mandatory = $true)]
@@ -158,9 +202,6 @@ try {
     Export-RequiredSecretToEnv -SecretName "ADMIN_API_KEY" -EnvName "ADMIN_API_KEY_HOST"
     Export-RequiredSecretToEnv -SecretName "DEMO_AUTH_TOKEN_SECRET" -EnvName "DEMO_AUTH_TOKEN_SECRET_HOST"
     Export-RequiredSecretToEnv -SecretName "CONTROL_PLANE_PG_PASSWORD" -EnvName "CONTROL_PLANE_PG_PASSWORD_HOST"
-    Export-RequiredSecretToEnv -SecretName "CLIENT_LOCAL_IP" -EnvName "CLIENT_LOCAL_IP"
-    Export-RequiredSecretToEnv -SecretName "CLIENT_PUBLIC_IP" -EnvName "CLIENT_PUBLIC_IP"
-    Export-RequiredSecretToEnv -SecretName "MAC_ADDRESS" -EnvName "MAC_ADDRESS"
 
     Set-EnvFromSecretOrDefault -EnvName "CONTROL_PLANE_PG_HOST" -DefaultValue "host.docker.internal"
     Set-EnvFromSecretOrDefault -EnvName "CONTROL_PLANE_PG_PORT" -DefaultValue "5432"
@@ -180,20 +221,35 @@ try {
     $env:TRADE_MODE = "LIVE"
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_TENANT_ID" -DefaultValue "tenant-1"
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_BROKER_ACCOUNT_ID" -DefaultValue "A1"
+    $tenantId = [Environment]::GetEnvironmentVariable("HUB_DEFAULT_TENANT_ID", "Process")
+    $brokerAccountId = [Environment]::GetEnvironmentVariable("HUB_DEFAULT_BROKER_ACCOUNT_ID", "Process")
+    $postgresDeployValues = Get-LiveDeployValuesFromPostgres `
+        -TenantId $tenantId `
+        -BrokerAccountId $brokerAccountId
+    Write-Host "Loaded deployment values from Postgres for $($tenantId):$($brokerAccountId)."
+
+    Set-EnvFromValueOrThrow `
+        -EnvName "CLIENT_LOCAL_IP" `
+        -Value $postgresDeployValues.client_local_ip `
+        -Source "broker_credentials.client_local_ip for $($tenantId):$($brokerAccountId)"
+    Set-EnvFromValueOrThrow `
+        -EnvName "CLIENT_PUBLIC_IP" `
+        -Value $postgresDeployValues.client_public_ip `
+        -Source "broker_credentials.client_public_ip for $($tenantId):$($brokerAccountId)"
+    Set-EnvFromValueOrThrow `
+        -EnvName "MAC_ADDRESS" `
+        -Value $postgresDeployValues.mac_address `
+        -Source "broker_credentials.mac_address for $($tenantId):$($brokerAccountId)"
 
     $capitalLimitsJson = [Environment]::GetEnvironmentVariable("CAPITAL_LIMITS_JSON", "Process")
     if ([string]::IsNullOrWhiteSpace($capitalLimitsJson)) {
-        try {
-            $capitalLimitsJson = Get-Secret -Name "CAPITAL_LIMITS_JSON" -AsPlainText -ErrorAction Stop
-        }
-        catch {
-            $capitalLimitsJson = ""
+        $capitalLimitsJson = [string]$postgresDeployValues.capital_limits_json
+        if (-not [string]::IsNullOrWhiteSpace($capitalLimitsJson)) {
+            Write-Host "Loaded account-specific CAPITAL_LIMITS_JSON from Postgres broker_accounts.meta."
         }
     }
 
     if ([string]::IsNullOrWhiteSpace($capitalLimitsJson)) {
-        $tenantId = [Environment]::GetEnvironmentVariable("HUB_DEFAULT_TENANT_ID", "Process")
-        $brokerAccountId = [Environment]::GetEnvironmentVariable("HUB_DEFAULT_BROKER_ACCOUNT_ID", "Process")
         $capitalLimitsPayload = @{
             "$($tenantId):$($brokerAccountId)" = @{
                 max_notional_per_order = 500000
@@ -220,8 +276,8 @@ try {
             Write-Host "    - The account has zero real capital at risk, OR" -ForegroundColor Yellow
             Write-Host "    - An operator has reviewed and approved the defaults for this account." -ForegroundColor Yellow
             Write-Host ""
-            Write-Host "  To set account-specific limits, add CAPITAL_LIMITS_JSON to your" -ForegroundColor Cyan
-            Write-Host "  PowerShell SecretStore or set it as an env var before running this script." -ForegroundColor Cyan
+            Write-Host "  To set account-specific limits, add broker_accounts.meta.capital_limits" -ForegroundColor Cyan
+            Write-Host "  in Postgres, or set CAPITAL_LIMITS_JSON as an explicit env override." -ForegroundColor Cyan
             Write-Host ""
 
             # Check for non-interactive / CI override
@@ -249,7 +305,7 @@ try {
     }
     else {
         Write-Host ""
-        Write-Host "Loaded CAPITAL_LIMITS_JSON from the current PowerShell session or SecretStore."
+        Write-Host "Loaded CAPITAL_LIMITS_JSON from the current PowerShell session or Postgres."
     }
     Set-Item -Path "Env:CAPITAL_LIMITS_JSON" -Value $capitalLimitsJson
 
@@ -263,11 +319,9 @@ try {
     $tradeModeForRisk = [Environment]::GetEnvironmentVariable("TRADE_MODE", "Process")
     $riskMaxDailyLoss = [Environment]::GetEnvironmentVariable("RISK_MAX_DAILY_LOSS", "Process")
     if ([string]::IsNullOrWhiteSpace($riskMaxDailyLoss)) {
-        try {
-            $riskMaxDailyLoss = Get-Secret -Name "RISK_MAX_DAILY_LOSS" -AsPlainText -ErrorAction Stop
-        }
-        catch {
-            $riskMaxDailyLoss = ""
+        $riskMaxDailyLoss = [string]$postgresDeployValues.risk_max_daily_loss
+        if (-not [string]::IsNullOrWhiteSpace($riskMaxDailyLoss)) {
+            Write-Host "Loaded RISK_MAX_DAILY_LOSS from Postgres broker_accounts.meta."
         }
     }
     if ([string]::IsNullOrWhiteSpace($riskMaxDailyLoss)) {
@@ -291,7 +345,7 @@ try {
         }
     }
     else {
-        Write-Host "Loaded RISK_MAX_DAILY_LOSS from the current PowerShell session or SecretStore."
+        Write-Host "Loaded RISK_MAX_DAILY_LOSS from the current PowerShell session or Postgres."
     }
     Set-Item -Path "Env:RISK_MAX_DAILY_LOSS" -Value $riskMaxDailyLoss
 
@@ -411,6 +465,8 @@ try {
     Write-Host "  ADMIN_API_KEY_HOST"
     Write-Host "  DEMO_AUTH_TOKEN_SECRET_HOST"
     Write-Host "  CONTROL_PLANE_PG_PASSWORD_HOST"
+    Write-Host ""
+    Write-Host "Loaded broker network identity from Postgres broker_credentials:"
     Write-Host "  CLIENT_LOCAL_IP"
     Write-Host "  CLIENT_PUBLIC_IP"
     Write-Host "  MAC_ADDRESS"

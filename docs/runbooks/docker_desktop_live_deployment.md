@@ -20,7 +20,8 @@ It uses:
 
 - [`docker-compose.live.single.yml`](../../docker-compose.live.single.yml)
 - Postgres as the authoritative operational store
-- Postgres `broker_credentials` as the broker-secret path used by the bundled manifest
+- Postgres `broker_credentials` as the broker-secret and broker-network-identity
+  path used by the bundled manifest
 - runtime-injected platform secrets for values such as `ADMIN_API_KEY`, auth token secret, and database password
 
 The older multi-file Compose path (`docker-compose.live.yml` + `docker-compose.postgres.override.yml`) is obsolete in this repo. Those files are not present and must not be used as current LIVE guidance.
@@ -145,11 +146,16 @@ Before you start the bundled LIVE stack, all of the following must already be tr
 - If public Vultr access is required, the SSH key exists at
   `C:\Users\abhis\.ssh\phoenix_vultr_proxy_workspace_ed25519`, or
   `VULTR_REVERSE_TUNNEL_SSH_KEY` points to the active key path.
-- The runtime can obtain `ADMIN_API_KEY`, `DEMO_AUTH_TOKEN_SECRET`,
-  `CONTROL_PLANE_PG_PASSWORD`, `ANGEL_POSTBACK_TOKEN`,
-  `ADMIN_KILL_SWITCH_OVERRIDE`, `RISK_MAX_DAILY_LOSS`,
-  `CAPITAL_LIMITS_JSON`, `CLIENT_LOCAL_IP`, `CLIENT_PUBLIC_IP`, and
-  `MAC_ADDRESS` from your approved LIVE secret process.
+- The runtime can obtain bootstrap-only values `ADMIN_API_KEY`,
+  `DEMO_AUTH_TOKEN_SECRET`, `CONTROL_PLANE_PG_PASSWORD`,
+  `ANGEL_POSTBACK_TOKEN`, and `ADMIN_KILL_SWITCH_OVERRIDE` from your approved
+  LIVE secret process.
+- The selected `broker_accounts` row contains account-specific
+  `meta.capital_limits` and, when managed per-account, `meta.risk.max_daily_loss`
+  or `meta.risk_max_daily_loss`.
+- The selected `broker_credentials` row contains `client_local_ip`,
+  `client_public_ip`, and `mac_address`; the Docker launcher exports these from
+  Postgres instead of Windows SecretStore.
 
 ### If you use the bundled PowerShell helper
 
@@ -161,12 +167,15 @@ The helper script expects the following Windows modules and secret names:
 - `CONTROL_PLANE_PG_PASSWORD`
 - `ANGEL_POSTBACK_TOKEN` (§126 — required for Angel broker postback authentication; without it all Angel postbacks return HTTP 401 and the lifecycle service misses fill events)
 - `ADMIN_KILL_SWITCH_OVERRIDE` (file-mounted only; never export or log it)
-- `RISK_MAX_DAILY_LOSS`
-- `CAPITAL_LIMITS_JSON`, or an explicit audited operator acknowledgement that
-  the helper-derived account baseline is acceptable for this deployment
-- `CLIENT_LOCAL_IP`
-- `CLIENT_PUBLIC_IP`
-- `MAC_ADDRESS`
+
+The helper also connects to Postgres before `docker compose up` and exports:
+
+- `CAPITAL_LIMITS_JSON` from `broker_accounts.meta.capital_limits` or
+  `broker_accounts.meta.capital_limits_json`.
+- `RISK_MAX_DAILY_LOSS` from `broker_accounts.meta.risk.max_daily_loss`,
+  `broker_accounts.meta.risk_max_daily_loss`, or an explicit host env override.
+- `CLIENT_LOCAL_IP`, `CLIENT_PUBLIC_IP`, and `MAC_ADDRESS` from
+  `broker_credentials`.
 
 Use that helper only when it is acting as your operator-side export step for values managed under the approved LIVE secret process.
 
@@ -204,8 +213,8 @@ operator convenience, not the authoritative LIVE secret source:
 .\start-docker-secretstore.ps1
 ```
 
-The helper implements the bundled Docker/Desktop path and derives an
-account-specific `CAPITAL_LIMITS_JSON` baseline if no override is present.
+The helper implements the bundled Docker/Desktop path and loads account-specific
+capital/risk/network values from Postgres for the selected tenant/account.
 It writes Docker Compose secret files under `$env:TEMP\phx-secrets` and
 intentionally keeps them there while the stack is running; Compose local secrets
 are bind mounts, so deleting those files breaks container restarts. Remove that

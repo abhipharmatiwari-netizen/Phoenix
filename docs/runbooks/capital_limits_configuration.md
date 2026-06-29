@@ -16,7 +16,9 @@ disabling capital/risk checks.
 
 - You know the funded tenant and broker account IDs.
 - You have operator approval for the exposure and per-order limits.
-- The deployment path injects values from the operator environment or platform secret store, not from a committed env file.
+- The deployment path injects values from Postgres account metadata, the
+  operator environment, or a platform secret store, not from a committed env
+  file.
 
 Phoenix enforces per-order notional and per-account gross-exposure limits via the `CapitalEngine`.
 All limits can be tuned per-tenant, per-account, or globally through the `CAPITAL_LIMITS_JSON`
@@ -112,9 +114,27 @@ Futures required margin = `max(notional × rate, lots × per_lot)`.
 
 ## How to update
 
-For funded LIVE accounts, prefer a specific `tenant_id:broker_account_id` key. Set
-`CAPITAL_LIMITS_JSON` in the operator environment before deployment, or store it
-in the approved platform secret process for your deployment path.
+For funded LIVE accounts, prefer a specific `tenant_id:broker_account_id` key.
+For the current Docker Desktop recovery path, store the account-specific object
+in `broker_accounts.meta.capital_limits` for the selected account; the launcher
+exports it as `CAPITAL_LIMITS_JSON` before Compose starts.
+
+Example Postgres metadata shape:
+
+```json
+{
+  "capital_limits": {
+    "max_notional_per_order": 500000,
+    "max_gross_exposure": 1000000
+  },
+  "risk": {
+    "max_daily_loss": 10000
+  }
+}
+```
+
+An explicit operator environment `CAPITAL_LIMITS_JSON` override still works for
+break-glass deployment, but it should match the approved funded-account values.
 
 Current OCI VM example:
 
@@ -126,7 +146,7 @@ docker exec phoenix-oci-backend curl -sS http://localhost:8080/health/summary
 
 Do not print the JSON value into tickets or docs.
 
-Non-current local example:
+Legacy local override example:
 
 ```powershell
 $env:CAPITAL_LIMITS_JSON = '{"tenant-1:A1": {"max_notional_per_order": 500000, "max_gross_exposure": 1000000}}'
