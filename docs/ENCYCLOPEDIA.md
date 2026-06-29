@@ -109,6 +109,34 @@ quotes with source timestamps, IV, and Greeks, a latest validation report that i
 not `ERROR`, and dry-run lifecycle rows that progress through staged, virtual
 filled, virtual exited, and flat with realized paper PnL.
 
+## 2026-06-29 EMA20 EOD Incident
+
+At approximately 15:00 IST on 2026-06-29, the local Docker Desktop LIVE runtime
+submitted ambiguous/repeated EMA20 exits during the index EOD window. The trigger
+was not a fresh entry signal. A full exit ACK cleared the EMA20 local managed
+position while stale legacy risk state still contained the same label; subsequent
+tick sync re-adopted that label and allowed more EOD exit attempts.
+
+The kill switch tripped because the risk engine evaluated `floating_drawdown`:
+total drawdown exceeded the configured intraday drawdown threshold. The numeric
+trip condition was correct under the configured limit; the surrounding defect was
+stale/ambiguous position state and duplicate exit lifecycle around the trip.
+
+Fixes added in this revision:
+
+- EMA20 full-exit idempotency keys.
+- LIVE pending-exit re-adoption guard backed by fresh broker position evidence.
+- Fail-closed retry behavior when broker state is unknown after a full-exit ACK.
+- Stale/missing mark tagging so total PnL is unavailable instead of realized-only.
+- Risk-engine entry blocking when unrealized PnL is required but unavailable.
+
+Recovery procedure: verify broker-side positions and open orders first, capture
+the order ids/fills and `kill_switch.trip` audit evidence, resolve any
+`RECONCILING` or `MANUAL_REVIEW` lifecycle rows, then clear the GLOBAL kill
+switch through the vault-backed password flow. Do not clear based only on
+`/health`; use `/readyz`, authenticated health summary, broker terminal evidence,
+and backend logs.
+
 ## Runbooks And Playbooks
 
 This repo does not have a separate `docs/playbooks/` directory. Operator

@@ -292,6 +292,18 @@ class RiskEngine:
                 is_risk_reducing=is_risk_reducing,
             )
 
+        if include_unrealized and guard_total_value is None and total is None:
+            return self._missing_pnl_decision(
+                settings=settings,
+                tenant_id=tenant_id,
+                broker_account_id=broker_account_id,
+                strategy_id=strategy_id,
+                max_daily_loss=float(max_daily_loss),
+                reason="pnl_snapshot_unavailable",
+                is_exit_order=is_exit_order,
+                is_risk_reducing=is_risk_reducing,
+            )
+
         realized_value: Optional[float] = None
         if realized is None:
             if guard_realized_value is not None:

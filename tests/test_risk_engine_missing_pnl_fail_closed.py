@@ -81,3 +81,55 @@ def test_missing_pnl_flag_off_preserves_fail_open_behavior(monkeypatch):
 
     assert allowed is True
     assert reason == "pnl_engine_unavailable_fail_open"
+
+
+def test_missing_total_pnl_blocks_entry_even_when_realized_exists(monkeypatch):
+    _patch_settings(monkeypatch, _settings(fail_closed=True, fail_open=True))
+
+    class _StaleMarkPnLEngine:
+        def get_current_realized_pnl(self, **_kwargs):
+            return 0.0
+
+        def get_current_total_pnl(self, **_kwargs):
+            return None
+
+    engine = RiskEngine(
+        pnl_engine=_StaleMarkPnLEngine(),
+        account_loss_guard_store=AccountLossGuard(),
+    )
+
+    allowed, reason = engine.check_order_allowed(
+        tenant_id=TenantId("tenant-1"),
+        broker_account_id=BrokerAccountId("A1"),
+        strategy_id=StrategyId("strategy-a"),
+        order=_order(purpose=OrderPurpose.ENTRY),
+    )
+
+    assert allowed is False
+    assert reason == "missing_pnl_fail_closed"
+
+
+def test_missing_total_pnl_still_allows_exit_when_fail_closed(monkeypatch):
+    _patch_settings(monkeypatch, _settings(fail_closed=True, fail_open=False))
+
+    class _StaleMarkPnLEngine:
+        def get_current_realized_pnl(self, **_kwargs):
+            return 0.0
+
+        def get_current_total_pnl(self, **_kwargs):
+            return None
+
+    engine = RiskEngine(
+        pnl_engine=_StaleMarkPnLEngine(),
+        account_loss_guard_store=AccountLossGuard(),
+    )
+
+    allowed, reason = engine.check_order_allowed(
+        tenant_id=TenantId("tenant-1"),
+        broker_account_id=BrokerAccountId("A1"),
+        strategy_id=StrategyId("strategy-a"),
+        order=_order(purpose=OrderPurpose.EXIT),
+    )
+
+    assert allowed is True
+    assert reason == "missing_pnl_fail_closed_exit_allowed"

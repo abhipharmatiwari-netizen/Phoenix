@@ -71,6 +71,29 @@ def _runtime_stub() -> types.SimpleNamespace:
     )
 
 
+def _runtime_with_position_status(positions):
+    """Runtime stub with fresh position-sync health metadata."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    return types.SimpleNamespace(
+        routing_table=types.SimpleNamespace(
+            get_routes_for_strategy=lambda _sid: [
+                types.SimpleNamespace(broker_account_id="A1")
+            ]
+        ),
+        state_store=types.SimpleNamespace(
+            get_positions=lambda _acct: list(positions),
+            get_positions_status=lambda _acct: {
+                "status": "OK",
+                "last_ok_ts": now_iso,
+                "last_count": len(positions),
+                "error_reason": None,
+                "blocked_ts": None,
+                "retry_after_seconds": None,
+            },
+        ),
+    )
+
+
 def _make_strategy(monkeypatch):
     monkeypatch.setenv("NG_EMA20_REQUIRE_RSI_FALLING", "1")
     mod = importlib.import_module(MODULE_PATH)
@@ -130,6 +153,34 @@ def _patch_bridge_success(monkeypatch, mod, calls: List[dict]):
     monkeypatch.setattr(mod, "_get_hub_runtime", lambda: _runtime_stub())
 
 
+def _patch_bridge_success_with_runtime(monkeypatch, mod, calls: List[dict], runtime):
+    def fake_place(**kwargs):
+        calls.append(kwargs)
+        return OrderResponse(
+            broker_order_id=f"260507001449{len(calls):03d}",
+            status="SUCCESS",
+            message="ok",
+        )
+    monkeypatch.setattr(mod, "place_order_via_bridge", fake_place)
+    monkeypatch.setattr(mod, "_get_hub_runtime", lambda: runtime)
+
+
+def _risk_entry():
+    return {
+        "side": "SELL",
+        "qty": 1,
+        "entry_price": 10.70,
+        "template_name": "ema20_strategy",
+        "strategy_name": "ema20_strategy",
+        "underlying": "NG",
+        "entry_ts": datetime(2026, 5, 7, 13, 10, tzinfo=timezone.utc).isoformat(),
+        "exchange": "MCX",
+        "symboltoken": "561551",
+        "tradingsymbol": "NATURALGAS22MAY26255CE",
+        "lot_size": 1250,
+    }
+
+
 # ---- tests --------------------------------------------------------------
 
 def test_first_exit_call_fires_and_arms_pending_guard(monkeypatch):
@@ -152,6 +203,22 @@ def test_first_exit_call_fires_and_arms_pending_guard(monkeypatch):
     # test — but the per-label guard survives so a re-restored position
     # cannot fire a duplicate exit.
     assert "NG_ATM_CE_255" not in strategy._managed_positions
+
+
+def test_full_exit_carries_stable_idempotency_key(monkeypatch):
+    mod, strategy = _make_strategy(monkeypatch)
+    _seed_short_position(mod, strategy)
+    calls: List[dict] = []
+    _patch_bridge_success(monkeypatch, mod, calls)
+
+    strategy._exit_position(reason="EOD")
+
+    order_req = calls[0]["order_req"]
+    today = strategy._now_ist().date().isoformat()
+    assert order_req.idempotency_key == (
+        f"ema20_exit:{today}:NG:NG_ATM_CE_255:EOD:full"
+    )
+    assert order_req.position_label == "NG_ATM_CE_255"
 
 
 def test_re_restored_position_cannot_fire_duplicate_exit(monkeypatch):
@@ -187,6 +254,78 @@ def test_re_restored_position_cannot_fire_duplicate_exit(monkeypatch):
         "second _exit_position call on a re-restored position must be "
         "suppressed while the prior exit's guard is still armed"
     )
+
+
+def test_pending_exit_blocks_live_risk_sync_re_adoption(monkeypatch):
+    mod, strategy = _make_strategy(monkeypatch)
+    _seed_short_position(mod, strategy)
+    strategy.risk_manager = types.SimpleNamespace(
+        current_trade_mode="LIVE",
+        open_positions={"NG_ATM_CE_255": _risk_entry()},
+        _state_lock=None,
+    )
+    calls: List[dict] = []
+    _patch_bridge_success(monkeypatch, mod, calls)
+
+    strategy._exit_position(reason="SL")
+    assert len(calls) == 1
+    assert "NG_ATM_CE_255" not in strategy._managed_positions
+
+    restored = strategy.sync_position_from_risk_manager(source="tick")
+
+    assert restored is False
+    assert "NG_ATM_CE_255" not in strategy._managed_positions
+    assert "NG_ATM_CE_255" in strategy._pending_exit_by_label
+
+
+def test_live_expired_guard_suppresses_retry_when_broker_state_unknown(monkeypatch):
+    mod, strategy = _make_strategy(monkeypatch)
+    _seed_short_position(mod, strategy)
+    strategy.risk_manager = types.SimpleNamespace(
+        current_trade_mode="LIVE",
+        open_positions={},
+        _state_lock=None,
+    )
+    calls: List[dict] = []
+    _patch_bridge_success(monkeypatch, mod, calls)
+
+    strategy._exit_position(reason="SL")
+    strategy._pending_exit_by_label["NG_ATM_CE_255"] = (
+        time.monotonic() - 2.0 * strategy._pending_exit_max_seconds
+    )
+    _seed_short_position(mod, strategy)
+
+    strategy._exit_position(reason="SL")
+
+    assert len(calls) == 1, (
+        "LIVE retry must not submit a second exit when broker position state "
+        "is unavailable after the prior full-exit ACK"
+    )
+
+
+def test_expired_guard_clears_local_position_when_broker_flat(monkeypatch):
+    mod, strategy = _make_strategy(monkeypatch)
+    _seed_short_position(mod, strategy)
+    strategy.risk_manager = types.SimpleNamespace(
+        current_trade_mode="LIVE",
+        open_positions={},
+        _state_lock=None,
+    )
+    calls: List[dict] = []
+    runtime = _runtime_with_position_status([])
+    _patch_bridge_success_with_runtime(monkeypatch, mod, calls, runtime)
+
+    strategy._exit_position(reason="SL")
+    strategy._pending_exit_by_label["NG_ATM_CE_255"] = (
+        time.monotonic() - 2.0 * strategy._pending_exit_max_seconds
+    )
+    _seed_short_position(mod, strategy)
+
+    strategy._exit_position(reason="SL")
+
+    assert len(calls) == 1
+    assert "NG_ATM_CE_255" not in strategy._managed_positions
+    assert strategy.position is None
 
 
 def test_watchdog_auto_clears_stuck_guard_after_max_seconds(monkeypatch):

@@ -145,7 +145,11 @@ Before you start the bundled LIVE stack, all of the following must already be tr
 - If public Vultr access is required, the SSH key exists at
   `C:\Users\abhis\.ssh\phoenix_vultr_proxy_workspace_ed25519`, or
   `VULTR_REVERSE_TUNNEL_SSH_KEY` points to the active key path.
-- The runtime can obtain `ADMIN_API_KEY`, `DEMO_AUTH_TOKEN_SECRET`, `CONTROL_PLANE_PG_PASSWORD`, `ANGEL_POSTBACK_TOKEN`, `CLIENT_LOCAL_IP`, `CLIENT_PUBLIC_IP`, and `MAC_ADDRESS` from your approved LIVE secret process.
+- The runtime can obtain `ADMIN_API_KEY`, `DEMO_AUTH_TOKEN_SECRET`,
+  `CONTROL_PLANE_PG_PASSWORD`, `ANGEL_POSTBACK_TOKEN`,
+  `ADMIN_KILL_SWITCH_OVERRIDE`, `RISK_MAX_DAILY_LOSS`,
+  `CAPITAL_LIMITS_JSON`, `CLIENT_LOCAL_IP`, `CLIENT_PUBLIC_IP`, and
+  `MAC_ADDRESS` from your approved LIVE secret process.
 
 ### If you use the bundled PowerShell helper
 
@@ -156,6 +160,10 @@ The helper script expects the following Windows modules and secret names:
 - `DEMO_AUTH_TOKEN_SECRET`
 - `CONTROL_PLANE_PG_PASSWORD`
 - `ANGEL_POSTBACK_TOKEN` (§126 — required for Angel broker postback authentication; without it all Angel postbacks return HTTP 401 and the lifecycle service misses fill events)
+- `ADMIN_KILL_SWITCH_OVERRIDE` (file-mounted only; never export or log it)
+- `RISK_MAX_DAILY_LOSS`
+- `CAPITAL_LIMITS_JSON`, or an explicit audited operator acknowledgement that
+  the helper-derived account baseline is acceptable for this deployment
 - `CLIENT_LOCAL_IP`
 - `CLIENT_PUBLIC_IP`
 - `MAC_ADDRESS`
@@ -319,6 +327,31 @@ That artifact intentionally excludes local clutter such as `logs/`, `__pycache__
 
 ---
 
+## 2026-06-29 incident regression checks
+
+After any redeploy that can affect strategy exits, risk checks, broker sync, or
+the router, run these checks before considering automated LIVE recovered:
+
+- Tail backend logs through at least one scheduler/order-sync cycle and, during
+  market hours, through the next EOD boundary for the active underlyings.
+- For EMA20, confirm a full-exit ACK is not followed by
+  `EMA20 adopted synced position` for the same label while a pending full exit
+  is still active. The expected LIVE behavior is
+  `EMA20 skipped synced position adoption` until broker state is fresh.
+- Confirm repeated EOD/SL/trail attempts for the same date, underlying, label,
+  and reason share one idempotency key. A duplicate attempt may log
+  `ORDER_IDEMPOTENCY_SUPPRESSED`; it must not produce another broker
+  `ORDER_PLACED` for the same full exit.
+- Watch for `broker_sync_stale_mark`, `broker_sync_mark_unavailable`,
+  `mark.unavailable`, or `PnL snapshot unavailable`. New entries must be
+  blocked fail-closed while total PnL is unavailable; reducing exits may still
+  proceed through the router safety checks.
+- If `kill_switch.trip` appears, capture `reasons`, realized/unrealized/total
+  PnL, drawdown fields, open labels, and `evaluation_source` before clearing.
+  Do not clear until broker-side positions and open orders are verified.
+
+---
+
 ## Expected startup log messages
 
 The following WARNING-level messages can appear on a clean host-local Docker/Desktop startup and are **expected behavior**, not incidents. Do not open an incident for these alone.
@@ -392,6 +425,11 @@ Free the host port or change the published nginx port in the manifest before red
 ### Automated LIVE starts but there are no fresh marks or strategy signals
 
 Check whether the backend effective environment or logs show an accidental stream-disabled state, broker websocket failure, or instrument-universe startup failure. Automated LIVE is not healthy when broker sync is running but live marks, bars, and indicators are stale.
+
+If fresh marks are missing but broker positions still exist, total PnL should be
+reported unavailable rather than realized-only. Treat any
+`broker_sync_stale_mark` or `mark.unavailable` event as an entry-blocking
+condition until market data or broker marks recover.
 
 ---
 

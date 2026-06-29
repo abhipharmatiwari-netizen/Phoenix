@@ -53,6 +53,43 @@ change means the running image is stale or another strategy instance still owns 
 state. Verify the deployed image tag, then inspect strategy attachments and restart
 through [oci_live_deployment.md](oci_live_deployment.md).
 
+## EMA20 duplicate or ambiguous exit diagnostics
+
+The 2026-06-29 local Docker LIVE incident around 15:00 IST showed the following
+failure shape:
+
+- A valid EMA20 full exit was submitted and ACKed.
+- `Ema20Strategy` cleared its local managed position.
+- `risk_manager.open_positions` still contained the just-exited label until
+  broker/order reconciliation caught up.
+- Tick sync re-adopted that stale label, so the EOD path kept trying to exit it.
+- The router rejected many no-position/non-reducing retries, but repeated
+  BANKNIFTY EOD attempts still reached the broker before terminal fills arrived.
+
+When reviewing a similar incident, correlate these log groups in timestamp
+order:
+
+- `ORDER_PLACED` / broker order id / strategy `ema20_strategy`
+- `exit_attribution` and `EMA20 cleared managed position`
+- `EMA20 adopted synced position` or the fixed
+  `EMA20 skipped synced position adoption`
+- `ORDER_EXIT_REJECTED_NO_POSITION_EVIDENCE`,
+  `ORDER_EXIT_REJECTED_NON_REDUCING`, and `CONTRACT_LOCKED`
+- terminal broker fill events
+- `kill_switch.trip` or `[RISK] Kill-switch activated`
+
+Expected fixed behavior:
+
+- Pending full exits suppress EMA20 risk-manager re-adoption in LIVE until fresh
+  broker position state exists.
+- If fresh broker state proves the contract is flat, EMA20 drops the stale local
+  state and does not retry.
+- If broker state is unknown in LIVE after the pending-exit watchdog expires,
+  EMA20 extends the guard and fails closed instead of submitting another exit.
+- Repeated full exits for the same date, underlying, label, and reason carry a
+  stable idempotency key; the order router should suppress duplicates instead of
+  placing a second broker order.
+
 ## Startup snapshot artifact
 
 At process startup the stream runner writes:

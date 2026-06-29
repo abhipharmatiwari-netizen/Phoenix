@@ -294,6 +294,30 @@ When realized plus unrealized PnL crosses `-abs(RISK_MAX_DAILY_LOSS)`, the syste
 
 In `LIVE` + `HUB_AUTHORITATIVE` mode, a flat account's loss check uses the hub `PnLEngine` display-realized PnL when both the hub `StateStore` and PnL snapshots confirm there is no open broker quantity. The legacy `risk_positions.json` PnL is then treated as a stream-runtime shadow, not the authority. If the hub position/PnL read fails or any open quantity remains, the legacy path is used fail-closed. This prevents stale mark-based legacy close PnL from re-tripping the kill switch after broker fills have flattened the account while keeping conservative behavior when position authority is uncertain.
 
+When LIVE loss checks include unrealized PnL, missing broker/market marks are an
+entry-blocking condition. Broker-sync snapshots tagged
+`broker_sync_stale_mark` or `broker_sync_mark_unavailable` make total PnL
+unavailable; the risk engine must not fall back to realized-only totals for new
+entries. Reducing exits may still proceed through the router's position and
+ownership checks.
+
+### 2026-06-29 EMA20 EOD auto-trip note
+
+The 2026-06-29 local Docker LIVE trip around 15:00 IST was an automatic GLOBAL
+SOFT trip with reason `floating_drawdown`. Log evidence showed total drawdown
+above the configured intraday drawdown limit, so the numeric kill-switch
+condition was correct. The related defect was upstream: EMA20 re-adopted
+just-exited labels from stale risk-manager state during the EOD window, causing
+ambiguous/repeated exit attempts around the same time.
+
+For future similar trips, capture the `kill_switch.trip` audit record and the
+legacy `[RISK] Kill-switch activated` line before clearing. The important fields
+are `reasons`, realized/unrealized/total PnL, realized and total drawdown,
+`evaluation_source`, open labels, `block_exits`, and scope. Then correlate with
+EMA20 `ORDER_PLACED`, `exit_attribution`, `EMA20 cleared managed position`,
+`EMA20 skipped synced position adoption`, router rejections, and terminal broker
+fills.
+
 See [Capital Limits Configuration](capital_limits_configuration.md) for daily-loss
 and capital-limit sizing guidance.
 
