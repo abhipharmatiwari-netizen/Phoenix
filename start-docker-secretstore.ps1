@@ -200,7 +200,7 @@ try {
 
         $tradeModeEnv = [Environment]::GetEnvironmentVariable("TRADE_MODE", "Process")
         if ($tradeModeEnv -eq "LIVE") {
-            # §98: Generic capital limits in LIVE require explicit operator sign-off.
+            # Section 98: Generic capital limits in LIVE require explicit operator sign-off.
             # We cannot silently proceed - the operator must confirm they understand
             # the account is either unfunded or has been explicitly risk-reviewed.
             Write-Host ""
@@ -274,9 +274,9 @@ try {
             Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
             Write-Host ""
             Write-Host "  The LIVE compose files require this explicitly (no fallback)." -ForegroundColor Yellow
-            Write-Host "  Size per capital tier — see docs/runbooks/oci_live_deployment.md" -ForegroundColor Yellow
+            Write-Host "  Size per capital tier - see docs/runbooks/oci_live_deployment.md" -ForegroundColor Yellow
             Write-Host "  'Sizing the daily-loss limit by capital tier'. A common starting" -ForegroundColor Yellow
-            Write-Host "  point for a ₹1-2L account is 10000." -ForegroundColor Yellow
+            Write-Host "  point for a INR 1-2L account is 10000." -ForegroundColor Yellow
             Write-Host ""
             Write-Error "Deployment cancelled. Set RISK_MAX_DAILY_LOSS in env or SecretStore and retry."
             exit 1
@@ -343,7 +343,7 @@ try {
     Write-SecretFile -Path (Join-Path $secretDir "admin_api_key")             -Value $env:ADMIN_API_KEY_HOST
     Write-SecretFile -Path (Join-Path $secretDir "demo_auth_token_secret")    -Value $env:DEMO_AUTH_TOKEN_SECRET_HOST
 
-    # §126 / Issue #5: ANGEL_POSTBACK_TOKEN - required for Angel broker order-status push
+    # Section 126 / Issue #5: ANGEL_POSTBACK_TOKEN - required for Angel broker order-status push
     # notifications (ANGEL_POSTBACK_AUTH_MODE=direct_broker in LIVE).  If not set,
     # lifecycle falls back to polling only; a WARNING is logged at startup.
     $angelPostbackToken = [Environment]::GetEnvironmentVariable("ANGEL_POSTBACK_TOKEN", "Process")
