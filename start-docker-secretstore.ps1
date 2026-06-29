@@ -289,6 +289,9 @@ try {
     if ([string]::IsNullOrWhiteSpace($capitalLimitsJson)) {
         $tradeModeEnv = [Environment]::GetEnvironmentVariable("TRADE_MODE", "Process")
         if ($tradeModeEnv -eq "LIVE") {
+            # Section 98: Generic capital limits in LIVE require explicit operator sign-off.
+            # We cannot silently proceed - the operator must confirm they understand
+            # the account is either unfunded or has been explicitly risk-reviewed.
             Write-Host ""
             Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
             Write-Host "  CAPITAL_LIMITS_JSON is not set for TRADE_MODE=LIVE     " -ForegroundColor Red
