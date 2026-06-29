@@ -108,5 +108,6 @@ A future Cloud Run approval would need, at minimum:
 - cutover and rollback playbook evidence
 - security review showing secret handling matches the architecture rules
 
-Until that evidence exists, use the current OCI VM runbook for production
-deployment guidance.
+Until that evidence exists, use the active Docker Desktop/Vultr runbook for
+production deployment guidance. OCI VM guidance is historical/restoration-only
+after 2026-06-29.

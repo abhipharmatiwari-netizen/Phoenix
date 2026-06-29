@@ -1,11 +1,12 @@
 # Update Broker Credentials in PostgreSQL
 
-**Applies to:** the current OCI VM deployment when it uses Postgres
-`broker_credentials`.
+**Applies to:** deployments using Postgres `broker_credentials`. As of
+2026-06-29, the active deployment is local Docker Desktop/Vultr; OCI examples
+below are historical/restoration-only.
 
-Current production database access is through the VM-local
-`phoenix-oci-postgres` container. Docker Desktop examples in old revisions are
-not current production guidance.
+Current production database access is through the Windows PostgreSQL 18
+`phoenix` database used by the local Docker Desktop stack. Do not treat the
+retired `phoenix-oci-postgres` container examples as active production guidance.
 
 Use this runbook when a SmartAPI credential changes for an existing `broker_account_id`.
 
@@ -58,9 +59,9 @@ The `broker_credentials` row is selected by `broker_account_id`.
 
 ## Step 1 - Connect to PostgreSQL
 
-### Option A - current OCI VM `psql`
+### Option A - historical OCI VM `psql`
 
-Run on the OCI VM:
+Run only during an approved OCI restoration inspection:
 
 ```bash
 docker exec -it phoenix-oci-postgres psql -U phoenix_app -d phoenix
@@ -75,10 +76,11 @@ Do not print credential values into terminal logs or tickets.
 3. Open Query Tool.
 4. Run the SQL statements from the steps below.
 
-### Option C - non-current local `psql` examples
+### Option C - local `psql` examples
 
-These examples are retained only for local engineering and are not the current
-OCI VM path:
+These examples match local engineering and the post-2026-06-29 local runtime
+shape. Confirm host, port, user, and database from the active Docker Desktop
+runbook before connecting:
 
 ```bash
 psql -h localhost -p 5432 -U phoenix_app -d phoenix
@@ -228,7 +230,13 @@ WHERE broker_account_id = 'A1';
 
 Phoenix does not treat the database update as live hot-reload proof. Restart the backend after changing broker credentials.
 
-Current OCI VM backend restart, after operator approval:
+Active local Docker Desktop restart, after operator approval:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-docker-secretstore.ps1
+```
+
+Historical OCI VM backend restart, only during approved restoration work:
 
 ```bash
 cd /opt/phoenix/app
@@ -241,11 +249,11 @@ docker compose \
   up -d --no-deps backend
 ```
 
-The hardened watchdog no longer stops or starts nginx. Recreate nginx only if
-the deployment change explicitly requires it, or if evidence shows the web
-container is unhealthy after backend readiness is restored. If watchdog logs
-show nginx stop/start actions, treat that as stale VM wiring and follow the OCI
-runtime hardening runbook.
+The historical OCI watchdog no longer stopped or started nginx. Recreate nginx
+only if an OCI restoration change explicitly requires it, or if evidence shows
+the web container is unhealthy after backend readiness is restored. If watchdog
+logs show nginx stop/start actions, treat that as stale VM wiring and follow the
+OCI runtime hardening runbook.
 
 ```bash
 CONTROL_PLANE_PG_PASSWORD_HOST="$(sudo cat /run/secrets/control_plane_pg_password)" \

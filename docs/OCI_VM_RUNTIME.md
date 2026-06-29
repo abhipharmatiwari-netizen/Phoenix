@@ -5,11 +5,12 @@ Phoenix DB backup cron was installed and dry-run verified on 2026-06-23
 14:21 UTC. EMA20-only LIVE authority, canonical-host login, and persistent
 OI/ML sidecar dormancy were verified during the 2026-06-20 review.
 
-The OCI VM is the last verified production VM baseline, but it is currently
-unavailable. This file intentionally records the VM evidence captured before the
-outage, including drift from repo templates. It must not be read as proof that
-the OCI VM is currently running. Secret values, private IPs, OCIDs, broker
-identifiers, and tokens are redacted.
+The OCI VM is the last verified production VM baseline, but Phoenix no longer
+uses it as of 2026-06-29. This file intentionally records the VM evidence
+captured before retirement, including drift from repo templates. It must not be
+read as proof that the OCI VM is currently running or as authorization to deploy
+to that host. Secret values, private IPs, OCIDs, broker identifiers, and tokens
+are redacted.
 
 ## 2026-06-28 Local Replica Note
 
@@ -23,7 +24,7 @@ The local replica reached `TRADE_MODE=LIVE`, `BROKER_SECRET_BACKEND=postgres`,
 EMA20-only strategy config, green `/health` and `/readyz`, and full
 `phoenix_app` table access across 36 `public` tables plus 6 archived
 `legacy_phoneix` tables. This evidence does not update the OCI VM verification
-timestamp above and must not be treated as proof that the unavailable OCI VM is
+timestamp above and must not be treated as proof that the retired OCI VM is
 running.
 
 On 2026-06-29 IST, the local replica was also exposed through a Vultr Ubuntu

@@ -11,8 +11,9 @@ This guide is read-only unless it explicitly tells the operator to redeploy thro
 ## Preconditions
 
 - You have log access for the backend container or host log volume.
-- You are operating the current OCI VM deployment described in
-  [OCI VM Runtime Evidence](../OCI_VM_RUNTIME.md).
+- You are operating the current Docker Desktop/Vultr deployment described in
+  [Docker Desktop LIVE Deployment](docker_desktop_live_deployment.md). OCI VM
+  evidence is historical/restoration-only after 2026-06-29.
 - You can capture `/readyz`, backend logs, and the startup snapshot artifact before making changes.
 
 ## `STRATEGY_BAR_SKIP` events
@@ -36,8 +37,9 @@ routing. These diagnostics are for historical log review or stale-image
 verification only; a current live backend should not attach or dispatch this
 strategy.
 
-Observed during 2026-06-03 OCI live monitoring: after a put-momentum exit filled and
-broker-flat evidence was observed, stale in-memory strategy state could continue to
+Observed during 2026-06-03 OCI live monitoring before OCI retirement: after a
+put-momentum exit filled and broker-flat evidence was observed, stale in-memory
+strategy state could continue to
 emit `PUT_MOM_EXIT_*` orders. The router correctly rejected those exits in LIVE with:
 
 ```
@@ -112,10 +114,11 @@ Key fields:
 
 ## WebSocket connectivity diagnostics
 
-### Expected startup sequence (OCI / proxy deployments)
+### Expected startup sequence (local/Vultr or restored OCI proxy deployments)
 
 After the universe build completes, the stream worker initialises the WebSocket runner.
-On a healthy OCI deployment the logs should show in order:
+On a healthy local/Vultr deployment, or on any future restored OCI deployment,
+the logs should show in order:
 
 ```
 [INFO] app.core.ws_runner: WebSocket proxy configured: <PROXY_HOST>:8888

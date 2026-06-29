@@ -1,16 +1,16 @@
 # Phoenix v9 Docker Desktop LIVE Deployment
 
-> **Status:** ACTIVE LOCAL RECOVERY RUNTIME WHILE OCI VM IS UNAVAILABLE.
+> **Status:** ACTIVE LIVE RUNTIME FROM 2026-06-29 ONWARD.
 >
 > This runbook is the current operating reference for the Windows Docker Desktop
 > recovery deployment connected to Windows PostgreSQL 18 `phoenix` and exposed
 > through the Vultr sidecar/proxy path. It is not a permanent replacement for a
 > dedicated production host.
 
-> **OCI restoration?** Use [oci_live_deployment.md](oci_live_deployment.md) and
-> [OCI VM Runtime Evidence](../OCI_VM_RUNTIME.md). The verified OCI VM used local
-> images and VM-local Postgres; do not assume OCIR or external Postgres from old
-> Docker/Desktop wording.
+> **OCI restoration?** OCI VM material is historical/restoration-only after
+> 2026-06-29. Use [oci_live_deployment.md](oci_live_deployment.md) and
+> [OCI VM Runtime Evidence](../OCI_VM_RUNTIME.md) only if a future migration
+> issue explicitly reinstates OCI as an active target.
 
 ## Purpose
 
@@ -45,7 +45,7 @@ This runbook is correct only for the following deployment model:
 
 This local Docker Desktop stack was rebuilt from the current repo and connected
 to the Windows PostgreSQL 18 database `phoenix` on `host.docker.internal:5432`.
-This is the active local OCI-VM replica while the OCI VM is unavailable.
+This is the active LIVE runtime from 2026-06-29 onward.
 
 Validated state:
 

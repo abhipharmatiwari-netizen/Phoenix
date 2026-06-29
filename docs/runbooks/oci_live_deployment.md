@@ -1,20 +1,22 @@
 # Phoenix OCI LIVE Deployment Runbook
 
-Status: current operator runbook for the OCI VM. Core runtime was verified on
-2026-06-21; Phoenix DB backup cron was installed and dry-run verified on
-2026-06-23.
+Status: historical/restoration-only runbook. Phoenix no longer uses the OCI VM
+as of 2026-06-29. Core runtime was last verified on 2026-06-21; Phoenix DB
+backup cron was installed and dry-run verified on 2026-06-23.
 
-This runbook describes what is actually running on the OCI VM. It does not
+This runbook describes the retired OCI VM state that existed before the
+2026-06-29 cutoff. Do not use it for current LIVE deploys unless a future
+migration issue explicitly reinstates OCI as the active target. It does not
 describe the older intended OCIR/external-Postgres deployment as current state.
 
 ## Purpose
 
-Operate Phoenix on the OCI VM without exposing secrets or changing live trading
-state accidentally.
+Inspect or restore the retired Phoenix OCI VM without exposing secrets or
+changing live trading state accidentally.
 
 ## Scope
 
-Current VM paths and containers:
+Historical VM paths and containers:
 
 - repo checkout: `/opt/phoenix/app`
 - Compose files: `/opt/phoenix/app/docker-compose.oci-live.yml` and `/opt/phoenix/phoenix-override.yml`
@@ -31,7 +33,7 @@ Current VM paths and containers:
 - OI/ML shadow compose: `/opt/phoenix/oi-ml-shadow.yml`
 - OI/ML shadow container: absent; retained image and operator Compose remain with restart policy `no`
 
-Latest verified live deployment:
+Last verified live deployment before OCI retirement:
 
 - VM repo checkout: verify with `git -C /opt/phoenix/app rev-parse --short HEAD`
 - running Phoenix image tags: verify with
@@ -505,8 +507,9 @@ service interruption.
 
 ## Migrations and Preflight
 
-The current VM uses the base Compose `migrator` and `db-preflight` service names,
-but the database is local. Run only during an approved deployment window:
+The retired VM used the base Compose `migrator` and `db-preflight` service
+names, but the database was local. Run only during an approved restoration
+window:
 
 ```bash
 cd /opt/phoenix/app

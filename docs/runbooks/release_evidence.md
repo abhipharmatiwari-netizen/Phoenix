@@ -8,21 +8,20 @@ is liveness evidence; it is not trading-readiness approval.
 
 ## Scope
 
-This runbook applies to LIVE releases for the active deployment path. During the
-OCI outage, that path is the local Docker Desktop recovery stack plus Vultr
-proxy/tunnel sidecar. For OCI restoration or future OCI releases, use the OCI VM
-evidence and commands in this runbook. Cloud Run material remains non-current
-unless a future deployment audit proves that model is active.
+This runbook applies to LIVE releases for the active deployment path. As of
+2026-06-29, that path is the local Docker Desktop stack plus Vultr proxy/tunnel
+sidecar. OCI VM material is historical/restoration-only unless a future
+migration issue explicitly reinstates OCI as the active target. Cloud Run
+material remains non-current unless a future deployment audit proves that model
+is active.
 
 ## Preconditions
 
-- The backend is deployed through the current OCI runbook.
-- For the active local recovery runtime, the backend and web are deployed
-  through `docker-compose.live.single.yml`, and `phoenix-v9-vultr-tunnel` owns
-  public access through Vultr.
+- The backend and web are deployed through `docker-compose.live.single.yml`.
+- `phoenix-v9-vultr-tunnel` owns public access through Vultr.
 - `ADMIN_API_KEY` is available only through the approved operator secret
   process, not from a repo env file.
-- Backend-local `/readyz` is reachable from inside `phoenix-oci-backend`.
+- Backend-local `/readyz` is reachable from inside `phoenix-v9-backend`.
 - Public nginx `/readyz` and `/health/summary` are expected to be redacted and
   are not substitutes for authenticated/internal diagnostics.
 
@@ -43,13 +42,11 @@ Collect all of the following without printing secret values:
 | Public HTTPS domain | `/health` and `/login` are reachable; `/readyz` returns HTTP 200 only when trading readiness is green |
 | Direct BFF diagnostic bypass | `/bff/health/summary`, `/bff/readyz`, and `/bff/dashboard/status` return 404 |
 | Static asset routing | current `/static/*` bundle assets return the correct content type; stale `/static/*` paths return 404 instead of SPA HTML |
-| Secret permissions | `scripts/validate-live-secret-perms.sh` passes on the VM |
-| Deploy env secret scan | `scripts/ops/check_env_secret_material.sh` passes without printing values |
+| Local secret inputs | SecretStore/Postgres deploy-value preflight passes without printing values |
 | Host-header boundary | malformed `Host` values return HTTP 400 before admin/BFF auth handling |
-| Phoenix DB backup automation | `/etc/cron.d/phoenix-postgres-backup` is installed, dry-run schema dump/restore-list verification passes, and the latest full backup evidence is current or a manual full backup is captured before database-affecting maintenance |
-| Watchdog contract | `docker inspect phoenix-oci-watchdog --format '{{json .Mounts}}'` returns an empty list |
-| Disk headroom | root filesystem has safe free-space buffer and `/health/alerts` includes `disk_headroom_low` |
-| Cleanup and isolation | active image tags, rollback set, co-tenant workloads, Docker resource caps, and storage headroom are documented |
+| Phoenix DB backup automation | local PostgreSQL backup evidence is current before database-affecting maintenance |
+| Disk headroom | local Docker/Desktop and Postgres storage have a safe free-space buffer |
+| Cleanup and isolation | active image tags, rollback set, Vultr tunnel state, and local storage headroom are documented |
 | Release evidence endpoint | authenticated `/admin/release-evidence` passes the criteria below |
 
 ## Release Evidence Fields
@@ -85,9 +82,7 @@ operator risk-halt or rollback decision is recorded.
    ```bash
    pytest -m smoke -q
    ```
-2. Deploy the new backend image via the active OCI deployment runbook.
-   For the local recovery runtime, deploy through the Docker Desktop runbook and
-   verify the sidecar:
+2. Deploy through the Docker Desktop runbook and verify the sidecar:
    ```powershell
    docker ps --filter "name=phoenix-v9" --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
    docker ps --filter "name=phoenix-v9-vultr-tunnel" --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
@@ -97,49 +92,42 @@ operator risk-halt or rollback decision is recorded.
      https://app.phoenixtechnosolutions.in/health
    ```
 3. Wait for Docker liveness, then verify trading readiness:
-   ```bash
-   docker ps --filter name=phoenix-oci --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
-   docker exec phoenix-oci-backend curl -sS http://localhost:8080/readyz
-   docker exec phoenix-oci-backend curl -sS http://localhost:8080/health/summary
-   curl -sS http://localhost/readyz
-   curl -sS http://localhost/health/summary
-   curl -sS http://localhost/health/alerts
-   curl -sS http://localhost/health/mitigations
+   ```powershell
+   docker ps --filter "name=phoenix-v9" --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+   docker exec phoenix-v9-backend curl -sS http://localhost:8080/readyz
+   docker exec phoenix-v9-backend curl -sS http://localhost:8080/health/summary
+   curl.exe -sS http://localhost/readyz
+   curl.exe -sS http://localhost/health/summary
+   curl.exe -sS http://localhost/health/alerts
+   curl.exe -sS http://localhost/health/mitigations
    ```
-4. Validate hardening invariants:
-   ```bash
-   sudo sh /opt/phoenix/app/scripts/validate-live-secret-perms.sh
-   sudo PHOENIX_ROOT=/opt/phoenix \
-     /opt/phoenix/app/scripts/ops/check_env_secret_material.sh
-   docker inspect phoenix-oci-postgres --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}'
-   sudo cat /etc/cron.d/phoenix-postgres-backup
-   sudo PHOENIX_PG_BACKUP_DRY_RUN=true /opt/phoenix/scripts/backup-postgres.sh
-   sudo tail -n 80 /opt/phoenix/logs/phoenix-postgres-backup.log
-   sudo cat /opt/phoenix/backups/postgres/latest.json 2>/dev/null || true
-   docker inspect phoenix-oci-watchdog --format '{{json .Mounts}}'
-   /opt/phoenix/app/scripts/ops/oci_storage_report.sh
-   df -h /
+4. Validate local hardening invariants without printing secrets:
+   ```powershell
+   docker inspect phoenix-v9-backend --format '{{json .Config.Image}}'
+   docker inspect phoenix-v9-web --format '{{json .Config.Image}}'
+   docker inspect phoenix-v9-vultr-tunnel --format '{{json .State.Health.Status}}'
+   docker system df
    ```
 5. Verify malformed Host handling:
-   ```bash
-   curl -sk -H 'Host: phoenix.invalid%2fadmin' \
-     -o /dev/null -w "%{http_code}\n" \
-     https://127.0.0.1:8443/admin/health/summary
-   curl -sk -H 'Host: phoenix.invalid%2fbff' \
-     -o /dev/null -w "%{http_code}\n" \
-     https://127.0.0.1:8443/bff/health/summary
+   ```powershell
+   curl.exe -sk -H "Host: phoenix.invalid%2fadmin" `
+     -o NUL -w "%{http_code}`n" `
+     https://app.phoenixtechnosolutions.in/admin/health/summary
+   curl.exe -sk -H "Host: phoenix.invalid%2fbff" `
+     -o NUL -w "%{http_code}`n" `
+     https://app.phoenixtechnosolutions.in/bff/health/summary
    ```
    Both commands should print `400`.
 6. Collect the authenticated release bundle:
-   ```bash
-   ADMIN_KEY="$(sudo cat /run/secrets/admin_api_key)"
-   curl -sk -H "X-Admin-Key: ${ADMIN_KEY}" \
-     https://127.0.0.1:8443/admin/health/summary
-   curl -sk -H "X-Admin-Key: ${ADMIN_KEY}" \
-     https://127.0.0.1:8443/admin/release-evidence
-   curl -sk -o /dev/null -w "%{http_code}\n" \
-     https://127.0.0.1:8443/bff/health/summary
-   unset ADMIN_KEY
+   ```powershell
+   $adminKey = Get-Secret -Name ADMIN_API_KEY -AsPlainText
+   curl.exe -sk -H "X-Admin-Key: $adminKey" `
+     https://app.phoenixtechnosolutions.in/admin/health/summary
+   curl.exe -sk -H "X-Admin-Key: $adminKey" `
+     https://app.phoenixtechnosolutions.in/admin/release-evidence
+   curl.exe -sk -o NUL -w "%{http_code}`n" `
+     https://app.phoenixtechnosolutions.in/bff/health/summary
+   Remove-Variable adminKey
    ```
 7. Review every field against the pass criteria table.
 8. If all criteria pass, record the generated timestamp in the deployment log.

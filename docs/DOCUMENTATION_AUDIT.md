@@ -3,18 +3,18 @@
 Audit date: 2026-06-29. Runtime snapshot refreshed after the 2026-06-23
 EMA20-only LIVE enablement, canonical-host login repair, persistent OI/ML
 sidecar dormancy, and Phoenix DB backup cron installation. On 2026-06-28, the
-Docker Desktop LIVE runbook was also refreshed with local OCI-VM replica
-evidence against Windows PostgreSQL 18 `phoenix`. On 2026-06-29, the Vultr
-reverse proxy runbook was added for the temporary public access path while the
-OCI VM remains unavailable, HTTPS was enabled for
+Docker Desktop LIVE runbook was also refreshed with local LIVE runtime evidence
+against Windows PostgreSQL 18 `phoenix`. On 2026-06-29, the Vultr reverse proxy
+runbook was added for the active public access path after OCI VM retirement,
+HTTPS was enabled for
 `app.phoenixtechnosolutions.in`, and the reverse tunnel owner was moved from a
 Windows Scheduled Task to Docker sidecar `phoenix-v9-vultr-tunnel`.
 
 Scope: repository documentation, environment examples, Compose comments, and
 operator-facing runbooks were checked against the last verified OCI VM evidence
-and the active local Docker/Vultr recovery deployment. During the OCI outage,
+and the active local Docker/Vultr deployment. After the 2026-06-29 OCI cutoff,
 the local Docker/Vultr runbooks override historical OCI assumptions for active
-operations; OCI docs remain the restoration baseline.
+operations; OCI docs remain restoration-only baseline material.
 
 ## Runtime Evidence Summary
 
@@ -47,11 +47,11 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | `ABOUTME.md` | plain-language summary | CURRENT_LOCAL_RECOVERY_WITH_OCI_BASELINE | KEEP CURRENT |
 | `ARCHITECTURE.md` | production contract | CURRENT_LOCAL_RECOVERY_WITH_OCI_BASELINE | KEEP CURRENT |
 | `docs/ENCYCLOPEDIA.md` | runtime glossary and endpoint behavior index | CURRENT | KEEP CURRENT |
-| `docs/OCI_VM_RUNTIME.md` | evidence snapshot | MATCHES_OCI_VM | KEEP CURRENT |
-| `docs/runbooks/oci_live_deployment.md` | OCI operations | MATCHES_OCI_VM | KEEP CURRENT |
-| `docs/runbooks/oci_runtime_hardening.md` | runtime hardening | MATCHES_OCI_VM | KEEP CURRENT |
-| `docs/runbooks/postgres_backup.md` | VM-local Postgres backup automation | MATCHES_OCI_VM | KEEP CURRENT |
-| `docs/runbooks/oci-live.env.example` | OCI env template | MATCHES_OCI_VM | KEEP CURRENT |
+| `docs/OCI_VM_RUNTIME.md` | historical evidence snapshot | HISTORICAL_OCI_RESTORATION_ONLY | KEEP AS ARCHIVE |
+| `docs/runbooks/oci_live_deployment.md` | OCI restoration operations | HISTORICAL_OCI_RESTORATION_ONLY | KEEP AS ARCHIVE |
+| `docs/runbooks/oci_runtime_hardening.md` | OCI hardening/restoration | HISTORICAL_OCI_RESTORATION_ONLY | KEEP AS ARCHIVE |
+| `docs/runbooks/postgres_backup.md` | historical VM-local Postgres backup automation | HISTORICAL_OCI_RESTORATION_ONLY | KEEP AS ARCHIVE |
+| `docs/runbooks/oci-live.env.example` | OCI env template | HISTORICAL_OCI_RESTORATION_ONLY | KEEP AS ARCHIVE |
 | `phoenix-override.yml.example` | OCI override template | MATCHES_OCI_VM_SHAPE | KEEP CURRENT |
 | `docker-compose.oci-live.yml` | base Compose manifest | CURRENT_WITH_OVERRIDE_CONTEXT | KEEP CURRENT |
 | `docs/runbooks/release_evidence.md` | release evidence | MATCHES_CURRENT_ENDPOINTS | KEEP CURRENT |
@@ -60,7 +60,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | `docs/runbooks/update_broker_credentials.md` | broker credential rotation | MATCHES_OCI_VM | KEEP CURRENT |
 | `docs/runbooks/dashboard-kill-switch.md` | kill-switch dashboard playbook | CURRENT_WITH_KILL_SWITCH_AUTHORITY | KEEP CURRENT |
 | `docs/runbooks/oi_ml_shadow_sidecar.md` | OI/ML shadow sidecar | CURRENT_DORMANT | KEEP CURRENT |
-| `docs/runbooks/docker_desktop_live_deployment.md` | Docker Desktop recovery runtime | CURRENT_LOCAL_RECOVERY | KEEP CURRENT |
+| `docs/runbooks/docker_desktop_live_deployment.md` | Docker Desktop/Vultr active runtime | CURRENT_ACTIVE_LOCAL | KEEP CURRENT |
 | `docs/runbooks/vultr_reverse_proxy.md` | Vultr public reverse proxy for local Phoenix | CURRENT_LOCAL_PROXY_HTTPS_ACTIVE | KEEP CURRENT |
 | `docs/runbooks/cloud_run_live_deployment.md` | Cloud Run reference | ROADMAP_ONLY | KEEP WITH BANNER |
 | `docs/runbooks/blue_green_cutover.md` | cutover plan | ROADMAP_ONLY_FOR_CURRENT_VM | KEEP WITH BANNER |
@@ -88,7 +88,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | Alerts/Mitigations API paths fell through to SPA HTML | Current nginx repo and host-mounted templates explicitly proxy `/health/alerts` and `/health/mitigations` as JSON |
 | `/bff/health/summary` bypassed public health redaction | Direct BFF access to internal diagnostics is blocked; operator dashboards use authenticated `/admin/health/summary` |
 | There was no encyclopedia page for repeated endpoint terms | `docs/ENCYCLOPEDIA.md` now defines current runtime, health surfaces, dashboard health interpretation, static routing, watchdog contract, and runbook/playbook locations |
-| Runtime env examples referenced old verified local image tags | Current OCI docs describe intended `local-<git-sha>` tags and require VM verification during each rollout |
+| Runtime env examples referenced old verified local image tags | Historical OCI docs describe intended `local-<git-sha>` tags and require restoration-time verification before any reinstated rollout |
 | OI/ML shadow gates allowed ambiguous promotion evidence | Current code and docs require validated LightGBM artifacts, fresh IV/Greeks/source timestamps, latest validation not `ERROR`, virtual fill/flat accounting, realized dry-run PnL, and 10 clean sessions |
 | Release evidence guidance treated Docker health as sufficient wait evidence | Current release guidance requires `/readyz` trading-readiness evidence in addition to liveness |
 | VM cleanup cron used a stale script path with unsafe dry-run behavior | The cron path is now documented as `/opt/phoenix/scripts/weekly-cleanup.sh`, the sync/hash check is in the hardening runbook, and regression tests assert destructive commands route through dry-run logging |

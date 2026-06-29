@@ -1,26 +1,27 @@
 # OCI Runtime Hardening
 
-Purpose: reduce the runtime drift observed on the OCI VM without changing live
-trading behavior during normal documentation or review work.
+Purpose: preserve historical OCI VM hardening/restoration steps without changing
+live trading behavior during normal documentation or review work.
 
-Status: the 2026-06-06 hardening pass has already applied the Postgres
-compose-adoption, watchdog no-socket recreation, secret-permission validation,
-and storage expansion steps on the current OCI VM. The Phoenix DB backup cron
-was installed and dry-run verified on 2026-06-23. Keep this runbook for evidence
-capture, repeatable maintenance, and rollback.
+Status: Phoenix no longer uses the OCI VM as of 2026-06-29. The 2026-06-06
+hardening pass applied Postgres compose-adoption, watchdog no-socket recreation,
+secret-permission validation, and storage expansion steps on the then-current
+OCI VM. The Phoenix DB backup cron was installed and dry-run verified on
+2026-06-23. Keep this runbook for restoration evidence, repeatable maintenance,
+and rollback if OCI is explicitly reinstated.
 
-Scope: the current OCI VM deployment only. Do not apply these steps to the live
-VM without an approved maintenance window, a fresh database backup, and operator
-approval to restart containers.
+Scope: historical OCI VM deployment only. Do not apply these steps to any live
+host without an approved maintenance window, a fresh database backup, and
+operator approval to restart containers.
 
-## Current Drift Being Addressed
+## Historical Drift Being Addressed
 
-| Drift | Verified current state | Target direction |
+| Drift | Historical verified state | Target direction |
 |---|---|---|
-| Postgres ownership | `phoenix-oci-postgres` is Compose-managed and Docker-healthy on the current VM | keep Postgres under the `vm-local-postgres` profile and retain health evidence |
+| Postgres ownership | `phoenix-oci-postgres` was Compose-managed and Docker-healthy on the retired VM | keep Postgres under the `vm-local-postgres` profile and retain health evidence if OCI is restored |
 | Image provenance | backend/web run `phoenix-local-*` images | use immutable image tags from the approved image build path |
 | Source overlays | backend has selected source-file bind mounts | remove overlays after the image contains those exact files |
-| Watchdog behavior | `phoenix-oci-watchdog` has no mounts on the current VM | keep the observe-only no-socket contract; treat Docker socket mounts as drift |
+| Watchdog behavior | `phoenix-oci-watchdog` had no mounts on the retired VM | keep the observe-only no-socket contract; treat Docker socket mounts as drift |
 
 ## Preconditions
 
@@ -29,7 +30,8 @@ approval to restart containers.
   `docs/runbooks/postgres_backup.md` and confirm the log contains
   `backup complete` and `verified=true` before maintenance that can affect the
   database or its container.
-- The current runtime evidence in `docs/OCI_VM_RUNTIME.md` has been refreshed.
+- The historical runtime evidence in `docs/OCI_VM_RUNTIME.md` has been reviewed
+  and any restoration drift has been captured separately.
 - `/run/secrets/control_plane_pg_password` exists on the VM.
 - `/opt/phoenix/phoenix-deploy.env` sets `CONTROL_PLANE_PG_SSLMODE_HOST=prefer`
   for VM-local Postgres validation; external/cloud Postgres should use
@@ -39,7 +41,7 @@ approval to restart containers.
   local Docker host, remove `LIVE_PG_SSL_SKIP_CHECK=true` and require encrypted
   Postgres transport before LIVE startup.
 - The operator has reviewed `docker compose config` output with secrets redacted.
-- The current `phoenix-oci-postgres` environment has been checked. On the
+- The restoration candidate `phoenix-oci-postgres` environment has been checked. On the
   verified VM, `PGDATA=/var/lib/postgresql/data` and `PG_VERSION` exists
   directly in that directory. Do not start a candidate container with a
   different `PGDATA` path.
@@ -68,9 +70,9 @@ Expected evidence today:
 ## Phase 2 - Compose-Managed Postgres Candidate
 
 The repository now contains an opt-in `vm-local-postgres` Compose profile in
-`docker-compose.oci-live.yml`. It is active on the current VM, but remains
+`docker-compose.oci-live.yml`. It was active on the retired VM, but remains
 profile-gated in the manifest so a default Compose operation does not create a
-second local database.
+second local database during restoration work.
 
 Validate only:
 

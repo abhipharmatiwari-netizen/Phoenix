@@ -1,11 +1,9 @@
 # Restore Drill Runbook
 
-> **Current OCI VM note:** verified production Postgres is the
-> `phoenix-oci-postgres` container with data mounted from `/opt/phoenix/pgdata`.
-> The current VM backup cron runs at 23:30 IST Monday-Friday and writes verified
-> custom-format dumps under `/opt/phoenix/backups/postgres`.
-> External/cloud database examples are non-current unless a fresh VM audit proves
-> the deployment changed.
+> **Current runtime note:** as of 2026-06-29, active production Postgres is the
+> Windows PostgreSQL 18 `phoenix` database used by the Docker Desktop/Vultr
+> stack. The `phoenix-oci-postgres` backup material below is historical
+> restoration evidence only unless a future migration issue reinstates OCI.
 
 **Architecture reference:** restore, recovery, and failure-drill policy in `ARCHITECTURE.md`
 
@@ -31,7 +29,7 @@ Use this for controlled restore drills and recovery-environment validation. It d
 | Metric | Target | Notes |
 |---|---|---|
 | **RTO** | < 30 minutes | Demonstrated 18 min on local Docker Desktop (2026-04-25 drill). Shorter targets require PITR-capable infrastructure (Cloud SQL). |
-| **RPO** | < 1 trading session | Current OCI VM and local Docker Desktop are bounded by scheduled `pg_dump`; the OCI VM cron runs at 23:30 IST Monday-Friday. Cloud SQL with WAL/PITR is roadmap/reference only unless a future audit proves it is active. |
+| **RPO** | < 1 trading session | Local Docker Desktop is bounded by scheduled `pg_dump`; the retired OCI VM cron evidence is historical. Cloud SQL with WAL/PITR is roadmap/reference only unless a future audit proves it is active. |
 
 ---
 
@@ -65,7 +63,7 @@ Use your database platform's production backup mechanism. At minimum, maintain:
 - operator access to restore into an isolated target database
 
 **RPO by deployment platform:**
-- **Current OCI VM** (`phoenix-oci-postgres`): backup cadence is a VM-local
+- **Historical OCI VM** (`phoenix-oci-postgres`): backup cadence was a VM-local
   custom-format `pg_dump` at 23:30 IST Monday-Friday. WAL archiving / PITR is
   not currently configured by this repo path. RPO is bounded by the latest
   verified weekday dump; run a manual full backup before weekend maintenance or
@@ -73,7 +71,7 @@ Use your database platform's production backup mechanism. At minimum, maintain:
 - **Local Docker Desktop** (host-local Postgres): backup cadence is limited to scheduled `pg_dump`. WAL archiving / point-in-time recovery (PITR) is not available without additional configuration. RPO is bounded by the `pg_dump` schedule (e.g. daily = up to one trading session of data loss).
 - **Cloud Run + Cloud SQL**: roadmap/reference only in this repo. Cloud SQL can provide WAL-based PITR, but Cloud Run is not the current approved go-live path.
 
-### Current OCI VM backup commands
+### Historical OCI VM backup commands
 
 Verify the installed backup job:
 
@@ -159,8 +157,9 @@ WHERE status = 'SUBMITTING'
 
 ### Step 4 — Start Phoenix against the restored database
 
-Use the current OCI deployment path and the same runtime secret process you use
-in production.
+Use the active Docker Desktop/Vultr deployment path and the same runtime secret
+process you use in production. The OCI example below is retained only for
+approved restoration drills:
 
 ```bash
 cd /opt/phoenix/app

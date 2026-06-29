@@ -1,8 +1,10 @@
 # Dashboard Kill Switch — Operator Guide
 
-> **Current OCI VM note:** verify `phoenix-oci-backend` `/readyz` and
-> `/health/summary` before relying on dashboard state. The dashboard is derived
-> state; Postgres and backend health are authority.
+> **Current runtime note:** verify the active backend `/readyz` and
+> `/health/summary` before relying on dashboard state. For the post-2026-06-29
+> Docker Desktop/Vultr runtime, use `phoenix-v9-backend`; `phoenix-oci-backend`
+> examples are historical/restoration-only. The dashboard is derived state;
+> Postgres and backend health are authority.
 
 **Issue:** #238 (admin dashboard kill-switch toggle on the Safety page).
 **Related:** [`kill_switch.md`](kill_switch.md) (HTTP API reference),
@@ -15,8 +17,7 @@
 Give the on-call operator a one-click panic stop from the admin
 dashboard when wrong, duplicated, or burst orders are detected. The
 Safety page exposes the durable `KillSwitchManager` state machine and
-the order-cancellation path without requiring shell access to the
-OCI VM.
+the order-cancellation path without requiring shell access to the runtime host.
 
 ## When to use
 
@@ -197,10 +198,11 @@ The Overview page consumes `/dashboard/status`, which mirrors
 and `readiness.http_status=503`. `/health` remains a liveness probe
 only; do not use it to decide whether live trading is ready.
 
-On the current OCI VM, public nginx `/health/summary` is redacted. Schema
-Status, Tracked Accounts, and Watchdog cards should be interpreted from the
-logged-in dashboard's authenticated `/admin/health/summary` data or from
-backend-local `/health/summary`, not from the public redacted response alone.
+On the current Docker Desktop/Vultr runtime, public nginx `/health/summary` is
+redacted. Schema Status, Tracked Accounts, and Watchdog cards should be
+interpreted from the logged-in dashboard's authenticated
+`/admin/health/summary` data or from backend-local `/health/summary`, not from
+the public redacted response alone.
 
 ## Operator playbook — common scenarios
 

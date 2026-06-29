@@ -203,9 +203,9 @@ Complete this checklist before every phase promotion and after every rollback:
 
 - Broker margin: verify available margin for the phase's maximum spreads and
   record the broker terminal timestamp. Do not paste account numbers or secrets.
-- Dashboard route: open the operations dashboard through the current OCI nginx
-  route and confirm health, readiness, strategy status, kill switch, positions,
-  orders, and OI/ML shadow ingestion panes are visible.
+- Dashboard route: open the operations dashboard through the active
+  Docker/Vultr public route and confirm health, readiness, strategy status, kill
+  switch, positions, orders, and OI/ML shadow ingestion panes are visible.
 - EOD startup snapshot: capture sanitized backend-local `/readyz`,
   backend-local `/health/summary`, and authenticated `/admin/health/summary`
   output after the backend has started and after EOD on the same session.

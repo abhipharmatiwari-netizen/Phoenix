@@ -6,9 +6,9 @@ Configure `CAPITAL_LIMITS_JSON` and related margin controls without weakening LI
 
 ## Scope
 
-This guide applies to the current OCI VM runtime documented in
-[`docs/OCI_VM_RUNTIME.md`](../OCI_VM_RUNTIME.md). Docker Desktop examples in old
-revisions are non-current for production. This guide does not approve
+This guide applies to the active Docker Desktop/Vultr runtime documented in
+[`docker_desktop_live_deployment.md`](docker_desktop_live_deployment.md). OCI VM
+examples are historical/restoration-only after 2026-06-29. This guide does not approve
 helper-derived generic limits for funded LIVE accounts, repo-stored secrets, or
 disabling capital/risk checks.
 
@@ -139,7 +139,15 @@ Postgres payload must resolve to the selected account key, such as
 `CAPITAL_LIMITS_JSON` override is a break-glass path only, and it must contain
 that same account key.
 
-Current OCI VM example:
+Active local Docker Desktop example:
+
+```powershell
+docker exec phoenix-v9-backend sh -lc 'test -n "$CAPITAL_LIMITS_JSON" && echo CAPITAL_LIMITS_JSON_PRESENT'
+docker exec phoenix-v9-backend curl -sS http://localhost:8080/readyz
+docker exec phoenix-v9-backend curl -sS http://localhost:8080/health/summary
+```
+
+Historical OCI VM example:
 
 ```bash
 docker exec phoenix-oci-backend sh -lc 'test -n "$CAPITAL_LIMITS_JSON" && echo CAPITAL_LIMITS_JSON_PRESENT'
@@ -155,8 +163,9 @@ Break-glass local override example:
 $env:CAPITAL_LIMITS_JSON = '{"tenant-1:A1": {"max_notional_per_order": 500000, "max_gross_exposure": 1000000}}'
 ```
 
-OCI Compose example: set `CAPITAL_LIMITS_JSON` in `/opt/phoenix/phoenix-deploy.env`
-from the operator secret store before running the OCI deployment runbook.
+Historical OCI Compose example: set `CAPITAL_LIMITS_JSON` in
+`/opt/phoenix/phoenix-deploy.env` from the operator secret store before running
+the OCI restoration runbook.
 
 The compose file requires this value at container start time. Empty `{}` is
 rejected in `TRADE_MODE=LIVE`; the Docker Desktop launcher also rejects the old

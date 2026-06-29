@@ -2,11 +2,10 @@
 
 Last updated: 2026-06-29.
 
-This is the quick-reference index for the current Phoenix runtime. During the
-OCI outage, active operations run from the local Docker Desktop LIVE stack and
-Vultr HTTPS proxy. The OCI VM entries below remain the last verified VM
-baseline and restoration reference, not proof that the unavailable VM is
-currently running.
+This is the quick-reference index for the current Phoenix runtime. As of
+2026-06-29, active operations run from the local Docker Desktop LIVE stack and
+Vultr HTTPS proxy. The OCI VM entries below remain the last verified VM baseline
+and restoration reference, not proof that the retired VM is currently running.
 
 ## Current Runtime
 
@@ -20,9 +19,9 @@ currently running.
 | Vultr proxy | `phoenix-proxy` at `65.20.69.50`; nginx terminates HTTPS and proxies to Vultr localhost `127.0.0.1:18080`. |
 | Vultr tunnel sidecar | `phoenix-v9-vultr-tunnel`, Compose service `vultr-tunnel`; owns the reverse SSH tunnel from Docker network `nginx:80` to Vultr `127.0.0.1:18080` and gates on nginx liveness, not trading readiness. |
 | Scheduled Task fallback | `Phoenix Vultr Reverse Tunnel`; installed but disabled while the Docker sidecar is active. |
-| OCI VM | Last verified production VM baseline; unavailable during local recovery. |
-| VM checkout | `/opt/phoenix/app`, branch `main`; verify the checkout SHA and running image tags during each OCI rollout. |
-| Deploy image tag | Verify with `docker ps --filter name=phoenix --format '{{.Names}} {{.Image}}'`; backend/nginx use local image tags on the current VM. |
+| OCI VM | Last verified production VM baseline; retired for active operations on 2026-06-29. |
+| VM checkout | `/opt/phoenix/app`, branch `main`; historical/restoration evidence only unless a future issue reinstates OCI. |
+| Deploy image tag | For the active local runtime, verify with `docker ps --filter name=phoenix-v9 --format '{{.Names}} {{.Image}}'`; historical OCI image tags are archive evidence only. |
 | Backend | `phoenix-oci-backend`, running `python -m app.main`. |
 | Web | `phoenix-oci-web`, nginx frontend and reverse proxy. |
 | Database | `phoenix-oci-postgres`, VM-local Postgres container managed by the `vm-local-postgres` Compose profile. |
@@ -77,7 +76,7 @@ authenticated summary reported `schema_status=ok`,
 
 If the authenticated admin summary also reports schema failure, zero tracked
 accounts, or watchdog stopped, treat that as a real operational issue and use
-the OCI live deployment and strategy diagnostics runbooks.
+the Docker Desktop deployment and strategy diagnostics runbooks.
 
 ## Static Asset And SPA Routing
 
@@ -154,15 +153,13 @@ playbooks are embedded in the runbooks, especially:
 - `docs/runbooks/kill_switch.md`
 - `docs/runbooks/restore_drill.md`
 
-When a historical runbook conflicts with the active local/Vultr evidence during
-the OCI outage, the active evidence wins. For OCI restoration, the OCI VM
-evidence and OCI runbooks remain the baseline until a fresh deployment audit
-replaces them.
+When a historical runbook conflicts with the active local/Vultr evidence, the
+active evidence wins. For OCI restoration, the OCI VM evidence and OCI runbooks
+remain the baseline until a fresh migration audit explicitly reinstates OCI.
 
 ## Non-Current Production Material
 
-Cloud Run, GCP Secret Manager, Firestore, BigQuery authority, OCIR-only
+Cloud Run, GCP Secret Manager, Firestore, BigQuery authority, OCI VM, OCIR-only
 deployment, and external OCI Database for PostgreSQL are not the current
 production operating model unless a future deployment audit proves they are
-active. Docker Desktop is current only for the documented local recovery
-deployment while OCI is unavailable.
+active. Docker Desktop/Vultr is the current documented LIVE deployment path.

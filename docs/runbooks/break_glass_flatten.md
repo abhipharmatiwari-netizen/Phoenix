@@ -1,9 +1,8 @@
 # Break-Glass Flatten Runbook
 
-> **Current OCI VM note:** this action can place live risk-reducing orders.
-> Verify the current OCI VM health and authority path in
-> [OCI VM Runtime Evidence](../OCI_VM_RUNTIME.md) before use. Do not use
-> Docker Desktop or Cloud Run docs as production prerequisites.
+> **Current runtime note:** this action can place live risk-reducing orders.
+> Verify the active Docker Desktop/Vultr backend health and authority path before
+> use. OCI VM evidence is historical/restoration-only after 2026-06-29.
 
 **Architecture reference:** §1 (Operating Modes), §3.4 (Ownership States), §15 (API control rules)
 
