@@ -27,6 +27,39 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+_SENSITIVE_QUERY_PARAM_RE = re.compile(
+    r"([?&](?:ticket|token|access_token|refresh_token|api_key|key|secret)=)[^&\s\"']+",
+    re.IGNORECASE,
+)
+
+
+def _redact_sensitive_log_text(value: str) -> str:
+    return _SENSITIVE_QUERY_PARAM_RE.sub(r"\1<redacted>", value)
+
+
+class _SensitiveAccessLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = _redact_sensitive_log_text(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                _redact_sensitive_log_text(arg) if isinstance(arg, str) else arg
+                for arg in record.args
+            )
+        elif isinstance(record.args, dict):
+            record.args = {
+                key: _redact_sensitive_log_text(value) if isinstance(value, str) else value
+                for key, value in record.args.items()
+            }
+        return True
+
+
+def _install_sensitive_access_log_filter() -> None:
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(item, _SensitiveAccessLogFilter) for item in access_logger.filters):
+        access_logger.addFilter(_SensitiveAccessLogFilter())
+
+
 # Parse a truthy environment value.
 def _env_truthy(value: Optional[str]) -> bool:
     if value is None:
@@ -71,6 +104,7 @@ def _force_utf8_stdio() -> None:
 # Configure basic stdout/stderr logging for Cloud Run and local runs.
 def _configure_logging() -> None:
     _force_utf8_stdio()
+    _install_sensitive_access_log_filter()
     level = os.getenv("LOG_LEVEL", "INFO").upper()
     log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     root_logger = logging.getLogger()

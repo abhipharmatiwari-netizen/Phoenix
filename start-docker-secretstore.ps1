@@ -174,6 +174,10 @@ try {
         $env:LIVE_PG_SSL_SKIP_CHECK = "true"
         Write-Host "  [local-deploy] LIVE_PG_SSL_SKIP_CHECK=true (local Postgres without SSL)" -ForegroundColor Yellow
     }
+    # This launcher always targets docker-compose.live.single.yml. Set TRADE_MODE
+    # in the host process so the pre-compose capital/risk gates cannot fall
+    # through to non-LIVE defaults before Compose injects TRADE_MODE=LIVE.
+    $env:TRADE_MODE = "LIVE"
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_TENANT_ID" -DefaultValue "tenant-1"
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_BROKER_ACCOUNT_ID" -DefaultValue "A1"
 
@@ -200,7 +204,7 @@ try {
 
         $tradeModeEnv = [Environment]::GetEnvironmentVariable("TRADE_MODE", "Process")
         if ($tradeModeEnv -eq "LIVE") {
-            # §98: Generic capital limits in LIVE require explicit operator sign-off.
+            # Section 98: Generic capital limits in LIVE require explicit operator sign-off.
             # We cannot silently proceed - the operator must confirm they understand
             # the account is either unfunded or has been explicitly risk-reviewed.
             Write-Host ""
@@ -274,9 +278,9 @@ try {
             Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
             Write-Host ""
             Write-Host "  The LIVE compose files require this explicitly (no fallback)." -ForegroundColor Yellow
-            Write-Host "  Size per capital tier — see docs/runbooks/oci_live_deployment.md" -ForegroundColor Yellow
+            Write-Host "  Size per capital tier - see docs/runbooks/oci_live_deployment.md" -ForegroundColor Yellow
             Write-Host "  'Sizing the daily-loss limit by capital tier'. A common starting" -ForegroundColor Yellow
-            Write-Host "  point for a ₹1-2L account is 10000." -ForegroundColor Yellow
+            Write-Host "  point for a INR 1-2L account is 10000." -ForegroundColor Yellow
             Write-Host ""
             Write-Error "Deployment cancelled. Set RISK_MAX_DAILY_LOSS in env or SecretStore and retry."
             exit 1
@@ -343,7 +347,7 @@ try {
     Write-SecretFile -Path (Join-Path $secretDir "admin_api_key")             -Value $env:ADMIN_API_KEY_HOST
     Write-SecretFile -Path (Join-Path $secretDir "demo_auth_token_secret")    -Value $env:DEMO_AUTH_TOKEN_SECRET_HOST
 
-    # §126 / Issue #5: ANGEL_POSTBACK_TOKEN - required for Angel broker order-status push
+    # Section 126 / Issue #5: ANGEL_POSTBACK_TOKEN - required for Angel broker order-status push
     # notifications (ANGEL_POSTBACK_AUTH_MODE=direct_broker in LIVE).  If not set,
     # lifecycle falls back to polling only; a WARNING is logged at startup.
     $angelPostbackToken = [Environment]::GetEnvironmentVariable("ANGEL_POSTBACK_TOKEN", "Process")
