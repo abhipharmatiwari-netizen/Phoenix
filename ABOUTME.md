@@ -1,15 +1,34 @@
 # About Phoenix
 
-Phoenix is an operator-run trading platform. Its current production deployment
-is the OCI VM described in [OCI VM Runtime Evidence](docs/OCI_VM_RUNTIME.md).
+Phoenix is an operator-run trading platform. The current active recovery
+deployment is the local Docker Desktop LIVE stack described in
+[Docker Desktop LIVE Deployment](docs/runbooks/docker_desktop_live_deployment.md),
+published through [Vultr Reverse Proxy For Local Phoenix](docs/runbooks/vultr_reverse_proxy.md).
+The OCI VM described in [OCI VM Runtime Evidence](docs/OCI_VM_RUNTIME.md) remains
+the last verified VM baseline, but it is unavailable and is not current running
+evidence.
+
 This file is plain-language context only; it is not an operating runbook. The
 runtime glossary and endpoint behavior index live in
 [Phoenix Encyclopedia](docs/ENCYCLOPEDIA.md).
 
 ## What Is Running Today
 
-The verified OCI VM deployment is a hub-authoritative Phoenix runtime behind
-nginx:
+The active 2026-06-29 recovery deployment is:
+
+- Windows Docker Desktop running `docker-compose.live.single.yml`.
+- `phoenix-v9-backend` in `APP_ENV=production`, `TRADE_MODE=LIVE`, with
+  Postgres-backed control state and broker secrets.
+- `phoenix-v9-web` on `127.0.0.1:80`.
+- Windows PostgreSQL 18 database `phoenix`.
+- `phoenix-v9-vultr-tunnel`, a Docker sidecar that waits for nginx readiness
+  and opens the reverse SSH tunnel to Vultr.
+- Vultr nginx at `65.20.69.50` serving
+  `https://app.phoenixtechnosolutions.in`.
+- The Windows Scheduled Task tunnel is installed but disabled as fallback.
+
+The last verified OCI VM deployment was a hub-authoritative Phoenix runtime
+behind nginx:
 
 - Latest verified VM checkout is `main` at `1d0ca01`; backend and nginx are
   running local images tagged `local-1d0ca01`.
@@ -56,20 +75,24 @@ broker snapshots and dashboard state are evidence, not control authority.
 
 ## What Is Not Current Production
 
-The following material may exist in the repository but is not the current
-production operating model:
+The following material may exist in the repository but is not the current active
+operating model:
 
-- Docker Desktop LIVE deployment
 - Cloud Run, GCP Secret Manager, Firestore, or BigQuery authority
 - OCIR-only deployment without the VM override currently in use
 - external OCI Database for PostgreSQL
 - repo-stored secrets or filled env files
 - local development or PAPER/SHADOW examples
 
+Docker Desktop LIVE deployment is current only for the documented local
+recovery mode while the OCI VM is unavailable.
+
 ## Operator Responsibility
 
-Operators must keep `/opt/phoenix/phoenix-deploy.env`, `/run/secrets`, the local
-Postgres container, the source checkout at `/opt/phoenix/app`, cron jobs,
-database backup evidence, and nginx certificates consistent with the current
-OCI runbook. Secret values and private infrastructure details must be redacted
-from logs, docs, commits, and screenshots.
+Operators must keep the active local Docker/Vultr stack consistent with the
+Docker Desktop and Vultr runbooks. For OCI restoration work, keep
+`/opt/phoenix/phoenix-deploy.env`, `/run/secrets`, the VM-local Postgres
+container, the source checkout at `/opt/phoenix/app`, cron jobs, database backup
+evidence, and nginx certificates consistent with the OCI runbook. Secret values
+and private infrastructure details must be redacted from logs, docs, commits,
+and screenshots.

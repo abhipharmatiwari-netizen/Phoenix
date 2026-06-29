@@ -1,14 +1,16 @@
 # Phoenix v9 Docker Desktop LIVE Deployment
 
-> **Status:** NON-CURRENT FOR PRODUCTION / LOCAL REFERENCE ONLY.
+> **Status:** ACTIVE LOCAL RECOVERY RUNTIME WHILE OCI VM IS UNAVAILABLE.
 >
-> The current production runtime is the OCI VM documented in
-> [OCI VM Runtime Evidence](../OCI_VM_RUNTIME.md). Do not use this document for
-> production restart, deployment, env, database, or go-live instructions.
+> This runbook is the current operating reference for the Windows Docker Desktop
+> recovery deployment connected to Windows PostgreSQL 18 `phoenix` and exposed
+> through the Vultr sidecar/proxy path. It is not a permanent replacement for a
+> dedicated production host.
 
-> **Current production deployment?** Use [oci_live_deployment.md](oci_live_deployment.md).
-> The verified OCI VM currently uses local images and VM-local Postgres; do not
-> assume OCIR or external Postgres from old Docker/Desktop wording.
+> **OCI restoration?** Use [oci_live_deployment.md](oci_live_deployment.md) and
+> [OCI VM Runtime Evidence](../OCI_VM_RUNTIME.md). The verified OCI VM used local
+> images and VM-local Postgres; do not assume OCIR or external Postgres from old
+> Docker/Desktop wording.
 
 ## Purpose
 
@@ -38,9 +40,75 @@ This runbook is correct only for the following deployment model:
 - Postgres authoritative for operational state
 - `BROKER_SECRET_BACKEND=postgres` in the bundled manifest
 
+## 2026-06-28 Local Replica Validation
+
+This local Docker Desktop stack was rebuilt from the current repo and connected
+to the Windows PostgreSQL 18 database `phoenix` on `host.docker.internal:5432`.
+This is the active local OCI-VM replica while the OCI VM is unavailable.
+
+Validated state:
+
+- live stack containers: `phoenix-v9-web` healthy on `127.0.0.1:80`, and
+  `phoenix-v9-backend` healthy;
+- public Vultr access is now handled by sidecar container
+  `phoenix-v9-vultr-tunnel`, which waits for `phoenix-v9-web` health and owns
+  the reverse SSH tunnel to `65.20.69.50`;
+- effective backend tuple: `APP_ENV=production`, `TRADE_MODE=LIVE`,
+  `REQUIRE_LIVE_TRADE_MODE=true`, `CONTROL_PLANE_PG_DB=phoenix`,
+  `CONTROL_PLANE_PG_USER=phoenix_app`, `BROKER_SECRET_BACKEND=postgres`,
+  `SCHEMA_CHECK_MODE=strict`, `BROKER_SCHEMA_CHECK_MODE=strict`,
+  `LEADER_LEASE_BACKEND=postgres`, and `LEADER_LEASE_ID=phoenix-local-live`;
+- public `/health` returned `ready=true`; public `/readyz` returned HTTP 200
+  with `universe_health.status=ok`;
+- Postgres migrations were current with 27 `schema_migrations` records;
+- `phoenix_app` successfully counted every consolidated table: 36 `public`
+  base tables plus 6 archived `legacy_phoneix` tables;
+- the local `phoneix` typo database remains preserved as a source archive, and
+  its rows are consolidated under `phoenix.legacy_phoneix`;
+- one broker credential row exists in Postgres for the live account; no broker
+  credential values were printed or copied into documentation;
+- `broker_accounts` has `tenant-1/A1` enabled with `trading_mode=LIVE`;
+- `admin@phoenix.com` has explicit local dashboard entitlements for
+  `tenant-1/A1`, so the UI can show the live tenant/account instead of the
+  "No tenant entitlements" banner;
+- `strategy_configs` is EMA20-only: `ema20_strategy=true`; all other listed
+  strategies are disabled;
+- `internal_position_records` has zero active/non-terminal rows and
+  `position_ownership_ledger` has zero rows;
+- one stale expired NIFTY `RECOVERY_PENDING` record was cleared through
+  `POST /admin/state/clear-position-record` with `force=false` after the
+  recovery endpoint reported broker-flat evidence; the clear was audited;
+- runtime table ownership for `bar_regime`,
+  `position_trailing_lock_inflight`, and `position_trailing_lock_state` was
+  repaired from `postgres` to `phoenix_app` so the live app can complete its
+  idempotent runtime table checks without owner warnings.
+
+Final clean-start log evidence after the owner repair:
+
+- schema guard passed for required Postgres tables and indexes;
+- expired-position cleanup found a clean DB;
+- zero non-terminal position records were restored from Postgres;
+- outbox recovery scanned zero unresolved active records;
+- `startup.runtime_ready` set the readiness latch with `recovery_status=ok`.
+
+The older PAPER/local validation stack that previously served
+`127.0.0.1:8080` and `127.0.0.1:18080` was removed after this validation.
+The LIVE-capable local replica is the only Phoenix stack expected to remain
+running, on `127.0.0.1:80`.
+
+Temporary public access for this local replica is handled by the Vultr reverse
+proxy runbook at [Vultr Reverse Proxy For Local Phoenix](vultr_reverse_proxy.md).
+That path keeps Phoenix and Postgres local, forwards only through the
+`phoenix-v9-vultr-tunnel` Docker sidecar to Vultr localhost, and uses HTTPS on
+`app.phoenixtechnosolutions.in` for UI login and live operations through the
+public endpoint.
+
 ## Scope
 
-This runbook covers only `docker-compose.live.single.yml` launched from a Windows PowerShell session. It does not cover OCI, Cloud Run, legacy multi-file Compose profiles, Firestore-backed authority, or env-file secret sourcing.
+This runbook covers only `docker-compose.live.single.yml` launched from a
+Windows PowerShell session, including the `vultr-tunnel` sidecar. It does not
+cover OCI, Cloud Run, legacy multi-file Compose profiles, Firestore-backed
+authority, or env-file secret sourcing.
 
 ### Secret boundary
 
@@ -53,8 +121,11 @@ This aligned bundle still includes a Windows PowerShell helper for convenience. 
 ## Files used by this runbook
 
 - [`../../docker-compose.live.single.yml`](../../docker-compose.live.single.yml)
+- [`../../docker/vultr-tunnel/Dockerfile`](../../docker/vultr-tunnel/Dockerfile)
+- [`../../scripts/ops/vultr_reverse_tunnel_entrypoint.sh`](../../scripts/ops/vultr_reverse_tunnel_entrypoint.sh)
 - [`../../start-docker-secretstore.ps1`](../../start-docker-secretstore.ps1)
 - [`update_broker_credentials.md`](update_broker_credentials.md)
+- [`vultr_reverse_proxy.md`](vultr_reverse_proxy.md)
 - [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md)
 
 ---
@@ -71,6 +142,9 @@ Before you start the bundled LIVE stack, all of the following must already be tr
 - The target subscription / strategy config rows exist.
 - The target `broker_credentials` row exists for the chosen `broker_account_id`.
 - Port `80` is free on the host.
+- If public Vultr access is required, the SSH key exists at
+  `C:\Users\abhis\.ssh\phoenix_vultr_proxy_workspace_ed25519`, or
+  `VULTR_REVERSE_TUNNEL_SSH_KEY` points to the active key path.
 - The runtime can obtain `ADMIN_API_KEY`, `DEMO_AUTH_TOKEN_SECRET`, `CONTROL_PLANE_PG_PASSWORD`, `ANGEL_POSTBACK_TOKEN`, `CLIENT_LOCAL_IP`, `CLIENT_PUBLIC_IP`, and `MAC_ADDRESS` from your approved LIVE secret process.
 
 ### If you use the bundled PowerShell helper

@@ -1,17 +1,27 @@
 # Phoenix Encyclopedia
 
-Last updated: 2026-06-23.
+Last updated: 2026-06-29.
 
-This is the quick-reference index for the current Phoenix OCI VM runtime. It
-explains terms and endpoint behavior that appear across the README,
-architecture document, runbooks, and operator playbooks.
+This is the quick-reference index for the current Phoenix runtime. During the
+OCI outage, active operations run from the local Docker Desktop LIVE stack and
+Vultr HTTPS proxy. The OCI VM entries below remain the last verified VM
+baseline and restoration reference, not proof that the unavailable VM is
+currently running.
 
 ## Current Runtime
 
 | Term | Current meaning |
 |---|---|
-| OCI VM | Current production source of truth for Phoenix runtime evidence. |
-| VM checkout | `/opt/phoenix/app`, branch `main`; verify the checkout SHA and running image tags during each rollout. |
+| Active recovery runtime | Local Windows Docker Desktop LIVE stack, Windows PostgreSQL 18 `phoenix`, and Vultr HTTPS proxy. |
+| Public URL | `https://app.phoenixtechnosolutions.in`. |
+| Local backend | `phoenix-v9-backend`, `APP_ENV=production`, `TRADE_MODE=LIVE`, Postgres-backed authority. |
+| Local web | `phoenix-v9-web`, nginx/frontend on `127.0.0.1:80`. |
+| Local database | Windows PostgreSQL 18 database `phoenix`, user `phoenix_app`; broker secrets live in Postgres. |
+| Vultr proxy | `phoenix-proxy` at `65.20.69.50`; nginx terminates HTTPS and proxies to Vultr localhost `127.0.0.1:18080`. |
+| Vultr tunnel sidecar | `phoenix-v9-vultr-tunnel`, Compose service `vultr-tunnel`; owns the reverse SSH tunnel from Docker network `nginx:80` to Vultr `127.0.0.1:18080`. |
+| Scheduled Task fallback | `Phoenix Vultr Reverse Tunnel`; installed but disabled while the Docker sidecar is active. |
+| OCI VM | Last verified production VM baseline; unavailable during local recovery. |
+| VM checkout | `/opt/phoenix/app`, branch `main`; verify the checkout SHA and running image tags during each OCI rollout. |
 | Deploy image tag | Verify with `docker ps --filter name=phoenix --format '{{.Names}} {{.Image}}'`; backend/nginx use local image tags on the current VM. |
 | Backend | `phoenix-oci-backend`, running `python -m app.main`. |
 | Web | `phoenix-oci-web`, nginx frontend and reverse proxy. |
@@ -21,6 +31,22 @@ architecture document, runbooks, and operator playbooks.
 | LIVE strategy authority | EMA20-only for the intended Angel account; `TRADE_MODE=LIVE`, one active strategy per underlying, flat broker/ownership state and green readiness were verified on 2026-06-20. |
 | OI/ML sidecar | Dormant and outside the live order authority path. No container is present; the retained image and operator Compose remain with restart `no`, runner/snapshotter/health monitoring disabled, and historical data/log evidence preserved. |
 | Host allow-list | The canonical deployment domain is passed to the backend. Approved browser login works; malformed or unapproved Host values are rejected before protected routes. |
+
+## Active Local/Vultr Path
+
+```text
+Browser
+  -> https://app.phoenixtechnosolutions.in
+  -> Vultr nginx :443
+  -> Vultr 127.0.0.1:18080
+  -> SSH reverse tunnel owned by phoenix-v9-vultr-tunnel
+  -> Docker service nginx:80
+  -> Phoenix backend as needed
+```
+
+Do not use `http://65.20.69.50` for login or live operations. The IP-level
+HTTP path is only a recovery/probe surface. The public UI must use the HTTPS
+domain.
 
 ## Health And Readiness Surfaces
 
@@ -89,6 +115,8 @@ This repo does not have a separate `docs/playbooks/` directory. Operator
 playbooks are embedded in the runbooks, especially:
 
 - `docs/runbooks/oci_live_deployment.md`
+- `docs/runbooks/docker_desktop_live_deployment.md`
+- `docs/runbooks/vultr_reverse_proxy.md`
 - `docs/runbooks/release_evidence.md`
 - `docs/runbooks/oci_runtime_hardening.md`
 - `docs/runbooks/postgres_backup.md`
@@ -97,12 +125,15 @@ playbooks are embedded in the runbooks, especially:
 - `docs/runbooks/kill_switch.md`
 - `docs/runbooks/restore_drill.md`
 
-When a historical runbook conflicts with the current OCI VM evidence, the VM
-evidence wins and the runbook must be corrected.
+When a historical runbook conflicts with the active local/Vultr evidence during
+the OCI outage, the active evidence wins. For OCI restoration, the OCI VM
+evidence and OCI runbooks remain the baseline until a fresh deployment audit
+replaces them.
 
 ## Non-Current Production Material
 
-Docker Desktop, Cloud Run, GCP Secret Manager, Firestore, BigQuery authority,
-OCIR-only deployment, and external OCI Database for PostgreSQL are not the
-current production operating model unless a future VM audit proves they are
-active.
+Cloud Run, GCP Secret Manager, Firestore, BigQuery authority, OCIR-only
+deployment, and external OCI Database for PostgreSQL are not the current
+production operating model unless a future deployment audit proves they are
+active. Docker Desktop is current only for the documented local recovery
+deployment while OCI is unavailable.

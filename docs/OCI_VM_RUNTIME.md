@@ -5,9 +5,35 @@ Phoenix DB backup cron was installed and dry-run verified on 2026-06-23
 14:21 UTC. EMA20-only LIVE authority, canonical-host login, and persistent
 OI/ML sidecar dormancy were verified during the 2026-06-20 review.
 
-The OCI VM is the production source of truth. This file intentionally records
-what is running, including drift from repo templates. Secret values, private IPs,
-OCIDs, broker identifiers, and tokens are redacted.
+The OCI VM is the last verified production VM baseline, but it is currently
+unavailable. This file intentionally records the VM evidence captured before the
+outage, including drift from repo templates. It must not be read as proof that
+the OCI VM is currently running. Secret values, private IPs, OCIDs, broker
+identifiers, and tokens are redacted.
+
+## 2026-06-28 Local Replica Note
+
+The OCI VM was unavailable during the 2026-06-28 local recovery work, so a
+Docker Desktop replica was started on the operator workstation using
+`docker-compose.live.single.yml` and Windows PostgreSQL 18 database `phoenix`.
+That local stack is documented in
+[Docker Desktop LIVE Deployment](runbooks/docker_desktop_live_deployment.md).
+
+The local replica reached `TRADE_MODE=LIVE`, `BROKER_SECRET_BACKEND=postgres`,
+EMA20-only strategy config, green `/health` and `/readyz`, and full
+`phoenix_app` table access across 36 `public` tables plus 6 archived
+`legacy_phoneix` tables. This evidence does not update the OCI VM verification
+timestamp above and must not be treated as proof that the unavailable OCI VM is
+running.
+
+On 2026-06-29 IST, the local replica was also exposed through a Vultr Ubuntu
+reverse proxy at `65.20.69.50` using Docker sidecar
+`phoenix-v9-vultr-tunnel`, which opens an SSH reverse tunnel from the local
+Compose network to Vultr `127.0.0.1:18080`. That proxy is documented separately in
+[Vultr Reverse Proxy For Local Phoenix](runbooks/vultr_reverse_proxy.md). It is
+not an OCI VM runtime signal. HTTPS is active for
+`app.phoenixtechnosolutions.in`, and the Let's Encrypt certificate expires on
+2026-09-26 18:16:46 UTC.
 
 ## Evidence Table
 
