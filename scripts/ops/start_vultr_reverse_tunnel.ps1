@@ -4,6 +4,7 @@ param(
     [string]$KeyPath = "$env:USERPROFILE\.ssh\phoenix_vultr_proxy_workspace_ed25519",
     [int]$RemotePort = 18080,
     [int]$LocalPort = 80,
+    [string]$LocalLivenessPath = "/nginx-health",
     [int]$RestartDelaySeconds = 5
 )
 
@@ -24,17 +25,20 @@ if (-not (Test-Path -LiteralPath $KeyPath)) {
 }
 
 while ($true) {
-    $ready = $false
-    $localReadyUrl = "http://127.0.0.1:${LocalPort}/readyz"
+    $live = $false
+    if (-not $LocalLivenessPath.StartsWith("/")) {
+        $LocalLivenessPath = "/$LocalLivenessPath"
+    }
+    $localLivenessUrl = "http://127.0.0.1:${LocalPort}${LocalLivenessPath}"
     try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri $localReadyUrl -TimeoutSec 5
-        $ready = ($response.StatusCode -eq 200)
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $localLivenessUrl -TimeoutSec 5
+        $live = ($response.StatusCode -eq 200)
     } catch {
-        $ready = $false
+        $live = $false
     }
 
-    if (-not $ready) {
-        Write-Host "$(Get-Date -Format o) Local Phoenix $localReadyUrl is not 200; retrying in $RestartDelaySeconds seconds."
+    if (-not $live) {
+        Write-Host "$(Get-Date -Format o) Local Phoenix liveness $localLivenessUrl is not 200; retrying in $RestartDelaySeconds seconds."
         Start-Sleep -Seconds $RestartDelaySeconds
         continue
     }

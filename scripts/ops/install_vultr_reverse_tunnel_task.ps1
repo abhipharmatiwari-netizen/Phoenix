@@ -45,7 +45,7 @@ Register-ScheduledTask `
     -Trigger $trigger `
     -Settings $settings `
     -Principal $principal `
-    -Description "Starts the Phoenix local-to-Vultr reverse SSH tunnel after Windows logon. The tunnel script waits for local Phoenix /readyz before connecting." `
+    -Description "Starts the Phoenix local-to-Vultr reverse SSH tunnel after Windows logon. The tunnel script waits for local Phoenix nginx liveness before connecting." `
     -Force | Out-Null
 
 Get-ScheduledTask -TaskName $TaskName | Select-Object TaskName, State

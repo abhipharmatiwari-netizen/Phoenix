@@ -23,11 +23,11 @@ Validated on 2026-06-29 IST:
 | Database | Windows PostgreSQL 18 database `phoenix`, user `phoenix_app`; broker secrets are stored in Postgres |
 | Public endpoint | `https://app.phoenixtechnosolutions.in` |
 | Vultr proxy | `phoenix-proxy` at `65.20.69.50`, nginx HTTPS, Let's Encrypt certificate valid until 2026-09-26 18:16:46 UTC |
-| Tunnel owner | Docker sidecar `phoenix-v9-vultr-tunnel`, service `vultr-tunnel`, reverse SSH to Vultr `127.0.0.1:18080` |
+| Tunnel owner | Docker sidecar `phoenix-v9-vultr-tunnel`, service `vultr-tunnel`, reverse SSH to Vultr `127.0.0.1:18080`, gated by nginx liveness |
 | Fallback tunnel | Windows Scheduled Task `Phoenix Vultr Reverse Tunnel` remains installed but disabled |
 | Strategy config | EMA20-only for the local LIVE-capable account configuration |
 | OI/ML sidecar | Dormant; retained historical assets are not live order authority |
-| Public health | `https://app.phoenixtechnosolutions.in/readyz` and `/health` return HTTP 200 |
+| Public health | `/health` and `/login` are reachable through HTTPS; `/readyz` returns HTTP 200 only when trading readiness is green |
 
 Do not expose Postgres to the internet. Do not use `http://65.20.69.50` for
 login or live operations; use the HTTPS domain only.

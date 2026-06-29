@@ -23,8 +23,9 @@ Validated state on 2026-06-29 IST:
 - GoDaddy DNS resolves `app.phoenixtechnosolutions.in` to `65.20.69.50`;
 - nginx HTTPS is active for `app.phoenixtechnosolutions.in`;
 - Let's Encrypt certificate expires on 2026-09-26 18:16:46 UTC;
-- `https://app.phoenixtechnosolutions.in/readyz` returns HTTP 200 with
-  `ready=true`;
+- `https://app.phoenixtechnosolutions.in/health` and `/login` are reachable
+  through HTTPS; `/readyz` returns HTTP 200 only when trading readiness is green
+  and may return HTTP 503 during an intentional risk halt;
 - `https://app.phoenixtechnosolutions.in/login` returns HTTP 200;
 - `/auth/login` reaches backend authentication and does not return
   `Invalid Host header`;
@@ -104,7 +105,9 @@ phoenix-v9-vultr-tunnel
 The sidecar:
 
 - starts after `phoenix-v9-web` is healthy;
-- waits for `http://nginx/readyz`;
+- waits for `http://nginx/nginx-health`, not `/readyz`, so the operator login
+  path stays available while trading readiness is blocked by an active kill
+  switch or startup risk gate;
 - copies the mounted SSH key to container-private `/tmp` with mode `0600`;
 - reconnects if SSH exits;
 - uses `restart: unless-stopped`.
@@ -143,9 +146,11 @@ Vultr 127.0.0.1:18080 -> Windows 127.0.0.1:80
 Use this only as an operator fallback when the Docker sidecar is unavailable.
 Keep this process running while using the domain. If it exits, nginx on Vultr
 will return an upstream error even though Phoenix may still be running locally.
-The tunnel script is single-instance and waits for local Phoenix `/readyz`
-before connecting, so it can be started before Docker Desktop has fully brought
-the Phoenix containers back.
+The tunnel script is single-instance and waits for local Phoenix nginx
+liveness (`/nginx-health`) before connecting, so it can be started before
+Docker Desktop has fully brought the Phoenix containers back. It deliberately
+does not wait for `/readyz`; `/readyz` is the trading-readiness gate and can be
+red while operators still need the HTTPS login path.
 
 ## Windows Scheduled Task Fallback
 
@@ -219,8 +224,10 @@ curl.exe https://app.phoenixtechnosolutions.in/health
 
 Expected:
 
-- `/readyz` returns HTTP 200
-- `/health` reports `ready:true`
+- `/health` returns HTTP 200
+- `/readyz` returns HTTP 200 only when trading readiness is clear; during an
+  intentional risk halt it may return HTTP 503 while the tunnel and login path
+  remain healthy
 - Phoenix UI loads at `https://app.phoenixtechnosolutions.in`
 - dummy `/auth/login` with a wrong password returns HTTP 401, not
   `Invalid Host header`

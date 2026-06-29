@@ -483,12 +483,15 @@ services:
       VULTR_TUNNEL_REMOTE_PORT: "${VULTR_TUNNEL_REMOTE_PORT:-18080}"
       PHOENIX_TUNNEL_TARGET_HOST: "${PHOENIX_TUNNEL_TARGET_HOST:-nginx}"
       PHOENIX_TUNNEL_TARGET_PORT: "${PHOENIX_TUNNEL_TARGET_PORT:-80}"
-      PHOENIX_TUNNEL_READY_URL: "${PHOENIX_TUNNEL_READY_URL:-http://nginx/readyz}"
+      # The tunnel is an operator-access path, not a trading-readiness gate.
+      # Keep it up while /readyz is red for intentional risk halts so operators
+      # can still log in and inspect/clear state through the dashboard.
+      PHOENIX_TUNNEL_LIVENESS_URL: "${PHOENIX_TUNNEL_LIVENESS_URL:-http://nginx/nginx-health}"
       VULTR_TUNNEL_RESTART_DELAY_SECONDS: "${VULTR_TUNNEL_RESTART_DELAY_SECONDS:-5}"
     secrets:
       - vultr_reverse_tunnel_ssh_key
     healthcheck:
-      test: ["CMD-SHELL", "pidof ssh >/dev/null && curl -fsS http://nginx/readyz >/dev/null"]
+      test: ["CMD-SHELL", "pidof ssh >/dev/null && curl -fsS http://nginx/nginx-health >/dev/null"]
       interval: 30s
       timeout: 5s
       retries: 3

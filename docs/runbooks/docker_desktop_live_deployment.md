@@ -52,15 +52,16 @@ Validated state:
 - live stack containers: `phoenix-v9-web` healthy on `127.0.0.1:80`, and
   `phoenix-v9-backend` healthy;
 - public Vultr access is now handled by sidecar container
-  `phoenix-v9-vultr-tunnel`, which waits for `phoenix-v9-web` health and owns
-  the reverse SSH tunnel to `65.20.69.50`;
+  `phoenix-v9-vultr-tunnel`, which waits for nginx liveness
+  (`/nginx-health`) and owns the reverse SSH tunnel to `65.20.69.50`;
 - effective backend tuple: `APP_ENV=production`, `TRADE_MODE=LIVE`,
   `REQUIRE_LIVE_TRADE_MODE=true`, `CONTROL_PLANE_PG_DB=phoenix`,
   `CONTROL_PLANE_PG_USER=phoenix_app`, `BROKER_SECRET_BACKEND=postgres`,
   `SCHEMA_CHECK_MODE=strict`, `BROKER_SCHEMA_CHECK_MODE=strict`,
   `LEADER_LEASE_BACKEND=postgres`, and `LEADER_LEASE_ID=phoenix-local-live`;
-- public `/health` returned `ready=true`; public `/readyz` returned HTTP 200
-  with `universe_health.status=ok`;
+- public `/health` is the login-path liveness check; public `/readyz` is the
+  trading-readiness check and can return HTTP 503 during an intentional risk
+  halt;
 - Postgres migrations were current with 27 `schema_migrations` records;
 - `phoenix_app` successfully counted every consolidated table: 36 `public`
   base tables plus 6 archived `legacy_phoneix` tables;

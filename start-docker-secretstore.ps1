@@ -514,13 +514,13 @@ try {
     Write-Host "  PHASE 2 - Building Docker images" -ForegroundColor Cyan
     Write-Host "================================================================" -ForegroundColor Cyan
     $buildStart = Get-Date
-    Invoke-External -Description "Building Compose images (backend + nginx)" `
-        -Command @("docker", "compose", "-f", $composeFile, "build", "backend", "nginx")
+    Invoke-External -Description "Building Compose images (backend + nginx + vultr-tunnel)" `
+        -Command @("docker", "compose", "-f", $composeFile, "build", "backend", "nginx", "vultr-tunnel")
     $buildSecs = [int]((Get-Date) - $buildStart).TotalSeconds
     Write-Host "  Build completed in ${buildSecs}s" -ForegroundColor Green
 
     # -----------------------------------------------------------------------
-    # PHASE 3 - Start stack (migrator -> db-preflight -> backend -> nginx)
+    # PHASE 3 - Start stack (migrator -> db-preflight -> backend -> nginx -> vultr-tunnel)
     # --no-build: images were already built in Phase 2; skip duplicate build.
     # --force-recreate: ensures containers pick up new image + config hash.
     # -----------------------------------------------------------------------
@@ -528,7 +528,7 @@ try {
     Write-Host "================================================================" -ForegroundColor Cyan
     Write-Host "  PHASE 3 - Starting LIVE stack" -ForegroundColor Cyan
     Write-Host "================================================================" -ForegroundColor Cyan
-    Invoke-External -Description "Starting LIVE stack (migrator -> db-preflight -> backend -> nginx)" `
+    Invoke-External -Description "Starting LIVE stack (migrator -> db-preflight -> backend -> nginx -> vultr-tunnel)" `
         -Command @("docker", "compose", "-f", $composeFile, "up", "-d", "--no-build", "--force-recreate")
 
     Write-Host ""
@@ -537,7 +537,7 @@ try {
 
     # -----------------------------------------------------------------------
     # PHASE 4 - Wait for backend to become healthy
-    # Docker's own health check uses /readyz with a 45 s start_period.
+    # Docker's own backend health check uses /health with a 45 s start_period.
     # We poll docker inspect so the operator sees live progress.
     # -----------------------------------------------------------------------
     Write-Host ""

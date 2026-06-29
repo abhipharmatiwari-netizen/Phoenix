@@ -18,7 +18,7 @@ currently running.
 | Local web | `phoenix-v9-web`, nginx/frontend on `127.0.0.1:80`. |
 | Local database | Windows PostgreSQL 18 database `phoenix`, user `phoenix_app`; broker secrets live in Postgres. |
 | Vultr proxy | `phoenix-proxy` at `65.20.69.50`; nginx terminates HTTPS and proxies to Vultr localhost `127.0.0.1:18080`. |
-| Vultr tunnel sidecar | `phoenix-v9-vultr-tunnel`, Compose service `vultr-tunnel`; owns the reverse SSH tunnel from Docker network `nginx:80` to Vultr `127.0.0.1:18080`. |
+| Vultr tunnel sidecar | `phoenix-v9-vultr-tunnel`, Compose service `vultr-tunnel`; owns the reverse SSH tunnel from Docker network `nginx:80` to Vultr `127.0.0.1:18080` and gates on nginx liveness, not trading readiness. |
 | Scheduled Task fallback | `Phoenix Vultr Reverse Tunnel`; installed but disabled while the Docker sidecar is active. |
 | OCI VM | Last verified production VM baseline; unavailable during local recovery. |
 | VM checkout | `/opt/phoenix/app`, branch `main`; verify the checkout SHA and running image tags during each OCI rollout. |
@@ -56,6 +56,7 @@ domain.
 | Backend-local `/readyz` | Operator shell inside backend container | Full trading-readiness gate. Must be green before automated LIVE entries resume. |
 | Backend-local `/health/summary` | Operator shell inside backend container | Full startup/dependency summary, including internal diagnostics. |
 | Public nginx `/readyz` | Browser/public probe | Redacted readiness. It proves reachability, not full diagnostics. |
+| Public nginx `/nginx-health` | Docker sidecar/proxy liveness | Local nginx liveness used by the Vultr tunnel; it is not a trading-readiness signal. |
 | Public nginx `/health/summary` | Browser/public probe | Redacted summary. Internal schema, watchdog, and account-count fields may be omitted. |
 | Public nginx `/health/alerts` | Dashboard Alerts page and probes | JSON alert-rule payload; must not fall through to SPA HTML. |
 | Public nginx `/health/mitigations` | Dashboard Mitigations page and probes | JSON mitigation payload; must not fall through to SPA HTML. |
