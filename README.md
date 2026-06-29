@@ -23,14 +23,40 @@ Validated on 2026-06-29 IST:
 | Database | Windows PostgreSQL 18 database `phoenix`, user `phoenix_app`; broker secrets are stored in Postgres |
 | Public endpoint | `https://app.phoenixtechnosolutions.in` |
 | Vultr proxy | `phoenix-proxy` at `65.20.69.50`, nginx HTTPS, Let's Encrypt certificate valid until 2026-09-26 18:16:46 UTC |
-| Tunnel owner | Docker sidecar `phoenix-v9-vultr-tunnel`, service `vultr-tunnel`, reverse SSH to Vultr `127.0.0.1:18080` |
+| Tunnel owner | Docker sidecar `phoenix-v9-vultr-tunnel`, service `vultr-tunnel`, reverse SSH to Vultr `127.0.0.1:18080`, gated by nginx liveness |
 | Fallback tunnel | Windows Scheduled Task `Phoenix Vultr Reverse Tunnel` remains installed but disabled |
 | Strategy config | EMA20-only for the local LIVE-capable account configuration |
 | OI/ML sidecar | Dormant; retained historical assets are not live order authority |
-| Public health | `https://app.phoenixtechnosolutions.in/readyz` and `/health` return HTTP 200 |
+| Public health | `/health` and `/login` are reachable through HTTPS; `/readyz` returns HTTP 200 only when trading readiness is green |
 
 Do not expose Postgres to the internet. Do not use `http://65.20.69.50` for
 login or live operations; use the HTTPS domain only.
+
+## 2026-06-29 Local LIVE Incident Safeguards
+
+The 2026-06-29 incident around 15:00 IST was traced to EMA20 exit handling, not
+fresh entry-signal logic. A full exit submission cleared the local EMA20 managed
+position while stale `risk_manager.open_positions` still contained the same
+label. The strategy could then re-adopt that stale label from tick sync and
+retry EOD exits. The kill switch tripped on `floating_drawdown` when total
+drawdown exceeded the configured intraday drawdown limit.
+
+Current safeguards in this revision:
+
+- EMA20 full exits use stable idempotency keys per date, underlying, label, and
+  exit reason.
+- A pending full exit blocks LIVE risk-manager re-adoption until fresh broker
+  position evidence is available.
+- If broker state is flat after a pending-exit timeout, EMA20 drops the local
+  position instead of retrying; if broker state is unknown in LIVE, retry is
+  suppressed fail-closed.
+- Broker-sync snapshots with missing marks are tagged
+  `broker_sync_stale_mark` / `broker_sync_mark_unavailable`; total PnL becomes
+  unavailable and risk checks block new entries rather than falling back to
+  realized-only totals.
+- During recovery, monitor `EMA20 skipped synced position adoption`,
+  `ORDER_IDEMPOTENCY_SUPPRESSED`, `mark.unavailable`, `kill_switch.trip`, and
+  `ORDER_EXIT_REJECTED_*`.
 
 ## Last Verified OCI VM State
 

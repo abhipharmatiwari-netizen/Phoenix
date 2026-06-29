@@ -249,3 +249,77 @@ def test_sync_positions_refreshes_pnl_from_broker_positions(monkeypatch):
     assert captured["account_gross_exposure"] == 240.0
     assert captured["per_strategy_marks"] == {StrategyId("ema20-trend"): (40.0, 240.0)}
     asyncio.run(runner.stop())
+
+
+def test_live_sync_positions_tags_snapshot_when_ltp_missing(monkeypatch, caplog):
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    state_store = StateStore()
+    account = _dummy_account()
+    captured = {}
+
+    class _BrokerClientMissingMark:
+        async def login(self):
+            return None
+
+        async def get_balance(self):
+            raise NotImplementedError
+
+        async def get_positions(self):
+            return PositionsFetchResult(
+                status=PositionsStatus.OK,
+                positions=[
+                    Position(
+                        symbol="NIFTY30JUN2623950CE",
+                        quantity=-2,
+                        avg_price=100.0,
+                        product_type=ProductType.INTRADAY,
+                    )
+                ],
+                reason="ok",
+            )
+
+        async def get_orders(self):
+            return []
+
+        async def place_order(self, request):
+            raise NotImplementedError
+
+    class _PnlEngine:
+        def sync_account_mark_to_market(self, **kwargs):
+            captured.update(kwargs)
+
+    ownership_store = SimpleNamespace(
+        reconcile_broker_positions=lambda **_kwargs: SimpleNamespace(
+            changed=False,
+            added_unknown=0,
+            converted_to_unknown=0,
+            removed_stale=0,
+            parse_errors=0,
+        ),
+        get_owner=lambda **_kwargs: "ema20-trend",
+    )
+    monkeypatch.setattr(
+        "app.hub.account_runner.dashboard_bus.get_last_price",
+        lambda _symbol: None,
+    )
+    caplog.set_level("WARNING", logger="app.hub.account_runner")
+
+    runner = AccountRunner(
+        tenant_id=account.tenant_id,
+        broker_account=account,
+        broker_client=_BrokerClientMissingMark(),
+        runtime_mode="LIVE",
+        state_store=state_store,
+        pnl_engine=_PnlEngine(),
+        position_ownership_store=ownership_store,
+        poll_interval_seconds=1,
+    )
+
+    asyncio.run(runner._sync_positions(force=True))
+
+    assert captured["account_unrealized_pnl"] == 0.0
+    assert captured["account_gross_exposure"] == 200.0
+    assert captured["per_strategy_marks"] == {}
+    assert captured["source"] == "broker_sync_stale_mark"
+    assert "mark.unavailable" in caplog.text
+    asyncio.run(runner.stop())

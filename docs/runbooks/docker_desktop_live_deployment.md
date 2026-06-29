@@ -20,7 +20,8 @@ It uses:
 
 - [`docker-compose.live.single.yml`](../../docker-compose.live.single.yml)
 - Postgres as the authoritative operational store
-- Postgres `broker_credentials` as the broker-secret path used by the bundled manifest
+- Postgres `broker_credentials` as the broker-secret and broker-network-identity
+  path used by the bundled manifest
 - runtime-injected platform secrets for values such as `ADMIN_API_KEY`, auth token secret, and database password
 
 The older multi-file Compose path (`docker-compose.live.yml` + `docker-compose.postgres.override.yml`) is obsolete in this repo. Those files are not present and must not be used as current LIVE guidance.
@@ -51,15 +52,16 @@ Validated state:
 - live stack containers: `phoenix-v9-web` healthy on `127.0.0.1:80`, and
   `phoenix-v9-backend` healthy;
 - public Vultr access is now handled by sidecar container
-  `phoenix-v9-vultr-tunnel`, which waits for `phoenix-v9-web` health and owns
-  the reverse SSH tunnel to `65.20.69.50`;
+  `phoenix-v9-vultr-tunnel`, which waits for nginx liveness
+  (`/nginx-health`) and owns the reverse SSH tunnel to `65.20.69.50`;
 - effective backend tuple: `APP_ENV=production`, `TRADE_MODE=LIVE`,
   `REQUIRE_LIVE_TRADE_MODE=true`, `CONTROL_PLANE_PG_DB=phoenix`,
   `CONTROL_PLANE_PG_USER=phoenix_app`, `BROKER_SECRET_BACKEND=postgres`,
   `SCHEMA_CHECK_MODE=strict`, `BROKER_SCHEMA_CHECK_MODE=strict`,
   `LEADER_LEASE_BACKEND=postgres`, and `LEADER_LEASE_ID=phoenix-local-live`;
-- public `/health` returned `ready=true`; public `/readyz` returned HTTP 200
-  with `universe_health.status=ok`;
+- public `/health` is the login-path liveness check; public `/readyz` is the
+  trading-readiness check and can return HTTP 503 during an intentional risk
+  halt;
 - Postgres migrations were current with 27 `schema_migrations` records;
 - `phoenix_app` successfully counted every consolidated table: 36 `public`
   base tables plus 6 archived `legacy_phoneix` tables;
@@ -145,7 +147,20 @@ Before you start the bundled LIVE stack, all of the following must already be tr
 - If public Vultr access is required, the SSH key exists at
   `C:\Users\abhis\.ssh\phoenix_vultr_proxy_workspace_ed25519`, or
   `VULTR_REVERSE_TUNNEL_SSH_KEY` points to the active key path.
-- The runtime can obtain `ADMIN_API_KEY`, `DEMO_AUTH_TOKEN_SECRET`, `CONTROL_PLANE_PG_PASSWORD`, `ANGEL_POSTBACK_TOKEN`, `CLIENT_LOCAL_IP`, `CLIENT_PUBLIC_IP`, and `MAC_ADDRESS` from your approved LIVE secret process.
+- The runtime can obtain bootstrap-only values `ADMIN_API_KEY`,
+  `DEMO_AUTH_TOKEN_SECRET`, `CONTROL_PLANE_PG_PASSWORD`,
+  `ANGEL_POSTBACK_TOKEN`, and `ADMIN_KILL_SWITCH_OVERRIDE` from your approved
+  LIVE secret process. These are not fetched from Postgres: the database
+  password is required before Postgres can be queried, and admin / kill-switch
+  secrets intentionally stay file-mounted instead of database-readable.
+- The selected `broker_accounts` row contains account-specific
+  `meta.capital_limits` and, when managed per-account, `meta.risk.max_daily_loss`
+  or `meta.risk_max_daily_loss`.
+- The selected `broker_credentials` row contains non-empty `api_key`,
+  `client_code`, `pin`, and `totp_secret`, plus `client_local_ip`,
+  `client_public_ip`, and `mac_address`. Broker login secrets and broker
+  network identity are fetched from Postgres; they must not be supplied through
+  `ANGEL_*` environment variables for this LIVE stack.
 
 ### If you use the bundled PowerShell helper
 
@@ -156,9 +171,21 @@ The helper script expects the following Windows modules and secret names:
 - `DEMO_AUTH_TOKEN_SECRET`
 - `CONTROL_PLANE_PG_PASSWORD`
 - `ANGEL_POSTBACK_TOKEN` (§126 — required for Angel broker postback authentication; without it all Angel postbacks return HTTP 401 and the lifecycle service misses fill events)
-- `CLIENT_LOCAL_IP`
-- `CLIENT_PUBLIC_IP`
-- `MAC_ADDRESS`
+- `ADMIN_KILL_SWITCH_OVERRIDE` (file-mounted only; never export or log it)
+
+The helper also connects to Postgres before `docker compose up` and verifies /
+exports:
+
+- `CAPITAL_LIMITS_JSON` from `broker_accounts.meta.capital_limits` or
+  `broker_accounts.meta.capital_limits_json`. The payload must include the
+  selected account key, such as `tenant-1:A1` or `A1`; generic-only `default`
+  limits are rejected for LIVE.
+- `RISK_MAX_DAILY_LOSS` from `broker_accounts.meta.risk.max_daily_loss`,
+  `broker_accounts.meta.risk_max_daily_loss`, or an explicit host env override.
+- `CLIENT_LOCAL_IP`, `CLIENT_PUBLIC_IP`, and `MAC_ADDRESS` from
+  `broker_credentials`.
+- Non-empty Postgres broker credential fields required for Angel login:
+  `api_key`, `client_code`, `pin`, and `totp_secret`. Values are never printed.
 
 Use that helper only when it is acting as your operator-side export step for values managed under the approved LIVE secret process.
 
@@ -196,8 +223,10 @@ operator convenience, not the authoritative LIVE secret source:
 .\start-docker-secretstore.ps1
 ```
 
-The helper implements the bundled Docker/Desktop path and derives an
-account-specific `CAPITAL_LIMITS_JSON` baseline if no override is present.
+The helper implements the bundled Docker/Desktop path and loads account-specific
+capital/risk/network values from Postgres for the selected tenant/account.
+It also preflights the selected `broker_credentials` row so blank Postgres
+broker-secret columns fail deployment before any container is recreated.
 It writes Docker Compose secret files under `$env:TEMP\phx-secrets` and
 intentionally keeps them there while the stack is running; Compose local secrets
 are bind mounts, so deleting those files breaks container restarts. Remove that
@@ -319,6 +348,31 @@ That artifact intentionally excludes local clutter such as `logs/`, `__pycache__
 
 ---
 
+## 2026-06-29 incident regression checks
+
+After any redeploy that can affect strategy exits, risk checks, broker sync, or
+the router, run these checks before considering automated LIVE recovered:
+
+- Tail backend logs through at least one scheduler/order-sync cycle and, during
+  market hours, through the next EOD boundary for the active underlyings.
+- For EMA20, confirm a full-exit ACK is not followed by
+  `EMA20 adopted synced position` for the same label while a pending full exit
+  is still active. The expected LIVE behavior is
+  `EMA20 skipped synced position adoption` until broker state is fresh.
+- Confirm repeated EOD/SL/trail attempts for the same date, underlying, label,
+  and reason share one idempotency key. A duplicate attempt may log
+  `ORDER_IDEMPOTENCY_SUPPRESSED`; it must not produce another broker
+  `ORDER_PLACED` for the same full exit.
+- Watch for `broker_sync_stale_mark`, `broker_sync_mark_unavailable`,
+  `mark.unavailable`, or `PnL snapshot unavailable`. New entries must be
+  blocked fail-closed while total PnL is unavailable; reducing exits may still
+  proceed through the router safety checks.
+- If `kill_switch.trip` appears, capture `reasons`, realized/unrealized/total
+  PnL, drawdown fields, open labels, and `evaluation_source` before clearing.
+  Do not clear until broker-side positions and open orders are verified.
+
+---
+
 ## Expected startup log messages
 
 The following WARNING-level messages can appear on a clean host-local Docker/Desktop startup and are **expected behavior**, not incidents. Do not open an incident for these alone.
@@ -392,6 +446,11 @@ Free the host port or change the published nginx port in the manifest before red
 ### Automated LIVE starts but there are no fresh marks or strategy signals
 
 Check whether the backend effective environment or logs show an accidental stream-disabled state, broker websocket failure, or instrument-universe startup failure. Automated LIVE is not healthy when broker sync is running but live marks, bars, and indicators are stale.
+
+If fresh marks are missing but broker positions still exist, total PnL should be
+reported unavailable rather than realized-only. Treat any
+`broker_sync_stale_mark` or `mark.unavailable` event as an entry-blocking
+condition until market data or broker marks recover.
 
 ---
 

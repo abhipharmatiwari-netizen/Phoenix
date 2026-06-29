@@ -61,6 +61,14 @@ Every strategy submits exits through `place_order_via_bridge → OrderRouter`. T
 ### EMA20-specific guard (PR #201, shipped 2026-05-08)
 `Ema20Strategy._pending_exit_by_label` blocks a second `_exit_position` call on the same `option_label` until the prior exit's fill is observed (or 60s watchdog elapses). Watch: `EMA20 exit suppressed (in-flight)` log line. See [`fix(ema20): per-label pending-exit guard prevents duplicate SL exits`](https://github.com/abhipharmatiwari-netizen/Phoenix/pull/201).
 
+2026-06-29 update: in LIVE mode, a pending full exit also blocks
+risk-manager/tick-sync re-adoption of the same EMA20 label until fresh broker
+position evidence is available. If broker state is flat, EMA20 drops the stale
+local position; if broker state is unknown, it extends the guard and suppresses
+the retry fail-closed. Full exits carry a stable idempotency key derived from
+date, underlying, option label, and exit reason so EOD/watchdog retries cannot
+place another broker order for the same full exit.
+
 ### Flip-the-trade fill protection (PR #199, shipped 2026-05-08)
 Applies to **every** strategy. If a single broker fill exceeds the open quantity (carrying `net_qty` through zero), `OrderLifecycleService._apply_position_fill` routes the record to `RECONCILING` with state-reason `flip_fill_blocked:close_leg=N:open_leg=M`, instead of allowing `filled_qty_close > filled_qty_open`. Watch: `POSITION_FLIP_FILL_DETECTED` audit event. See [PR #199](https://github.com/abhipharmatiwari-netizen/Phoenix/pull/199).
 
@@ -125,6 +133,10 @@ A bar closes below `EMA(period)` with sufficient volatility and downward momentu
 - **EOD:** `square_off_time` (15:00 indices, 23:30 NG).
 - **Signal flip:** `close > EMA(period)` invalidates the bear thesis → immediate exit.
 - **Time-decay accelerator (PHX#184):** Within `decay_tighten_minutes_before_eod` of EOD, TP/trail tighten by `decay_tp_multiplier` / `decay_trail_buffer_multiplier`.
+- **LIVE duplicate-exit guard:** Full exits are idempotent per date,
+  underlying, option label, and reason. After a full-exit ACK, EMA20 will not
+  re-adopt the same label from stale risk-manager state unless fresh broker
+  evidence shows the position is still open.
 
 ### Critical parameters
 | Param | Default (NIFTY) | Where |
@@ -143,7 +155,9 @@ A bar closes below `EMA(period)` with sufficient volatility and downward momentu
 
 ### Known caveats
 - **Authoritative-entry mode:** `ema20_is_authoritative=true` makes ema20 bypass selector regime gating — required to keep entries firing when the central regime selector says CHOPPY.
-- **Per-label pending-exit guard active (PR #201).** Duplicate SL exits within 60s are silently suppressed.
+- **Per-label pending-exit guard active.** Duplicate full exits are suppressed
+  while an exit is in flight. In LIVE, an expired guard does not retry unless
+  fresh broker state confirms the position is still open.
 
 ### Entry decision tree (5-minute bar close)
 

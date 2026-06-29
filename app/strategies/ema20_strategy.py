@@ -583,6 +583,78 @@ class Ema20Strategy(BaseStrategy):
             len(self._managed_positions),
         )
 
+    def _is_live_trade_mode(self) -> bool:
+        rm = getattr(self, "risk_manager", None)
+        mode = getattr(rm, "current_trade_mode", None)
+        if mode in (None, ""):
+            mode = self._cfg.env.get("TRADE_MODE") or os.getenv("TRADE_MODE")
+        return str(mode or "").strip().upper() == "LIVE"
+
+    def _should_defer_pending_exit_sync(
+        self,
+        *,
+        label: str,
+        restored_position: "Ema20Position",
+        source: str,
+    ) -> bool:
+        if source == "entry":
+            return False
+        prior_pending = self._pending_exit_by_label.get(label)
+        if prior_pending is None:
+            return False
+
+        age = max(0.0, time.monotonic() - float(prior_pending))
+        if age < self._pending_exit_max_seconds:
+            logger.info(
+                "[%s] EMA20 skipped synced position adoption during pending exit | "
+                "label=%s broker_symbol=%s source=%s pending_age=%.1fs max=%.1fs",
+                self.env_prefix,
+                label,
+                restored_position.broker_symbol,
+                source,
+                age,
+                self._pending_exit_max_seconds,
+            )
+            return True
+
+        broker_state = self._confirm_exit_position_state(restored_position)
+        if broker_state is True:
+            logger.warning(
+                "[%s] EMA20 pending-exit sync confirmed broker position still open | "
+                "label=%s broker_symbol=%s source=%s pending_age=%.1fs; allowing adoption",
+                self.env_prefix,
+                label,
+                restored_position.broker_symbol,
+                source,
+                age,
+            )
+            return False
+        if broker_state is False:
+            logger.info(
+                "[%s] EMA20 skipped synced position adoption after pending exit; "
+                "fresh broker state is flat | label=%s broker_symbol=%s source=%s "
+                "pending_age=%.1fs",
+                self.env_prefix,
+                label,
+                restored_position.broker_symbol,
+                source,
+                age,
+            )
+            return True
+        if self._is_live_trade_mode():
+            logger.warning(
+                "[%s] EMA20 skipped synced position adoption after pending exit; "
+                "broker state is unknown in LIVE | label=%s broker_symbol=%s source=%s "
+                "pending_age=%.1fs",
+                self.env_prefix,
+                label,
+                restored_position.broker_symbol,
+                source,
+                age,
+            )
+            return True
+        return False
+
     def sync_position_from_risk_manager(
         self,
         *,
@@ -609,6 +681,18 @@ class Ema20Strategy(BaseStrategy):
             if restored_position is None:
                 continue
             existing = self._managed_positions.get(label)
+            if self._should_defer_pending_exit_sync(
+                label=label,
+                restored_position=restored_position,
+                source=source,
+            ):
+                if existing is not None:
+                    self._drop_managed_position(
+                        label,
+                        reason="pending_exit_sync_deferred",
+                    )
+                    changed = True
+                continue
             if existing is not None:
                 # §91: If the restored entry_price differs from the in-memory
                 # one and the fill price hasn't been confirmed yet, treat the
@@ -2218,6 +2302,25 @@ class Ema20Strategy(BaseStrategy):
             return None
         return out
 
+    def _exit_idempotency_key(
+        self,
+        *,
+        pos: "Ema20Position",
+        reason: str,
+        is_partial: bool,
+        exit_lots: int,
+    ) -> str:
+        reason_key = "".join(
+            ch if ch.isalnum() else "_"
+            for ch in str(reason or "EXIT").strip().upper()
+        ).strip("_") or "EXIT"
+        date_key = self._now_ist().date().isoformat()
+        slice_key = f"partial_{int(exit_lots)}" if is_partial else "full"
+        return (
+            f"ema20_exit:{date_key}:{self._underlying_key}:"
+            f"{pos.option_label}:{reason_key}:{slice_key}"
+        )
+
     @staticmethod
     def _parse_datetime(val: Any) -> Optional[datetime]:
         if val in (None, ""):
@@ -2371,9 +2474,41 @@ class Ema20Strategy(BaseStrategy):
                     self._pending_exit_max_seconds,
                 )
                 return
-            # Auto-recover: the prior exit has been pending too long without a
-            # fill observation. Clear the guard with a WARNING so this is
-            # visible in alerts; allow the retry to proceed.
+            broker_state = self._confirm_exit_position_state(pos)
+            if broker_state is False:
+                logger.warning(
+                    "[%s] EMA20 pending-exit guard expired but fresh broker "
+                    "state is flat | label=%s broker_symbol=%s reason=%s "
+                    "pending_age=%.1fs; clearing local position without retry",
+                    self.env_prefix,
+                    pos.option_label,
+                    pos.broker_symbol,
+                    reason,
+                    age,
+                )
+                self._reset_exit_retry_state()
+                self._drop_managed_position(
+                    pos.option_label,
+                    reason="pending_exit_broker_flat",
+                )
+                return
+            if broker_state is None and self._is_live_trade_mode():
+                logger.error(
+                    "[%s][ALERT] EMA20 pending-exit guard exceeded max age but "
+                    "broker state is unknown in LIVE; suppressing duplicate exit | "
+                    "label=%s broker_symbol=%s reason=%s pending_age=%.1fs max=%.1fs",
+                    self.env_prefix,
+                    pos.option_label,
+                    pos.broker_symbol,
+                    reason,
+                    age,
+                    self._pending_exit_max_seconds,
+                )
+                self._pending_exit_by_label[pos.option_label] = now_mono
+                return
+            # Auto-recover only after broker state confirms the position remains
+            # open, or outside LIVE where simulated runtimes may not expose
+            # fresh broker-position health metadata.
             logger.warning(
                 "[%s] EMA20 pending-exit guard auto-cleared after %.1fs | "
                 "label=%s broker_symbol=%s reason=%s; allowing retry",
@@ -2445,6 +2580,12 @@ class Ema20Strategy(BaseStrategy):
             purpose=OrderPurpose.EXIT,
             exchange=exchange,
             symbol_token=str(token) if token is not None else None,
+            idempotency_key=self._exit_idempotency_key(
+                pos=pos,
+                reason=reason,
+                is_partial=is_partial,
+                exit_lots=int(exit_lots),
+            ),
             # Issue #253: EMA20 entries set position_label=ce_label; exits
             # must carry the same stable label so replay PnL pairing can key
             # entries and exits by option_label (e.g. "NIFTY_ATM_CE") rather

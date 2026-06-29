@@ -39,8 +39,8 @@ Collect all of the following without printing secret values:
 | Public `/health/summary` | response is redacted; internal schema, watchdog, and tracked-account details are omitted or masked |
 | Public `/health/alerts` and `/health/mitigations` | HTTP 200 JSON responses; neither endpoint returns SPA HTML |
 | Authenticated `/admin/health/summary` | schema, watchdog, tracked-account, and readiness fields are present for the logged-in operator view |
-| Vultr tunnel sidecar | `phoenix-v9-vultr-tunnel` is healthy when local/Vultr recovery is the active path |
-| Public HTTPS domain | `https://app.phoenixtechnosolutions.in/readyz` and `/health` return HTTP 200 when local/Vultr recovery is active |
+| Vultr tunnel sidecar | `phoenix-v9-vultr-tunnel` is healthy on nginx liveness when local/Vultr recovery is the active path |
+| Public HTTPS domain | `/health` and `/login` are reachable; `/readyz` returns HTTP 200 only when trading readiness is green |
 | Direct BFF diagnostic bypass | `/bff/health/summary`, `/bff/readyz`, and `/bff/dashboard/status` return 404 |
 | Static asset routing | current `/static/*` bundle assets return the correct content type; stale `/static/*` paths return 404 instead of SPA HTML |
 | Secret permissions | `scripts/validate-live-secret-perms.sh` passes on the VM |

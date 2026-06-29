@@ -100,6 +100,55 @@ def test_angel_login_postgres_backend_without_secrets_raises(monkeypatch):
         angel_login.angel_login_and_get_tokens()
 
 
+def test_legacy_postgres_secret_loader_rejects_blank_required_fields(monkeypatch):
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, *_args):
+            return None
+
+        def fetchone(self):
+            return (
+                "",  # api_key
+                "",
+                "C1",
+                "",  # pin
+                "TOTP",
+                "1.2.3.4",
+                "5.6.7.8",
+                "02:00:00:00:00:31",
+            )
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+    import app.data.postgres as postgres
+
+    monkeypatch.setattr(
+        angel_login,
+        "get_settings",
+        lambda: SimpleNamespace(
+            broker_secret_backend="postgres",
+            hub_default_broker_account_id="A1",
+        ),
+    )
+    monkeypatch.setattr(postgres, "get_control_plane_dsn", lambda: "dsn")
+    monkeypatch.setattr(postgres, "connect_with_retry", lambda _dsn: FakeConnection())
+
+    assert angel_login._load_postgres_secrets_for_default_account() is None
+
+
 def test_angel_login_rejects_live_placeholder_network_identity(monkeypatch):
     monkeypatch.setenv("TRADE_MODE", "LIVE")
     monkeypatch.setenv("ANGEL_TOTP_SECRET", "TOTP")

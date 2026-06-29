@@ -9,6 +9,9 @@ LIVE_COMPOSE_PATH = REPO_ROOT / "docker-compose.live.single.yml"
 DOCKERFILE_PATH = REPO_ROOT / "Dockerfile"
 NGINX_TEMPLATE_PATH = REPO_ROOT / "nginx" / "nginx.conf.template"
 SECRETSTORE_LAUNCHER_PATH = REPO_ROOT / "start-docker-secretstore.ps1"
+VULTR_TUNNEL_ENTRYPOINT_PATH = REPO_ROOT / "scripts" / "ops" / "vultr_reverse_tunnel_entrypoint.sh"
+VULTR_TUNNEL_FALLBACK_PATH = REPO_ROOT / "scripts" / "ops" / "start_vultr_reverse_tunnel.ps1"
+VULTR_TUNNEL_TASK_PATH = REPO_ROOT / "scripts" / "ops" / "install_vultr_reverse_tunnel_task.ps1"
 
 
 def _read_text(path: Path) -> str:
@@ -68,8 +71,46 @@ def test_live_container_healthchecks_use_liveness_not_readiness():
     assert "proxy_pass http://backend/readyz-public;" in nginx_template_text
 
 
+def test_vultr_tunnel_sidecar_uses_liveness_not_trading_readiness():
+    compose_text = _read_text(LIVE_COMPOSE_PATH)
+    entrypoint_text = _read_text(VULTR_TUNNEL_ENTRYPOINT_PATH)
+    fallback_text = _read_text(VULTR_TUNNEL_FALLBACK_PATH)
+    task_text = _read_text(VULTR_TUNNEL_TASK_PATH)
+
+    assert "PHOENIX_TUNNEL_LIVENESS_URL" in compose_text
+    assert "http://nginx/nginx-health" in compose_text
+    assert "pidof ssh >/dev/null && curl -fsS http://nginx/nginx-health >/dev/null" in compose_text
+    assert 'PHOENIX_TUNNEL_READY_URL: "${PHOENIX_TUNNEL_READY_URL:-http://nginx/readyz}"' not in compose_text
+    assert "pidof ssh >/dev/null && curl -fsS http://nginx/readyz >/dev/null" not in compose_text
+
+    assert "PHOENIX_TUNNEL_LIVENESS_URL" in entrypoint_text
+    assert "http://nginx/nginx-health" in entrypoint_text
+    assert "Phoenix liveness check failed" in entrypoint_text
+
+    assert 'LocalLivenessPath = "/nginx-health"' in fallback_text
+    assert "Local Phoenix liveness" in fallback_text
+    assert "local Phoenix /readyz" not in task_text
+    assert "local Phoenix nginx liveness" in task_text
+
+
 def test_secretstore_launcher_builds_all_local_live_images_before_no_build_up():
     script_text = _read_text(SECRETSTORE_LAUNCHER_PATH)
 
-    assert '@("docker", "compose", "-f", $composeFile, "build", "backend", "nginx")' in script_text
+    assert '@("docker", "compose", "-f", $composeFile, "build", "backend", "nginx", "vultr-tunnel")' in script_text
     assert '@("docker", "compose", "-f", $composeFile, "up", "-d", "--no-build", "--force-recreate")' in script_text
+
+
+def test_secretstore_launcher_requires_postgres_account_specific_capital_limits():
+    script_text = _read_text(SECRETSTORE_LAUNCHER_PATH)
+
+    assert '$env:BROKER_SECRET_BACKEND = "postgres"' in script_text
+    assert "Generic 5L/10L launcher defaults are not allowed for LIVE deployment" in script_text
+    assert "Type YES to acknowledge and continue with generic limits" not in script_text
+    assert "ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true found" not in script_text
+
+
+def test_secretstore_launcher_redacts_capital_limits_json_output():
+    script_text = _read_text(SECRETSTORE_LAUNCHER_PATH)
+
+    assert 'if ($name -eq "CAPITAL_LIMITS_JSON")' in script_text
+    assert "<present: redacted>" in script_text

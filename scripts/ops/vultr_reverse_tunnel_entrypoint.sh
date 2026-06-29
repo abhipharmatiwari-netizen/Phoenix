@@ -7,7 +7,7 @@ VULTR_TUNNEL_REMOTE_BIND="${VULTR_TUNNEL_REMOTE_BIND:-127.0.0.1}"
 VULTR_TUNNEL_REMOTE_PORT="${VULTR_TUNNEL_REMOTE_PORT:-18080}"
 PHOENIX_TUNNEL_TARGET_HOST="${PHOENIX_TUNNEL_TARGET_HOST:-nginx}"
 PHOENIX_TUNNEL_TARGET_PORT="${PHOENIX_TUNNEL_TARGET_PORT:-80}"
-PHOENIX_TUNNEL_READY_URL="${PHOENIX_TUNNEL_READY_URL:-http://nginx/readyz}"
+PHOENIX_TUNNEL_LIVENESS_URL="${PHOENIX_TUNNEL_LIVENESS_URL:-${PHOENIX_TUNNEL_READY_URL:-http://nginx/nginx-health}}"
 VULTR_TUNNEL_RESTART_DELAY_SECONDS="${VULTR_TUNNEL_RESTART_DELAY_SECONDS:-5}"
 VULTR_TUNNEL_SSH_KEY_PATH="${VULTR_TUNNEL_SSH_KEY_PATH:-/run/secrets/vultr_reverse_tunnel_ssh_key}"
 
@@ -22,8 +22,8 @@ cp "$VULTR_TUNNEL_SSH_KEY_PATH" /tmp/phoenix-vultr-tunnel/id_ed25519
 chmod 0600 /tmp/phoenix-vultr-tunnel/id_ed25519
 
 while true; do
-  if ! curl -fsS --max-time 5 "$PHOENIX_TUNNEL_READY_URL" >/dev/null; then
-    echo "$(date -Iseconds) Phoenix ready check failed at $PHOENIX_TUNNEL_READY_URL; retrying in ${VULTR_TUNNEL_RESTART_DELAY_SECONDS}s."
+  if ! curl -fsS --max-time 5 "$PHOENIX_TUNNEL_LIVENESS_URL" >/dev/null; then
+    echo "$(date -Iseconds) Phoenix liveness check failed at $PHOENIX_TUNNEL_LIVENESS_URL; retrying in ${VULTR_TUNNEL_RESTART_DELAY_SECONDS}s."
     sleep "$VULTR_TUNNEL_RESTART_DELAY_SECONDS"
     continue
   fi

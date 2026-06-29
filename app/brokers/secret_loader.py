@@ -38,6 +38,12 @@ _LIVE_SECRET_BACKENDS = {
     "db",
     "database",
 }
+_REQUIRED_POSTGRES_CREDENTIAL_FIELDS = (
+    "api_key",
+    "client_code",
+    "pin",
+    "totp_secret",
+)
 
 
 @lru_cache(maxsize=1)
@@ -120,6 +126,16 @@ def _fetch_secret_payload_from_postgres(
         return None
 
 
+def _missing_required_postgres_credential_fields(
+    payload: Dict[str, Any],
+) -> list[str]:
+    return [
+        field
+        for field in _REQUIRED_POSTGRES_CREDENTIAL_FIELDS
+        if not str(payload.get(field) or "").strip()
+    ]
+
+
 def load_angel_secrets_from_secret_manager(
     account: BrokerAccountModel,
 ) -> Optional[AngelSecrets]:
@@ -174,6 +190,16 @@ def load_angel_secrets_from_postgres(
 ) -> Optional[AngelSecrets]:
     payload = _fetch_secret_payload_from_postgres(account.broker_account_id)
     if payload is None:
+        return None
+
+    missing_fields = _missing_required_postgres_credential_fields(payload)
+    if missing_fields:
+        logger.error(
+            "Postgres broker_credentials missing non-empty required fields "
+            "for broker_account_id=%s: %s",
+            account.broker_account_id,
+            ", ".join(missing_fields),
+        )
         return None
 
     try:

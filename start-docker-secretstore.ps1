@@ -111,6 +111,82 @@ function Set-EnvFromSecretOrDefault {
     throw "Required value '$EnvName' is missing in both the current PowerShell session and SecretStore secret '$SecretName'."
 }
 
+function Get-LiveDeployValuesFromPostgres {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TenantId,
+        [Parameter(Mandatory = $true)]
+        [string]$BrokerAccountId
+    )
+
+    $helper = Join-Path $repoRoot "scripts\ops\export_live_deploy_values_from_postgres.py"
+    if (-not (Test-Path -LiteralPath $helper)) {
+        throw "Postgres deploy-value helper not found: $helper"
+    }
+
+    $output = & python $helper --tenant-id $TenantId --broker-account-id $BrokerAccountId 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to load deployment values from Postgres: $output"
+    }
+    try {
+        return ($output | ConvertFrom-Json)
+    }
+    catch {
+        throw "Postgres deploy-value helper returned invalid JSON."
+    }
+}
+
+function Set-EnvFromValueOrThrow {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$EnvName,
+        [string]$Value,
+        [Parameter(Mandatory = $true)]
+        [string]$Source
+    )
+
+    $currentValue = [Environment]::GetEnvironmentVariable($EnvName, "Process")
+    if (-not [string]::IsNullOrWhiteSpace($currentValue)) {
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        throw "$EnvName is missing from $Source."
+    }
+    Set-Item -Path "Env:$EnvName" -Value $Value
+}
+
+function Assert-CapitalLimitsJsonHasAccountKey {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Json,
+        [Parameter(Mandatory = $true)]
+        [string]$TenantId,
+        [Parameter(Mandatory = $true)]
+        [string]$BrokerAccountId
+    )
+
+    try {
+        $parsed = $Json | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "CAPITAL_LIMITS_JSON is not valid JSON: $($_.Exception.Message)"
+    }
+
+    if ($null -eq $parsed) {
+        throw "CAPITAL_LIMITS_JSON must be a JSON object containing account-specific limits."
+    }
+
+    $keys = @()
+    foreach ($prop in $parsed.PSObject.Properties) {
+        $keys += $prop.Name
+    }
+
+    $tenantAccountKey = "$($TenantId):$($BrokerAccountId)"
+    if (($keys -notcontains $tenantAccountKey) -and ($keys -notcontains $BrokerAccountId)) {
+        throw "CAPITAL_LIMITS_JSON must include account-specific limits for '$tenantAccountKey' or '$BrokerAccountId'."
+    }
+}
+
 function Invoke-External {
     param(
         [Parameter(Mandatory = $true)]
@@ -158,9 +234,6 @@ try {
     Export-RequiredSecretToEnv -SecretName "ADMIN_API_KEY" -EnvName "ADMIN_API_KEY_HOST"
     Export-RequiredSecretToEnv -SecretName "DEMO_AUTH_TOKEN_SECRET" -EnvName "DEMO_AUTH_TOKEN_SECRET_HOST"
     Export-RequiredSecretToEnv -SecretName "CONTROL_PLANE_PG_PASSWORD" -EnvName "CONTROL_PLANE_PG_PASSWORD_HOST"
-    Export-RequiredSecretToEnv -SecretName "CLIENT_LOCAL_IP" -EnvName "CLIENT_LOCAL_IP"
-    Export-RequiredSecretToEnv -SecretName "CLIENT_PUBLIC_IP" -EnvName "CLIENT_PUBLIC_IP"
-    Export-RequiredSecretToEnv -SecretName "MAC_ADDRESS" -EnvName "MAC_ADDRESS"
 
     Set-EnvFromSecretOrDefault -EnvName "CONTROL_PLANE_PG_HOST" -DefaultValue "host.docker.internal"
     Set-EnvFromSecretOrDefault -EnvName "CONTROL_PLANE_PG_PORT" -DefaultValue "5432"
@@ -178,30 +251,42 @@ try {
     # in the host process so the pre-compose capital/risk gates cannot fall
     # through to non-LIVE defaults before Compose injects TRADE_MODE=LIVE.
     $env:TRADE_MODE = "LIVE"
+    $env:BROKER_SECRET_BACKEND = "postgres"
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_TENANT_ID" -DefaultValue "tenant-1"
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_BROKER_ACCOUNT_ID" -DefaultValue "A1"
+    $tenantId = [Environment]::GetEnvironmentVariable("HUB_DEFAULT_TENANT_ID", "Process")
+    $brokerAccountId = [Environment]::GetEnvironmentVariable("HUB_DEFAULT_BROKER_ACCOUNT_ID", "Process")
+    $postgresDeployValues = Get-LiveDeployValuesFromPostgres `
+        -TenantId $tenantId `
+        -BrokerAccountId $brokerAccountId
+    Write-Host "Loaded deployment values from Postgres for $($tenantId):$($brokerAccountId)."
+    if ($postgresDeployValues.broker_credentials_ready -ne $true) {
+        throw "Postgres broker_credentials preflight did not confirm required broker secrets."
+    }
+    Write-Host "Verified Postgres broker_credentials for $($tenantId):$($brokerAccountId) (secret values not printed)."
+
+    Set-EnvFromValueOrThrow `
+        -EnvName "CLIENT_LOCAL_IP" `
+        -Value $postgresDeployValues.client_local_ip `
+        -Source "broker_credentials.client_local_ip for $($tenantId):$($brokerAccountId)"
+    Set-EnvFromValueOrThrow `
+        -EnvName "CLIENT_PUBLIC_IP" `
+        -Value $postgresDeployValues.client_public_ip `
+        -Source "broker_credentials.client_public_ip for $($tenantId):$($brokerAccountId)"
+    Set-EnvFromValueOrThrow `
+        -EnvName "MAC_ADDRESS" `
+        -Value $postgresDeployValues.mac_address `
+        -Source "broker_credentials.mac_address for $($tenantId):$($brokerAccountId)"
 
     $capitalLimitsJson = [Environment]::GetEnvironmentVariable("CAPITAL_LIMITS_JSON", "Process")
     if ([string]::IsNullOrWhiteSpace($capitalLimitsJson)) {
-        try {
-            $capitalLimitsJson = Get-Secret -Name "CAPITAL_LIMITS_JSON" -AsPlainText -ErrorAction Stop
-        }
-        catch {
-            $capitalLimitsJson = ""
+        $capitalLimitsJson = [string]$postgresDeployValues.capital_limits_json
+        if (-not [string]::IsNullOrWhiteSpace($capitalLimitsJson)) {
+            Write-Host "Loaded account-specific CAPITAL_LIMITS_JSON from Postgres broker_accounts.meta."
         }
     }
 
     if ([string]::IsNullOrWhiteSpace($capitalLimitsJson)) {
-        $tenantId = [Environment]::GetEnvironmentVariable("HUB_DEFAULT_TENANT_ID", "Process")
-        $brokerAccountId = [Environment]::GetEnvironmentVariable("HUB_DEFAULT_BROKER_ACCOUNT_ID", "Process")
-        $capitalLimitsPayload = @{
-            "$($tenantId):$($brokerAccountId)" = @{
-                max_notional_per_order = 500000
-                max_gross_exposure = 1000000
-            }
-        }
-        $capitalLimitsJson = $capitalLimitsPayload | ConvertTo-Json -Compress
-
         $tradeModeEnv = [Environment]::GetEnvironmentVariable("TRADE_MODE", "Process")
         if ($tradeModeEnv -eq "LIVE") {
             # Section 98: Generic capital limits in LIVE require explicit operator sign-off.
@@ -212,44 +297,35 @@ try {
             Write-Host "  CAPITAL_LIMITS_JSON is not set for TRADE_MODE=LIVE     " -ForegroundColor Red
             Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
             Write-Host ""
-            Write-Host "  Generic 5L notional / 10L exposure baseline will be used for:" -ForegroundColor Yellow
+            Write-Host "  Account-specific capital limits are required for:" -ForegroundColor Yellow
             Write-Host "    Account: $($tenantId):$($brokerAccountId)" -ForegroundColor Yellow
             Write-Host ""
-            Write-Host "  Generic limits are NOT audited per-account risk limits." -ForegroundColor Yellow
-            Write-Host "  They are acceptable ONLY when:" -ForegroundColor Yellow
-            Write-Host "    - The account has zero real capital at risk, OR" -ForegroundColor Yellow
-            Write-Host "    - An operator has reviewed and approved the defaults for this account." -ForegroundColor Yellow
+            Write-Host "  Add broker_accounts.meta.capital_limits in Postgres for this account." -ForegroundColor Cyan
+            Write-Host "  Generic 5L/10L launcher defaults are not allowed for LIVE deployment." -ForegroundColor Cyan
             Write-Host ""
-            Write-Host "  To set account-specific limits, add CAPITAL_LIMITS_JSON to your" -ForegroundColor Cyan
-            Write-Host "  PowerShell SecretStore or set it as an env var before running this script." -ForegroundColor Cyan
-            Write-Host ""
-
-            # Check for non-interactive / CI override
-            $skipConfirm = [Environment]::GetEnvironmentVariable("ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY", "Process")
-            if ($skipConfirm -eq "true") {
-                Write-Host "  ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true found - skipping interactive prompt." -ForegroundColor Yellow
-                Write-Host "  This is an audited exception; document justification in your deployment record." -ForegroundColor Yellow
-            }
-            else {
-                $confirm = Read-Host "  Type YES to acknowledge and continue with generic limits"
-                if ($confirm -ne "YES") {
-                    Write-Error "Deployment cancelled. Set CAPITAL_LIMITS_JSON before deploying to a funded LIVE account."
-                    exit 1
-                }
-            }
-            Write-Host ""
-            Write-Host "Setting ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true (explicit operator acknowledgement)."
-            Set-Item -Path "Env:ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY" -Value "true"
+            Write-Error "Deployment cancelled. Set account-specific capital limits in Postgres before deploying LIVE."
+            exit 1
         }
         else {
+            $capitalLimitsPayload = @{
+                "$($tenantId):$($brokerAccountId)" = @{
+                    max_notional_per_order = 500000
+                    max_gross_exposure = 1000000
+                }
+            }
+            $capitalLimitsJson = $capitalLimitsPayload | ConvertTo-Json -Compress
             Write-Host ""
             Write-Host "Derived CAPITAL_LIMITS_JSON for $($tenantId):$($brokerAccountId) using the bundled 5L/10L baseline."
-            Write-Host "Override by setting the CAPITAL_LIMITS_JSON env var or SecretStore secret before launch."
+            Write-Host "Override by setting account-specific limits in Postgres before launch."
         }
     }
     else {
         Write-Host ""
-        Write-Host "Loaded CAPITAL_LIMITS_JSON from the current PowerShell session or SecretStore."
+        Assert-CapitalLimitsJsonHasAccountKey `
+            -Json $capitalLimitsJson `
+            -TenantId $tenantId `
+            -BrokerAccountId $brokerAccountId
+        Write-Host "Loaded account-specific CAPITAL_LIMITS_JSON from Postgres or an explicit env override (value redacted)."
     }
     Set-Item -Path "Env:CAPITAL_LIMITS_JSON" -Value $capitalLimitsJson
 
@@ -263,11 +339,9 @@ try {
     $tradeModeForRisk = [Environment]::GetEnvironmentVariable("TRADE_MODE", "Process")
     $riskMaxDailyLoss = [Environment]::GetEnvironmentVariable("RISK_MAX_DAILY_LOSS", "Process")
     if ([string]::IsNullOrWhiteSpace($riskMaxDailyLoss)) {
-        try {
-            $riskMaxDailyLoss = Get-Secret -Name "RISK_MAX_DAILY_LOSS" -AsPlainText -ErrorAction Stop
-        }
-        catch {
-            $riskMaxDailyLoss = ""
+        $riskMaxDailyLoss = [string]$postgresDeployValues.risk_max_daily_loss
+        if (-not [string]::IsNullOrWhiteSpace($riskMaxDailyLoss)) {
+            Write-Host "Loaded RISK_MAX_DAILY_LOSS from Postgres broker_accounts.meta."
         }
     }
     if ([string]::IsNullOrWhiteSpace($riskMaxDailyLoss)) {
@@ -282,7 +356,7 @@ try {
             Write-Host "  'Sizing the daily-loss limit by capital tier'. A common starting" -ForegroundColor Yellow
             Write-Host "  point for a INR 1-2L account is 10000." -ForegroundColor Yellow
             Write-Host ""
-            Write-Error "Deployment cancelled. Set RISK_MAX_DAILY_LOSS in env or SecretStore and retry."
+            Write-Error "Deployment cancelled. Set RISK_MAX_DAILY_LOSS in broker_accounts.meta or as an explicit env override and retry."
             exit 1
         }
         else {
@@ -291,7 +365,7 @@ try {
         }
     }
     else {
-        Write-Host "Loaded RISK_MAX_DAILY_LOSS from the current PowerShell session or SecretStore."
+        Write-Host "Loaded RISK_MAX_DAILY_LOSS from the current PowerShell session or Postgres."
     }
     Set-Item -Path "Env:RISK_MAX_DAILY_LOSS" -Value $riskMaxDailyLoss
 
@@ -361,14 +435,14 @@ try {
     }
     if (-not [string]::IsNullOrWhiteSpace($angelPostbackToken)) {
         Write-SecretFile -Path (Join-Path $secretDir "angel_postback_token") -Value $angelPostbackToken
-        Write-Host "  angel_postback_token: loaded from SecretStore/env" -ForegroundColor Green
+        Write-Host "  angel_postback_token: loaded from bootstrap secret/env" -ForegroundColor Green
     }
     else {
         # Write an empty file so Docker Compose secret mount succeeds.
         # Startup validator emits a WARNING (not error) when token is absent.
         Write-SecretFile -Path (Join-Path $secretDir "angel_postback_token") -Value ""
         Write-Host "  angel_postback_token: NOT configured - postbacks will return 401, polling fallback active" -ForegroundColor Yellow
-        Write-Host "  To configure: Set-Secret -Name ANGEL_POSTBACK_TOKEN -Secret '<your-token>'" -ForegroundColor Cyan
+        Write-Host "  Configure ANGEL_POSTBACK_TOKEN in the approved bootstrap secret path." -ForegroundColor Cyan
     }
 
     try {
@@ -378,7 +452,7 @@ try {
         $killSwitchOverride = ""
     }
     if ([string]::IsNullOrWhiteSpace($killSwitchOverride)) {
-        throw "ADMIN_KILL_SWITCH_OVERRIDE must be configured in SecretStore before starting the live Docker stack."
+        throw "ADMIN_KILL_SWITCH_OVERRIDE must be configured in the approved bootstrap secret path before starting the live Docker stack."
     }
     Write-SecretFile -Path (Join-Path $secretDir "admin_kill_switch_override") -Value $killSwitchOverride
     Write-Host "  admin_kill_switch_override: loaded into file-only Docker secret" -ForegroundColor Green
@@ -398,11 +472,15 @@ try {
         "CONTROL_PLANE_PG_DB",
         "CONTROL_PLANE_PG_USER",
         "CONTROL_PLANE_PG_SSLMODE",
+        "BROKER_SECRET_BACKEND",
         "CAPITAL_LIMITS_JSON",
         "HUB_DEFAULT_TENANT_ID",
         "HUB_DEFAULT_BROKER_ACCOUNT_ID"
     )) {
         $value = [Environment]::GetEnvironmentVariable($name, "Process")
+        if ($name -eq "CAPITAL_LIMITS_JSON") {
+            $value = if ([string]::IsNullOrWhiteSpace($value)) { "<missing>" } else { "<present: redacted>" }
+        }
         Write-Host ("  {0}={1}" -f $name, $value)
     }
 
@@ -411,6 +489,8 @@ try {
     Write-Host "  ADMIN_API_KEY_HOST"
     Write-Host "  DEMO_AUTH_TOKEN_SECRET_HOST"
     Write-Host "  CONTROL_PLANE_PG_PASSWORD_HOST"
+    Write-Host ""
+    Write-Host "Loaded broker network identity from Postgres broker_credentials:"
     Write-Host "  CLIENT_LOCAL_IP"
     Write-Host "  CLIENT_PUBLIC_IP"
     Write-Host "  MAC_ADDRESS"
@@ -437,13 +517,13 @@ try {
     Write-Host "  PHASE 2 - Building Docker images" -ForegroundColor Cyan
     Write-Host "================================================================" -ForegroundColor Cyan
     $buildStart = Get-Date
-    Invoke-External -Description "Building Compose images (backend + nginx)" `
-        -Command @("docker", "compose", "-f", $composeFile, "build", "backend", "nginx")
+    Invoke-External -Description "Building Compose images (backend + nginx + vultr-tunnel)" `
+        -Command @("docker", "compose", "-f", $composeFile, "build", "backend", "nginx", "vultr-tunnel")
     $buildSecs = [int]((Get-Date) - $buildStart).TotalSeconds
     Write-Host "  Build completed in ${buildSecs}s" -ForegroundColor Green
 
     # -----------------------------------------------------------------------
-    # PHASE 3 - Start stack (migrator -> db-preflight -> backend -> nginx)
+    # PHASE 3 - Start stack (migrator -> db-preflight -> backend -> nginx -> vultr-tunnel)
     # --no-build: images were already built in Phase 2; skip duplicate build.
     # --force-recreate: ensures containers pick up new image + config hash.
     # -----------------------------------------------------------------------
@@ -451,7 +531,7 @@ try {
     Write-Host "================================================================" -ForegroundColor Cyan
     Write-Host "  PHASE 3 - Starting LIVE stack" -ForegroundColor Cyan
     Write-Host "================================================================" -ForegroundColor Cyan
-    Invoke-External -Description "Starting LIVE stack (migrator -> db-preflight -> backend -> nginx)" `
+    Invoke-External -Description "Starting LIVE stack (migrator -> db-preflight -> backend -> nginx -> vultr-tunnel)" `
         -Command @("docker", "compose", "-f", $composeFile, "up", "-d", "--no-build", "--force-recreate")
 
     Write-Host ""
@@ -460,7 +540,7 @@ try {
 
     # -----------------------------------------------------------------------
     # PHASE 4 - Wait for backend to become healthy
-    # Docker's own health check uses /readyz with a 45 s start_period.
+    # Docker's own backend health check uses /health with a 45 s start_period.
     # We poll docker inspect so the operator sees live progress.
     # -----------------------------------------------------------------------
     Write-Host ""

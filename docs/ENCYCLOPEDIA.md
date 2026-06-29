@@ -18,7 +18,7 @@ currently running.
 | Local web | `phoenix-v9-web`, nginx/frontend on `127.0.0.1:80`. |
 | Local database | Windows PostgreSQL 18 database `phoenix`, user `phoenix_app`; broker secrets live in Postgres. |
 | Vultr proxy | `phoenix-proxy` at `65.20.69.50`; nginx terminates HTTPS and proxies to Vultr localhost `127.0.0.1:18080`. |
-| Vultr tunnel sidecar | `phoenix-v9-vultr-tunnel`, Compose service `vultr-tunnel`; owns the reverse SSH tunnel from Docker network `nginx:80` to Vultr `127.0.0.1:18080`. |
+| Vultr tunnel sidecar | `phoenix-v9-vultr-tunnel`, Compose service `vultr-tunnel`; owns the reverse SSH tunnel from Docker network `nginx:80` to Vultr `127.0.0.1:18080` and gates on nginx liveness, not trading readiness. |
 | Scheduled Task fallback | `Phoenix Vultr Reverse Tunnel`; installed but disabled while the Docker sidecar is active. |
 | OCI VM | Last verified production VM baseline; unavailable during local recovery. |
 | VM checkout | `/opt/phoenix/app`, branch `main`; verify the checkout SHA and running image tags during each OCI rollout. |
@@ -56,6 +56,7 @@ domain.
 | Backend-local `/readyz` | Operator shell inside backend container | Full trading-readiness gate. Must be green before automated LIVE entries resume. |
 | Backend-local `/health/summary` | Operator shell inside backend container | Full startup/dependency summary, including internal diagnostics. |
 | Public nginx `/readyz` | Browser/public probe | Redacted readiness. It proves reachability, not full diagnostics. |
+| Public nginx `/nginx-health` | Docker sidecar/proxy liveness | Local nginx liveness used by the Vultr tunnel; it is not a trading-readiness signal. |
 | Public nginx `/health/summary` | Browser/public probe | Redacted summary. Internal schema, watchdog, and account-count fields may be omitted. |
 | Public nginx `/health/alerts` | Dashboard Alerts page and probes | JSON alert-rule payload; must not fall through to SPA HTML. |
 | Public nginx `/health/mitigations` | Dashboard Mitigations page and probes | JSON mitigation payload; must not fall through to SPA HTML. |
@@ -108,6 +109,34 @@ requires LightGBM model artifacts with a passed validation report, candidate
 quotes with source timestamps, IV, and Greeks, a latest validation report that is
 not `ERROR`, and dry-run lifecycle rows that progress through staged, virtual
 filled, virtual exited, and flat with realized paper PnL.
+
+## 2026-06-29 EMA20 EOD Incident
+
+At approximately 15:00 IST on 2026-06-29, the local Docker Desktop LIVE runtime
+submitted ambiguous/repeated EMA20 exits during the index EOD window. The trigger
+was not a fresh entry signal. A full exit ACK cleared the EMA20 local managed
+position while stale legacy risk state still contained the same label; subsequent
+tick sync re-adopted that label and allowed more EOD exit attempts.
+
+The kill switch tripped because the risk engine evaluated `floating_drawdown`:
+total drawdown exceeded the configured intraday drawdown threshold. The numeric
+trip condition was correct under the configured limit; the surrounding defect was
+stale/ambiguous position state and duplicate exit lifecycle around the trip.
+
+Fixes added in this revision:
+
+- EMA20 full-exit idempotency keys.
+- LIVE pending-exit re-adoption guard backed by fresh broker position evidence.
+- Fail-closed retry behavior when broker state is unknown after a full-exit ACK.
+- Stale/missing mark tagging so total PnL is unavailable instead of realized-only.
+- Risk-engine entry blocking when unrealized PnL is required but unavailable.
+
+Recovery procedure: verify broker-side positions and open orders first, capture
+the order ids/fills and `kill_switch.trip` audit evidence, resolve any
+`RECONCILING` or `MANUAL_REVIEW` lifecycle rows, then clear the GLOBAL kill
+switch through the vault-backed password flow. Do not clear based only on
+`/health`; use `/readyz`, authenticated health summary, broker terminal evidence,
+and backend logs.
 
 ## Runbooks And Playbooks
 

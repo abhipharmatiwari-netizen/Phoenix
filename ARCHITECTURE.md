@@ -33,13 +33,14 @@ Validated on 2026-06-29 IST:
 - Public endpoint: `https://app.phoenixtechnosolutions.in`
 - Public proxy: Vultr `phoenix-proxy` at `65.20.69.50`
 - Tunnel owner: Docker sidecar `phoenix-v9-vultr-tunnel`, which waits for
-  `phoenix-v9-web` readiness and opens
+  nginx liveness (`/nginx-health`) and opens
   `ssh -R 127.0.0.1:18080:nginx:80 phoenixproxy@65.20.69.50`
 - Windows fallback: Scheduled Task `Phoenix Vultr Reverse Tunnel` is installed
   but disabled to avoid racing the sidecar
 - HTTPS: Let's Encrypt certificate for `app.phoenixtechnosolutions.in`, expires
   2026-09-26 18:16:46 UTC
-- Public health: `/readyz` and `/health` return HTTP 200 through the domain
+- Public health: `/health` and `/login` are reachable through the domain;
+  `/readyz` returns HTTP 200 only when trading readiness is green
 - Strategy config: EMA20-only in the local control-plane state
 
 This local recovery runtime is LIVE-capable and must be treated with production

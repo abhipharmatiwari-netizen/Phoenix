@@ -48,6 +48,10 @@ from app.pnl.state_store import (
 logger = logging.getLogger(__name__)
 
 ACCOUNT_BOOTSTRAP_STRATEGY_ID = StrategyId("__account_seed__")
+_UNAVAILABLE_MARK_SOURCES = {
+    "broker_sync_stale_mark",
+    "broker_sync_mark_unavailable",
+}
 
 
 class PnLEngine:
@@ -562,6 +566,30 @@ class PnLEngine:
                 snap.key.strategy_id,
             )
 
+    @staticmethod
+    def _mark_snapshot_unavailable(snap: PnLSnapshot) -> bool:
+        return (
+            str(snap.freshness_source or "").strip().lower()
+            in _UNAVAILABLE_MARK_SOURCES
+        )
+
+    def _warn_if_mark_snapshot_unavailable(
+        self,
+        *,
+        tenant_id: TenantId,
+        broker_account_id: BrokerAccountId,
+        snap: PnLSnapshot,
+        read_kind: str,
+    ) -> None:
+        logger.warning(
+            "PnL snapshot unavailable during %s read for %s/%s/%s source=%s",
+            read_kind,
+            tenant_id,
+            broker_account_id,
+            snap.key.strategy_id,
+            snap.freshness_source or "unknown",
+        )
+
     # Return current realized PnL for a strategy or account.
     def get_current_realized_pnl(
         self,
@@ -603,6 +631,14 @@ class PnLEngine:
                 None,
             )
             if account_seed is not None:
+                if self._mark_snapshot_unavailable(account_seed):
+                    self._warn_if_mark_snapshot_unavailable(
+                        tenant_id=tenant_id,
+                        broker_account_id=broker_account_id,
+                        snap=account_seed,
+                        read_kind="total PnL",
+                    )
+                    return None
                 self._warn_if_mark_snapshot_stale(
                     tenant_id=tenant_id,
                     broker_account_id=broker_account_id,
@@ -621,6 +657,14 @@ class PnLEngine:
                     realized_total += float(account_seed.realized_pnl or 0.0)
                 return float(realized_total + float(account_seed.unrealized_pnl or 0.0))
         for snap in snaps:
+            if self._mark_snapshot_unavailable(snap):
+                self._warn_if_mark_snapshot_unavailable(
+                    tenant_id=tenant_id,
+                    broker_account_id=broker_account_id,
+                    snap=snap,
+                    read_kind="total PnL",
+                )
+                return None
             self._warn_if_mark_snapshot_stale(
                 tenant_id=tenant_id,
                 broker_account_id=broker_account_id,

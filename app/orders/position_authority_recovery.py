@@ -374,12 +374,14 @@ def auto_recover_broker_flat_zero_qty_records(
     reason: str = "broker_flat_auto_recovery",
     persist: bool = True,
 ) -> dict[str, Any]:
-    """Clear stale zero-quantity authority records after flat broker evidence.
+    """Clear stale authority records after flat broker evidence.
 
     This is intentionally conservative: it only clears records already in a
-    recovery/degraded state, whose internal net quantity is zero, whose current
-    broker snapshot is flat for the same contract, and whose current order
-    snapshot has no active matching order.
+    recovery/degraded state whose current broker snapshot is flat for the same
+    contract and whose current order snapshot has no active matching order.
+    The broker snapshot is the source of truth here, so stale internal non-zero
+    quantity is cleared when fresh broker/order evidence proves the contract is
+    flat.
     """
 
     if lifecycle is None or state_store is None:
@@ -402,17 +404,6 @@ def auto_recover_broker_flat_zero_qty_records(
             continue
         state_text = _position_state_text(record)
         if state_text not in _AUTO_RECOVERY_STATES:
-            continue
-        net_qty = _safe_float(getattr(record, "net_qty", None))
-        if net_qty is None or abs(net_qty) > _QTY_EPSILON:
-            skipped.append(
-                {
-                    "scope_key": scope_key,
-                    "reason": "internal_position_nonzero",
-                    "position_state": state_text,
-                    "net_qty": net_qty,
-                }
-            )
             continue
 
         positions_fresh, positions_fresh_reason, positions_checked_at = (

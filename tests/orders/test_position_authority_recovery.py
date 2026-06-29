@@ -106,6 +106,28 @@ def test_auto_recovers_zero_qty_flat_pending_confirmation(monkeypatch):
     assert record.state_reason == "broker_flat_auto_recovery"
 
 
+def test_auto_recovers_nonzero_internal_record_when_broker_contract_is_flat(monkeypatch):
+    monkeypatch.setattr(recovery, "emit_audit_event", lambda **_kw: None)
+    monkeypatch.setattr(recovery, "_persist_flat_clear", lambda **_kw: 0)
+
+    state_store = StateStore()
+    state_store.set_positions("A1", [])
+    _mark_broker_snapshots_fresh(state_store)
+    lifecycle = _Lifecycle([_record(state="RECOVERY_PENDING", net_qty=30.0)])
+
+    result = recovery.auto_recover_broker_flat_zero_qty_records(
+        lifecycle=lifecycle,
+        state_store=state_store,
+        broker_account_id="A1",
+    )
+
+    assert result["recovered"] == 1
+    record = next(iter(lifecycle.records.values()))
+    assert record.position_state == "FLAT"
+    assert record.net_qty == 0.0
+    assert record.state_reason == "broker_flat_auto_recovery"
+
+
 def test_auto_recovery_waits_for_fresh_order_snapshot(monkeypatch):
     monkeypatch.setattr(recovery, "emit_audit_event", lambda **_kw: None)
     monkeypatch.setattr(recovery, "_persist_flat_clear", lambda **_kw: 0)

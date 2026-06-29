@@ -165,6 +165,33 @@ def test_account_total_uses_seed_snapshot_without_double_counting_strategy_marks
     assert total == pytest.approx(-65.0)
 
 
+def test_account_total_returns_none_for_broker_sync_stale_mark(monkeypatch, caplog):
+    base_time = datetime(2026, 3, 26, 9, 15, tzinfo=timezone.utc)
+    engine, _clock = _build_engine(monkeypatch, base_time=base_time)
+    tenant_id = TenantId("tenant-1")
+    broker_account_id = BrokerAccountId("A1")
+
+    engine.sync_account_mark_to_market(
+        tenant_id=tenant_id,
+        broker_account_id=broker_account_id,
+        account_unrealized_pnl=0.0,
+        account_gross_exposure=9150.0,
+        per_strategy_marks={},
+        as_of=base_time,
+        source="broker_sync_stale_mark",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        total = engine.get_current_total_pnl(
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+        )
+
+    assert total is None
+    assert "PnL snapshot unavailable during total PnL read" in caplog.text
+    assert "source=broker_sync_stale_mark" in caplog.text
+
+
 def test_display_realized_account_resets_previous_session(monkeypatch):
     base_time = datetime(2026, 5, 8, 9, 15, tzinfo=timezone.utc)
     engine, clock = _build_engine(monkeypatch, base_time=base_time)
