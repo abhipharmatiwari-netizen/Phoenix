@@ -1,16 +1,44 @@
 # Phoenix
 
-Phoenix is currently operated from an OCI VM. The running OCI VM is the only
-source of truth for production documentation; repo manifests and historical
-runbooks are secondary evidence only when they match that VM.
+Phoenix is currently running in a local recovery deployment because the OCI VM
+is unavailable. The active runtime is a Windows Docker Desktop LIVE stack using
+Windows PostgreSQL 18 database `phoenix`, exposed publicly through a Vultr HTTPS
+reverse proxy and a Docker-managed reverse SSH tunnel sidecar.
+
+The OCI VM evidence remains the last verified production VM baseline, but it is
+not proof that the unavailable VM is currently running. Until OCI is restored or
+a new production target is cut over, operators should treat the local
+Docker/Vultr path as the active runtime and the OCI docs as historical evidence
+plus restoration reference.
+
+## Current Active Recovery Runtime
+
+Validated on 2026-06-29 IST:
+
+| Area | Verified state |
+|---|---|
+| Local runtime | Docker Desktop Compose stack from `docker-compose.live.single.yml` |
+| Backend | `phoenix-v9-backend`, healthy, `APP_ENV=production`, `TRADE_MODE=LIVE`, `REQUIRE_LIVE_TRADE_MODE=true` |
+| Web | `phoenix-v9-web`, healthy on `127.0.0.1:80` |
+| Database | Windows PostgreSQL 18 database `phoenix`, user `phoenix_app`; broker secrets are stored in Postgres |
+| Public endpoint | `https://app.phoenixtechnosolutions.in` |
+| Vultr proxy | `phoenix-proxy` at `65.20.69.50`, nginx HTTPS, Let's Encrypt certificate valid until 2026-09-26 18:16:46 UTC |
+| Tunnel owner | Docker sidecar `phoenix-v9-vultr-tunnel`, service `vultr-tunnel`, reverse SSH to Vultr `127.0.0.1:18080` |
+| Fallback tunnel | Windows Scheduled Task `Phoenix Vultr Reverse Tunnel` remains installed but disabled |
+| Strategy config | EMA20-only for the local LIVE-capable account configuration |
+| OI/ML sidecar | Dormant; retained historical assets are not live order authority |
+| Public health | `https://app.phoenixtechnosolutions.in/readyz` and `/health` return HTTP 200 |
+
+Do not expose Postgres to the internet. Do not use `http://65.20.69.50` for
+login or live operations; use the HTTPS domain only.
+
+## Last Verified OCI VM State
 
 Last verified against the VM: 2026-06-20 12:48 UTC.
 Phoenix DB backup cron verified on the VM: 2026-06-23 14:21 UTC
 with a schema-only dump and restore-list dry run.
-EMA20 is enabled for the intended LIVE account and the OI/ML research sidecar
-is persistently dormant with its historical database, image, and logs retained.
-
-## Current OCI VM State
+EMA20 was enabled for the intended LIVE account and the OI/ML research sidecar
+was persistently dormant with its historical database, image, and logs retained.
 
 | Area | Verified state |
 |---|---|
@@ -63,25 +91,28 @@ See [OCI VM Runtime Evidence](docs/OCI_VM_RUNTIME.md) for the evidence table.
 
 ## Operator Reading Order
 
-1. [OCI VM Runtime Evidence](docs/OCI_VM_RUNTIME.md)
-2. [OCI LIVE Deployment Runbook](docs/runbooks/oci_live_deployment.md)
-3. [Architecture Contract](ARCHITECTURE.md)
-4. [Phoenix Encyclopedia](docs/ENCYCLOPEDIA.md)
+1. [Docker Desktop LIVE Deployment](docs/runbooks/docker_desktop_live_deployment.md)
+2. [Vultr Reverse Proxy For Local Phoenix](docs/runbooks/vultr_reverse_proxy.md)
+3. [Phoenix Encyclopedia](docs/ENCYCLOPEDIA.md)
+4. [Architecture Contract](ARCHITECTURE.md)
 5. [Documentation Audit](docs/DOCUMENTATION_AUDIT.md)
-6. [Release Evidence](docs/runbooks/release_evidence.md)
-7. [OCI Runtime Hardening](docs/runbooks/oci_runtime_hardening.md)
+6. [OCI VM Runtime Evidence](docs/OCI_VM_RUNTIME.md)
+7. [Kill Switch](docs/runbooks/kill_switch.md)
 8. [Strategy Runtime Diagnostics](docs/runbooks/strategy_runtime_diagnostics.md)
-9. [Phoenix Postgres Backup](docs/runbooks/postgres_backup.md)
-10. [OI/ML Shadow Sidecar](docs/runbooks/oi_ml_shadow_sidecar.md)
-11. [OI/ML Data Source Approval](docs/runbooks/oi_ml_data_source_approval.md)
-12. [OI/ML CE Seller Rollout](docs/runbooks/oi_ml_ce_seller_rollout.md)
-13. [Kill Switch](docs/runbooks/kill_switch.md)
-14. [Broker Credential Update](docs/runbooks/update_broker_credentials.md)
-15. [Restore Drill](docs/runbooks/restore_drill.md)
+9. [Broker Credential Update](docs/runbooks/update_broker_credentials.md)
+10. [Restore Drill](docs/runbooks/restore_drill.md)
+11. [OCI LIVE Deployment Runbook](docs/runbooks/oci_live_deployment.md)
+12. [Release Evidence](docs/runbooks/release_evidence.md)
+13. [OCI Runtime Hardening](docs/runbooks/oci_runtime_hardening.md)
+14. [Phoenix Postgres Backup](docs/runbooks/postgres_backup.md)
+15. [OI/ML Shadow Sidecar](docs/runbooks/oi_ml_shadow_sidecar.md)
+16. [OI/ML Data Source Approval](docs/runbooks/oi_ml_data_source_approval.md)
+17. [OI/ML CE Seller Rollout](docs/runbooks/oi_ml_ce_seller_rollout.md)
 
-Docker Desktop, Cloud Run, GCP, Firestore, BigQuery, and local development
-material are not current production operating models unless a future VM audit
-proves otherwise.
+Cloud Run, GCP Secret Manager, Firestore, BigQuery authority, and OCIR-only
+deployment material remain roadmap/reference unless a future audit proves they
+are active. Docker Desktop is current only for the documented local recovery
+deployment while OCI is unavailable.
 
 ## Safe VM Commands
 
@@ -116,18 +147,22 @@ requires that action and the operator has approved it.
 app/                              Backend service and trading runtime
 frontend/                         React operations console
 nginx/                            Reverse proxy and frontend image config
+docker/vultr-tunnel/              Reverse SSH tunnel sidecar image
 migrations/                       SQL migrations and bootstrap assets
 scripts/                          Operator and release utility scripts
 ops/cron/                         Root cron definitions for VM-installed jobs
 tests/                            Pytest suite
 docs/OCI_VM_RUNTIME.md            Current VM evidence snapshot
 docs/ENCYCLOPEDIA.md              Current runtime glossary and endpoint behavior
+docs/runbooks/docker_desktop_live_deployment.md Active local Docker Desktop runbook
+docs/runbooks/vultr_reverse_proxy.md Active Vultr proxy/tunnel runbook
 docs/runbooks/oci_live_deployment.md Current OCI VM operator runbook
 docs/runbooks/postgres_backup.md  VM-local Postgres backup automation runbook
 docs/runbooks/oi_ml_shadow_sidecar.md OI/ML shadow sidecar progress and gates
 docs/runbooks/oi_ml_data_source_approval.md OI/ML option-chain data source approval gate
 docs/runbooks/oi_ml_ce_seller_rollout.md OI/ML promotion and rollback gates
 docker-compose.oci-live.yml       Base Compose file used with the VM override
+docker-compose.live.single.yml    Active local Docker Desktop recovery Compose file
 phoenix-override.yml.example      Template mirroring the current VM override shape
 ```
 

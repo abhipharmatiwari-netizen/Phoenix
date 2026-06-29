@@ -465,6 +465,40 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  vultr-tunnel:
+    build:
+      context: .
+      dockerfile: docker/vultr-tunnel/Dockerfile
+    image: phoenix-v9-vultr-tunnel:live
+    container_name: phoenix-v9-vultr-tunnel
+    init: true
+    restart: unless-stopped
+    depends_on:
+      nginx:
+        condition: service_healthy
+    environment:
+      VULTR_TUNNEL_HOST: "${VULTR_TUNNEL_HOST:-65.20.69.50}"
+      VULTR_TUNNEL_USER: "${VULTR_TUNNEL_USER:-phoenixproxy}"
+      VULTR_TUNNEL_REMOTE_BIND: "${VULTR_TUNNEL_REMOTE_BIND:-127.0.0.1}"
+      VULTR_TUNNEL_REMOTE_PORT: "${VULTR_TUNNEL_REMOTE_PORT:-18080}"
+      PHOENIX_TUNNEL_TARGET_HOST: "${PHOENIX_TUNNEL_TARGET_HOST:-nginx}"
+      PHOENIX_TUNNEL_TARGET_PORT: "${PHOENIX_TUNNEL_TARGET_PORT:-80}"
+      PHOENIX_TUNNEL_READY_URL: "${PHOENIX_TUNNEL_READY_URL:-http://nginx/readyz}"
+      VULTR_TUNNEL_RESTART_DELAY_SECONDS: "${VULTR_TUNNEL_RESTART_DELAY_SECONDS:-5}"
+    secrets:
+      - vultr_reverse_tunnel_ssh_key
+    healthcheck:
+      test: ["CMD-SHELL", "pidof ssh >/dev/null && curl -fsS http://nginx/readyz >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
 # Docker secrets: files written and retained by start-docker-secretstore.ps1
 # at PHX_SECRET_DIR (e.g. $env:TEMP\phx-secrets). Compose local secrets are
 # bind-mounted files, so they must exist for the lifetime of the stack.
@@ -482,3 +516,6 @@ secrets:
     file: "${PHX_SECRET_DIR}/angel_postback_token"
   admin_kill_switch_override:
     file: "${PHX_SECRET_DIR}/admin_kill_switch_override"
+  vultr_reverse_tunnel_ssh_key:
+    # Override this path if the Vultr tunnel key is stored elsewhere.
+    file: "${VULTR_REVERSE_TUNNEL_SSH_KEY:-C:/Users/abhis/.ssh/phoenix_vultr_proxy_workspace_ed25519}"

@@ -8,13 +8,18 @@ is liveness evidence; it is not trading-readiness approval.
 
 ## Scope
 
-This runbook applies to the current OCI VM deployment. Docker Desktop and Cloud
-Run material are non-current for production unless a future OCI VM audit proves
-that deployment model is active.
+This runbook applies to LIVE releases for the active deployment path. During the
+OCI outage, that path is the local Docker Desktop recovery stack plus Vultr
+proxy/tunnel sidecar. For OCI restoration or future OCI releases, use the OCI VM
+evidence and commands in this runbook. Cloud Run material remains non-current
+unless a future deployment audit proves that model is active.
 
 ## Preconditions
 
 - The backend is deployed through the current OCI runbook.
+- For the active local recovery runtime, the backend and web are deployed
+  through `docker-compose.live.single.yml`, and `phoenix-v9-vultr-tunnel` owns
+  public access through Vultr.
 - `ADMIN_API_KEY` is available only through the approved operator secret
   process, not from a repo env file.
 - Backend-local `/readyz` is reachable from inside `phoenix-oci-backend`.
@@ -34,6 +39,8 @@ Collect all of the following without printing secret values:
 | Public `/health/summary` | response is redacted; internal schema, watchdog, and tracked-account details are omitted or masked |
 | Public `/health/alerts` and `/health/mitigations` | HTTP 200 JSON responses; neither endpoint returns SPA HTML |
 | Authenticated `/admin/health/summary` | schema, watchdog, tracked-account, and readiness fields are present for the logged-in operator view |
+| Vultr tunnel sidecar | `phoenix-v9-vultr-tunnel` is healthy when local/Vultr recovery is the active path |
+| Public HTTPS domain | `https://app.phoenixtechnosolutions.in/readyz` and `/health` return HTTP 200 when local/Vultr recovery is active |
 | Direct BFF diagnostic bypass | `/bff/health/summary`, `/bff/readyz`, and `/bff/dashboard/status` return 404 |
 | Static asset routing | current `/static/*` bundle assets return the correct content type; stale `/static/*` paths return 404 instead of SPA HTML |
 | Secret permissions | `scripts/validate-live-secret-perms.sh` passes on the VM |
@@ -79,6 +86,16 @@ operator risk-halt or rollback decision is recorded.
    pytest -m smoke -q
    ```
 2. Deploy the new backend image via the active OCI deployment runbook.
+   For the local recovery runtime, deploy through the Docker Desktop runbook and
+   verify the sidecar:
+   ```powershell
+   docker ps --filter "name=phoenix-v9" --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+   docker ps --filter "name=phoenix-v9-vultr-tunnel" --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+   curl.exe -s -o NUL -w "readyz=%{http_code} health=%{http_code}" `
+     --max-time 15 `
+     https://app.phoenixtechnosolutions.in/readyz `
+     https://app.phoenixtechnosolutions.in/health
+   ```
 3. Wait for Docker liveness, then verify trading readiness:
    ```bash
    docker ps --filter name=phoenix-oci --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"

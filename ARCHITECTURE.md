@@ -6,15 +6,49 @@ This document defines the Phoenix control-flow, state-model, ownership, and
 reconciliation rules that production should satisfy. It is not, by itself, proof
 of what is deployed.
 
-For current operations, the OCI VM is the source of truth. If this document,
-historical docs, compose comments, or old runbooks conflict with the running VM,
-the VM wins and the document must be corrected.
+For current operations during the OCI outage, the active runtime is the local
+Docker Desktop LIVE stack exposed through Vultr. The last verified OCI VM
+evidence remains the production VM baseline, but it is not proof that the
+unavailable VM is currently running. If this document, compose comments, or old
+runbooks conflict with the active local/Vultr evidence, the active evidence and
+the dedicated runbooks win until OCI is restored or a new production target is
+approved.
 
 Current VM evidence is captured in [docs/OCI_VM_RUNTIME.md](docs/OCI_VM_RUNTIME.md).
 The runtime glossary and operator-facing endpoint behavior index is
 [docs/ENCYCLOPEDIA.md](docs/ENCYCLOPEDIA.md).
 
-### 0.1 Verified OCI VM Runtime
+### 0.1 Active Local/Vultr Recovery Runtime
+
+Validated on 2026-06-29 IST:
+
+- Compose file: `docker-compose.live.single.yml`
+- Backend: `phoenix-v9-backend`, `APP_ENV=production`, `TRADE_MODE=LIVE`,
+  `REQUIRE_LIVE_TRADE_MODE=true`
+- Web: `phoenix-v9-web`, healthy on local `127.0.0.1:80`
+- Database: Windows PostgreSQL 18 database `phoenix`, accessed by
+  `phoenix_app`
+- Secret model: application secrets are mounted from local Docker secret files;
+  broker credentials are stored in Postgres
+- Public endpoint: `https://app.phoenixtechnosolutions.in`
+- Public proxy: Vultr `phoenix-proxy` at `65.20.69.50`
+- Tunnel owner: Docker sidecar `phoenix-v9-vultr-tunnel`, which waits for
+  `phoenix-v9-web` readiness and opens
+  `ssh -R 127.0.0.1:18080:nginx:80 phoenixproxy@65.20.69.50`
+- Windows fallback: Scheduled Task `Phoenix Vultr Reverse Tunnel` is installed
+  but disabled to avoid racing the sidecar
+- HTTPS: Let's Encrypt certificate for `app.phoenixtechnosolutions.in`, expires
+  2026-09-26 18:16:46 UTC
+- Public health: `/readyz` and `/health` return HTTP 200 through the domain
+- Strategy config: EMA20-only in the local control-plane state
+
+This local recovery runtime is LIVE-capable and must be treated with production
+safety discipline, but it is not a complete replacement for a dedicated VM or
+managed production hosting target. Docker Desktop startup, the local Windows
+machine, local Postgres, and the tunnel sidecar are now part of availability.
+Postgres must not be exposed to the internet.
+
+### 0.2 Last Verified OCI VM Runtime
 
 Verified on 2026-06-20 from the running OCI VM:
 
@@ -73,7 +107,7 @@ cutoff. Constant scorer output is connectivity smoke evidence only. Its progress
 and promotion gates are tracked in
 [docs/runbooks/oi_ml_shadow_sidecar.md](docs/runbooks/oi_ml_shadow_sidecar.md).
 
-### 0.2 Production Contract
+### 0.3 Production Contract
 
 The production safety contract remains:
 
@@ -96,8 +130,9 @@ The production safety contract remains:
   approved replacement market-data, bar, indicator, and strategy plane is
   verified on the VM.
 
-Docker Desktop, Cloud Run, Firestore, BigQuery, and GCP references are
-non-current unless future OCI VM evidence proves they are active.
+Cloud Run, Firestore, BigQuery, and GCP references are non-current unless future
+deployment evidence proves they are active. Docker Desktop is current only for
+the documented local recovery deployment while OCI is unavailable.
 
 ---
 
@@ -150,9 +185,11 @@ Phoenix runs in one of two mutually exclusive operating modes. Only one mode may
 | Control-plane credentials and secrets | Approved platform secret store in LIVE; Postgres is allowed for broker credentials | short-lived injected env/file mounts only | Repo files and long-lived plaintext env are forbidden for LIVE |
 | Hub routing table | Postgres (`CONTROL_PLANE_BACKEND=postgres`) | in-memory cache refreshed from Postgres | Firestore was a prior implementation; current LIVE stack uses Postgres exclusively. If `CONTROL_PLANE_BACKEND=firestore`, Google ADC credentials (`GOOGLE_APPLICATION_CREDENTIALS`) are required — see compose comment |
 
-Clarification: "current LIVE stack" in the matrix means the OCI VM runtime
-verified in section 0.1. Firestore-capable code remains compatibility/reference
-only unless this contract is revised after a fresh VM audit.
+Clarification: "current LIVE stack" in the matrix means the active local/Vultr
+recovery runtime in section 0.1 and, for OCI restoration, the last verified OCI
+VM runtime in section 0.2. Both documented LIVE paths use Postgres-exclusive
+authority. Firestore-capable code remains compatibility/reference only unless
+this contract is revised after fresh deployment evidence.
 
 ### Firestore dependency status
 
