@@ -19,6 +19,21 @@ def test_module_defines_callable(name):
     assert hasattr(mod, name), f"Module {MODULE_PATH} should define {name}"
 
 
+def test_sensitive_query_values_are_redacted_from_access_logs():
+    raw = (
+        'GET /ws/dashboard?ticket=abc.def&mode=delta&api_key=secret HTTP/1.1 '
+        'GET /health?token=xyz'
+    )
+    redacted = main_mod._redact_sensitive_log_text(raw)
+
+    assert "abc.def" not in redacted
+    assert "secret" not in redacted
+    assert "token=xyz" not in redacted
+    assert "ticket=<redacted>" in redacted
+    assert "api_key=<redacted>" in redacted
+    assert "token=<redacted>" in redacted
+
+
 def test_main_rejects_non_uvicorn_modes(monkeypatch):
     monkeypatch.setenv("RUNNER_MODE", "stream")
     with pytest.raises(SystemExit) as exc:

@@ -16,11 +16,13 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import (
     FastAPI,
     Request,
+    Response,
     WebSocket,
     WebSocketDisconnect,
     Query,
@@ -69,6 +71,7 @@ logger = logging.getLogger(__name__)
 _REAL_ASYNCIO_SLEEP = asyncio.sleep
 _ACTIVE_DASHBOARD_SOCKETS: dict[int, WebSocket] = {}
 _ACTIVE_DASHBOARD_SOCKETS_LOCK = threading.Lock()
+_DASHBOARD_WS_TICKET_COOKIE = "phx_dashboard_ws_ticket"
 
 
 def refresh_daily_levels_cache() -> bool:
@@ -619,6 +622,57 @@ def _is_invalid_host_header(host: str | None) -> bool:
     if any(char in value for char in ("/", "\\", "?", "#", "@", "%")):
         return True
     return not _host_matches_allowed(value, _configured_allowed_hosts())
+
+
+def _request_is_https(request: Request) -> bool:
+    forwarded_proto = str(request.headers.get("x-forwarded-proto") or "").lower()
+    if forwarded_proto.split(",", 1)[0].strip() == "https":
+        return True
+    return str(request.url.scheme or "").lower() == "https"
+
+
+def _dashboard_ws_host_candidates(websocket: WebSocket) -> tuple[str, ...]:
+    candidates: list[str] = []
+    for header_name in ("x-forwarded-host", "host"):
+        raw = str(websocket.headers.get(header_name) or "")
+        for token in raw.split(","):
+            host = token.strip().lower()
+            if host:
+                candidates.append(host)
+
+    for origin in origins:
+        try:
+            parsed = urlparse(origin)
+        except Exception:
+            continue
+        if parsed.netloc:
+            candidates.append(parsed.netloc.lower())
+
+    return tuple(dict.fromkeys(candidates))
+
+
+def _dashboard_ws_origin_allowed(websocket: WebSocket) -> bool:
+    origin = str(websocket.headers.get("origin") or "").strip()
+    if not origin:
+        return True
+    try:
+        parsed = urlparse(origin)
+    except Exception:
+        return False
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return False
+    if any(char.isspace() for char in parsed.netloc) or any(
+        char in parsed.netloc for char in ("/", "\\", "?", "#", "@", "%")
+    ):
+        return False
+
+    origin_host = _host_without_port(parsed.netloc)
+    for candidate in _dashboard_ws_host_candidates(websocket):
+        if origin_host == _host_without_port(candidate):
+            return True
+        if _host_matches_allowed(parsed.netloc, (candidate,)):
+            return True
+    return _host_matches_allowed(parsed.netloc, _configured_allowed_hosts())
 
 
 @app.middleware("http")
@@ -2483,6 +2537,8 @@ def dashboard() -> HTMLResponse:
 
 @app.post("/admin/dashboard/ws-ticket", response_model=DashboardWebsocketTicketResponse)
 async def create_dashboard_ws_ticket(
+    request: Request,
+    response: Response,
     mode: str | None = Query(default=None),
     ctx: AdminContext = Depends(get_admin_context),
 ) -> DashboardWebsocketTicketResponse:
@@ -2493,13 +2549,24 @@ async def create_dashboard_ws_ticket(
         mode=resolved_mode,
         settings=get_settings(),
     )
+    ttl_seconds = max(0, ticket.expires_at - ticket.issued_at)
+    response.set_cookie(
+        key=_DASHBOARD_WS_TICKET_COOKIE,
+        value=ticket.token,
+        max_age=ttl_seconds,
+        path="/ws/dashboard",
+        secure=_request_is_https(request),
+        httponly=True,
+        samesite="strict",
+    )
+    response.headers["Cache-Control"] = "no-store"
     return DashboardWebsocketTicketResponse(
         ticket=ticket.token,
         expires_at=datetime.fromtimestamp(
             ticket.expires_at,
             tz=timezone.utc,
         ).isoformat().replace("+00:00", "Z"),
-        ttl_seconds=max(0, ticket.expires_at - ticket.issued_at),
+        ttl_seconds=ttl_seconds,
         mode=ticket.mode,
         path=ticket.path,
     )
@@ -2517,8 +2584,15 @@ async def dashboard_socket(websocket: WebSocket) -> None:
     requested_mode = websocket.query_params.get("mode")
     resolved_mode = _dashboard_ws_mode_token(requested_mode)
     use_delta = resolved_mode == "delta"
-    ticket = websocket.query_params.get("ticket")
+    query_ticket = websocket.query_params.get("ticket")
+    ticket = websocket.cookies.get(_DASHBOARD_WS_TICKET_COOKIE)
     admin_ctx: AdminContext | None = None
+    if query_ticket:
+        await websocket.close(code=1008)
+        return
+    if ticket and not _dashboard_ws_origin_allowed(websocket):
+        await websocket.close(code=1008)
+        return
     if auth_required or ticket:
         try:
             admin_ctx = verify_dashboard_ws_ticket(
