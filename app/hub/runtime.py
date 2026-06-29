@@ -352,6 +352,7 @@ class HubRuntime:
         # how long legacy has been halted, not the heartbeat interval
         # since the last republish.
         self._legacy_kill_switch_first_active_at: Optional[Any] = None
+        self._legacy_risk_managers: Dict[str, Dict[str, Any]] = {}
 
         # Core engines
         self.capital_engine = CapitalEngine()
@@ -1040,6 +1041,83 @@ class HubRuntime:
             elif not new_active:
                 self._legacy_kill_switch_first_active_at = None
 
+    def register_legacy_risk_manager(
+        self,
+        *,
+        risk_manager: Any,
+        account_id: Optional[str] = None,
+        state_path: Optional[str] = None,
+    ) -> None:
+        """Register the stream-owned RiskManager instance for admin state.
+
+        The legacy RiskManager lives outside HubRuntime, but position_sync
+        evaluates this exact instance. Registering it lets admin endpoints
+        report and clear the same object rather than only the last published
+        boolean snapshot.
+        """
+        if risk_manager is None:
+            return
+        key = str(account_id or getattr(risk_manager, "broker_account_id", "") or "")
+        if not key:
+            key = f"risk_manager:{id(risk_manager)}"
+        with self._legacy_kill_switch_lock:
+            self._legacy_risk_managers[key] = {
+                "account_id": str(account_id or "") or None,
+                "risk_manager": risk_manager,
+                "state_path": str(
+                    state_path
+                    or getattr(risk_manager, "state_path", "")
+                    or ""
+                ),
+            }
+
+    def iter_legacy_risk_managers(self) -> list[tuple[str, Any]]:
+        with self._legacy_kill_switch_lock:
+            return [
+                (key, entry.get("risk_manager"))
+                for key, entry in self._legacy_risk_managers.items()
+                if entry.get("risk_manager") is not None
+            ]
+
+    def list_legacy_risk_managers(self) -> list[dict]:
+        with self._legacy_kill_switch_lock:
+            entries = list(self._legacy_risk_managers.items())
+        managers: list[dict] = []
+        for key, entry in entries:
+            risk_manager = entry.get("risk_manager")
+            if risk_manager is None:
+                continue
+            state_lock = getattr(risk_manager, "_state_lock", None)
+            try:
+                if state_lock is not None:
+                    with state_lock:
+                        active = bool(getattr(risk_manager, "kill_switch_activated", False))
+                        open_position_count = len(getattr(risk_manager, "open_positions", {}) or {})
+                        open_spread_count = len(getattr(risk_manager, "open_spreads_by_underlying", {}) or {})
+                else:
+                    active = bool(getattr(risk_manager, "kill_switch_activated", False))
+                    open_position_count = len(getattr(risk_manager, "open_positions", {}) or {})
+                    open_spread_count = len(getattr(risk_manager, "open_spreads_by_underlying", {}) or {})
+            except Exception:
+                active = False
+                open_position_count = None
+                open_spread_count = None
+            managers.append({
+                "key": key,
+                "broker_account_id": (
+                    entry.get("account_id")
+                    or getattr(risk_manager, "broker_account_id", None)
+                ),
+                "state_path": (
+                    entry.get("state_path")
+                    or str(getattr(risk_manager, "state_path", "") or "")
+                ),
+                "active": bool(active),
+                "open_position_count": open_position_count,
+                "open_spread_count": open_spread_count,
+            })
+        return managers
+
     def get_legacy_kill_switch_snapshot(self) -> dict:
         """Return a serializable snapshot of the published legacy state.
 
@@ -1047,7 +1125,23 @@ class HubRuntime:
         has been called at least once — useful for distinguishing
         "no publisher running" from "publisher running and reports False".
         """
+        list_registered = getattr(self, "list_legacy_risk_managers", None)
+        registered_managers = (
+            list_registered() if callable(list_registered) else []
+        )
+        registered_active = [
+            item for item in registered_managers if bool(item.get("active"))
+        ]
         with self._legacy_kill_switch_lock:
+            published_active = bool(self._legacy_kill_switch_active)
+            legacy_active = published_active or bool(registered_active)
+            legacy_reason = self._legacy_kill_switch_reason
+            if registered_active:
+                accounts = ",".join(
+                    str(item.get("broker_account_id") or item.get("key"))
+                    for item in registered_active
+                )
+                legacy_reason = f"registered_risk_manager_active:{accounts}"
             updated_iso = (
                 self._legacy_kill_switch_updated_at.isoformat().replace(
                     "+00:00", "Z"
@@ -1063,13 +1157,17 @@ class HubRuntime:
                 else None
             )
             return {
-                "publisher_seen": bool(self._legacy_kill_switch_publisher_seen),
-                "legacy_active": bool(self._legacy_kill_switch_active),
-                "legacy_reason": self._legacy_kill_switch_reason,
+                "publisher_seen": bool(
+                    self._legacy_kill_switch_publisher_seen
+                    or registered_managers
+                ),
+                "legacy_active": bool(legacy_active),
+                "legacy_reason": legacy_reason,
                 "legacy_updated_at": updated_iso,
                 # PR #234 round-1 review P2: first-active timestamp for
                 # accurate divergence-age reporting.
                 "legacy_first_active_at": first_active_iso,
+                "registered_risk_managers": registered_managers,
             }
 
     def compute_kill_switch_divergence(self) -> dict:

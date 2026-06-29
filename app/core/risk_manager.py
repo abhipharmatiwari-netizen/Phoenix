@@ -635,6 +635,7 @@ class RiskManager:
         # and marks succeeded with NO audit row.
         self._pending_audit_reemit: bool = False
         self._pending_audit_reemit_reason: Optional[str] = None
+        self._registered_with_hub_runtime: bool = False
         self.risk_limits = risk_limits or {}
         self.instrument_controller = instrument_controller
         self._underlying_name_to_label: Dict[str, str] = {}
@@ -2072,6 +2073,17 @@ class RiskManager:
         except Exception:
             return
         recorder = getattr(runtime, "record_legacy_kill_switch_state", None)
+        register = getattr(runtime, "register_legacy_risk_manager", None)
+        if callable(register) and not self._registered_with_hub_runtime:
+            try:
+                register(
+                    risk_manager=self,
+                    account_id=self.broker_account_id,
+                    state_path=str(self.state_path),
+                )
+                self._registered_with_hub_runtime = True
+            except Exception:
+                pass
         if not callable(recorder):
             return
         try:
@@ -2738,6 +2750,259 @@ class RiskManager:
                 return None
         return None
 
+    @staticmethod
+    def _risk_state_positions_have_open_qty(value: Any) -> bool:
+        if not value:
+            return False
+        if isinstance(value, dict):
+            iterable = value.values()
+        elif isinstance(value, list):
+            iterable = value
+        else:
+            return True
+        for entry in iterable:
+            if not isinstance(entry, dict):
+                return True
+            qty_value = None
+            for key in ("qty", "quantity", "net_qty", "netqty", "net"):
+                if entry.get(key) is not None:
+                    qty_value = entry.get(key)
+                    break
+            if qty_value is None:
+                return True
+            try:
+                if abs(float(qty_value)) > 0.0001:
+                    return True
+            except (TypeError, ValueError):
+                return True
+        return False
+
+    @staticmethod
+    def _risk_state_spreads_have_open_entries(value: Any) -> bool:
+        if not value:
+            return False
+        if isinstance(value, dict):
+            return any(
+                RiskManager._risk_state_spreads_have_open_entries(v)
+                for v in value.values()
+            )
+        if isinstance(value, (list, tuple, set)):
+            return any(bool(item) for item in value)
+        return bool(value)
+
+    def _read_persisted_risk_state_snapshot(self) -> Optional[Dict[str, Any]]:
+        try:
+            if not self.state_path.exists():
+                return None
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _persisted_state_would_not_trip_kill_switch(
+        self,
+        data: Dict[str, Any],
+    ) -> bool:
+        try:
+            daily_realized = float(data.get("daily_realized_pnl", 0.0) or 0.0)
+            last_total = float(
+                data.get("last_total_pnl", data.get("daily_realized_pnl", 0.0))
+                or 0.0
+            )
+            daily_peak = float(
+                data.get("daily_peak_equity", daily_realized) or daily_realized
+            )
+            daily_total_peak = float(
+                data.get(
+                    "daily_peak_total_pnl",
+                    data.get("daily_peak_equity", last_total),
+                )
+                or last_total
+            )
+        except (TypeError, ValueError):
+            return False
+        loss_limit = abs(float(self.max_daily_loss or 0.0))
+        drawdown_limit = abs(float(self.max_intraday_drawdown or 0.0))
+        if loss_limit > 0.0 and daily_realized <= -loss_limit:
+            return False
+        if (
+            self._include_unrealized_in_kill_switch
+            and loss_limit > 0.0
+            and last_total <= -loss_limit
+        ):
+            return False
+        if (
+            drawdown_limit > 0.0
+            and max(0.0, daily_peak - daily_realized) >= drawdown_limit
+        ):
+            return False
+        if (
+            self._include_unrealized_in_kill_switch
+            and drawdown_limit > 0.0
+            and max(0.0, daily_total_peak - last_total) >= drawdown_limit
+        ):
+            return False
+        return True
+
+    def _state_store_positions_flat_for_account(self, runtime: Any) -> bool:
+        account_id = str(self.broker_account_id or "").strip()
+        if not account_id:
+            return False
+        state_store = getattr(runtime, "state_store", None)
+        get_positions = getattr(state_store, "get_positions", None)
+        if not callable(get_positions):
+            return False
+        try:
+            positions = list(get_positions(account_id) or [])
+        except Exception as exc:
+            logger.warning(
+                "risk_manager.stale_legacy_clear_skipped: account=%s "
+                "state_store_positions_unavailable=%s",
+                account_id,
+                exc,
+            )
+            return False
+        for position in positions:
+            net_qty = self._position_net_qty_for_flat_check(position)
+            if net_qty is None or net_qty != 0:
+                return False
+        return True
+
+    def _state_store_orders_flat_for_account(self, runtime: Any) -> bool:
+        account_id = str(self.broker_account_id or "").strip()
+        if not account_id:
+            return False
+        state_store = getattr(runtime, "state_store", None)
+        orders: list[Any] = []
+        try:
+            get_order_snapshot = getattr(state_store, "get_order_snapshot", None)
+            if callable(get_order_snapshot):
+                orders = list(get_order_snapshot(account_id) or [])
+            if not orders:
+                get_orders = getattr(state_store, "get_orders", None)
+                if callable(get_orders):
+                    orders = list(get_orders(account_id) or [])
+        except Exception as exc:
+            logger.warning(
+                "risk_manager.stale_legacy_clear_skipped: account=%s "
+                "state_store_orders_unavailable=%s",
+                account_id,
+                exc,
+            )
+            return False
+        terminal_statuses = {
+            "CANCELLED",
+            "CANCELED",
+            "COMPLETE",
+            "COMPLETED",
+            "EXECUTED",
+            "FILLED",
+            "REJECTED",
+            "FAILED",
+            "EXPIRED",
+        }
+        for order in orders:
+            if isinstance(order, dict):
+                raw_status = order.get("status") or order.get("order_status")
+            else:
+                raw_status = (
+                    getattr(order, "status", None)
+                    or getattr(order, "order_status", None)
+                )
+            status_text = self._normalize_broker_order_status(
+                getattr(raw_status, "value", raw_status)
+            )
+            if status_text not in terminal_statuses:
+                return False
+        return True
+
+    def _apply_persisted_flat_legacy_state(self, data: Dict[str, Any]) -> None:
+        with self._state_lock:
+            self.realized_pnl = float(data.get("realized_pnl", 0.0) or 0.0)
+            self.max_equity = float(data.get("max_equity", self.realized_pnl) or 0.0)
+            self.daily_realized_pnl = float(
+                data.get("daily_realized_pnl", 0.0) or 0.0
+            )
+            self.daily_peak_equity = float(
+                data.get("daily_peak_equity", self.daily_realized_pnl) or 0.0
+            )
+            self.daily_peak_total_pnl = float(
+                data.get("daily_peak_total_pnl", self.daily_peak_equity) or 0.0
+            )
+            self.last_unrealized_pnl = float(
+                data.get("last_unrealized_pnl", 0.0) or 0.0
+            )
+            self.last_total_pnl = float(
+                data.get("last_total_pnl", self.daily_realized_pnl) or 0.0
+            )
+            ks_date = data.get("kill_switch_date")
+            try:
+                self.kill_switch_date = (
+                    datetime.fromisoformat(str(ks_date)).date() if ks_date else None
+                )
+            except Exception:
+                self.kill_switch_date = None
+            self.kill_switch_activated = False
+            self._durable_kill_switch_bridge_succeeded = True
+            self._pending_audit_reemit = False
+            self._pending_audit_reemit_reason = None
+
+    def _maybe_clear_stale_position_sync_legacy_kill_switch(
+        self,
+        *,
+        source: str,
+    ) -> bool:
+        if str(source or "") != "position_sync":
+            return False
+        with self._state_lock:
+            if (
+                not self.kill_switch_activated
+                or self._durable_kill_switch_bridge_succeeded
+                or bool(self.open_positions)
+                or bool(self.open_spreads_by_underlying)
+            ):
+                return False
+
+        persisted = self._read_persisted_risk_state_snapshot()
+        if not persisted:
+            return False
+        if bool(persisted.get("kill_switch_activated", False)):
+            return False
+        if self._risk_state_positions_have_open_qty(persisted.get("open_positions")):
+            return False
+        if self._risk_state_spreads_have_open_entries(persisted.get("open_spreads")):
+            return False
+        if not self._persisted_state_would_not_trip_kill_switch(persisted):
+            return False
+
+        try:
+            from app.hub.runtime import get_hub_runtime
+
+            cache_info = getattr(get_hub_runtime, "cache_info", None)
+            if callable(cache_info) and cache_info().currsize == 0:
+                return False
+            runtime = get_hub_runtime()
+            snapshot_getter = getattr(runtime, "get_legacy_kill_switch_snapshot", None)
+            snapshot = snapshot_getter() if callable(snapshot_getter) else {}
+        except Exception:
+            return False
+
+        if bool((snapshot or {}).get("legacy_active", False)):
+            return False
+        if not self._state_store_positions_flat_for_account(runtime):
+            return False
+        if not self._state_store_orders_flat_for_account(runtime):
+            return False
+
+        self._apply_persisted_flat_legacy_state(persisted)
+        logger.warning(
+            "risk_manager.stale_legacy_kill_switch_cleared: source=position_sync "
+            "account=%s state_path=%s reason=runtime_legacy_inactive_flat_state",
+            self.broker_account_id or "",
+            self.state_path,
+        )
+        return True
+
     def _load_hub_authoritative_flat_account_pnl(
         self,
     ) -> Optional[_AuthoritativeAccountPnL]:
@@ -2851,6 +3116,7 @@ class RiskManager:
         # legacy_active=True until a forced or unthrottled evaluation
         # later in the day, surfacing a phantom divergence in /readyz.
         self._reset_daily_if_new_day(now_ts)
+        self._maybe_clear_stale_position_sync_legacy_kill_switch(source=source)
         self._publish_legacy_kill_switch_state_to_hub()
         now_mono = time.monotonic()
         if (

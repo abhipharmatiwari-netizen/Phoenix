@@ -251,3 +251,43 @@ curl -H "X-Admin-Key: $ADMIN_KEY" https://$VM/admin/health/summary
 
 Both endpoints back the dashboard panel; running them from outside
 the dashboard validates that the UI and backend agree.
+
+## Legacy Recovery Re-Trip Validation
+
+After any durable clear or legacy recovery clear, capture evidence that
+the durable manager, legacy RiskManager bridge, broker/state-store
+positions, and readiness all agree before re-enabling strategy
+mutations.
+
+```bash
+# Durable + legacy kill-switch state. Check:
+# - active_count == 0
+# - legacy_kill_switch.active == false
+# - divergence.durable_global_active == false
+# - every legacy_kill_switch.registered_risk_managers[].active == false
+curl -fsS -H "X-Admin-Key: $ADMIN_KEY" \
+  https://$VM/admin/kill-switch/state | jq .
+
+# Readiness must remain green after at least one position-sync interval.
+# Check ready=true, kill_switch_active_count=0, and divergence=false.
+curl -fsS -H "X-Admin-Key: $ADMIN_KEY" https://$VM/readyz | jq .
+
+# Confirm the legacy risk state file the runtime is using and its contents.
+# The OCI profile sets RISK_STATE_PATH to /opt/phoenix/state/risk_positions.json.
+docker exec phoenix-oci-backend sh -lc \
+  'printf "RISK_STATE_PATH=%s\n" "${RISK_STATE_PATH:-}"; \
+   python -c "from app.core.risk_manager import _resolve_risk_state_path; print(_resolve_risk_state_path())"; \
+   cat "${RISK_STATE_PATH:-/opt/phoenix/state/risk_positions.json}"'
+
+# Recent kill-switch audit evidence. Confirm the recovery/clear event is
+# present and no later risk_manager_auto kill_switch.trip event reappeared.
+curl -fsS -H "X-Admin-Key: $ADMIN_KEY" \
+  "https://$VM/admin/audit?resource_type=kill_switch&limit=20" | jq .
+```
+
+The `/admin/kill-switch/state` payload now includes
+`legacy_kill_switch.registered_risk_managers`, which identifies the
+stream-owned legacy RiskManager instance(s), their broker account ids,
+state paths, active flags, and open local position/spread counts. Treat
+any active registered manager after a clear as a stop-the-line recovery
+blocker, even if durable `active_count` is zero.

@@ -2576,11 +2576,12 @@ def _collect_legacy_kill_switch_clear_failures(*, fail_closed: bool) -> list[str
         from app.risk.kill_switch import get_kill_switch_state
         state = get_kill_switch_state()
         legacy = state.get("legacy_kill_switch") or {}
+        legacy_present = "legacy_kill_switch" in state
         divergence = state.get("divergence") or {}
         if bool(legacy.get("active")):
             reason = str(legacy.get("reason") or "unknown")
             failures.append(f"legacy kill switch is still active: {reason}")
-        elif bool(state.get("kill_switch_activated")):
+        elif not legacy_present and bool(state.get("kill_switch_activated")):
             failures.append("legacy risk manager kill switch is still active")
         if bool(divergence.get("divergent")):
             failures.append("legacy and durable kill-switch state are divergent")
@@ -2604,6 +2605,19 @@ async def _maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+def _normalise_positions_payload(value: Any) -> list[Any]:
+    status_value = getattr(value, "status", None)
+    if status_value is not None and hasattr(value, "positions"):
+        status_text = str(getattr(status_value, "value", status_value) or "").upper()
+        if status_text and status_text != "OK":
+            reason = str(getattr(value, "reason", "") or status_text)
+            raise RuntimeError(reason)
+        return list(getattr(value, "positions", None) or [])
+    if isinstance(value, dict):
+        return list(value.get("data") or value.get("positions") or [])
+    return list(value or [])
 
 
 def _hub_runner_ids(hub: Any) -> list[str]:
@@ -2668,7 +2682,9 @@ async def _collect_legacy_recovery_flatness_evidence(ctx: AdminContext) -> tuple
         get_positions = getattr(broker_client, "get_positions", None)
         if callable(get_positions):
             try:
-                positions = list(await _maybe_await(get_positions()) or [])
+                positions = _normalise_positions_payload(
+                    await _maybe_await(get_positions())
+                )
                 position_source = "broker"
             except Exception as exc:
                 blockers.append(f"{account_id}: broker positions unavailable: {exc}")
@@ -2741,14 +2757,15 @@ def _clear_legacy_kill_switch_runtime_state(*, actor: str, reason: str) -> dict[
 
     cleared_managers: list[dict[str, Any]] = []
     persist_failures: list[str] = []
-    for account_id in _hub_runner_ids(hub):
-        runner = _hub_runner_for_account(hub, account_id)
-        risk_manager = (
-            getattr(runner, "_risk_manager", None)
-            or getattr(runner, "risk_manager", None)
-        )
+    seen_manager_ids: set[int] = set()
+
+    def _clear_one_risk_manager(account_id: str, risk_manager: Any) -> None:
         if risk_manager is None:
-            continue
+            return
+        manager_id = id(risk_manager)
+        if manager_id in seen_manager_ids:
+            return
+        seen_manager_ids.add(manager_id)
         was_active = bool(getattr(risk_manager, "kill_switch_activated", False))
         setattr(risk_manager, "kill_switch_activated", False)
         if hasattr(risk_manager, "_durable_kill_switch_bridge_succeeded"):
@@ -2776,6 +2793,22 @@ def _clear_legacy_kill_switch_runtime_state(*, actor: str, reason: str) -> dict[
             "broker_account_id": account_id,
             "was_active": was_active,
         })
+
+    for account_id in _hub_runner_ids(hub):
+        runner = _hub_runner_for_account(hub, account_id)
+        risk_manager = (
+            getattr(runner, "_risk_manager", None)
+            or getattr(runner, "risk_manager", None)
+        )
+        _clear_one_risk_manager(account_id, risk_manager)
+
+    iter_registered = getattr(runtime, "iter_legacy_risk_managers", None)
+    if callable(iter_registered):
+        try:
+            for key, risk_manager in iter_registered():
+                _clear_one_risk_manager(str(key), risk_manager)
+        except Exception as exc:
+            persist_failures.append(f"registered_legacy_risk_managers: {exc}")
     if persist_failures:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

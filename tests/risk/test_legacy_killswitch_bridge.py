@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib
+import json
 import os
 from types import SimpleNamespace
 from typing import List, Optional
@@ -253,6 +254,105 @@ def test_bridge_retries_on_subsequent_evaluate_after_initial_failure(
         "bridge must retry trip on the next evaluate after first-attempt "
         "failure (Codex P1 / PR #231 review)"
     )
+    assert rm._durable_kill_switch_bridge_succeeded is True
+
+
+def test_position_sync_does_not_retrip_after_durable_clear_when_flat_and_persisted_inactive(
+    tmp_path,
+):
+    """Regression for the 2026-06-29 re-trip: a stale in-memory legacy flag
+    must not recreate a durable GLOBAL trip after the durable state has been
+    cleared and persisted risk + state-store evidence are flat.
+    """
+    rm = _build_risk_manager(tmp_path)
+    rm.broker_account_id = "ba1"
+    ist = dt.timezone(dt.timedelta(hours=5, minutes=30))
+    now = dt.datetime.now(ist)
+    rm.kill_switch_date = now.date()
+    rm.kill_switch_activated = True
+    rm._durable_kill_switch_bridge_succeeded = False
+    rm.daily_realized_pnl = -2500.0
+    rm.daily_peak_equity = 0.0
+    rm.last_total_pnl = -2500.0
+    rm.daily_peak_total_pnl = 0.0
+    rm.state_path.write_text(
+        json.dumps(
+            {
+                "realized_pnl": 0.0,
+                "max_equity": 0.0,
+                "daily_realized_pnl": 0.0,
+                "daily_peak_equity": 0.0,
+                "daily_peak_total_pnl": 0.0,
+                "last_unrealized_pnl": 0.0,
+                "last_total_pnl": 0.0,
+                "kill_switch_activated": False,
+                "kill_switch_date": now.date().isoformat(),
+                "open_positions": {},
+                "open_spreads": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    stub_ksm = _StubKillSwitchManager()
+    state_store = SimpleNamespace(
+        get_positions=lambda account_id: [],
+        get_order_snapshot=lambda account_id: [],
+        get_orders=lambda account_id: [],
+    )
+    runtime = SimpleNamespace(
+        kill_switch_manager=stub_ksm,
+        state_store=state_store,
+        get_legacy_kill_switch_snapshot=lambda: {
+            "publisher_seen": True,
+            "legacy_active": False,
+            "legacy_reason": "legacy_risk_manager_inactive",
+        },
+    )
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime):
+        result = rm.evaluate_account_loss(
+            now=now,
+            source="position_sync",
+            force=True,
+        )
+
+    assert stub_ksm.trip_calls == []
+    assert result["kill_switch_activated"] is False
+    assert rm.kill_switch_activated is False
+    assert rm._durable_kill_switch_bridge_succeeded is True
+    assert rm.daily_realized_pnl == 0.0
+
+
+def test_position_sync_retries_truly_active_legacy_once_without_loop(
+    tmp_path,
+    stub_postgres_save,
+):
+    rm = _build_risk_manager(tmp_path)
+    ist = dt.timezone(dt.timedelta(hours=5, minutes=30))
+    now = dt.datetime.now(ist)
+    rm.kill_switch_date = now.date()
+    rm.kill_switch_activated = True
+    rm._durable_kill_switch_bridge_succeeded = False
+    rm.daily_realized_pnl = 0.0
+
+    stub_ksm = _StubKillSwitchManager()
+    runtime = SimpleNamespace(
+        kill_switch_manager=stub_ksm,
+        get_legacy_kill_switch_snapshot=lambda: {
+            "publisher_seen": True,
+            "legacy_active": True,
+            "legacy_reason": "legacy_risk_manager_active",
+        },
+    )
+
+    with patch("app.hub.runtime.get_hub_runtime", return_value=runtime):
+        rm.evaluate_account_loss(now=now, source="position_sync", force=True)
+        rm.evaluate_account_loss(now=now, source="position_sync", force=True)
+
+    assert len(stub_ksm.trip_calls) == 1
+    assert stub_ksm.trip_calls[0]["actor"] == "risk_manager_auto"
+    assert "legacy_already_tripped_retry" in stub_ksm.trip_calls[0]["reason"]
     assert rm._durable_kill_switch_bridge_succeeded is True
 
 

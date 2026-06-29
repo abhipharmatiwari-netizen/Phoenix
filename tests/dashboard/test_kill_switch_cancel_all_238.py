@@ -20,11 +20,14 @@ import pytest
 from fastapi import HTTPException
 
 from app.brokers.base import OrderResponse
+from app.brokers.positions_types import PositionsFetchResult, PositionsStatus
 from app.dashboard import admin_routes
 from app.dashboard.admin_routes import (
     KillSwitchCancelAllRequest,
     KillSwitchLegacyRecoveryRequest,
     KillSwitchPasswordClearRequest,
+    _collect_legacy_kill_switch_clear_failures,
+    _collect_legacy_recovery_flatness_evidence,
     _save_kill_switch_state,
     kill_switch_cancel_all,
     kill_switch_clear_with_password,
@@ -234,6 +237,24 @@ def test_kill_switch_password_clear_fails_closed_when_legacy_active(monkeypatch,
     assert ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL").state == KillSwitchState.TRIPPED
 
 
+def test_clear_validator_trusts_enriched_legacy_inactive_state(monkeypatch):
+    monkeypatch.setattr(
+        "app.risk.kill_switch.get_kill_switch_state",
+        lambda: {
+            "source": "kill_switch_manager",
+            "legacy_kill_switch": {
+                "publisher_seen": True,
+                "active": False,
+                "reason": "legacy_risk_manager_inactive",
+            },
+            "kill_switch_activated": True,
+            "divergence": {"divergent": False},
+        },
+    )
+
+    assert _collect_legacy_kill_switch_clear_failures(fail_closed=True) == []
+
+
 class _LegacyRecoveryRiskManager:
     def __init__(self) -> None:
         self.kill_switch_activated = True
@@ -328,6 +349,37 @@ def test_legacy_recovery_refuses_when_broker_positions_not_flat(monkeypatch, tmp
     assert "positions are not flat" in str(exc_info.value.detail)
     assert rm.kill_switch_activated is True
     assert ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL").state == KillSwitchState.TRIPPED
+
+
+def test_legacy_recovery_flatness_accepts_positions_fetch_result(monkeypatch):
+    class _Broker:
+        def get_positions(self):
+            return PositionsFetchResult(
+                status=PositionsStatus.OK,
+                positions=[{"symbol": "NIFTY", "netqty": 0}],
+                reason="ok",
+            )
+
+        def get_orders(self):
+            return [{"order_id": "ord1", "status": "COMPLETE"}]
+
+    rm = _LegacyRecoveryRiskManager()
+    runtime = _legacy_recovery_runtime(
+        risk_manager=rm,
+        positions=[],
+        orders=[],
+    )
+    runner = runtime.hub.get_runner("ba1")
+    runner._broker_client = _Broker()
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: runtime)
+
+    evidence, blockers = asyncio.run(
+        _collect_legacy_recovery_flatness_evidence(_mk_bearer_admin())
+    )
+
+    assert blockers == []
+    assert evidence[0]["position_source"] == "broker"
+    assert evidence[0]["open_position_count"] == 0
 
 
 def test_legacy_recovery_refuses_when_broker_orders_open(monkeypatch, tmp_path):

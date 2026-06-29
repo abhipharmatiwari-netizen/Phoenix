@@ -747,6 +747,15 @@ def get_kill_switch_state() -> dict:
                     "divergence_age_seconds": divergence.get(
                         "divergence_age_seconds"
                     ),
+                    "registered_risk_managers": (
+                        runtime.get_legacy_kill_switch_snapshot().get(
+                            "registered_risk_managers", []
+                        )
+                        if callable(
+                            getattr(runtime, "get_legacy_kill_switch_snapshot", None)
+                        )
+                        else []
+                    ),
                 }
                 payload["divergence"] = {
                     "divergent": bool(divergence.get("divergent", False)),
