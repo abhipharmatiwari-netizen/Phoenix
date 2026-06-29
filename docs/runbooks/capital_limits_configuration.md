@@ -133,8 +133,11 @@ Example Postgres metadata shape:
 }
 ```
 
-An explicit operator environment `CAPITAL_LIMITS_JSON` override still works for
-break-glass deployment, but it should match the approved funded-account values.
+The Docker Desktop LIVE launcher rejects missing or generic-only limits. The
+Postgres payload must resolve to the selected account key, such as
+`tenant-1:A1` or `A1`. An explicit operator environment
+`CAPITAL_LIMITS_JSON` override is a break-glass path only, and it must contain
+that same account key.
 
 Current OCI VM example:
 
@@ -146,24 +149,18 @@ docker exec phoenix-oci-backend curl -sS http://localhost:8080/health/summary
 
 Do not print the JSON value into tickets or docs.
 
-Legacy local override example:
+Break-glass local override example:
 
 ```powershell
 $env:CAPITAL_LIMITS_JSON = '{"tenant-1:A1": {"max_notional_per_order": 500000, "max_gross_exposure": 1000000}}'
-```
-
-Or via SecretStore:
-```powershell
-Set-Secret -Name "CAPITAL_LIMITS_JSON" -Secret '{"tenant-1:A1": {"max_notional_per_order": 500000, "max_gross_exposure": 1000000}}'
 ```
 
 OCI Compose example: set `CAPITAL_LIMITS_JSON` in `/opt/phoenix/phoenix-deploy.env`
 from the operator secret store before running the OCI deployment runbook.
 
 The compose file requires this value at container start time. Empty `{}` is
-rejected in `TRADE_MODE=LIVE` unless `ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true`
-is deliberately set as an audited exception. Do not use the helper-derived
-5L/10L fallback as funded-account go-live evidence.
+rejected in `TRADE_MODE=LIVE`; the Docker Desktop launcher also rejects the old
+helper-derived 5L/10L fallback before Compose starts.
 
 ## Validation
 

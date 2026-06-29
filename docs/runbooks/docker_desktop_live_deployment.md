@@ -149,13 +149,17 @@ Before you start the bundled LIVE stack, all of the following must already be tr
 - The runtime can obtain bootstrap-only values `ADMIN_API_KEY`,
   `DEMO_AUTH_TOKEN_SECRET`, `CONTROL_PLANE_PG_PASSWORD`,
   `ANGEL_POSTBACK_TOKEN`, and `ADMIN_KILL_SWITCH_OVERRIDE` from your approved
-  LIVE secret process.
+  LIVE secret process. These are not fetched from Postgres: the database
+  password is required before Postgres can be queried, and admin / kill-switch
+  secrets intentionally stay file-mounted instead of database-readable.
 - The selected `broker_accounts` row contains account-specific
   `meta.capital_limits` and, when managed per-account, `meta.risk.max_daily_loss`
   or `meta.risk_max_daily_loss`.
-- The selected `broker_credentials` row contains `client_local_ip`,
-  `client_public_ip`, and `mac_address`; the Docker launcher exports these from
-  Postgres instead of Windows SecretStore.
+- The selected `broker_credentials` row contains non-empty `api_key`,
+  `client_code`, `pin`, and `totp_secret`, plus `client_local_ip`,
+  `client_public_ip`, and `mac_address`. Broker login secrets and broker
+  network identity are fetched from Postgres; they must not be supplied through
+  `ANGEL_*` environment variables for this LIVE stack.
 
 ### If you use the bundled PowerShell helper
 
@@ -168,14 +172,19 @@ The helper script expects the following Windows modules and secret names:
 - `ANGEL_POSTBACK_TOKEN` (§126 — required for Angel broker postback authentication; without it all Angel postbacks return HTTP 401 and the lifecycle service misses fill events)
 - `ADMIN_KILL_SWITCH_OVERRIDE` (file-mounted only; never export or log it)
 
-The helper also connects to Postgres before `docker compose up` and exports:
+The helper also connects to Postgres before `docker compose up` and verifies /
+exports:
 
 - `CAPITAL_LIMITS_JSON` from `broker_accounts.meta.capital_limits` or
-  `broker_accounts.meta.capital_limits_json`.
+  `broker_accounts.meta.capital_limits_json`. The payload must include the
+  selected account key, such as `tenant-1:A1` or `A1`; generic-only `default`
+  limits are rejected for LIVE.
 - `RISK_MAX_DAILY_LOSS` from `broker_accounts.meta.risk.max_daily_loss`,
   `broker_accounts.meta.risk_max_daily_loss`, or an explicit host env override.
 - `CLIENT_LOCAL_IP`, `CLIENT_PUBLIC_IP`, and `MAC_ADDRESS` from
   `broker_credentials`.
+- Non-empty Postgres broker credential fields required for Angel login:
+  `api_key`, `client_code`, `pin`, and `totp_secret`. Values are never printed.
 
 Use that helper only when it is acting as your operator-side export step for values managed under the approved LIVE secret process.
 
@@ -215,6 +224,8 @@ operator convenience, not the authoritative LIVE secret source:
 
 The helper implements the bundled Docker/Desktop path and loads account-specific
 capital/risk/network values from Postgres for the selected tenant/account.
+It also preflights the selected `broker_credentials` row so blank Postgres
+broker-secret columns fail deployment before any container is recreated.
 It writes Docker Compose secret files under `$env:TEMP\phx-secrets` and
 intentionally keeps them there while the stack is running; Compose local secrets
 are bind mounts, so deleting those files breaks container restarts. Remove that

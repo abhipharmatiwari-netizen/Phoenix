@@ -73,3 +73,19 @@ def test_secretstore_launcher_builds_all_local_live_images_before_no_build_up():
 
     assert '@("docker", "compose", "-f", $composeFile, "build", "backend", "nginx")' in script_text
     assert '@("docker", "compose", "-f", $composeFile, "up", "-d", "--no-build", "--force-recreate")' in script_text
+
+
+def test_secretstore_launcher_requires_postgres_account_specific_capital_limits():
+    script_text = _read_text(SECRETSTORE_LAUNCHER_PATH)
+
+    assert '$env:BROKER_SECRET_BACKEND = "postgres"' in script_text
+    assert "Generic 5L/10L launcher defaults are not allowed for LIVE deployment" in script_text
+    assert "Type YES to acknowledge and continue with generic limits" not in script_text
+    assert "ALLOW_LIVE_CAPITAL_LIMITS_DEFAULT_ONLY=true found" not in script_text
+
+
+def test_secretstore_launcher_redacts_capital_limits_json_output():
+    script_text = _read_text(SECRETSTORE_LAUNCHER_PATH)
+
+    assert 'if ($name -eq "CAPITAL_LIMITS_JSON")' in script_text
+    assert "<present: redacted>" in script_text

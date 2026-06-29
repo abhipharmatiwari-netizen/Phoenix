@@ -107,6 +107,12 @@ _LOGIN_SNIPPET_LIMIT = 200
 _RATE_LIMIT_TEXT_RE = re.compile(r"exceeding access rate", flags=re.IGNORECASE)
 _STRICT_POSTGRES_SECRET_BACKENDS = {"postgres", "pg", "db", "database"}
 _POSTGRES_SECRET_BACKENDS = _STRICT_POSTGRES_SECRET_BACKENDS | {"auto"}
+_REQUIRED_POSTGRES_CREDENTIAL_INDEXES = {
+    "api_key": 0,
+    "client_code": 2,
+    "pin": 3,
+    "totp_secret": 4,
+}
 
 
 # Shorten verbose logs to a single-line snippet.
@@ -322,6 +328,19 @@ def _load_postgres_secrets_for_default_account() -> AngelSecrets | None:
                 cur.execute(sql, (broker_account_id,))
                 row = cur.fetchone()
                 if row is None:
+                    return None
+                missing_fields = [
+                    name
+                    for name, idx in _REQUIRED_POSTGRES_CREDENTIAL_INDEXES.items()
+                    if not str(row[idx] or "").strip()
+                ]
+                if missing_fields:
+                    logger.error(
+                        "Postgres broker_credentials missing non-empty required fields "
+                        "for broker_account_id=%s: %s",
+                        broker_account_id,
+                        ", ".join(missing_fields),
+                    )
                     return None
                 network_identity = resolve_broker_network_identity(
                     client_local_ip=row[5],

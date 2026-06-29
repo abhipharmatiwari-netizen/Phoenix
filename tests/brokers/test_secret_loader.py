@@ -70,6 +70,43 @@ def test_resolve_angel_secrets_live_accepts_postgres_backend(monkeypatch):
     assert mod.resolve_angel_secrets(_account()) is sentinel
 
 
+def test_load_angel_secrets_from_postgres_rejects_blank_required_fields(monkeypatch):
+    """Postgres broker secret rows must contain usable credential material."""
+    mod = importlib.import_module(MODULE_PATH)
+    monkeypatch.setenv("TRADE_MODE", "PAPER")
+    monkeypatch.setattr(
+        mod,
+        "_fetch_secret_payload_from_postgres",
+        lambda _account_id: {
+            "api_key": "",
+            "api_secret": "",
+            "client_code": "CLIENT123",
+            "pin": "1234",
+            "totp_secret": "TOTP",
+            "client_local_ip": "1.2.3.4",
+            "client_public_ip": "5.6.7.8",
+            "mac_address": "02:00:00:00:00:21",
+        },
+    )
+
+    assert mod.load_angel_secrets_from_postgres(_account()) is None
+
+
+def test_resolve_angel_secrets_live_postgres_missing_fails_closed(monkeypatch):
+    """LIVE + postgres backend must not fall back to env when the DB row is unusable."""
+    mod = importlib.import_module(MODULE_PATH)
+    monkeypatch.setenv("TRADE_MODE", "LIVE")
+    monkeypatch.setattr(
+        mod,
+        "get_settings",
+        lambda: SimpleNamespace(broker_secret_backend="postgres"),
+    )
+    monkeypatch.setattr(mod, "load_angel_secrets_from_postgres", lambda _account: None)
+
+    with pytest.raises(RuntimeError, match="postgres credentials unavailable"):
+        mod.resolve_angel_secrets(_account())
+
+
 def test_resolve_angel_secrets_live_rejects_unknown_backend(monkeypatch):
     """LIVE rejects unrecognized broker secret backends."""
     mod = importlib.import_module(MODULE_PATH)

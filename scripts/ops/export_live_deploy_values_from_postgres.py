@@ -19,6 +19,17 @@ else:
 
 
 _CAPITAL_LIMIT_KEYS = {"max_notional_per_order", "max_gross_exposure"}
+_REQUIRED_BROKER_CREDENTIAL_FIELDS = (
+    "api_key",
+    "client_code",
+    "pin",
+    "totp_secret",
+)
+_REQUIRED_BROKER_NETWORK_FIELDS = (
+    "client_local_ip",
+    "client_public_ip",
+    "mac_address",
+)
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -57,6 +68,19 @@ def _capital_limits_from_meta(
     return json.dumps(data, separators=(",", ":"))
 
 
+def _capital_limits_json_has_account_key(
+    capital_limits_json: str,
+    *,
+    tenant_id: str,
+    broker_account_id: str,
+) -> bool:
+    data = _as_dict(capital_limits_json)
+    return (
+        f"{tenant_id}:{broker_account_id}" in data
+        or str(broker_account_id) in data
+    )
+
+
 def _risk_max_daily_loss_from_meta(meta: Mapping[str, Any]) -> str | None:
     for key in ("risk_max_daily_loss", "max_daily_loss"):
         value = meta.get(key)
@@ -68,6 +92,17 @@ def _risk_max_daily_loss_from_meta(meta: Mapping[str, Any]) -> str | None:
         if value not in (None, ""):
             return str(value)
     return None
+
+
+def _missing_required_fields(
+    row: Mapping[str, Any],
+    fields: tuple[str, ...],
+) -> list[str]:
+    return [
+        field
+        for field in fields
+        if not str(row.get(field) or "").strip()
+    ]
 
 
 def _conninfo_from_env() -> str:
@@ -116,6 +151,10 @@ def fetch_deploy_values(
         SELECT
             ba.tenant_id,
             ba.meta,
+            bc.api_key,
+            bc.client_code,
+            bc.pin,
+            bc.totp_secret,
             bc.client_local_ip,
             bc.client_public_ip,
             bc.mac_address
@@ -138,14 +177,53 @@ def fetch_deploy_values(
         )
 
     meta = _as_dict(row.get("meta"))
+    missing_credential_fields = _missing_required_fields(
+        row,
+        _REQUIRED_BROKER_CREDENTIAL_FIELDS,
+    )
+    if missing_credential_fields:
+        raise RuntimeError(
+            "broker_credentials missing required Postgres broker secret fields "
+            f"for tenant_id={tenant_id} broker_account_id={broker_account_id}: "
+            + ", ".join(missing_credential_fields)
+        )
+
+    missing_network_fields = _missing_required_fields(
+        row,
+        _REQUIRED_BROKER_NETWORK_FIELDS,
+    )
+    if missing_network_fields:
+        raise RuntimeError(
+            "broker_credentials missing required broker network identity fields "
+            f"for tenant_id={tenant_id} broker_account_id={broker_account_id}: "
+            + ", ".join(missing_network_fields)
+        )
+
+    capital_limits_json = _capital_limits_from_meta(
+        meta,
+        tenant_id=tenant_id,
+        broker_account_id=broker_account_id,
+    )
+    if not capital_limits_json:
+        raise RuntimeError(
+            "broker_accounts.meta missing account-specific capital_limits "
+            f"for tenant_id={tenant_id} broker_account_id={broker_account_id}"
+        )
+    if not _capital_limits_json_has_account_key(
+        capital_limits_json,
+        tenant_id=tenant_id,
+        broker_account_id=broker_account_id,
+    ):
+        raise RuntimeError(
+            "broker_accounts.meta capital_limits_json must include an account key "
+            f"for {tenant_id}:{broker_account_id}"
+        )
+
     return {
         "tenant_id": tenant_id,
         "broker_account_id": broker_account_id,
-        "capital_limits_json": _capital_limits_from_meta(
-            meta,
-            tenant_id=tenant_id,
-            broker_account_id=broker_account_id,
-        ),
+        "broker_credentials_ready": True,
+        "capital_limits_json": capital_limits_json,
         "risk_max_daily_loss": _risk_max_daily_loss_from_meta(meta),
         "client_local_ip": row.get("client_local_ip") or "",
         "client_public_ip": row.get("client_public_ip") or "",
