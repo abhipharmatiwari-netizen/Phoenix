@@ -119,6 +119,32 @@ def test_secretstore_launcher_redacts_capital_limits_json_output():
     assert "<present: redacted>" in script_text
 
 
+def test_secretstore_launcher_defaults_live_state_and_logs_outside_repo():
+    script_text = _read_text(SECRETSTORE_LAUNCHER_PATH)
+
+    assert "Set-DefaultHostPathOutsideRepo" in script_text
+    assert "PHOENIX_STATE_HOST_PATH" in script_text
+    assert "PHOENIX_LOG_HOST_PATH" in script_text
+    assert "C:\\ProgramData\\phoenix\\state" in script_text
+    assert "C:\\ProgramData\\phoenix\\logs" in script_text
+    assert "LIVE Docker Desktop state and logs must be outside the checkout" in script_text
+    assert "Copy-LegacyRiskStateIfMissing" in script_text
+    assert "risk_positions.json.bak" in script_text
+
+
+def test_docker_desktop_runbook_documents_secretstore_path_defaults():
+    runbook_text = _read_text(DOCKER_DESKTOP_RUNBOOK_PATH)
+
+    assert "Issue #388" in runbook_text
+    assert "start-docker-secretstore.ps1` defaults `PHOENIX_STATE_HOST_PATH`" in runbook_text
+    assert "PHOENIX_STATE_HOST_PATH=C:\\ProgramData\\phoenix\\state" in runbook_text
+    assert "PHOENIX_LOG_HOST_PATH=C:\\ProgramData\\phoenix\\logs" in runbook_text
+    assert "rejects any override that resolves inside the" in runbook_text
+    assert "raw `docker compose up`" in runbook_text
+    assert "phoenix-local-live" not in runbook_text
+    assert "LEADER_LEASE_ID=phoenix-live-single-stack" in runbook_text
+
+
 def test_docker_desktop_runbook_keeps_only_redacted_compose_evidence():
     runbook_text = _read_text(DOCKER_DESKTOP_RUNBOOK_PATH)
 

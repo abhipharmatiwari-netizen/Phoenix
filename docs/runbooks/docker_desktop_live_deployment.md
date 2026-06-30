@@ -58,7 +58,8 @@ Validated state:
   `REQUIRE_LIVE_TRADE_MODE=true`, `CONTROL_PLANE_PG_DB=phoenix`,
   `CONTROL_PLANE_PG_USER=phoenix_app`, `BROKER_SECRET_BACKEND=postgres`,
   `SCHEMA_CHECK_MODE=strict`, `BROKER_SCHEMA_CHECK_MODE=strict`,
-  `LEADER_LEASE_BACKEND=postgres`, and `LEADER_LEASE_ID=phoenix-local-live`;
+  `LEADER_LEASE_BACKEND=postgres`, and
+  `LEADER_LEASE_ID=phoenix-live-single-stack`;
 - public `/health` is the login-path liveness check; public `/readyz` is the
   trading-readiness check and can return HTTP 503 during an intentional risk
   halt;
@@ -74,7 +75,9 @@ Validated state:
   `tenant-1/A1`, so the UI can show the live tenant/account instead of the
   "No tenant entitlements" banner;
 - `strategy_configs` is EMA20-only: `ema20_strategy=true`; all other listed
-  strategies are disabled;
+  strategies are disabled. The selector's maximum-active default may remain `3`
+  for historical multi-strategy mappings, but it does not enable additional
+  strategies unless the Postgres strategy config and routing rows also do so;
 - `internal_position_records` has zero active/non-terminal rows and
   `position_ownership_ledger` has zero rows;
 - one stale expired NIFTY `RECOVERY_PENDING` record was cleared through
@@ -266,22 +269,30 @@ The single-file Compose manifest wires the required LIVE settings directly into 
 - `ENABLE_EOD_EXIT=true`
 - `RISK_STATE_PATH=/app/state/risk_positions.json` — risk restart-helper persisted to the `/app/state` volume, separate from the log volume
 
-### §133 — State and log volume paths
+### §133 / Issue #388 - State and log volume paths
 
-> **Required for production:** set `PHOENIX_STATE_HOST_PATH` and
-> `PHOENIX_LOG_HOST_PATH` to paths **outside the repo root** to prevent
-> pytest runs on the same machine from overwriting production state files
-> between LIVE sessions.
+`start-docker-secretstore.ps1` defaults `PHOENIX_STATE_HOST_PATH` and
+`PHOENIX_LOG_HOST_PATH` to paths **outside the repo root**:
+
+- `PHOENIX_STATE_HOST_PATH=C:\ProgramData\phoenix\state`
+- `PHOENIX_LOG_HOST_PATH=C:\ProgramData\phoenix\logs`
+
+This prevents pytest runs on the same machine from overwriting production state
+files or mixing test audit evidence with LIVE runtime logs between sessions. The
+helper creates those directories, rejects any override that resolves inside the
+checkout, and copies the legacy repo-root `state\risk_positions.json` /
+`state\risk_positions.json.bak` into the new state directory only when the target
+files do not already exist.
 
 ```powershell
-# Recommended — set before running start-docker-secretstore.ps1:
+# Optional explicit override - must still resolve outside the repo root:
 $env:PHOENIX_STATE_HOST_PATH = "C:\ProgramData\phoenix\state"
 $env:PHOENIX_LOG_HOST_PATH   = "C:\ProgramData\phoenix\logs"
 ```
 
-If these are not set, the defaults (`./state` and `./logs`) inside the repo
-root are used — which is shared with pytest's write paths.  The LIVE startup
-emits a `startup.state_path_inside_repo` WARNING when this is detected.
+Do not launch this LIVE profile with raw `docker compose up` unless the session
+has already exported safe non-repo values for both variables. The Compose file's
+repo-relative fallbacks are retained for schema/render compatibility only.
 
 ---
 

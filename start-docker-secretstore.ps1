@@ -155,6 +155,56 @@ function Set-EnvFromValueOrThrow {
     Set-Item -Path "Env:$EnvName" -Value $Value
 }
 
+function Set-DefaultHostPathOutsideRepo {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$EnvName,
+        [Parameter(Mandatory = $true)]
+        [string]$DefaultPath,
+        [Parameter(Mandatory = $true)]
+        [string]$Description
+    )
+
+    $currentValue = [Environment]::GetEnvironmentVariable($EnvName, "Process")
+    if ([string]::IsNullOrWhiteSpace($currentValue)) {
+        Set-Item -Path "Env:$EnvName" -Value $DefaultPath
+        $currentValue = $DefaultPath
+        Write-Host "  [local-deploy] $EnvName=$DefaultPath ($Description default outside repo root)" -ForegroundColor Yellow
+    }
+
+    $resolvedPath = [System.IO.Path]::GetFullPath($currentValue)
+    $resolvedRepo = [System.IO.Path]::GetFullPath($repoRoot)
+    $repoPrefix = $resolvedRepo.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $normalizedPath = $resolvedPath.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+
+    if ($normalizedPath.Equals($repoPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $normalizedPath.StartsWith($repoPrefix + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $normalizedPath.StartsWith($repoPrefix + [System.IO.Path]::AltDirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "$EnvName resolves inside the repo root ($resolvedPath). LIVE Docker Desktop state and logs must be outside the checkout; use C:\ProgramData\phoenix or another operator-owned path."
+    }
+
+    New-Item -ItemType Directory -Force -Path $resolvedPath | Out-Null
+    Set-Item -Path "Env:$EnvName" -Value $resolvedPath
+    return $resolvedPath
+}
+
+function Copy-LegacyRiskStateIfMissing {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TargetStateDir
+    )
+
+    $legacyStateDir = Join-Path $repoRoot "state"
+    foreach ($fileName in @("risk_positions.json", "risk_positions.json.bak")) {
+        $sourcePath = Join-Path $legacyStateDir $fileName
+        $targetPath = Join-Path $TargetStateDir $fileName
+        if ((Test-Path -LiteralPath $sourcePath) -and -not (Test-Path -LiteralPath $targetPath)) {
+            Copy-Item -LiteralPath $sourcePath -Destination $targetPath
+            Write-Host "  [local-deploy] Migrated legacy $fileName to $TargetStateDir" -ForegroundColor Yellow
+        }
+    }
+}
+
 function Assert-CapitalLimitsJsonHasAccountKey {
     param(
         [Parameter(Mandatory = $true)]
@@ -252,6 +302,15 @@ try {
     # through to non-LIVE defaults before Compose injects TRADE_MODE=LIVE.
     $env:TRADE_MODE = "LIVE"
     $env:BROKER_SECRET_BACKEND = "postgres"
+    $liveStateDir = Set-DefaultHostPathOutsideRepo `
+        -EnvName "PHOENIX_STATE_HOST_PATH" `
+        -DefaultPath "C:\ProgramData\phoenix\state" `
+        -Description "risk state"
+    $null = Set-DefaultHostPathOutsideRepo `
+        -EnvName "PHOENIX_LOG_HOST_PATH" `
+        -DefaultPath "C:\ProgramData\phoenix\logs" `
+        -Description "runtime log"
+    Copy-LegacyRiskStateIfMissing -TargetStateDir $liveStateDir
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_TENANT_ID" -DefaultValue "tenant-1"
     Set-EnvFromSecretOrDefault -EnvName "HUB_DEFAULT_BROKER_ACCOUNT_ID" -DefaultValue "A1"
     $tenantId = [Environment]::GetEnvironmentVariable("HUB_DEFAULT_TENANT_ID", "Process")
@@ -473,6 +532,8 @@ try {
         "CONTROL_PLANE_PG_USER",
         "CONTROL_PLANE_PG_SSLMODE",
         "BROKER_SECRET_BACKEND",
+        "PHOENIX_STATE_HOST_PATH",
+        "PHOENIX_LOG_HOST_PATH",
         "CAPITAL_LIMITS_JSON",
         "HUB_DEFAULT_TENANT_ID",
         "HUB_DEFAULT_BROKER_ACCOUNT_ID"
