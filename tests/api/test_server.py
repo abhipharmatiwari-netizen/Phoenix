@@ -681,6 +681,33 @@ def test_dashboard_ws_delta_mode_emits_delta_then_compaction(api_client, monkeyp
     assert third_payload["_mode"] == "full_snapshot"
 
 
+def test_dashboard_ws_accepts_short_lived_ticket_subprotocol_without_cookie(api_client, monkeypatch):
+    client, _ = api_client
+    bus = DashboardBus()
+    bus.record_tick("ABC", 100.0, datetime(2024, 1, 1, 4, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr(server, "dashboard_bus", bus)
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            runtime=SimpleNamespace(app_env="production", dashboard_auth_disabled=False)
+        ),
+    )
+    ticket = _fetch_dashboard_ws_ticket(client, mode="delta")
+    client.cookies.clear()
+
+    with client.websocket_connect(
+        "/ws/dashboard?mode=delta",
+        subprotocols=[
+            server._DASHBOARD_WS_SUBPROTOCOL,
+            f"{server._DASHBOARD_WS_TICKET_SUBPROTOCOL_PREFIX}{ticket}",
+        ],
+    ) as websocket:
+        payload = json.loads(websocket.receive_text())
+
+    assert payload["_mode"] == "full_snapshot"
+
+
 def test_dashboard_ws_rejects_invalid_or_expired_ticket(api_client, monkeypatch):
     client, _ = api_client
     monkeypatch.setattr(
@@ -740,6 +767,31 @@ def test_dashboard_ws_rejects_cross_origin_cookie_ticket(api_client, monkeypatch
         with client.websocket_connect(
             "/ws/dashboard?mode=delta",
             headers={"origin": "https://evil.example"},
+        ):
+            pass
+    assert origin_exc.value.code == 1008
+
+
+def test_dashboard_ws_rejects_cross_origin_subprotocol_ticket(api_client, monkeypatch):
+    client, _ = api_client
+    monkeypatch.setattr(
+        server,
+        "get_boot_config",
+        lambda: SimpleNamespace(
+            runtime=SimpleNamespace(app_env="production", dashboard_auth_disabled=False)
+        ),
+    )
+    ticket = _fetch_dashboard_ws_ticket(client, mode="delta")
+    client.cookies.clear()
+
+    with pytest.raises(WebSocketDisconnect) as origin_exc:
+        with client.websocket_connect(
+            "/ws/dashboard?mode=delta",
+            headers={"origin": "https://evil.example"},
+            subprotocols=[
+                server._DASHBOARD_WS_SUBPROTOCOL,
+                f"{server._DASHBOARD_WS_TICKET_SUBPROTOCOL_PREFIX}{ticket}",
+            ],
         ):
             pass
     assert origin_exc.value.code == 1008

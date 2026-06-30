@@ -4,7 +4,13 @@ const MAX_RETRIES = 5;
 const INITIAL_DELAY = 1000; // 1 second
 const MAX_DELAY = 30000; // 30 seconds
 
-type WebSocketUrlFactory = () => Promise<string>;
+export interface WebSocketConnectionDescriptor {
+  url: string;
+  protocols?: string | string[];
+}
+
+type WebSocketTarget = string | WebSocketConnectionDescriptor;
+type WebSocketUrlFactory = () => Promise<WebSocketTarget>;
 
 function mergeDashboardPayload(previous: unknown, incoming: unknown): unknown {
   if (
@@ -53,9 +59,9 @@ export const useWebSocket = (urlFactory: WebSocketUrlFactory) => {
     };
 
     const connect = async () => {
-      let resolvedUrl = '';
+      let resolvedTarget: WebSocketTarget;
       try {
-        resolvedUrl = await urlFactory();
+        resolvedTarget = await urlFactory();
       } catch (error) {
         console.error('WebSocket ticket fetch failed:', error);
         setIsStale(true);
@@ -67,7 +73,12 @@ export const useWebSocket = (urlFactory: WebSocketUrlFactory) => {
         return;
       }
 
-      ws.current = new WebSocket(resolvedUrl);
+      const descriptor = typeof resolvedTarget === 'string'
+        ? { url: resolvedTarget }
+        : resolvedTarget;
+      ws.current = descriptor.protocols
+        ? new WebSocket(descriptor.url, descriptor.protocols)
+        : new WebSocket(descriptor.url);
 
       ws.current.onopen = () => {
         console.log('WebSocket connected');

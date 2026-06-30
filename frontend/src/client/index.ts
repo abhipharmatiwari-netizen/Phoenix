@@ -1,5 +1,6 @@
 import { MatrixResponse } from '../types/controlTower';
 import { AlertsResponse, HealthSummary, MitigationsResponse } from '../types/health';
+import type { WebSocketConnectionDescriptor } from '../hooks/useWebSocket';
 import {
   AuditEvent,
   BrokerAccount,
@@ -14,6 +15,8 @@ import {
 const TENANT_STORAGE_KEY = 'phoenix.tenant_id';
 const AUTH_TOKEN_STORAGE_KEY = 'token';
 const REFRESH_TOKEN_STORAGE_KEY = 'refresh_token';
+const DASHBOARD_WS_SUBPROTOCOL = 'phoenix.dashboard.v1';
+const DASHBOARD_WS_TICKET_PROTOCOL_PREFIX = 'phoenix.ticket.';
 
 export const AUTH_SESSION_CHANGED_EVENT = 'phoenix-auth-session-changed';
 
@@ -585,7 +588,7 @@ function inferDashboardWebSocketBaseUrl(): string {
 
 export async function createDashboardWebSocketUrl(
   mode: 'delta' | 'full' = 'delta',
-): Promise<string> {
+): Promise<WebSocketConnectionDescriptor> {
   const payload = await request<DashboardWebSocketTicketResponse>({
     path: bffPath('/admin/dashboard/ws-ticket'),
     method: 'POST',
@@ -594,12 +597,18 @@ export async function createDashboardWebSocketUrl(
   });
   const url = new URL('/ws/dashboard', `${inferDashboardWebSocketBaseUrl()}/`);
   url.searchParams.set('mode', payload.mode || mode);
-  return url.toString();
+  return {
+    url: url.toString(),
+    protocols: [
+      DASHBOARD_WS_SUBPROTOCOL,
+      `${DASHBOARD_WS_TICKET_PROTOCOL_PREFIX}${payload.ticket}`,
+    ],
+  };
 }
 
 export async function buildDashboardWebSocketUrl(
   mode: 'delta' | 'full' = 'delta',
-): Promise<string> {
+): Promise<WebSocketConnectionDescriptor> {
   return createDashboardWebSocketUrl(mode);
 }
 

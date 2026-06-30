@@ -72,6 +72,8 @@ _REAL_ASYNCIO_SLEEP = asyncio.sleep
 _ACTIVE_DASHBOARD_SOCKETS: dict[int, WebSocket] = {}
 _ACTIVE_DASHBOARD_SOCKETS_LOCK = threading.Lock()
 _DASHBOARD_WS_TICKET_COOKIE = "phx_dashboard_ws_ticket"
+_DASHBOARD_WS_SUBPROTOCOL = "phoenix.dashboard.v1"
+_DASHBOARD_WS_TICKET_SUBPROTOCOL_PREFIX = "phoenix.ticket."
 
 
 def refresh_daily_levels_cache() -> bool:
@@ -279,6 +281,26 @@ def _dashboard_ws_path(websocket: WebSocket) -> str:
     url = getattr(websocket, "url", None)
     path = str(getattr(url, "path", "") or "").strip()
     return path or "/ws/dashboard"
+
+
+def _dashboard_ws_requested_subprotocols(websocket: WebSocket) -> tuple[str, ...]:
+    raw = str(websocket.headers.get("sec-websocket-protocol") or "")
+    return tuple(token.strip() for token in raw.split(",") if token.strip())
+
+
+def _dashboard_ws_ticket_from_subprotocol(websocket: WebSocket) -> str | None:
+    for token in _dashboard_ws_requested_subprotocols(websocket):
+        if token.startswith(_DASHBOARD_WS_TICKET_SUBPROTOCOL_PREFIX):
+            ticket = token[len(_DASHBOARD_WS_TICKET_SUBPROTOCOL_PREFIX):].strip()
+            return ticket or None
+    return None
+
+
+def _dashboard_ws_accept_subprotocol(websocket: WebSocket) -> str | None:
+    protocols = _dashboard_ws_requested_subprotocols(websocket)
+    if _DASHBOARD_WS_SUBPROTOCOL in protocols:
+        return _DASHBOARD_WS_SUBPROTOCOL
+    return None
 
 
 def _ctx_all_tenants(admin_ctx: AdminContext | None) -> bool:
@@ -2593,7 +2615,9 @@ async def dashboard_socket(websocket: WebSocket) -> None:
     resolved_mode = _dashboard_ws_mode_token(requested_mode)
     use_delta = resolved_mode == "delta"
     query_ticket = websocket.query_params.get("ticket")
-    ticket = websocket.cookies.get(_DASHBOARD_WS_TICKET_COOKIE)
+    cookie_ticket = websocket.cookies.get(_DASHBOARD_WS_TICKET_COOKIE)
+    protocol_ticket = _dashboard_ws_ticket_from_subprotocol(websocket)
+    ticket = protocol_ticket or cookie_ticket
     admin_ctx: AdminContext | None = None
     if query_ticket:
         await websocket.close(code=1008)
@@ -2612,7 +2636,7 @@ async def dashboard_socket(websocket: WebSocket) -> None:
         except ValueError:
             await websocket.close(code=1008)
             return
-    await websocket.accept()
+    await websocket.accept(subprotocol=_dashboard_ws_accept_subprotocol(websocket))
     _register_dashboard_socket(websocket)
     sender_task = asyncio.create_task(
         _dashboard_ws_sender_loop(
