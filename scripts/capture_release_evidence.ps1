@@ -15,14 +15,16 @@
 
     USAGE:
         .\scripts\capture_release_evidence.ps1 -AdminKey $env:ADMIN_API_KEY
+        .\scripts\capture_release_evidence.ps1 -ReadyzUrl http://127.0.0.1:8080/readyz
         .\scripts\capture_release_evidence.ps1  # reads ADMIN_API_KEY from session
 #>
 
 param(
     [string]$AdminKey    = $env:ADMIN_API_KEY,
     [string]$BaseUrl     = "http://localhost",
+    [string]$ReadyzUrl   = "",
     [string]$OutDir      = "$PSScriptRoot\..\docs\release-evidence",
-    [string]$BackendContainer = "phoenix-oci-backend",
+    [string]$BackendContainer = "phoenix-v9-backend",
     [int]   $TimeoutSec  = 30
 )
 
@@ -46,6 +48,37 @@ function Invoke-PhoenixApi {
     catch {
         Write-Error "API call to $Path failed: $_"
         throw
+    }
+}
+
+function Invoke-BackendReadyz {
+    if (-not [string]::IsNullOrWhiteSpace($ReadyzUrl)) {
+        try {
+            return Invoke-RestMethod `
+                -Uri $ReadyzUrl `
+                -TimeoutSec $TimeoutSec `
+                -Method Get
+        }
+        catch {
+            Write-Error "Backend-local readyz call to $ReadyzUrl failed: $_"
+            throw
+        }
+    }
+
+    if (-not (Get-Command -Name "docker" -ErrorAction SilentlyContinue)) {
+        throw "docker is required to capture backend-local /readyz. Install docker or pass -ReadyzUrl with a backend-local readiness URL."
+    }
+
+    $readyzJson = & docker exec $BackendContainer curl -fsS --max-time $TimeoutSec http://localhost:8080/readyz
+    if ($LASTEXITCODE -ne 0) {
+        throw "docker exec $BackendContainer curl http://localhost:8080/readyz failed with exit code $LASTEXITCODE."
+    }
+
+    try {
+        return ($readyzJson -join "`n") | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "Backend-local /readyz returned invalid JSON: $($_.Exception.Message)"
     }
 }
 
@@ -125,8 +158,8 @@ Write-Host "Base URL : $BaseUrl"
 Write-Host "Timestamp: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') IST"
 Write-Host ""
 
-Write-Host "Fetching /readyz ..." -ForegroundColor Yellow
-$readyz = Invoke-PhoenixApi "/readyz"
+Write-Host "Fetching backend-local /readyz ..." -ForegroundColor Yellow
+$readyz = Invoke-BackendReadyz
 
 Write-Host "Fetching /admin/release-evidence ..." -ForegroundColor Yellow
 $evidence = Invoke-PhoenixApi "/admin/release-evidence"
@@ -190,11 +223,11 @@ Write-Host "Bundle written to: $outFile" -ForegroundColor Cyan
 # ---------------------------------------------------------------------------
 Write-Host ""
 if ($allPass) {
-    Write-Host "RESULT: ALL CHECKS PASSED — deployment approved" -ForegroundColor Green
+    Write-Host "RESULT: ALL CHECKS PASSED - deployment approved" -ForegroundColor Green
     Write-Host "Attach $outFile to the deployment record / PR." -ForegroundColor Green
     exit 0
 } else {
-    Write-Host "RESULT: ONE OR MORE CHECKS FAILED — DO NOT APPROVE RELEASE" -ForegroundColor Red
+    Write-Host "RESULT: ONE OR MORE CHECKS FAILED - DO NOT APPROVE RELEASE" -ForegroundColor Red
     Write-Host "Review failures above, roll back if needed, and re-run after fix." -ForegroundColor Red
     exit 1
 }

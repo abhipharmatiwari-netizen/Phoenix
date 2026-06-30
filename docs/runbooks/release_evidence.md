@@ -139,6 +139,18 @@ The PowerShell helper remains available for local/operator workstations:
 .\scripts\capture_release_evidence.ps1 -BaseUrl http://localhost
 ```
 
+By default, the helper captures full backend-local readiness with
+`docker exec phoenix-v9-backend curl http://localhost:8080/readyz`; it does not
+validate internal readiness fields from the public nginx `/readyz`, which is
+redacted. For non-Docker or alternate container layouts, pass an explicit
+backend-local readiness URL:
+
+```powershell
+.\scripts\capture_release_evidence.ps1 `
+  -BaseUrl http://localhost `
+  -ReadyzUrl http://127.0.0.1:8080/readyz
+```
+
 The helper redacts secret-like fields before writing a bundle under
 `docs/release-evidence/`.
 

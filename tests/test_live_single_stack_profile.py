@@ -9,7 +9,9 @@ LIVE_COMPOSE_PATH = REPO_ROOT / "docker-compose.live.single.yml"
 DOCKERFILE_PATH = REPO_ROOT / "Dockerfile"
 NGINX_TEMPLATE_PATH = REPO_ROOT / "nginx" / "nginx.conf.template"
 SECRETSTORE_LAUNCHER_PATH = REPO_ROOT / "start-docker-secretstore.ps1"
+RELEASE_EVIDENCE_SCRIPT_PATH = REPO_ROOT / "scripts" / "capture_release_evidence.ps1"
 DOCKER_DESKTOP_RUNBOOK_PATH = REPO_ROOT / "docs" / "runbooks" / "docker_desktop_live_deployment.md"
+RELEASE_EVIDENCE_RUNBOOK_PATH = REPO_ROOT / "docs" / "runbooks" / "release_evidence.md"
 VULTR_TUNNEL_ENTRYPOINT_PATH = REPO_ROOT / "scripts" / "ops" / "vultr_reverse_tunnel_entrypoint.sh"
 VULTR_TUNNEL_FALLBACK_PATH = REPO_ROOT / "scripts" / "ops" / "start_vultr_reverse_tunnel.ps1"
 VULTR_TUNNEL_TASK_PATH = REPO_ROOT / "scripts" / "ops" / "install_vultr_reverse_tunnel_task.ps1"
@@ -154,3 +156,22 @@ def test_docker_desktop_runbook_keeps_only_redacted_compose_evidence():
     assert "PGPASSWORD" in runbook_text
     assert "<redacted>" in runbook_text
     assert "Do not retain an unredacted `docker compose config` output." in runbook_text
+
+
+def test_release_evidence_script_uses_backend_local_readyz():
+    script_text = _read_text(RELEASE_EVIDENCE_SCRIPT_PATH)
+    runbook_text = _read_text(RELEASE_EVIDENCE_RUNBOOK_PATH)
+
+    assert '[string]$BackendContainer = "phoenix-v9-backend"' in script_text
+    assert '[string]$ReadyzUrl   = ""' in script_text
+    assert "function Invoke-BackendReadyz" in script_text
+    assert "docker exec $BackendContainer curl -fsS --max-time $TimeoutSec http://localhost:8080/readyz" in script_text
+    assert 'Invoke-PhoenixApi "/readyz"' not in script_text
+    assert "Fetching backend-local /readyz" in script_text
+    assert "degraded_scope_count == 0" in script_text
+    assert "RESULT: ALL CHECKS PASSED - deployment approved" in script_text
+    assert "RESULT: ONE OR MORE CHECKS FAILED - DO NOT APPROVE RELEASE" in script_text
+
+    assert "docker exec phoenix-v9-backend curl http://localhost:8080/readyz" in runbook_text
+    assert "public nginx `/readyz`, which is" in runbook_text
+    assert "-ReadyzUrl http://127.0.0.1:8080/readyz" in runbook_text
