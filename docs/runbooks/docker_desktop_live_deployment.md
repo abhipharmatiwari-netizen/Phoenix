@@ -326,15 +326,30 @@ docker compose -f .\docker-compose.live.single.yml logs --tail 200 backend
 
 Look for evidence of broker login, universe build, websocket startup, indicator seeding, or strategy runtime startup. If the runtime behaves as operator/control-plane only, automated LIVE readiness has not been proven.
 
-### 5. Rendered manifest evidence
+### 5. Compose config and redacted manifest evidence
 
-Capture the resolved Compose model as release evidence:
+First validate the resolved Compose model without printing it:
 
 ```powershell
-docker compose -f .\docker-compose.live.single.yml config > .\compose.rendered.live.yml
+docker compose -f .\docker-compose.live.single.yml config --quiet
 ```
 
-Keep that file with the release evidence for the deployment.
+Do not retain an unredacted `docker compose config` output. The rendered model
+can include transient secret values such as `PGPASSWORD` for one-shot
+migration/preflight containers. If a manifest artifact is required for release
+evidence, retain only a redacted copy:
+
+```powershell
+docker compose -f .\docker-compose.live.single.yml config |
+  ForEach-Object {
+    $_ -replace '(^\s*(PGPASSWORD|CONTROL_PLANE_PG_PASSWORD|ADMIN_API_KEY|DEMO_AUTH_TOKEN_SECRET|ANGEL_POSTBACK_TOKEN|ADMIN_KILL_SWITCH_OVERRIDE):\s*).+$', '$1<redacted>'
+  } |
+  Set-Content -Encoding UTF8 .\compose.rendered.live.redacted.yml
+```
+
+Keep the `config --quiet` result and the redacted manifest with the release
+evidence. Delete any previously generated unredacted `compose.rendered.live.yml`
+from operator workstations.
 
 ### 6. Clean promotion artifact
 
@@ -344,7 +359,7 @@ Build the promotion artifact from the git-tracked source tree, not from a whole 
 python .\scripts\build_release_artifact.py --output .\release\phoenix-live-source.zip
 ```
 
-That artifact intentionally excludes local clutter such as `logs/`, `__pycache__/`, `.pytest_cache/`, `.venv/`, test trees, and temp output roots. Keep the generated zip with the rendered manifest as release evidence.
+That artifact intentionally excludes local clutter such as `logs/`, `__pycache__/`, `.pytest_cache/`, `.venv/`, test trees, and temp output roots. Keep the generated zip with the redacted rendered manifest as release evidence.
 
 ---
 
@@ -537,7 +552,7 @@ If balance sync does not recover within 30 minutes and the market is open:
 
 For each deployment, capture all of the following:
 
-- rendered Compose file from `docker compose config`
+- `docker compose config --quiet` result and redacted rendered Compose file
 - `docker compose ps` output
 - backend effective LIVE env output
 - `/health/summary` output

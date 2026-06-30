@@ -9,6 +9,7 @@ LIVE_COMPOSE_PATH = REPO_ROOT / "docker-compose.live.single.yml"
 DOCKERFILE_PATH = REPO_ROOT / "Dockerfile"
 NGINX_TEMPLATE_PATH = REPO_ROOT / "nginx" / "nginx.conf.template"
 SECRETSTORE_LAUNCHER_PATH = REPO_ROOT / "start-docker-secretstore.ps1"
+DOCKER_DESKTOP_RUNBOOK_PATH = REPO_ROOT / "docs" / "runbooks" / "docker_desktop_live_deployment.md"
 VULTR_TUNNEL_ENTRYPOINT_PATH = REPO_ROOT / "scripts" / "ops" / "vultr_reverse_tunnel_entrypoint.sh"
 VULTR_TUNNEL_FALLBACK_PATH = REPO_ROOT / "scripts" / "ops" / "start_vultr_reverse_tunnel.ps1"
 VULTR_TUNNEL_TASK_PATH = REPO_ROOT / "scripts" / "ops" / "install_vultr_reverse_tunnel_task.ps1"
@@ -86,6 +87,8 @@ def test_vultr_tunnel_sidecar_uses_liveness_not_trading_readiness():
     assert "PHOENIX_TUNNEL_LIVENESS_URL" in entrypoint_text
     assert "http://nginx/nginx-health" in entrypoint_text
     assert "Phoenix liveness check failed" in entrypoint_text
+    assert "PHOENIX_TUNNEL_READY_URL" not in entrypoint_text
+    assert "http://nginx/readyz" not in entrypoint_text
 
     assert 'LocalLivenessPath = "/nginx-health"' in fallback_text
     assert "Local Phoenix liveness" in fallback_text
@@ -114,3 +117,14 @@ def test_secretstore_launcher_redacts_capital_limits_json_output():
 
     assert 'if ($name -eq "CAPITAL_LIMITS_JSON")' in script_text
     assert "<present: redacted>" in script_text
+
+
+def test_docker_desktop_runbook_keeps_only_redacted_compose_evidence():
+    runbook_text = _read_text(DOCKER_DESKTOP_RUNBOOK_PATH)
+
+    assert "config > .\\compose.rendered.live.yml" not in runbook_text
+    assert "docker compose -f .\\docker-compose.live.single.yml config --quiet" in runbook_text
+    assert "compose.rendered.live.redacted.yml" in runbook_text
+    assert "PGPASSWORD" in runbook_text
+    assert "<redacted>" in runbook_text
+    assert "Do not retain an unredacted `docker compose config` output." in runbook_text

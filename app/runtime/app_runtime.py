@@ -416,6 +416,7 @@ class AppRuntime:
             "checked_at": None,
             "missing_tables": [],
             "missing_indexes": [],
+            "missing_columns": [],
         }
         self._startup_recovery_status: dict[str, object] = {
             "status": "unknown",
@@ -711,12 +712,18 @@ class AppRuntime:
                 settings=settings,
                 mode=effective_schema_mode,
             )
-            schema_ok = not bool(schema_result.missing_tables or schema_result.missing_indexes)
+            missing_columns = list(getattr(schema_result, "missing_columns", ()) or ())
+            schema_ok = not bool(
+                schema_result.missing_tables
+                or schema_result.missing_indexes
+                or missing_columns
+            )
             self._schema_status = {
                 "status": "ok" if schema_ok else "degraded",
                 "checked_at": schema_checked_at,
                 "missing_tables": list(schema_result.missing_tables or ()),
                 "missing_indexes": list(schema_result.missing_indexes or ()),
+                "missing_columns": missing_columns,
             }
         except Exception as exc:
             self._schema_status = {
@@ -724,6 +731,7 @@ class AppRuntime:
                 "checked_at": schema_checked_at,
                 "missing_tables": [],
                 "missing_indexes": [],
+                "missing_columns": [],
                 "error": str(exc),
             }
             raise

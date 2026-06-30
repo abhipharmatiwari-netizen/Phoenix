@@ -23,7 +23,12 @@ class _FakeCursor:
         self._rows = []
 
     def execute(self, sql):
-        key = "indexes" if "pg_indexes" in sql else "tables"
+        if "information_schema.columns" in sql:
+            key = "columns"
+        elif "pg_indexes" in sql:
+            key = "indexes"
+        else:
+            key = "tables"
         self._rows = list(self._rows_by_query.get(key, []))
 
     def fetchall(self):
@@ -37,10 +42,15 @@ class _FakeCursor:
 
 
 class _FakeConn:
-    def __init__(self, *, tables, indexes):
+    def __init__(self, *, tables, indexes, columns):
         self._rows_by_query = {
             "tables": [(name,) for name in tables],
             "indexes": [(name,) for name in indexes],
+            "columns": [
+                (table, column)
+                for table, table_columns in columns.items()
+                for column in table_columns
+            ],
         }
 
     def cursor(self):
@@ -53,12 +63,23 @@ class _FakeConn:
         return False
 
 
-def _patch_schema_probe(monkeypatch, *, tables, indexes):
+def _required_columns():
+    return {
+        table: set(columns)
+        for table, columns in schema_guard._REQUIRED_COLUMNS.items()
+    }
+
+
+def _patch_schema_probe(monkeypatch, *, tables, indexes, columns=None):
     monkeypatch.setattr(schema_guard, "get_control_plane_dsn", lambda _settings: "dsn")
     monkeypatch.setattr(
         schema_guard,
         "connect_with_retry",
-        lambda *_args, **_kwargs: _FakeConn(tables=tables, indexes=indexes),
+        lambda *_args, **_kwargs: _FakeConn(
+            tables=tables,
+            indexes=indexes,
+            columns=columns or _required_columns(),
+        ),
     )
 
 
@@ -97,6 +118,38 @@ def test_schema_guard_reports_missing_strategy_config_candidates(monkeypatch):
     assert "strategy_config_candidates" in result.missing_tables
     assert "idx_strategy_config_candidates_cfg_status" in result.missing_indexes
     assert "idx_strategy_config_candidates_created_at" in result.missing_indexes
+
+
+def test_schema_guard_reports_missing_kill_switch_block_exits_column(monkeypatch):
+    columns = _required_columns()
+    columns["kill_switch_state"] = columns["kill_switch_state"] - {"block_exits"}
+    _patch_schema_probe(
+        monkeypatch,
+        tables=schema_guard._required_tables(_settings()),
+        indexes=set(schema_guard._REQUIRED_INDEXES),
+        columns=columns,
+    )
+
+    result = schema_guard.check_startup_schema(settings=_settings(), mode="warn")
+
+    assert "kill_switch_state.block_exits" in result.missing_columns
+
+
+def test_schema_guard_strict_mode_rejects_missing_kill_switch_block_exits_column(monkeypatch):
+    columns = _required_columns()
+    columns["kill_switch_state"] = columns["kill_switch_state"] - {"block_exits"}
+    _patch_schema_probe(
+        monkeypatch,
+        tables=schema_guard._required_tables(_settings()),
+        indexes=set(schema_guard._REQUIRED_INDEXES),
+        columns=columns,
+    )
+
+    with pytest.raises(RuntimeError, match="kill_switch_state.block_exits"):
+        schema_guard.check_startup_schema(
+            settings=_settings(schema_check_mode="strict"),
+            mode="strict",
+        )
 
 
 def test_schema_guard_strict_mode_rejects_missing_strategy_config_candidates(monkeypatch):

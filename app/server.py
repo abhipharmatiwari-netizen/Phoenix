@@ -1180,6 +1180,7 @@ def _build_docker_health_summary() -> dict[str, Any]:
         "checked_at": None,
         "missing_tables": [],
         "missing_indexes": [],
+        "missing_columns": [],
     }
     schema_getter = getattr(runtime, "schema_status", None)
     if callable(schema_getter):
@@ -1193,6 +1194,7 @@ def _build_docker_health_summary() -> dict[str, Any]:
                 "checked_at": now,
                 "missing_tables": [],
                 "missing_indexes": [],
+                "missing_columns": [],
                 "error": str(exc),
             }
 
@@ -1266,7 +1268,9 @@ def _build_docker_health_summary() -> dict[str, Any]:
         degraded_reasons.append("stream_worker_stopped")
     schema_status = str(schema_snapshot.get("status") or "unknown").strip().lower()
     schema_missing = bool(
-        schema_snapshot.get("missing_tables") or schema_snapshot.get("missing_indexes")
+        schema_snapshot.get("missing_tables")
+        or schema_snapshot.get("missing_indexes")
+        or schema_snapshot.get("missing_columns")
     )
     if schema_status in {"error", "degraded"} or schema_missing:
         degraded_reasons.append("schema_error")
@@ -1645,11 +1649,14 @@ async def readyz() -> JSONResponse:
                 "status": "error",
                 "missing_tables": [],
                 "missing_indexes": [],
+                "missing_columns": [],
                 "error": str(exc),
             }
         schema_status = str(schema_snapshot.get("status") or "unknown").strip().lower()
         schema_missing = bool(
-            schema_snapshot.get("missing_tables") or schema_snapshot.get("missing_indexes")
+            schema_snapshot.get("missing_tables")
+            or schema_snapshot.get("missing_indexes")
+            or schema_snapshot.get("missing_columns")
         )
         if schema_status in {"error", "degraded"} or schema_missing:
             payload["ready"] = False
@@ -1658,6 +1665,7 @@ async def readyz() -> JSONResponse:
                 "status": schema_status or "unknown",
                 "missing_tables": list(schema_snapshot.get("missing_tables") or []),
                 "missing_indexes": list(schema_snapshot.get("missing_indexes") or []),
+                "missing_columns": list(schema_snapshot.get("missing_columns") or []),
             }
             return JSONResponse(status_code=503, content=payload)
 

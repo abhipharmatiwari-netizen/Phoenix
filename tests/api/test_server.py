@@ -1497,6 +1497,44 @@ def test_readyz_returns_503_when_schema_guard_degraded(monkeypatch):
     assert payload["schema_guard"]["missing_tables"] == ["strategy_config_candidates"]
 
 
+def test_readyz_returns_503_when_schema_guard_reports_missing_columns(monkeypatch):
+    runtime = DummyAppRuntime()
+    runtime.ready = True
+    runtime.schema_state = {
+        "status": "degraded",
+        "checked_at": "2026-03-05T00:00:00Z",
+        "missing_tables": [],
+        "missing_indexes": [],
+        "missing_columns": ["kill_switch_state.block_exits"],
+    }
+    monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        server,
+        "get_settings",
+        lambda: SimpleNamespace(
+            enable_multi_hub=False,
+            log_level="INFO",
+            admin_api_key="test-admin",
+        ),
+    )
+    monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard())
+    monkeypatch.setattr(server, "instrument_controller", InstrumentController())
+    monkeypatch.setattr(
+        importlib.import_module("app.dashboard.auth"),
+        "get_settings",
+        lambda: SimpleNamespace(admin_api_key="test-admin"),
+    )
+
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        resp = client.get("/readyz")
+
+    assert resp.status_code == 503
+    payload = resp.json()
+    assert payload["ready"] is False
+    assert payload["reason"] == "schema_guard_degraded"
+    assert payload["schema_guard"]["missing_columns"] == ["kill_switch_state.block_exits"]
+
+
 def test_readyz_returns_503_when_live_universe_health_failed(monkeypatch):
     runtime = DummyAppRuntime()
     runtime.ready = True
