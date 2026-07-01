@@ -90,6 +90,12 @@ class KillSwitchClearValidation:
     failures: List[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class KillSwitchDurableRepairResult:
+    status: str
+    record: KillSwitchRecord
+
+
 # ---------------------------------------------------------------------------
 # Allowed transitions
 # ---------------------------------------------------------------------------
@@ -104,6 +110,18 @@ _TRANSITIONS: Dict[Tuple[KillSwitchState, str], KillSwitchState] = {
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _legacy_repair_reason(legacy_snapshot: Any, fallback_reason: str) -> str:
+    legacy_reason: Optional[str] = None
+    if isinstance(legacy_snapshot, dict):
+        legacy_reason = (
+            legacy_snapshot.get("legacy_reason")
+            or legacy_snapshot.get("reason")
+            or (legacy_snapshot.get("legacy_kill_switch") or {}).get("reason")
+        )
+    reason_text = str(legacy_reason or fallback_reason or "legacy_active").strip()
+    return f"durable_repair_from_legacy: {reason_text}"
 
 
 # Issue #220 (PR #233 review): cache schema-detection result so we don't
@@ -714,6 +732,89 @@ class KillSwitchManager:
         return manager
 
 
+def repair_durable_global_from_legacy(
+    ksm: KillSwitchManager,
+    legacy_snapshot: Any,
+    actor: str,
+    reason: str,
+    block_exits: bool = False,
+) -> KillSwitchDurableRepairResult:
+    """Repair GLOBAL/GLOBAL durable state after a legacy-active divergence.
+
+    This is intentionally scoped to the single authoritative GLOBAL record.
+    Calling it repeatedly will not create duplicate active rows: once the
+    durable GLOBAL record is TRIPPED or CLEAR_PENDING, the existing record is
+    returned unchanged with ``status="already_durable_active"``.
+    """
+    if ksm is None:
+        raise ValueError("KillSwitchManager is required")
+
+    repair_reason = _legacy_repair_reason(legacy_snapshot, reason)
+    now = _now_iso()
+    with ksm._lock:
+        key = ksm._key(KillSwitchScope.GLOBAL, "GLOBAL")
+        existing = ksm._records.get(key)
+        if existing is not None and existing.state in (
+            KillSwitchState.TRIPPED,
+            KillSwitchState.CLEAR_PENDING,
+        ):
+            return KillSwitchDurableRepairResult(
+                status="already_durable_active",
+                record=existing,
+            )
+
+        before_state = (
+            existing.state if existing is not None else KillSwitchState.INACTIVE
+        )
+        if existing is None:
+            record = KillSwitchRecord(
+                id=uuid4().hex,
+                state=KillSwitchState.TRIPPED,
+                scope=KillSwitchScope.GLOBAL,
+                scope_id="GLOBAL",
+                tripped_at=now,
+                tripped_by=actor,
+                trip_reason=repair_reason,
+                updated_at=now,
+                block_exits=bool(block_exits),
+            )
+            ksm._records[key] = record
+        else:
+            record = existing
+            record.state = KillSwitchState.TRIPPED
+            record.tripped_at = now
+            record.tripped_by = actor
+            record.trip_reason = repair_reason
+            record.cleared_at = None
+            record.cleared_by = None
+            record.clear_reason = None
+            record.clear_request_id = None
+            record.updated_at = now
+            record.block_exits = bool(block_exits)
+
+        ksm._emit_audit(
+            actor=actor,
+            action="kill_switch.durable_repair",
+            record=record,
+            before_state=before_state,
+            metadata={
+                "reason": repair_reason,
+                "operator_reason": reason,
+                "legacy_snapshot": legacy_snapshot if isinstance(legacy_snapshot, dict) else {},
+                "block_exits": bool(block_exits),
+                "status": "repaired",
+            },
+        )
+        logger.warning(
+            "Kill switch DURABLE REPAIR scope=GLOBAL scope_id=GLOBAL "
+            "actor=%s reason=%s block_exits=%s",
+            actor,
+            repair_reason,
+            bool(block_exits),
+        )
+        return KillSwitchDurableRepairResult(status="repaired", record=record)
+
+
 def get_kill_switch_state() -> dict:
     """Return a serializable snapshot of the current kill switch state.
 
@@ -793,9 +894,11 @@ def get_kill_switch_state() -> dict:
 __all__ = [
     "KillSwitchClearRequest",
     "KillSwitchClearValidation",
+    "KillSwitchDurableRepairResult",
     "KillSwitchManager",
     "KillSwitchRecord",
     "KillSwitchScope",
     "KillSwitchState",
     "get_kill_switch_state",
+    "repair_durable_global_from_legacy",
 ]

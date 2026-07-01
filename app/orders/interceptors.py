@@ -305,6 +305,11 @@ class GlobalKillSwitchInterceptor:
         ):
             return None
 
+        live_trade_mode = (
+            str(os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper()
+            == "LIVE"
+        )
+
         # Issue #220: env-var kill switch can choose to block exits too via
         # GLOBAL_KILL_BLOCK_EXITS=1. Default (env GLOBAL_KILL=1 alone) is
         # SOFT — entries blocked, exits allowed.
@@ -338,7 +343,65 @@ class GlobalKillSwitchInterceptor:
             # check below in case a durable record sets block_exits=True at
             # a more specific scope.
 
-        # Check durable KillSwitchManager (Architecture §12.1 — primary path in LIVE).
+        # First handle LIVE-only legacy/durable divergence.
+        if live_trade_mode:
+            try:
+                from app.hub.runtime import get_hub_runtime
+
+                runtime = get_hub_runtime()
+                compute_divergence = getattr(
+                    runtime, "compute_kill_switch_divergence", None
+                )
+                if not callable(compute_divergence):
+                    raise RuntimeError(
+                        "compute_kill_switch_divergence unavailable"
+                    )
+                divergence = compute_divergence()
+                if bool(divergence.get("divergent", False)):
+                    if not ctx.is_exit_order:
+                        reason = "kill_switch_divergence_legacy_active"
+                        log_event(
+                            logger,
+                            event_type="ORDER_REJECTED_KILL_SWITCH_DIVERGENCE",
+                            message=reason,
+                            level=logging.WARNING,
+                            tenant_id=ctx.tenant_id,
+                            broker_account_id=ctx.broker_account_id,
+                            strategy_id=ctx.strategy_id,
+                            correlation_id=ctx.correlation_id,
+                            request_id=ctx.request_id,
+                            instrument=ctx.order_req.symbol,
+                            origin="kill_switch_divergence",
+                            legacy_active=True,
+                            durable_global_active=False,
+                            legacy_reason=divergence.get("legacy_reason"),
+                            is_exit_order=bool(ctx.is_exit_order),
+                        )
+                        return _rejected_response(reason)
+                    # Risk-reducing exits remain eligible under divergence.
+                    # The durable manager check below can still block a HARD
+                    # trip, and GLOBAL_KILL_BLOCK_EXITS was handled above.
+            except Exception as _div_exc:
+                if not ctx.is_exit_order:
+                    reason = "kill_switch_divergence_unavailable"
+                    log_event(
+                        logger,
+                        event_type="ORDER_REJECTED_KILL_SWITCH_DIVERGENCE_UNAVAILABLE",
+                        message=reason,
+                        level=logging.ERROR,
+                        tenant_id=ctx.tenant_id,
+                        broker_account_id=ctx.broker_account_id,
+                        strategy_id=ctx.strategy_id,
+                        correlation_id=ctx.correlation_id,
+                        request_id=ctx.request_id,
+                        instrument=ctx.order_req.symbol,
+                        origin="kill_switch_divergence",
+                        error=str(_div_exc),
+                        is_exit_order=bool(ctx.is_exit_order),
+                    )
+                    return _rejected_response(reason)
+
+        # Check durable KillSwitchManager (primary path in LIVE).
         try:
             from app.hub.runtime import get_hub_runtime
             ksm = getattr(get_hub_runtime(), "kill_switch_manager", None)
@@ -388,8 +451,7 @@ class GlobalKillSwitchInterceptor:
             # unavailable — a missing KillSwitchManager means we cannot prove
             # the kill switch is inactive.  In non-LIVE modes, fail open so the
             # env-var path remains the fallback without disrupting PAPER/SHADOW.
-            _live = str(os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper() == "LIVE"
-            if _live:
+            if live_trade_mode:
                 reason = "kill_switch_manager_unavailable"
                 log_event(
                     logger,

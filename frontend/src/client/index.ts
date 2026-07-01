@@ -810,6 +810,22 @@ export interface KillSwitchPasswordClearResponse {
   message?: string;
 }
 
+export interface KillSwitchDurableRepairPayload {
+  reason: string;
+  block_exits?: boolean;
+}
+
+export interface KillSwitchDurableRepairResponse {
+  status: 'repaired' | 'already_durable_active';
+  record_id?: string | number | null;
+  state: string;
+  block_exits: boolean;
+  legacy_snapshot?: Record<string, unknown>;
+  divergence_before?: Record<string, unknown>;
+  divergence_after?: Record<string, unknown>;
+  post_recheck?: Record<string, unknown>;
+}
+
 export interface KillSwitchCancelAllPayload {
   reason: string;
   broker_account_id?: string | null;
@@ -908,6 +924,16 @@ export const KillSwitchService = {
   ): Promise<KillSwitchPasswordClearResponse> {
     return request<KillSwitchPasswordClearResponse>({
       path: bffPath('/admin/kill-switch/clear-with-password'),
+      method: 'POST',
+      body: payload,
+    });
+  },
+
+  repairDurableFromLegacy(
+    payload: KillSwitchDurableRepairPayload,
+  ): Promise<KillSwitchDurableRepairResponse> {
+    return request<KillSwitchDurableRepairResponse>({
+      path: bffPath('/admin/kill-switch/repair-durable-from-legacy'),
       method: 'POST',
       body: payload,
     });

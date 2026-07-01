@@ -218,12 +218,29 @@ Paste the returned token_id below.`;
 
   // Trip — operator confirms and provides reason; SOFT vs HARD selectable.
   const onTrip = () => {
+    const repairingDivergence = globalState === 'DIVERGENT';
     setConfirmDialog({
-      title: 'Trip GLOBAL kill switch',
-      prompt: 'This blocks new entry orders across every account. HARD trip also blocks exits.',
+      title: repairingDivergence
+        ? 'Repair durable GLOBAL kill switch'
+        : 'Trip GLOBAL kill switch',
+      prompt: repairingDivergence
+        ? 'Creates the missing durable GLOBAL trip from the active legacy kill-switch state. The repair is SOFT by default so risk-reducing exits remain allowed.'
+        : 'This blocks new entry orders across every account. HARD trip also blocks exits.',
       reasonLabel: 'Reason',
-      hardOption: true,
+      hardOption: !repairingDivergence,
       onConfirm: async (reason, hard) => {
+        if (repairingDivergence) {
+          const resp = await KillSwitchService.repairDurableFromLegacy({
+            reason,
+            block_exits: false,
+          });
+          setActionFeedback(
+            resp.status === 'already_durable_active'
+              ? 'Durable GLOBAL kill switch is already active.'
+              : 'Durable GLOBAL kill switch repaired from legacy state.',
+          );
+          return;
+        }
         await KillSwitchService.trip({
           scope: 'GLOBAL',
           scope_id: 'GLOBAL',

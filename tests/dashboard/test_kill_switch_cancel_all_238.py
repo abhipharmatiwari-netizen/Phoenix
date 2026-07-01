@@ -283,6 +283,7 @@ def _legacy_recovery_runtime(
     risk_manager: _LegacyRecoveryRiskManager,
     positions: list[Any],
     orders: list[Any],
+    durable_global_active: bool = True,
 ) -> SimpleNamespace:
     legacy_active = {"value": True, "reason": "legacy_auto_trip"}
 
@@ -295,6 +296,15 @@ def _legacy_recovery_runtime(
             "publisher_seen": True,
             "legacy_active": legacy_active["value"],
             "legacy_reason": legacy_active["reason"],
+        }
+
+    def compute_kill_switch_divergence() -> dict:
+        return {
+            "divergent": bool(legacy_active["value"]) and not durable_global_active,
+            "legacy_active": bool(legacy_active["value"]),
+            "durable_global_active": bool(durable_global_active),
+            "legacy_reason": legacy_active["reason"],
+            "publisher_seen": True,
         }
 
     runner = SimpleNamespace(
@@ -311,6 +321,7 @@ def _legacy_recovery_runtime(
         state_store=_LegacyRecoveryStateStore(positions=positions, orders=orders),
         record_legacy_kill_switch_state=record_legacy_kill_switch_state,
         get_legacy_kill_switch_snapshot=get_legacy_kill_switch_snapshot,
+        compute_kill_switch_divergence=compute_kill_switch_divergence,
     )
 
 

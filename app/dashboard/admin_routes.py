@@ -2214,6 +2214,44 @@ def _get_kill_switch_manager():
         raise HTTPException(status_code=503, detail=f"KillSwitchManager unavailable: {exc}") from exc
 
 
+def _compute_kill_switch_divergence_or_503(runtime: Any | None = None) -> dict[str, Any]:
+    try:
+        runtime = runtime or get_hub_runtime()
+        compute = getattr(runtime, "compute_kill_switch_divergence", None)
+        if not callable(compute):
+            raise RuntimeError("compute_kill_switch_divergence unavailable")
+        divergence = compute()
+        if not isinstance(divergence, dict):
+            raise RuntimeError("compute_kill_switch_divergence returned non-dict")
+        return dict(divergence)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Kill-switch divergence state unavailable: {exc}",
+        ) from exc
+
+
+def _legacy_snapshot_from_runtime(
+    runtime: Any,
+    divergence: dict[str, Any],
+) -> dict[str, Any]:
+    getter = getattr(runtime, "get_legacy_kill_switch_snapshot", None)
+    if callable(getter):
+        try:
+            snapshot = getter()
+            if isinstance(snapshot, dict):
+                return dict(snapshot)
+        except Exception:
+            pass
+    return {
+        "publisher_seen": bool(divergence.get("publisher_seen", False)),
+        "legacy_active": bool(divergence.get("legacy_active", False)),
+        "legacy_reason": divergence.get("legacy_reason"),
+    }
+
+
 def _save_kill_switch_state(ksm, *, rollback=None) -> None:
     """Persist KillSwitchManager state to Postgres.
 
@@ -2464,6 +2502,17 @@ class KillSwitchLegacyRecoveryRequest(BaseModel):
         description="Kill-switch override password from the vault-backed secret.",
     )
     reason: str = Field(..., description="Operator-entered recovery reason")
+
+
+class KillSwitchDurableRepairRequest(BaseModel):
+    reason: str = Field(..., description="Operator-entered durable repair reason")
+    block_exits: bool = Field(
+        False,
+        description=(
+            "False (default) preserves risk-reducing exits while repairing "
+            "a legacy-active divergence. True creates a HARD trip."
+        ),
+    )
 
 
 class StepUpIssueRequest(BaseModel):
@@ -2982,6 +3031,158 @@ def kill_switch_trip(
     }
 
 
+@router.post("/kill-switch/repair-durable-from-legacy")
+async def kill_switch_repair_durable_from_legacy(
+    payload: KillSwitchDurableRepairRequest,
+    request: Request,
+    ctx: AdminContext = Depends(get_admin_context),
+) -> dict:
+    """Create the durable GLOBAL trip required to repair legacy divergence."""
+    ctx.require_role(AdminRole.ADMIN)
+    check_rate_limit(request)
+    _require_scope_entitlement(ctx, "GLOBAL", "GLOBAL")
+    repair_reason = str(payload.reason or "").strip()
+    if not repair_reason:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="reason is required and must be non-empty",
+        )
+
+    try:
+        runtime = get_hub_runtime()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"hub runtime unavailable: {exc}",
+        ) from exc
+
+    divergence_before = _compute_kill_switch_divergence_or_503(runtime)
+    legacy_snapshot = _legacy_snapshot_from_runtime(runtime, divergence_before)
+    if not bool(divergence_before.get("legacy_active", False)):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": (
+                    "Durable repair refused because legacy kill-switch "
+                    "state is not active."
+                ),
+                "legacy_snapshot": legacy_snapshot,
+                "divergence_before": divergence_before,
+            },
+        )
+
+    from app.risk.kill_switch import (
+        KillSwitchScope,
+        KillSwitchState,
+        repair_durable_global_from_legacy,
+    )
+
+    ksm = getattr(runtime, "kill_switch_manager", None)
+    if ksm is None:
+        ksm = _get_kill_switch_manager()
+
+    existing = ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL")
+    active_states = (KillSwitchState.TRIPPED, KillSwitchState.CLEAR_PENDING)
+    if bool(divergence_before.get("durable_global_active", False)) or (
+        existing is not None and existing.state in active_states
+    ):
+        record = existing
+        if record is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "Divergence detector reports durable GLOBAL active, "
+                    "but no GLOBAL record is available."
+                ),
+            )
+        divergence_after = _compute_kill_switch_divergence_or_503(runtime)
+        post_recheck = await _kill_switch_post_recheck()
+        emit_audit_event(
+            actor=ctx.caller,
+            action="kill_switch_durable_repair_from_legacy",
+            resource_type="kill_switch",
+            resource_id=str(record.id),
+            metadata={
+                "status": "already_durable_active",
+                "reason": repair_reason,
+                "block_exits": bool(record.block_exits),
+                "legacy_snapshot": legacy_snapshot,
+                "divergence_before": divergence_before,
+                "divergence_after": divergence_after,
+                "request_id": _request_id_from_request(request),
+            },
+            request_id=_request_id_from_request(request),
+        )
+        return {
+            "status": "already_durable_active",
+            "record_id": record.id,
+            "state": record.state.value,
+            "block_exits": bool(record.block_exits),
+            "legacy_snapshot": legacy_snapshot,
+            "divergence_before": divergence_before,
+            "divergence_after": divergence_after,
+            "post_recheck": post_recheck,
+        }
+
+    if divergence_before.get("durable_global_active") is not False:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "message": (
+                    "Durable repair refused because durable GLOBAL state "
+                    "could not be verified inactive."
+                ),
+                "legacy_snapshot": legacy_snapshot,
+                "divergence_before": divergence_before,
+            },
+        )
+
+    rollback = _kill_switch_rollback_factory(
+        ksm, KillSwitchScope.GLOBAL, "GLOBAL",
+    )
+    result = repair_durable_global_from_legacy(
+        ksm,
+        legacy_snapshot,
+        actor=ctx.caller,
+        reason=repair_reason,
+        block_exits=bool(payload.block_exits),
+    )
+    record = result.record
+    rollback.set_expected_post_record(record)  # type: ignore[attr-defined]
+    if result.status != "already_durable_active":
+        _save_kill_switch_state(ksm, rollback=rollback)
+
+    divergence_after = _compute_kill_switch_divergence_or_503(runtime)
+    post_recheck = await _kill_switch_post_recheck()
+    emit_audit_event(
+        actor=ctx.caller,
+        action="kill_switch_durable_repair_from_legacy",
+        resource_type="kill_switch",
+        resource_id=str(record.id),
+        metadata={
+            "status": result.status,
+            "reason": repair_reason,
+            "block_exits": bool(record.block_exits),
+            "legacy_snapshot": legacy_snapshot,
+            "divergence_before": divergence_before,
+            "divergence_after": divergence_after,
+            "post_recheck": post_recheck,
+            "request_id": _request_id_from_request(request),
+        },
+        request_id=_request_id_from_request(request),
+    )
+    return {
+        "status": result.status,
+        "record_id": record.id,
+        "state": record.state.value,
+        "block_exits": bool(record.block_exits),
+        "legacy_snapshot": legacy_snapshot,
+        "divergence_before": divergence_before,
+        "divergence_after": divergence_after,
+        "post_recheck": post_recheck,
+    }
+
+
 @router.post("/kill-switch/request-clear")
 def kill_switch_request_clear(
     payload: KillSwitchClearRequestPayload,
@@ -3405,6 +3606,43 @@ async def kill_switch_legacy_recovery_clear(
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid scope: {payload.scope!r}")
 
+    try:
+        runtime = get_hub_runtime()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"hub runtime unavailable: {exc}",
+        ) from exc
+    divergence_before = _compute_kill_switch_divergence_or_503(runtime)
+    if bool(divergence_before.get("legacy_active", False)):
+        durable_global_active = divergence_before.get("durable_global_active")
+        if durable_global_active is False:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": (
+                        "Legacy recovery clear refused because legacy "
+                        "kill-switch state is active but durable GLOBAL is "
+                        "not active."
+                    ),
+                    "next_step": (
+                        "Run /admin/kill-switch/repair-durable-from-legacy first"
+                    ),
+                    "divergence_before": divergence_before,
+                },
+            )
+        if durable_global_active is not True:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "message": (
+                        "Legacy recovery clear refused because durable "
+                        "GLOBAL kill-switch state could not be verified."
+                    ),
+                    "divergence_before": divergence_before,
+                },
+            )
+
     legacy_snapshot = _clear_legacy_kill_switch_runtime_state(
         actor=ctx.caller,
         reason=str(payload.reason).strip(),
@@ -3477,6 +3715,7 @@ async def kill_switch_legacy_recovery_clear(
             "reason": payload.reason,
             "broker_flatness_evidence": evidence,
             "legacy_snapshot": legacy_snapshot,
+            "divergence_before": divergence_before,
             "durable_transitions": transitions,
             "post_recheck": post_recheck,
             "request_id": _request_id_from_request(request),
@@ -3492,6 +3731,7 @@ async def kill_switch_legacy_recovery_clear(
         "legacy_recovered": True,
         "durable_transitions": transitions,
         "broker_flatness_evidence": evidence,
+        "divergence_before": divergence_before,
         "post_recheck": post_recheck,
         "next_step": (
             "Review /readyz and /health/summary before re-enabling any strategy mutations."
