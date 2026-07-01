@@ -19,12 +19,14 @@
   display: flex;
   flex-direction: column;
   flex: 1;
+  min-width: 0;
   overflow: hidden;
 }
 
 .content {
   flex: 1;
   padding: 1rem;
+  min-width: 0;
   overflow-y: auto;
 }
 
@@ -53,15 +55,30 @@
 }
 
 .health-tiles {
-  display: flex;
-  gap: 1rem;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0.75rem;
+  width: 100%;
 }
 
 .health-tile {
-  padding: 1rem;
+  min-width: 0;
+  min-height: 128px;
+  padding: 0.875rem;
   border-radius: 8px;
   color: white;
-  min-width: 150px;
+  overflow-wrap: anywhere;
+}
+
+.health-tile h3 {
+  margin: 0 0 1rem;
+  font-size: 1.1rem;
+  line-height: 1.2;
+}
+
+.health-tile p {
+  margin: 0;
+  line-height: 1.35;
 }
 
 .health-tile.green {
@@ -74,4 +91,22 @@
 
 .health-tile.red {
   background-color: #dc3545;
+}
+
+@media (max-width: 1100px) {
+  .health-tiles {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .health-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 480px) {
+  .health-tiles {
+    grid-template-columns: 1fr;
+  }
 }

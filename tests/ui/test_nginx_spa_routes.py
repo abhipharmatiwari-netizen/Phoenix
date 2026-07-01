@@ -48,6 +48,22 @@ def test_nginx_runtime_contains_healthcheck_binary():
     assert "apt-get install -y --no-install-recommends wget" in dockerfile
 
 
+def test_overview_health_cards_fit_without_horizontal_scroll():
+    app_css = (REPO_ROOT / "frontend" / "src" / "App.css").read_text(encoding="utf-8")
+
+    assert ".main-content" in app_css
+    assert ".content" in app_css
+    assert ".health-tiles" in app_css
+    assert "min-width: 0;" in app_css
+
+    health_tiles_block = re.search(r"\.health-tiles\s+\{(?P<body>.*?)\}", app_css, flags=re.S)
+    assert health_tiles_block is not None
+    body = health_tiles_block.group("body")
+    assert "display: grid;" in body
+    assert "grid-template-columns: repeat(6, minmax(0, 1fr));" in body
+    assert "display: flex;" not in body
+
+
 def test_frontend_assets_do_not_fall_back_to_spa_html():
     content = NGINX_TEMPLATE.read_text()
 
