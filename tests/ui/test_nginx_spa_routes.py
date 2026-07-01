@@ -143,6 +143,10 @@ def test_alerts_and_mitigations_tolerate_missing_response_arrays():
     mitigations = (REPO_ROOT / "frontend" / "src" / "pages" / "Mitigations.tsx").read_text(encoding="utf-8")
 
     assert "Array.isArray(response?.alerts) ? response.alerts : []" in alerts
+    assert "DefaultService.getHealthSummary().catch(() => null)" in alerts
+    assert "healthSummary?.degraded_reasons || []" in alerts
+    assert "System Degraded" in alerts
+    assert "No alert rules are firing; the degradation is coming from readiness checks." in alerts
     assert "Array.isArray(response?.recent_events) ? response.recent_events : []" in mitigations
     assert "fault_counts: response?.fault_counts && typeof response.fault_counts === 'object'" in mitigations
 

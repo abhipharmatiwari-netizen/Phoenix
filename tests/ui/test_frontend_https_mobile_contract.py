@@ -79,6 +79,7 @@ def test_tables_and_preformatted_blocks_are_internally_scrollable():
     assert "min-width: max-content;" in app_css
     assert ".json-block" in app_css
     assert "overflow-wrap: anywhere;" in app_css
+    assert ".system-degraded-panel" in app_css
     assert "maxWidth: '100%'" in data_table
     assert "WebkitOverflowScrolling: 'touch'" in data_table
     assert "<div className=\"table-scroll\">" in alerts
