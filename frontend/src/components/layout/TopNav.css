@@ -4,19 +4,45 @@
   align-items: center;
   background-color: #111827;
   color: #d1d5db;
-  padding: 1rem 2rem;
+  gap: 1rem;
+  min-width: 0;
+  padding: calc(0.75rem + env(safe-area-inset-top)) calc(1rem + env(safe-area-inset-right)) 0.75rem calc(1rem + env(safe-area-inset-left));
+}
+
+.top-nav__brand {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
 }
 
 .top-nav .logo {
   font-size: 1.5rem;
   font-weight: bold;
   color: #ffffff;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.mobile-menu-button {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(31, 41, 55, 0.95);
+  color: #f9fafb;
+  cursor: pointer;
 }
 
 .tenant-selector {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  min-width: 0;
 }
 
 .tenant-selector input {
@@ -28,6 +54,7 @@
 }
 
 .tenant-selector button {
+  min-height: 44px;
   padding: 0.5rem 1rem;
   border-radius: 4px;
   border: none;
@@ -46,10 +73,19 @@
   display: flex;
   align-items: center;
   gap: 1rem;
+  min-width: 0;
 }
 
 .user-menu span {
   font-weight: 500;
+}
+
+.user-email {
+  min-width: 0;
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .user-menu .role-badge {
@@ -63,6 +99,8 @@
 }
 
 .user-menu button {
+  min-height: 44px;
+  padding: 0.35rem 0.5rem;
   background: none;
   border: none;
   color: #9ca3af;
@@ -76,6 +114,7 @@
 
 .tenant-selector select {
   min-width: 180px;
+  max-width: min(260px, 42vw);
   padding: 8px 10px;
   border-radius: 6px;
   border: 1px solid rgba(255, 255, 255, 0.16);
@@ -86,4 +125,80 @@
 .tenant-hint {
   font-size: 12px;
   color: rgba(226, 232, 240, 0.8);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  .top-nav {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    align-items: center;
+    padding: calc(0.45rem + env(safe-area-inset-top)) calc(0.75rem + env(safe-area-inset-right)) 0.45rem calc(0.75rem + env(safe-area-inset-left));
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .mobile-menu-button {
+    display: inline-flex;
+  }
+
+  .top-nav .logo {
+    font-size: 1.15rem;
+  }
+
+  .tenant-selector {
+    order: 3;
+    flex: 1 1 100%;
+    justify-content: stretch;
+  }
+
+  .tenant-selector select {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .tenant-selector button {
+    flex: 0 0 auto;
+    padding-inline: 0.75rem;
+  }
+
+  .user-menu {
+    margin-left: auto;
+    gap: 0.45rem;
+  }
+
+  .user-email {
+    max-width: 28vw;
+  }
+}
+
+@media (max-width: 430px) {
+  .role-badge,
+  .user-email {
+    display: none;
+  }
+
+  .tenant-selector {
+    gap: 0.4rem;
+  }
+
+  .tenant-selector button {
+    padding-inline: 0.6rem;
+  }
+}
+
+@media (max-height: 430px) and (orientation: landscape) {
+  .top-nav {
+    padding-top: calc(0.3rem + env(safe-area-inset-top));
+    padding-bottom: 0.3rem;
+  }
+
+  .mobile-menu-button,
+  .tenant-selector button,
+  .user-menu button {
+    min-height: 40px;
+    height: 40px;
+  }
 }

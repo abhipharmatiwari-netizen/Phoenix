@@ -23,14 +23,15 @@ def test_index_html_is_marked_non_cacheable_for_route_refreshes():
 
 
 def test_public_health_routes_use_redacted_backend_endpoints():
-    content = NGINX_TEMPLATE.read_text()
+    for template in (NGINX_TEMPLATE, NGINX_SSL_TEMPLATE):
+        content = template.read_text()
 
-    assert "location = /nginx-health" in content
-    assert 'return 200 "ok\\n";' in content
-    assert "proxy_pass http://backend/readyz-public;" in content
-    assert "proxy_pass http://backend/health/summary-public;" in content
-    assert "location = /health/alerts" in content
-    assert "location = /health/mitigations" in content
+        assert "location = /nginx-health" in content
+        assert 'return 200 "ok\\n";' in content
+        assert "proxy_pass http://backend/readyz-public;" in content
+        assert "proxy_pass http://backend/health/summary-public;" in content
+        assert "location = /health/alerts" in content
+        assert "location = /health/mitigations" in content
 
 
 def test_public_health_routes_use_internal_backend_host_header():
@@ -65,16 +66,17 @@ def test_overview_health_cards_fit_without_horizontal_scroll():
 
 
 def test_frontend_assets_do_not_fall_back_to_spa_html():
-    content = NGINX_TEMPLATE.read_text()
+    for template in (NGINX_TEMPLATE, NGINX_SSL_TEMPLATE):
+        content = template.read_text()
 
-    assert "location /static/" in content
-    assert "try_files $uri =404;" in content
-    assert "location = /manifest.json" in content
-    assert "try_files /manifest.json =404;" in content
-    assert "location = /favicon.svg" in content
-    assert "try_files /favicon.svg =404;" in content
-    assert "location = /favicon.ico" in content
-    assert "rewrite ^ /favicon.svg last;" in content
+        assert "location /static/" in content
+        assert "try_files $uri =404;" in content
+        assert "location = /manifest.json" in content
+        assert "try_files /manifest.json =404;" in content
+        assert "location = /favicon.svg" in content
+        assert "try_files /favicon.svg =404;" in content
+        assert "location = /favicon.ico" in content
+        assert "rewrite ^ /favicon.svg last;" in content
 
 
 def test_sensitive_probe_paths_do_not_fall_back_to_spa_html():

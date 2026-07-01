@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Outlet, useNavigate } from 'react-router-dom';
+import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import TopNav from './TopNav';
 import SideNav from './SideNav';
 import StaleBanner from '../shared/StaleBanner';
@@ -13,7 +13,9 @@ const Shell = () => {
   const [systemDegraded, setSystemDegraded] = useState(false);
   const [degradedMessage, setDegradedMessage] = useState('');
   const [showHelp, setShowHelp] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const navigate = useNavigate();
+  const location = useLocation();
 
   useEffect(() => {
     let active = true;
@@ -57,6 +59,23 @@ const Shell = () => {
 
   useKeyboardShortcut(shortcuts);
 
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    if (!mobileNavOpen) {
+      return undefined;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMobileNavOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [mobileNavOpen]);
+
   return (
     <div className="app-shell">
         <a href="#main-content" className="skip-to-content" 
@@ -64,9 +83,18 @@ const Shell = () => {
            onBlur={(e) => { (e.target as HTMLElement).style.top = '-40px'; }}>
           Skip to content
         </a>
-      <SideNav />
+      <SideNav isOpen={mobileNavOpen} onNavigate={() => setMobileNavOpen(false)} />
+      <button
+        type="button"
+        className={`side-nav-overlay${mobileNavOpen ? ' is-open' : ''}`}
+        aria-label="Close navigation"
+        onClick={() => setMobileNavOpen(false)}
+      />
       <div className="main-content">
-        <TopNav />
+        <TopNav
+          isMobileNavOpen={mobileNavOpen}
+          onMenuClick={() => setMobileNavOpen((open) => !open)}
+        />
         {systemDegraded && (
           <StaleBanner message={degradedMessage} variant="danger" />
         )}

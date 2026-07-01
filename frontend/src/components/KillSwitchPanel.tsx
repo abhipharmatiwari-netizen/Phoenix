@@ -338,6 +338,8 @@ Paste the returned token_id below.`;
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'center',
+          gap: '0.75rem',
+          flexWrap: 'wrap',
           marginBottom: '0.75rem',
         }}
       >
@@ -663,6 +665,7 @@ Paste the returned token_id below.`;
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
+            padding: 'calc(1rem + env(safe-area-inset-top)) calc(1rem + env(safe-area-inset-right)) calc(1rem + env(safe-area-inset-bottom)) calc(1rem + env(safe-area-inset-left))',
           }}
         >
           <div
@@ -671,7 +674,9 @@ Paste the returned token_id below.`;
               borderRadius: 12,
               padding: '1.5rem',
               maxWidth: 480,
-              width: '100%',
+              width: 'min(100%, 480px)',
+              maxHeight: 'calc(100dvh - 2rem - env(safe-area-inset-top) - env(safe-area-inset-bottom))',
+              overflowY: 'auto',
               boxShadow: '0 10px 25px rgba(0,0,0,0.15)',
             }}
           >
@@ -778,7 +783,7 @@ Paste the returned token_id below.`;
                 />
               </div>
             )}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', flexWrap: 'wrap' }}>
               <button
                 type="button"
                 onClick={closeDialog}
@@ -819,6 +824,7 @@ const btnStyle = (
   variant: 'solid' | 'outline' = 'solid',
 ): React.CSSProperties => ({
   padding: '0.5rem 0.875rem',
+  minHeight: 44,
   borderRadius: 6,
   border: `1px solid ${color}`,
   backgroundColor: variant === 'outline' ? 'transparent' : color,

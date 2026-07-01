@@ -40,28 +40,30 @@ const Alerts: React.FC = () => {
       {loading && <p>Loading...</p>}
       {error && <p>{error}</p>}
       {alerts.length > 0 && (
-        <table>
-          <thead>
-            <tr>
-              <th>Rule</th>
-              <th>Severity</th>
-              <th>State</th>
-              <th>Message</th>
-              <th>Value</th>
-            </tr>
-          </thead>
-          <tbody>
-            {alerts.map((alert, index) => (
-              <tr key={index}>
-                <td>{alert.rule_name}</td>
-                <td>{alert.severity}</td>
-                <td>{alert.state}</td>
-                <td>{alert.message}</td>
-                <td>{alert.value ?? '-'}</td>
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Rule</th>
+                <th>Severity</th>
+                <th>State</th>
+                <th>Message</th>
+                <th>Value</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {alerts.map((alert, index) => (
+                <tr key={index}>
+                  <td>{alert.rule_name}</td>
+                  <td>{alert.severity}</td>
+                  <td>{alert.state}</td>
+                  <td>{alert.message}</td>
+                  <td>{alert.value ?? '-'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
       {!loading && !error && alerts.length === 0 && <p>No alert rules are firing.</p>}
     </div>

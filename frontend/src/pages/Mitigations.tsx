@@ -55,29 +55,31 @@ const Mitigations: React.FC = () => {
           {mitigations.recent_events.length === 0 ? (
             <p>No mitigation events have been recorded.</p>
           ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>Rule</th>
-                  <th>Action</th>
-                  <th>Scope</th>
-                  <th>Fault Count</th>
-                </tr>
-              </thead>
-              <tbody>
-                {mitigations.recent_events.map((event) => (
-                  <tr key={`${event.rule_name}-${event.timestamp}`}>
-                    <td>{event.rule_name}</td>
-                    <td>{event.action}</td>
-                    <td>{event.scope_key ? `${event.scope_key}:${event.scope_value}` : 'global'}</td>
-                    <td>{event.fault_count}</td>
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Rule</th>
+                    <th>Action</th>
+                    <th>Scope</th>
+                    <th>Fault Count</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {mitigations.recent_events.map((event) => (
+                    <tr key={`${event.rule_name}-${event.timestamp}`}>
+                      <td>{event.rule_name}</td>
+                      <td>{event.action}</td>
+                      <td>{event.scope_key ? `${event.scope_key}:${event.scope_value}` : 'global'}</td>
+                      <td>{event.fault_count}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
           <h2>Fault Counts</h2>
-          <pre>{JSON.stringify(mitigations.fault_counts, null, 2)}</pre>
+          <pre className="json-block">{JSON.stringify(mitigations.fault_counts, null, 2)}</pre>
         </div>
       )}
     </div>

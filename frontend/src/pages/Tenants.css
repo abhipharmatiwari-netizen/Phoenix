@@ -47,7 +47,7 @@
   align-items: center;
   justify-content: center;
   gap: 0.4rem;
-  min-height: 34px;
+  min-height: 44px;
 }
 
 .primary-button {
@@ -72,8 +72,8 @@
 }
 
 .icon-button {
-  width: 34px;
-  height: 34px;
+  width: 44px;
+  height: 44px;
   background: #fff;
   border-color: #d1d5db;
   color: #374151;
@@ -312,7 +312,7 @@
   align-items: center;
   justify-content: center;
   z-index: 1000;
-  padding: 1rem;
+  padding: calc(1rem + env(safe-area-inset-top)) calc(1rem + env(safe-area-inset-right)) calc(1rem + env(safe-area-inset-bottom)) calc(1rem + env(safe-area-inset-left));
 }
 
 .tenant-modal {
@@ -320,7 +320,7 @@
   border-radius: 8px;
   box-shadow: 0 18px 50px rgba(17, 24, 39, 0.22);
   width: min(760px, 96vw);
-  max-height: 92vh;
+  max-height: calc(100dvh - 2rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
   overflow: auto;
 }
 

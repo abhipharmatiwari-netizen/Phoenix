@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { Menu } from 'react-feather';
 import { useAuth } from '../../auth/AuthContext';
 import { AdminService, getTenantId, setTenantId as persistTenantId } from '../../client';
 import './TopNav.css';
@@ -8,7 +9,12 @@ interface TenantOption {
   label: string;
 }
 
-const TopNav: React.FC = () => {
+interface TopNavProps {
+  isMobileNavOpen?: boolean;
+  onMenuClick?: () => void;
+}
+
+const TopNav: React.FC<TopNavProps> = ({ isMobileNavOpen = false, onMenuClick }) => {
   const { user, logout } = useAuth();
   const [tenantId, setTenantId] = useState(getTenantId());
   const [tenantOptions, setTenantOptions] = useState<TenantOption[]>([]);
@@ -88,7 +94,21 @@ const TopNav: React.FC = () => {
 
   return (
     <div className="top-nav">
-      <div className="logo">Phoenix</div>
+      <div className="top-nav__brand">
+        {onMenuClick && (
+          <button
+            type="button"
+            className="mobile-menu-button"
+            aria-label={isMobileNavOpen ? 'Close navigation' : 'Open navigation'}
+            aria-expanded={isMobileNavOpen}
+            aria-controls="primary-navigation"
+            onClick={onMenuClick}
+          >
+            <Menu size={20} aria-hidden="true" />
+          </button>
+        )}
+        <div className="logo">Phoenix</div>
+      </div>
       <div className="tenant-selector">
         {sortedTenantOptions.length > 0 ? (
           <>
@@ -112,7 +132,7 @@ const TopNav: React.FC = () => {
         )}
       </div>
       <div className="user-menu">
-        <span>{user?.email || 'User'}</span>
+        <span className="user-email">{user?.email || 'User'}</span>
         <span className="role-badge">{user?.role || 'viewer'}</span>
         <button type="button" onClick={logout}>
           Logout
