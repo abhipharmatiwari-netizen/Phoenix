@@ -2690,7 +2690,9 @@ async def _collect_legacy_recovery_flatness_evidence(ctx: AdminContext) -> tuple
                 blockers.append(f"{account_id}: broker positions unavailable: {exc}")
         elif state_store is not None and callable(getattr(state_store, "get_positions", None)):
             try:
-                positions = list(state_store.get_positions(account_id) or [])
+                positions = _normalise_positions_payload(
+                    state_store.get_positions(account_id)
+                )
                 position_source = "state_store"
             except Exception as exc:
                 blockers.append(f"{account_id}: state-store positions unavailable: {exc}")

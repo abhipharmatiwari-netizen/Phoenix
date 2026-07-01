@@ -382,6 +382,34 @@ def test_legacy_recovery_flatness_accepts_positions_fetch_result(monkeypatch):
     assert evidence[0]["open_position_count"] == 0
 
 
+def test_legacy_recovery_state_store_flatness_accepts_positions_fetch_result(
+    monkeypatch,
+):
+    rm = _LegacyRecoveryRiskManager()
+    runtime = _legacy_recovery_runtime(
+        risk_manager=rm,
+        positions=[],
+        orders=[],
+    )
+    runtime.state_store = SimpleNamespace(
+        get_positions=lambda _account_id: PositionsFetchResult(
+            status=PositionsStatus.OK,
+            positions=[{"symbol": "NIFTY", "netqty": 0}],
+            reason="ok",
+        ),
+        get_orders=lambda _account_id: [{"order_id": "ord1", "status": "COMPLETE"}],
+    )
+    monkeypatch.setattr(admin_routes, "get_hub_runtime", lambda: runtime)
+
+    evidence, blockers = asyncio.run(
+        _collect_legacy_recovery_flatness_evidence(_mk_bearer_admin())
+    )
+
+    assert blockers == []
+    assert evidence[0]["position_source"] == "state_store"
+    assert evidence[0]["open_position_count"] == 0
+
+
 def test_legacy_recovery_refuses_when_broker_orders_open(monkeypatch, tmp_path):
     from app.risk.kill_switch import KillSwitchManager, KillSwitchScope, KillSwitchState
 

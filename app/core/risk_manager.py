@@ -2751,6 +2751,23 @@ class RiskManager:
         return None
 
     @staticmethod
+    def _normalise_positions_result_for_flat_check(value: Any) -> Optional[list[Any]]:
+        status_value = getattr(value, "status", None)
+        if status_value is not None and hasattr(value, "positions"):
+            status_text = str(
+                getattr(status_value, "value", status_value) or ""
+            ).strip().upper()
+            if status_text and status_text != "OK":
+                return None
+            return list(getattr(value, "positions", None) or [])
+        if isinstance(value, dict):
+            return list(value.get("data") or value.get("positions") or [])
+        try:
+            return list(value or [])
+        except TypeError:
+            return None
+
+    @staticmethod
     def _risk_state_positions_have_open_qty(value: Any) -> bool:
         if not value:
             return False
@@ -2853,13 +2870,22 @@ class RiskManager:
         if not callable(get_positions):
             return False
         try:
-            positions = list(get_positions(account_id) or [])
+            positions = self._normalise_positions_result_for_flat_check(
+                get_positions(account_id)
+            )
         except Exception as exc:
             logger.warning(
                 "risk_manager.stale_legacy_clear_skipped: account=%s "
                 "state_store_positions_unavailable=%s",
                 account_id,
                 exc,
+            )
+            return False
+        if positions is None:
+            logger.warning(
+                "risk_manager.stale_legacy_clear_skipped: account=%s "
+                "state_store_positions_not_ok",
+                account_id,
             )
             return False
         for position in positions:
@@ -2975,6 +3001,7 @@ class RiskManager:
         if not self._persisted_state_would_not_trip_kill_switch(persisted):
             return False
 
+        snapshot: dict[str, Any] = {}
         try:
             from app.hub.runtime import get_hub_runtime
 
@@ -2987,8 +3014,6 @@ class RiskManager:
         except Exception:
             return False
 
-        if bool((snapshot or {}).get("legacy_active", False)):
-            return False
         if not self._state_store_positions_flat_for_account(runtime):
             return False
         if not self._state_store_orders_flat_for_account(runtime):
@@ -2997,9 +3022,12 @@ class RiskManager:
         self._apply_persisted_flat_legacy_state(persisted)
         logger.warning(
             "risk_manager.stale_legacy_kill_switch_cleared: source=position_sync "
-            "account=%s state_path=%s reason=runtime_legacy_inactive_flat_state",
+            "account=%s state_path=%s reason=persisted_inactive_flat_state "
+            "legacy_snapshot_active=%s legacy_snapshot_reason=%s",
             self.broker_account_id or "",
             self.state_path,
+            bool((snapshot or {}).get("legacy_active", False)),
+            (snapshot or {}).get("legacy_reason"),
         )
         return True
 
@@ -3034,7 +3062,9 @@ class RiskManager:
         if not callable(get_positions):
             return None
         try:
-            broker_positions = get_positions(self.broker_account_id) or []
+            broker_positions = self._normalise_positions_result_for_flat_check(
+                get_positions(self.broker_account_id)
+            )
         except Exception as exc:
             logger.warning(
                 "risk_manager.authoritative_pnl_unavailable: account=%s "
@@ -3042,6 +3072,8 @@ class RiskManager:
                 self.broker_account_id,
                 exc,
             )
+            return None
+        if broker_positions is None:
             return None
         for position in broker_positions:
             net_qty = self._position_net_qty_for_flat_check(position)
@@ -3194,6 +3226,10 @@ class RiskManager:
             if should_activate:
                 self.kill_switch_activated = True
                 self.kill_switch_date = now_ts.astimezone(IST).date()
+                # A stale-clear/admin-clear episode may have marked the prior
+                # legacy trip as handled. A fresh same-day breach is a new
+                # episode and must bridge to the durable manager.
+                self._durable_kill_switch_bridge_succeeded = False
             has_open_positions = bool(self.open_positions)
             open_labels = list(self.open_positions.keys()) if has_open_positions else []
 
