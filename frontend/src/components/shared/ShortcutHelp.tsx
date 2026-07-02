@@ -20,6 +20,7 @@ const ShortcutHelp: React.FC<Props> = ({ onClose }) => (
     style={{
       position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)',
       display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+      padding: 'calc(1rem + env(safe-area-inset-top)) calc(1rem + env(safe-area-inset-right)) calc(1rem + env(safe-area-inset-bottom)) calc(1rem + env(safe-area-inset-left))',
     }}
     onClick={onClose}
     role="dialog"
@@ -28,7 +29,10 @@ const ShortcutHelp: React.FC<Props> = ({ onClose }) => (
     <div
       style={{
         backgroundColor: '#fff', borderRadius: 8, padding: '1.5rem',
-        maxWidth: 400, width: '90%', boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+        maxWidth: 400, width: 'min(100%, 400px)',
+        maxHeight: 'calc(100dvh - 2rem - env(safe-area-inset-top) - env(safe-area-inset-bottom))',
+        overflowY: 'auto',
+        boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
       }}
       onClick={(e) => e.stopPropagation()}
     >

@@ -240,16 +240,58 @@ function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, '');
 }
 
+function normalizeRelativeBaseUrl(value: string): string {
+  const normalized = `/${value.replace(/^\/+|\/+$/g, '')}`;
+  return normalized === '/' ? '' : normalized;
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  return normalized === 'localhost'
+    || normalized === '127.0.0.1'
+    || normalized === '::1';
+}
+
+function isHttpsPage(): boolean {
+  return typeof window !== 'undefined' && window.location.protocol === 'https:';
+}
+
+function sanitizeConfiguredHttpBaseUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return '';
+  }
+  if (trimmed.startsWith('/')) {
+    return normalizeRelativeBaseUrl(trimmed);
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (
+      parsed.protocol === 'http:'
+      && isHttpsPage()
+      && !isLoopbackHostname(parsed.hostname)
+    ) {
+      return '';
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return '';
+    }
+    return normalizeBaseUrl(parsed.toString());
+  } catch {
+    return '';
+  }
+}
+
 function inferBackendBaseUrl(): string {
   const configured = String(process.env.REACT_APP_BACKEND_URL || '').trim();
   if (configured) {
-    return normalizeBaseUrl(configured);
+    return sanitizeConfiguredHttpBaseUrl(configured);
   }
   if (typeof window !== 'undefined') {
     if (window.location.hostname === 'localhost' && window.location.port === '3000') {
       return 'http://localhost:8080';
     }
-    return normalizeBaseUrl(window.location.origin);
+    return '';
   }
   return 'http://localhost:8080';
 }
@@ -287,12 +329,29 @@ function buildUrl(
   path: string,
   query?: Record<string, string | number | boolean | undefined>,
 ): string {
-  const url = new URL(path.replace(/^\/+/, ''), `${normalizeBaseUrl(baseUrl)}/`);
+  const normalizedPath = `/${path.replace(/^\/+/, '')}`;
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+  if (!normalizedBaseUrl || normalizedBaseUrl.startsWith('/')) {
+    const relativePath = `${normalizedBaseUrl}${normalizedPath}`;
+    const params = new URLSearchParams();
+    Object.entries(query || {}).forEach(([key, value]) => {
+      if (value !== undefined) {
+        params.set(key, String(value));
+      }
+    });
+    const queryString = params.toString();
+    return queryString ? `${relativePath}?${queryString}` : relativePath;
+  }
+
+  const url = new URL(normalizedPath, `${normalizedBaseUrl}/`);
   Object.entries(query || {}).forEach(([key, value]) => {
     if (value !== undefined) {
       url.searchParams.set(key, String(value));
     }
   });
+  if (typeof window !== 'undefined' && url.origin === window.location.origin) {
+    return `${url.pathname}${url.search}${url.hash}`;
+  }
   return url.toString();
 }
 
@@ -618,10 +677,64 @@ function safeJsonParse(raw: string): unknown {
   }
 }
 
+function httpBaseUrlToWebSocketBaseUrl(baseUrl: string): string {
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+  if (!normalizedBaseUrl || normalizedBaseUrl.startsWith('/')) {
+    if (typeof window !== 'undefined') {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      return `${protocol}//${window.location.host}${normalizedBaseUrl}`;
+    }
+    return 'ws://localhost:8080';
+  }
+  try {
+    const parsed = new URL(normalizedBaseUrl);
+    parsed.protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+    return normalizeBaseUrl(parsed.toString());
+  } catch {
+    return typeof window !== 'undefined'
+      ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`
+      : 'ws://localhost:8080';
+  }
+}
+
+function sanitizeConfiguredWebSocketBaseUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return '';
+  }
+  if (trimmed.startsWith('/')) {
+    return httpBaseUrlToWebSocketBaseUrl(normalizeRelativeBaseUrl(trimmed));
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (
+      (parsed.protocol === 'http:' || parsed.protocol === 'ws:')
+      && isHttpsPage()
+      && !isLoopbackHostname(parsed.hostname)
+    ) {
+      return '';
+    }
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return httpBaseUrlToWebSocketBaseUrl(parsed.toString());
+    }
+    if (parsed.protocol === 'ws:' || parsed.protocol === 'wss:') {
+      return normalizeBaseUrl(parsed.toString());
+    }
+    return '';
+  } catch {
+    return '';
+  }
+}
+
 function inferDashboardWebSocketBaseUrl(): string {
   const configured = String(process.env.REACT_APP_DASHBOARD_WS_URL || '').trim();
-  const baseUrl = configured || BACKEND_BASE_URL;
-  return normalizeBaseUrl(baseUrl).replace(/^http/i, 'ws');
+  if (configured) {
+    const sanitized = sanitizeConfiguredWebSocketBaseUrl(configured);
+    if (sanitized) {
+      return sanitized;
+    }
+  }
+  return httpBaseUrlToWebSocketBaseUrl(BACKEND_BASE_URL);
 }
 
 export async function createDashboardWebSocketUrl(

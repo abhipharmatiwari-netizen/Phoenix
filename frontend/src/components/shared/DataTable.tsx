@@ -104,18 +104,32 @@ function DataTable<T extends Record<string, unknown>>({
   }, []);
 
   return (
-    <div>
-      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem', alignItems: 'center' }}>
+    <div style={{ minWidth: 0, maxWidth: '100%' }}>
+      <div style={{
+        display: 'flex',
+        gap: '0.5rem',
+        marginBottom: '0.75rem',
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        minWidth: 0,
+      }}>
         {filterable && (
           <input
             placeholder="Filter..." value={filter}
             onChange={(e) => setFilter(e.target.value)}
             aria-label="Filter table"
-            style={{ padding: '0.4rem 0.75rem', border: '1px solid #d1d5db', borderRadius: 4, flex: 1, maxWidth: 300 }}
+            style={{
+              padding: '0.55rem 0.75rem',
+              border: '1px solid #d1d5db',
+              borderRadius: 4,
+              flex: '1 1 220px',
+              maxWidth: 300,
+              minWidth: 0,
+            }}
           />
         )}
         {onExport && (
-          <button onClick={onExport} aria-label="Export to CSV" style={{ padding: '0.4rem 0.75rem', border: '1px solid #d1d5db', borderRadius: 4, cursor: 'pointer', backgroundColor: '#fff', fontSize: '0.8rem' }}>
+          <button onClick={onExport} aria-label="Export to CSV" style={{ padding: '0.55rem 0.75rem', border: '1px solid #d1d5db', borderRadius: 4, cursor: 'pointer', backgroundColor: '#fff', fontSize: '0.8rem' }}>
             Export CSV
           </button>
         )}
@@ -126,10 +140,12 @@ function DataTable<T extends Record<string, unknown>>({
         onScroll={useVirtual ? handleScroll : undefined}
         style={{
           overflowX: 'auto',
+          maxWidth: '100%',
+          WebkitOverflowScrolling: 'touch',
           ...(useVirtual ? { overflowY: 'auto', maxHeight: CONTAINER_HEIGHT } : {}),
         }}
       >
-        <table role="table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
+        <table role="table" style={{ width: '100%', minWidth: 'max-content', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
           <thead>
             <tr role="row">
               {columns.map((col) => (

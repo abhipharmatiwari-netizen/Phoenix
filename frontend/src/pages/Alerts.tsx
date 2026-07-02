@@ -82,7 +82,9 @@ const Alerts: React.FC = () => {
       {loading ? (
         <LoadingSpinner />
       ) : (
-        <DataTable columns={columns} data={data} emptyMessage="No alert rules are firing." />
+        <div className="table-scroll">
+          <DataTable columns={columns} data={data} emptyMessage="No alert rules are firing." />
+        </div>
       )}
     </div>
   );

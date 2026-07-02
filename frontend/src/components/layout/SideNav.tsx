@@ -19,110 +19,57 @@ import {
 } from 'react-feather';
 import './SideNav.css';
 
-const SideNav: React.FC = () => {
+interface NavItem {
+  to: string;
+  label: string;
+  icon: React.ReactNode;
+  end?: boolean;
+}
+
+interface SideNavProps {
+  isOpen?: boolean;
+  onNavigate?: () => void;
+}
+
+const NAV_ITEMS: NavItem[] = [
+  { to: '/', label: 'Overview', icon: <Home className="nav-icon" aria-hidden="true" />, end: true },
+  { to: '/safety', label: 'Safety', icon: <Heart className="nav-icon" aria-hidden="true" /> },
+  { to: '/positions', label: 'Positions', icon: <Archive className="nav-icon" aria-hidden="true" /> },
+  { to: '/orders', label: 'Orders', icon: <ShoppingCart className="nav-icon" aria-hidden="true" /> },
+  { to: '/strategies', label: 'Strategies', icon: <Activity className="nav-icon" aria-hidden="true" /> },
+  { to: '/accounts', label: 'Accounts', icon: <Users className="nav-icon" aria-hidden="true" /> },
+  { to: '/alerts', label: 'Alerts', icon: <AlertCircle className="nav-icon" aria-hidden="true" /> },
+  { to: '/mitigations', label: 'Mitigations', icon: <Shield className="nav-icon" aria-hidden="true" /> },
+  { to: '/trades', label: 'Trades', icon: <BarChart2 className="nav-icon" aria-hidden="true" /> },
+  { to: '/pnl', label: 'PnL', icon: <DollarSign className="nav-icon" aria-hidden="true" /> },
+  { to: '/audit', label: 'Audit', icon: <Clipboard className="nav-icon" aria-hidden="true" /> },
+  { to: '/release-evidence', label: 'Release Evidence', icon: <FileText className="nav-icon" aria-hidden="true" /> },
+  { to: '/control-tower', label: 'Control Tower', icon: <Sliders className="nav-icon" aria-hidden="true" /> },
+  { to: '/tenants', label: 'Tenants', icon: <Users className="nav-icon" aria-hidden="true" /> },
+  { to: '/admin/strategy-candidates', label: 'Candidates', icon: <GitPullRequest className="nav-icon" aria-hidden="true" /> },
+  { to: '/settings', label: 'Settings', icon: <Settings className="nav-icon" aria-hidden="true" /> },
+];
+
+const SideNav: React.FC<SideNavProps> = ({ isOpen = false, onNavigate }) => {
   return (
-    <nav className="side-nav" aria-label="Phoenix operator console">
+    <nav
+      id="primary-navigation"
+      className={`side-nav${isOpen ? ' is-open' : ''}`}
+      aria-label="Primary navigation"
+    >
       <div className="side-nav__brand">
         <span className="side-nav__mark">P</span>
         <span>Phoenix</span>
       </div>
       <ul>
-        <li>
-          <NavLink to="/">
-            <Home className="nav-icon" />
-            Overview
-          </NavLink>
-        </li>
-        <li>
-          <NavLink to="/safety">
-            <Heart className="nav-icon" />
-            Safety
-          </NavLink>
-        </li>
-        <li>
-          <NavLink to="/positions">
-            <Archive className="nav-icon" />
-            Positions
-          </NavLink>
-        </li>
-        <li>
-          <NavLink to="/orders">
-            <ShoppingCart className="nav-icon" />
-            Orders
-          </NavLink>
-        </li>
-        <li>
-          <NavLink to="/strategies">
-            <Activity className="nav-icon" />
-            Strategies
-          </NavLink>
-        </li>
-        <li>
-          <NavLink to="/accounts">
-            <Users className="nav-icon" />
-            Accounts
-          </NavLink>
-        </li>
-        <li>
-          <NavLink to="/alerts">
-            <AlertCircle className="nav-icon" />
-            Alerts
-          </NavLink>
-        </li>
-        <li>
-          <NavLink to="/mitigations">
-            <Shield className="nav-icon" />
-            Mitigations
-          </NavLink>
-        </li>
-        <li>
-          <NavLink to="/trades">
-            <BarChart2 className="nav-icon" />
-            Trades
-          </NavLink>
-        </li>
-        <li>
-          <NavLink to="/pnl">
-            <DollarSign className="nav-icon" />
-            PnL
-          </NavLink>
-        </li>
-        <li>
-          <NavLink to="/audit">
-            <Clipboard className="nav-icon" />
-            Audit
-          </NavLink>
-        </li>
-        <li>
-          <NavLink to="/release-evidence">
-            <FileText className="nav-icon" />
-            Release Evidence
-          </NavLink>
-        </li>
-        <li>
-          <NavLink to="/control-tower">
-            <Sliders className="nav-icon" />
-            Control Tower
-          </NavLink>
-        </li>
-        <li>
-          <NavLink to="/tenants">
-            <Users className="nav-icon" />
-            Tenants
-          </NavLink>
-        </li>
-        <li>
-          <NavLink to="/admin/strategy-candidates">
-            <GitPullRequest className="nav-icon" />
-            Candidates
-          </NavLink>
-        </li>
-        <li>
-          <NavLink to="/settings">
-            <Settings className="nav-icon" />
-            Settings
-          </NavLink>
-        </li>
+        {NAV_ITEMS.map((item) => (
+          <li key={item.to}>
+            <NavLink to={item.to} end={item.end} onClick={onNavigate}>
+              {item.icon}
+              <span>{item.label}</span>
+            </NavLink>
+          </li>
+        ))}
       </ul>
     </nav>
   );

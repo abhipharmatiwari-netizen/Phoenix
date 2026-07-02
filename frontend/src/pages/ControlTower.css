@@ -1,6 +1,6 @@
 .control-tower-container {
   padding: 2rem;
-  font-family: 'Inter', sans-serif;
+  font-family: inherit;
   max-width: 100%;
   overflow-x: auto;
 }

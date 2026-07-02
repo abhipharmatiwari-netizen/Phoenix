@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { Menu } from 'react-feather';
 import { useAuth } from '../../auth/AuthContext';
 import { AdminService, getTenantId, setTenantId as persistTenantId } from '../../client';
 import { ConsoleStatus, statusClass } from '../../lib/consoleUtils';
@@ -13,12 +14,16 @@ interface TopNavProps {
   mode?: string | null;
   diagnosticSource?: 'admin' | 'public' | 'unavailable';
   diagnosticStatus?: ConsoleStatus;
+  isMobileNavOpen?: boolean;
+  onMenuClick?: () => void;
 }
 
 const TopNav: React.FC<TopNavProps> = ({
   mode,
   diagnosticSource = 'unavailable',
   diagnosticStatus = 'unknown',
+  isMobileNavOpen = false,
+  onMenuClick,
 }) => {
   const { user, logout } = useAuth();
   const [tenantId, setTenantId] = useState(getTenantId());
@@ -100,6 +105,18 @@ const TopNav: React.FC<TopNavProps> = ({
   return (
     <div className="top-nav">
       <div className="top-nav__status">
+        {onMenuClick && (
+          <button
+            type="button"
+            className="mobile-menu-button"
+            aria-label={isMobileNavOpen ? 'Close navigation' : 'Open navigation'}
+            aria-expanded={isMobileNavOpen}
+            aria-controls="primary-navigation"
+            onClick={onMenuClick}
+          >
+            <Menu size={20} aria-hidden="true" />
+          </button>
+        )}
         <div className="logo">Phoenix Operator Console</div>
         <span className={`env-badge env-badge--${String(mode || 'UNKNOWN').toLowerCase()}`}>
           {String(mode || 'UNKNOWN').toUpperCase()}

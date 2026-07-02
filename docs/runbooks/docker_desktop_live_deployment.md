@@ -564,9 +564,22 @@ If balance sync does not recover within 30 minutes and the market is open:
 For each deployment, capture all of the following:
 
 - `docker compose config --quiet` result and redacted rendered Compose file
+- safe compose validation evidence using a non-secret env file or the approved
+  operator env for `docker-compose.live.single.yml`
 - `docker compose ps` output
 - backend effective LIVE env output
+- authenticated `/admin/health/summary` output
+- authenticated `/admin/release-evidence` output
 - `/health/summary` output
+- redacted public `/readyz` and `/health/summary` evidence
+- `/health/alerts` and `/health/mitigations` JSON evidence
+- blocked `/bff/health/summary`, `/bff/readyz`, and
+  `/bff/dashboard/status` evidence
+- admin console smoke output from `scripts/smoke/admin_console_smoke.py`
+- mobile console smoke output from `npm.cmd run test:e2e`
+- nginx route/security smoke output from
+  `scripts/smoke/nginx_security_smoke.py`
+- frontend build-output secret scan evidence
 - backend startup log excerpt showing startup validation succeeded
 - backend log excerpt showing stream-worker market-data/strategy startup for automated LIVE
 

@@ -320,6 +320,7 @@ test('safety page mobile uses authenticated admin summary', async ({ page }) => 
   await routeConsoleApis(page, counters);
 
   await loginAsAdmin(page);
+  await page.getByRole('button', { name: 'Open navigation' }).click();
   const adminSummary = page.waitForResponse((response) => (
     new URL(response.url()).pathname === '/bff/admin/health/summary'
     && response.status() === 200

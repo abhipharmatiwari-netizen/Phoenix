@@ -98,7 +98,13 @@ const Mitigations: React.FC = () => {
               <strong>{mitigations?.total_events ?? 0}</strong>
             </section>
           </div>
-          <DataTable columns={columns} data={data} emptyMessage="No mitigation events have been recorded." />
+          <div className="table-scroll">
+            <DataTable columns={columns} data={data} emptyMessage="No mitigation events have been recorded." />
+          </div>
+          <section className="evidence-panel">
+            <h2>Fault Counts</h2>
+            <pre className="json-block">{JSON.stringify(mitigations?.fault_counts || {}, null, 2)}</pre>
+          </section>
         </>
       )}
     </div>

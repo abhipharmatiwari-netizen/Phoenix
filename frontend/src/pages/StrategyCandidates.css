@@ -33,7 +33,7 @@
 
 .strategy-candidates-actions select,
 .review-reason input {
-  height: 2.25rem;
+  min-height: 44px;
   border: 1px solid #cbd5e1;
   border-radius: 6px;
   padding: 0 0.6rem;
@@ -45,7 +45,7 @@
 .icon-button,
 .approve-button,
 .reject-button {
-  min-height: 2.25rem;
+  min-height: 44px;
   border: 1px solid transparent;
   border-radius: 6px;
   padding: 0 0.75rem;
@@ -58,6 +58,8 @@
 }
 
 .icon-button {
+  width: auto;
+  height: auto;
   border-color: #cbd5e1;
   background: #f8fafc;
   color: #334155;
