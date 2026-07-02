@@ -36,9 +36,13 @@ export interface Subscription {
 }
 
 export interface Position {
+  tenant_id?: string;
+  broker_account_id?: string;
+  strategy_id?: string;
   symbol: string;
   quantity: number;
   net_qty: number;
+  broker_qty?: number;
   qty_lots: number;
   lot_size: number;
   avg_price: number;
@@ -48,14 +52,24 @@ export interface Position {
   side?: string;
   ltp?: number;
   unrealized_pnl?: number;
+  ownership_state?: string;
+  lifecycle_state?: string;
+  mark_ts?: string | null;
+  pnl_ts?: string | null;
+  reconciliation_state?: string;
 }
 
 export interface Order {
   order_id: string;
+  internal_order_id?: string;
+  broker_order_id?: string;
+  strategy_id?: string;
   symbol: string;
   side: 'BUY' | 'SELL';
   order_type: string;
   status: string;
+  lifecycle_state?: string;
+  outbox_state?: string;
   quantity: number;
   filled_qty?: number;
   filled_quantity?: number;
@@ -66,6 +80,9 @@ export interface Order {
   updated_at?: string;
   correlation_id?: string;
   request_id?: string;
+  exit_reason?: string;
+  retry_state?: string;
+  idempotency_key?: string;
   events?: OrderEvent[];
 }
 
@@ -122,6 +139,7 @@ export interface AuditEvent {
   resource_id: string;
   before?: Record<string, unknown>;
   after?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
   request_id?: string;
 }
 

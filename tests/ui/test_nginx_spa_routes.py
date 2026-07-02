@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -31,6 +32,8 @@ def test_public_health_routes_use_redacted_backend_endpoints():
     assert "proxy_pass http://backend/health/summary-public;" in content
     assert "location = /health/alerts" in content
     assert "location = /health/mitigations" in content
+    assert "Content-Security-Policy" in content
+    assert "Strict-Transport-Security" in content
 
 
 def test_public_health_routes_use_internal_backend_host_header():
@@ -111,13 +114,12 @@ def test_overview_tolerates_public_redacted_health_summary():
     overview = (REPO_ROOT / "frontend" / "src" / "pages" / "Overview.tsx").read_text(encoding="utf-8")
     client = (REPO_ROOT / "frontend" / "src" / "client" / "index.ts").read_text(encoding="utf-8")
 
-    assert "String(status || 'unknown').toLowerCase()" in overview
-    assert "healthSummary?.alerts?.firing_count ?? 0" in overview
-    assert "healthSummary?.degraded_reasons || []" in overview
-    assert "healthSummary?.schema_status || healthSummary?.schema?.status || 'unknown'" in overview
-    assert "publicHealth?.ready" in overview
+    assert "classifyOperatorHealth" in overview
+    assert "public summary proves reachability only" in overview
+    assert "Authenticated admin diagnostics unavailable" in overview
     assert "bffPath('/admin/health/summary')" in client
     assert "path: '/health/summary'" in client
+    assert "source: 'public'" in client
 
 
 def test_alerts_and_mitigations_tolerate_missing_response_arrays():
@@ -135,3 +137,55 @@ def test_safety_treats_omitted_public_watchdog_as_unknown():
     assert "runtimeStatus(health?.watchdog_running)" in safety
     assert "return { status: 'warning' as const, label: 'Unknown' };" in safety
     assert "trackedAccountCount ?? 'Unknown'" in safety
+    assert "classifyOperatorHealth" in safety
+    assert "healthSource !== 'admin'" in safety
+
+
+def test_admin_console_routes_are_wired():
+    app = (REPO_ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+    nav = (REPO_ROOT / "frontend" / "src" / "components" / "layout" / "SideNav.tsx").read_text(encoding="utf-8")
+
+    for route in (
+        "/strategies",
+        "/accounts",
+        "/audit",
+        "/release-evidence",
+        "/settings",
+    ):
+        assert f'path="{route}"' in app
+        assert f'to="{route}"' in nav
+
+
+def test_nginx_security_headers_are_hardened():
+    for template in (NGINX_TEMPLATE, NGINX_SSL_TEMPLATE):
+        content = template.read_text()
+        assert "Content-Security-Policy" in content
+        assert "frame-ancestors 'self'" in content
+        assert "X-Content-Type-Options \"nosniff\"" in content
+        assert "Referrer-Policy \"strict-origin-when-cross-origin\"" in content
+        assert "Strict-Transport-Security" in content
+        assert "script-src 'self'" in content
+
+
+def test_frontend_build_output_does_not_contain_secret_like_literals():
+    build_dir = REPO_ROOT / "frontend" / "build"
+    if not build_dir.exists():
+        pytest.skip("frontend build output not present")
+
+    suspicious = re.compile(
+        r"(BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY|"
+        r"AKIA[0-9A-Z]{16}|"
+        r"-----BEGIN|"
+        r"refresh_token['\"]?\s*[:=]\s*['\"][^'\"]{12,}|"
+        r"password['\"]?\s*[:=]\s*['\"][^'\"]{8,}|"
+        r"secret['\"]?\s*[:=]\s*['\"][^'\"]{8,})",
+        re.I,
+    )
+    checked = []
+    for path in build_dir.rglob("*"):
+        if path.suffix.lower() not in {".js", ".css", ".html", ".json"}:
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        checked.append(path)
+        assert not suspicious.search(text), path
+    assert checked

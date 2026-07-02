@@ -268,6 +268,8 @@ def _redact_health_summary_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "stream_worker_expected": payload.get("stream_worker_expected"),
         "stream_worker_running": payload.get("stream_worker_running"),
     }
+    if payload.get("trade_mode") is not None:
+        out["trade_mode"] = payload.get("trade_mode")
     if reason:
         out["reason"] = str(reason)
     return out
@@ -797,6 +799,8 @@ async def get_positions_legacy(
 class ToggleRequest(BaseModel):
     name: str
     enabled: bool
+    reason: str
+    step_up_token: str | None = None
 
 
 class InstrumentUpdateRequest(BaseModel):
@@ -1411,6 +1415,7 @@ def _build_docker_health_summary() -> dict[str, Any]:
         "timestamp": now,
         "schema_status": schema_status,
         "operating_mode": op_mode_snapshot.get("mode"),
+        "trade_mode": _readiness_trade_mode(),
         "stream_worker_running": stream_worker_running,
         "stream_worker_expected": stream_worker_expected,
         "watchdog_running": watchdog_running,
@@ -2337,11 +2342,42 @@ async def toggle_strategy(
     name = str(req.name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Missing strategy name")
+    reason = str(req.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail="reason is required and must be non-empty")
     canonical_name = canonicalize_strategy_name(
         name,
         source="/admin/strategies/toggle",
         preserve_unknown=True,
     )
+    if _readiness_trade_mode() == "LIVE":
+        if not req.step_up_token:
+            action = "strategy_enable" if req.enabled else "strategy_disable"
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "step_up_token is required to change strategy state in LIVE mode. "
+                    "Issue one first: POST /admin/step-up/issue "
+                    f"{{\"action_class\": \"{action}\", \"resource_id\": \"{canonical_name}\"}}."
+                ),
+            )
+        from app.security.step_up import DangerousActionClass, consume_step_up_token
+
+        action_class = (
+            DangerousActionClass.STRATEGY_ENABLE
+            if req.enabled
+            else DangerousActionClass.STRATEGY_DISABLE
+        )
+        if not consume_step_up_token(
+            token_id=req.step_up_token,
+            actor=ctx.caller,
+            action_class=action_class,
+            resource_id=canonical_name,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="step_up_token is invalid, expired, already used, or actor/action/resource mismatched.",
+            )
     previous = strategy_switchboard.is_enabled(canonical_name)
     strategy_switchboard.set_enabled(canonical_name, req.enabled)
     emit_audit_event(
@@ -2351,6 +2387,12 @@ async def toggle_strategy(
         resource_id=canonical_name,
         before={"enabled": previous},
         after={"enabled": req.enabled},
+        metadata={
+            "reason": reason,
+            "action_class": "strategy_enable" if req.enabled else "strategy_disable",
+            "trade_mode": _readiness_trade_mode(),
+            "request_id": getattr(request.state, "request_id", None),
+        },
     )
     log_event(
         logger,

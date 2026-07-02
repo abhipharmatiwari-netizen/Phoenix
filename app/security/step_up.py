@@ -235,6 +235,8 @@ def load_from_postgres() -> int:
 _RESOURCE_BOUND_ACTION_CLASSES: frozenset[DangerousActionClass] = frozenset({
     DangerousActionClass.KILL_SWITCH_CLEAR,
     DangerousActionClass.KILL_SWITCH_REARM,
+    DangerousActionClass.STRATEGY_ENABLE,
+    DangerousActionClass.STRATEGY_DISABLE,
 })
 
 

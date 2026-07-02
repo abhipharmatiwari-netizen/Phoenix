@@ -5,6 +5,7 @@ class Role(str, Enum):
     VIEWER = "viewer"
     OPERATOR = "operator"
     ADMIN = "admin"
+    BREAK_GLASS_ADMIN = "break_glass_admin"
 
 class User(BaseModel):
     id: str

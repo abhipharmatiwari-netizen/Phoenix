@@ -9,8 +9,13 @@ import Positions from './pages/Positions';
 import Orders from './pages/Orders';
 import Trades from './pages/Trades';
 import Pnl from './pages/Pnl';
+import Accounts from './pages/Accounts';
+import Audit from './pages/Audit';
 import ControlTower from './pages/ControlTower';
+import ReleaseEvidence from './pages/ReleaseEvidence';
 import Safety from './pages/Safety';
+import Settings from './pages/Settings';
+import Strategies from './pages/Strategies';
 import StrategyCandidates from './pages/StrategyCandidates';
 import Login from './pages/Login';
 import NotFound from './pages/NotFound';
@@ -32,11 +37,16 @@ function App() {
               <Route path="/mitigations" element={<Mitigations />} />
               <Route path="/positions" element={<Positions />} />
               <Route path="/orders" element={<Orders />} />
+              <Route path="/strategies" element={<Strategies />} />
+              <Route path="/accounts" element={<Accounts />} />
               <Route path="/trades" element={<Trades />} />
               <Route path="/pnl" element={<Pnl />} />
               <Route path="/control-tower" element={<ControlTower />} />
               <Route path="/admin/strategy-candidates" element={<StrategyCandidates />} />
               <Route path="/safety" element={<Safety />} />
+              <Route path="/audit" element={<Audit />} />
+              <Route path="/release-evidence" element={<ReleaseEvidence />} />
+              <Route path="/settings" element={<Settings />} />
             </Route>
           </Route>
           <Route path="*" element={<NotFound />} />

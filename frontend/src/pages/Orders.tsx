@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { TenantService } from '../client';
 import { BrokerAccount, Order } from '../types/trading';
 import DataTable, { Column } from '../components/shared/DataTable';
@@ -10,11 +10,17 @@ import OrderTimeline from '../components/shared/OrderTimeline';
 type OrderRow = Order & Record<string, unknown>;
 
 const STATUS_VARIANT: Record<string, 'ok' | 'warning' | 'error' | 'info' | 'unknown'> = {
-  complete: 'ok', filled: 'ok',
-  open: 'info', pending: 'info', submitted: 'info',
+  complete: 'ok',
+  completed: 'ok',
+  filled: 'ok',
+  open: 'info',
+  pending: 'info',
+  submitted: 'info',
   partial_fill: 'warning',
   cancelled: 'unknown',
-  rejected: 'error', failed: 'error',
+  canceled: 'unknown',
+  rejected: 'error',
+  failed: 'error',
 };
 
 const Orders: React.FC = () => {
@@ -65,69 +71,94 @@ const Orders: React.FC = () => {
 
   const filtered = useMemo(() => {
     if (statusFilter === 'all') return orders;
-    return orders.filter(o => o.status.toLowerCase() === statusFilter);
+    return orders.filter((order) => String(order.status || '').toLowerCase() === statusFilter);
   }, [orders, statusFilter]);
 
   const statuses = useMemo(() => {
-    const s = new Set(orders.map(o => o.status.toLowerCase()));
-    return ['all', ...Array.from(s).sort()];
+    const statusSet = new Set(orders.map((order) => String(order.status || '').toLowerCase()).filter(Boolean));
+    return ['all', ...Array.from(statusSet).sort()];
   }, [orders]);
 
   const columns: Column<OrderRow>[] = useMemo(() => [
-    { key: 'order_id', header: 'Order ID', render: (row) => (
-      <span style={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{row.order_id}</span>
-    )},
+    { key: 'order_id', header: 'Internal Order ID', render: (row) => (
+      <span style={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{row.internal_order_id || row.order_id}</span>
+    ) },
+    { key: 'broker_order_id', header: 'Broker Order ID', render: (row) => row.broker_order_id || row.order_id || 'Unknown' },
+    { key: 'strategy_id', header: 'Strategy', render: (row) => row.strategy_id || 'Unknown' },
     { key: 'symbol', header: 'Symbol' },
     { key: 'side', header: 'Side', render: (row) => (
       <span style={{ color: row.side === 'BUY' ? '#16a34a' : '#dc2626', fontWeight: 600 }}>{row.side}</span>
-    )},
-    { key: 'status', header: 'Status', render: (row) => (
-      <StatusBadge status={STATUS_VARIANT[row.status.toLowerCase()] || 'unknown'} label={row.status} />
-    )},
+    ) },
+    { key: 'status', header: 'Status', render: (row) => {
+      const status = String(row.status || 'unknown');
+      return <StatusBadge status={STATUS_VARIANT[status.toLowerCase()] || 'unknown'} label={status} />;
+    } },
+    { key: 'lifecycle_state', header: 'Lifecycle', render: (row) => row.lifecycle_state || row.status || 'Unknown' },
+    { key: 'outbox_state', header: 'Outbox', render: (row) => row.outbox_state || 'Unknown' },
     { key: 'order_type', header: 'Type' },
     { key: 'quantity', header: 'Qty' },
-    { key: 'filled_qty', header: 'Filled', render: (row) => String(row.filled_quantity ?? row.filled_qty ?? '—') },
-    { key: 'price', header: 'Price', render: (row) => row.price ? row.price.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—' },
-    { key: 'created_at', header: 'Created', render: (row) => row.created_at ? new Date(row.created_at).toLocaleString() : '—' },
+    { key: 'filled_qty', header: 'Filled', render: (row) => String(row.filled_quantity ?? row.filled_qty ?? '-') },
+    { key: 'exit_reason', header: 'Exit Reason', render: (row) => row.exit_reason || 'Unknown' },
+    { key: 'retry_state', header: 'Retry', render: (row) => row.retry_state || 'Unknown' },
+    { key: 'idempotency_key', header: 'Idempotency', render: (row) => row.idempotency_key ? 'Present' : 'Unknown' },
+    { key: 'price', header: 'Price', render: (row) => row.price ? row.price.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '-' },
+    { key: 'created_at', header: 'Created', render: (row) => row.created_at ? new Date(row.created_at).toLocaleString() : '-' },
   ], []);
 
   const handleRowClick = useCallback((row: OrderRow) => {
-    setExpandedOrderId(prev => prev === row.order_id ? null : row.order_id);
+    setExpandedOrderId((prev) => prev === row.order_id ? null : row.order_id);
   }, []);
 
-  const tableData: OrderRow[] = useMemo(() =>
-    filtered.map(o => ({ ...o } as OrderRow)),
-    [filtered]
-  );
+  const handleExport = useCallback(() => {
+    const header = 'Internal Order ID,Broker Order ID,Strategy,Symbol,Side,Status,Lifecycle,Outbox,Exit Reason,Retry,Idempotency,Created';
+    const rows = filtered.map((order) => [
+      order.internal_order_id || order.order_id || '',
+      order.broker_order_id || order.order_id || '',
+      order.strategy_id || '',
+      order.symbol,
+      order.side,
+      order.status,
+      order.lifecycle_state || '',
+      order.outbox_state || '',
+      order.exit_reason || '',
+      order.retry_state || '',
+      order.idempotency_key ? 'present' : '',
+      order.created_at || '',
+    ].join(','));
+    const blob = new Blob([header + '\n' + rows.join('\n')], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'orders-evidence.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [filtered]);
+
+  const tableData: OrderRow[] = useMemo(() => filtered.map((order) => ({ ...order } as OrderRow)), [filtered]);
 
   return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
-        <h1 style={{ margin: 0 }}>Orders</h1>
-        {accounts.length > 1 && (
-          <select
-            value={selectedAccountId}
-            onChange={(e) => setSelectedAccountId(e.target.value)}
-            aria-label="Select broker account"
-            style={{ padding: '0.4rem 0.75rem', border: '1px solid #d1d5db', borderRadius: 4 }}
-          >
-            {accounts.map(a => (
-              <option key={a.broker_account_id} value={a.broker_account_id}>
-                {a.display_name} ({a.trading_mode})
-              </option>
+    <div className="console-page">
+      <div className="page-header">
+        <div>
+          <h1>Orders</h1>
+          <p>Read-only order lifecycle, outbox, broker IDs, retry, exit reason, and idempotency evidence.</p>
+        </div>
+        <div className="toolbar">
+          {accounts.length > 1 && (
+            <select value={selectedAccountId} onChange={(e) => setSelectedAccountId(e.target.value)} aria-label="Select broker account">
+              {accounts.map((account) => (
+                <option key={account.broker_account_id} value={account.broker_account_id}>
+                  {account.display_name} ({account.trading_mode})
+                </option>
+              ))}
+            </select>
+          )}
+          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} aria-label="Filter by status">
+            {statuses.map((status) => (
+              <option key={status} value={status}>{status === 'all' ? 'All Statuses' : status.toUpperCase()}</option>
             ))}
           </select>
-        )}
-        <select
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-          aria-label="Filter by status"
-          style={{ padding: '0.4rem 0.75rem', border: '1px solid #d1d5db', borderRadius: 4 }}
-        >
-          {statuses.map(s => (
-            <option key={s} value={s}>{s === 'all' ? 'All Statuses' : s.toUpperCase()}</option>
-          ))}
-        </select>
+        </div>
       </div>
       {error && <StaleBanner message={error} variant="danger" />}
       {loading ? (
@@ -137,16 +168,15 @@ const Orders: React.FC = () => {
           <DataTable
             columns={columns}
             data={tableData}
+            onExport={handleExport}
             onRowClick={handleRowClick}
             rowKey={(row) => row.order_id}
             emptyMessage="No orders found"
           />
           {expandedOrderId && (
-            <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, margin: '0.5rem 0', padding: '0.5rem', backgroundColor: '#f9fafb' }}>
-              <h4 style={{ margin: '0 0 0.5rem 0.5rem', fontSize: '0.85rem', color: '#374151' }}>
-                Order Lifecycle — {expandedOrderId}
-              </h4>
-              <OrderTimeline events={orders.find(o => o.order_id === expandedOrderId)?.events || []} />
+            <div className="evidence-panel">
+              <h2>Order Lifecycle: {expandedOrderId}</h2>
+              <OrderTimeline events={orders.find((order) => order.order_id === expandedOrderId)?.events || []} />
             </div>
           )}
         </>

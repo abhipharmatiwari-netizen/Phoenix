@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { AdminService, getTenantId, setTenantId as persistTenantId } from '../../client';
+import { ConsoleStatus, statusClass } from '../../lib/consoleUtils';
 import './TopNav.css';
 
 interface TenantOption {
@@ -8,7 +9,17 @@ interface TenantOption {
   label: string;
 }
 
-const TopNav: React.FC = () => {
+interface TopNavProps {
+  mode?: string | null;
+  diagnosticSource?: 'admin' | 'public' | 'unavailable';
+  diagnosticStatus?: ConsoleStatus;
+}
+
+const TopNav: React.FC<TopNavProps> = ({
+  mode,
+  diagnosticSource = 'unavailable',
+  diagnosticStatus = 'unknown',
+}) => {
   const { user, logout } = useAuth();
   const [tenantId, setTenantId] = useState(getTenantId());
   const [tenantOptions, setTenantOptions] = useState<TenantOption[]>([]);
@@ -88,7 +99,15 @@ const TopNav: React.FC = () => {
 
   return (
     <div className="top-nav">
-      <div className="logo">Phoenix</div>
+      <div className="top-nav__status">
+        <div className="logo">Phoenix Operator Console</div>
+        <span className={`env-badge env-badge--${String(mode || 'UNKNOWN').toLowerCase()}`}>
+          {String(mode || 'UNKNOWN').toUpperCase()}
+        </span>
+        <span className={statusClass(diagnosticStatus)}>
+          {diagnosticSource === 'admin' ? 'Admin diagnostics' : diagnosticSource === 'public' ? 'Public reachability only' : 'Diagnostics unavailable'}
+        </span>
+      </div>
       <div className="tenant-selector">
         {sortedTenantOptions.length > 0 ? (
           <>

@@ -1,6 +1,19 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { DefaultService } from '../client';
-import { MitigationsResponse } from '../types/health';
+import DataTable, { Column } from '../components/shared/DataTable';
+import LoadingSpinner from '../components/shared/LoadingSpinner';
+import StatusBadge from '../components/shared/StatusBadge';
+import { MitigationEvent, MitigationsResponse } from '../types/health';
+
+type MitigationRow = MitigationEvent & Record<string, unknown>;
+
+function eventTimestamp(value: number): string {
+  if (!value) {
+    return 'Unknown';
+  }
+  const millis = value > 10_000_000_000 ? value : value * 1000;
+  return new Date(millis).toLocaleString();
+}
 
 const Mitigations: React.FC = () => {
   const [mitigations, setMitigations] = useState<MitigationsResponse | null>(null);
@@ -36,49 +49,57 @@ const Mitigations: React.FC = () => {
     };
 
     fetchMitigations();
-
+    const timer = window.setInterval(fetchMitigations, 30_000);
     return () => {
       active = false;
+      window.clearInterval(timer);
     };
   }, []);
 
+  const columns: Column<MitigationRow>[] = useMemo(() => [
+    { key: 'rule_name', header: 'Rule' },
+    { key: 'action', header: 'Action', render: (row) => <StatusBadge status="warning" label={String(row.action || 'unknown')} /> },
+    { key: 'scope_key', header: 'Affected Scope', render: (row) => row.scope_key ? `${row.scope_key}:${row.scope_value}` : 'Global' },
+    { key: 'fault_count', header: 'Fault Count' },
+    { key: 'timestamp', header: 'Timestamp', render: (row) => eventTimestamp(Number(row.timestamp || 0)) },
+    { key: 'details', header: 'Trigger Condition', render: (row) => row.details ? JSON.stringify(row.details) : 'Rule threshold exceeded' },
+    { key: 'recommended_action', header: 'Recommended Action', render: () => 'Inspect Safety, Positions, and Audit before clearing degraded state.' },
+  ], []);
+
+  const data = useMemo<MitigationRow[]>(
+    () => (mitigations?.recent_events || []).map((event) => ({ ...event })),
+    [mitigations],
+  );
+
   return (
-    <div>
-      <h1>Mitigations</h1>
-      {loading && <p>Loading...</p>}
-      {error && <p>{error}</p>}
-      {mitigations && (
+    <div className="console-page">
+      <div className="page-header">
         <div>
-          <p>Enabled: {mitigations.enabled ? 'Yes' : 'No'}</p>
-          <p>Triggered Events: {mitigations.total_events}</p>
-          <h2>Recent Events</h2>
-          {mitigations.recent_events.length === 0 ? (
-            <p>No mitigation events have been recorded.</p>
-          ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>Rule</th>
-                  <th>Action</th>
-                  <th>Scope</th>
-                  <th>Fault Count</th>
-                </tr>
-              </thead>
-              <tbody>
-                {mitigations.recent_events.map((event) => (
-                  <tr key={`${event.rule_name}-${event.timestamp}`}>
-                    <td>{event.rule_name}</td>
-                    <td>{event.action}</td>
-                    <td>{event.scope_key ? `${event.scope_key}:${event.scope_value}` : 'global'}</td>
-                    <td>{event.fault_count}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-          <h2>Fault Counts</h2>
-          <pre>{JSON.stringify(mitigations.fault_counts, null, 2)}</pre>
+          <h1>Mitigations</h1>
+          <p>Auto-mitigation events from /health/mitigations. This endpoint must return JSON, never SPA HTML.</p>
         </div>
+        {mitigations && (
+          <StatusBadge status={mitigations.enabled ? 'ok' : 'unknown'} label={mitigations.enabled ? 'Enabled' : 'Disabled'} />
+        )}
+      </div>
+
+      {error && <div className="notice notice--blocked">{error}</div>}
+      {loading ? (
+        <LoadingSpinner />
+      ) : (
+        <>
+          <div className="metric-grid">
+            <section className="metric-card">
+              <span>Rules</span>
+              <strong>{mitigations?.rule_count ?? 0}</strong>
+            </section>
+            <section className="metric-card">
+              <span>Total Events</span>
+              <strong>{mitigations?.total_events ?? 0}</strong>
+            </section>
+          </div>
+          <DataTable columns={columns} data={data} emptyMessage="No mitigation events have been recorded." />
+        </>
       )}
     </div>
   );

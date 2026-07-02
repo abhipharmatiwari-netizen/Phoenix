@@ -2,88 +2,94 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background-color: #111827;
-  color: #d1d5db;
-  padding: 1rem 2rem;
+  gap: 1rem;
+  background: #fff;
+  color: #1f2937;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #d9e0e8;
 }
 
-.top-nav .logo {
-  font-size: 1.5rem;
-  font-weight: bold;
-  color: #ffffff;
-}
-
-.tenant-selector {
+.top-nav__status {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
-.tenant-selector input {
-  padding: 0.5rem;
-  border-radius: 4px;
-  border: 1px solid #374151;
-  background-color: #1f2937;
-  color: #d1d5db;
+.top-nav .logo {
+  font-size: 1rem;
+  font-weight: 900;
+  color: #111827;
+  white-space: nowrap;
 }
 
-.tenant-selector button {
-  padding: 0.5rem 1rem;
-  border-radius: 4px;
-  border: none;
-  background-color: #2563eb;
-  color: #ffffff;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background-color 0.2s;
-}
-
-.tenant-selector button:hover {
-  background-color: #1d4ed8;
-}
-
+.tenant-selector,
 .user-menu {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.tenant-selector button,
+.user-menu button {
+  padding: 0.45rem 0.7rem;
+  border-radius: 6px;
+  border: 1px solid #cdd5df;
+  background: #fff;
+  color: #1f2937;
+  font-weight: 700;
+  cursor: pointer;
 }
 
 .user-menu span {
-  font-weight: 500;
+  font-weight: 700;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .user-menu .role-badge {
-  background-color: #374151;
-  color: #9ca3af;
+  background: #e5e7eb;
+  color: #374151;
   padding: 0.25rem 0.5rem;
   border-radius: 9999px;
-  font-size: 0.75rem;
-  font-weight: 600;
+  font-size: 0.72rem;
+  font-weight: 800;
   text-transform: uppercase;
-}
-
-.user-menu button {
-  background: none;
-  border: none;
-  color: #9ca3af;
-  cursor: pointer;
-  transition: color 0.2s;
-}
-
-.user-menu button:hover {
-  color: #ffffff;
 }
 
 .tenant-selector select {
   min-width: 180px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  background: rgba(15, 23, 42, 0.8);
-  color: #f8fafc;
 }
 
 .tenant-hint {
   font-size: 12px;
-  color: rgba(226, 232, 240, 0.8);
+  color: #64748b;
+}
+
+@media (max-width: 900px) {
+  .top-nav {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .tenant-selector,
+  .user-menu {
+    width: 100%;
+  }
+}
+
+@media (max-width: 520px) {
+  .top-nav .logo {
+    width: 100%;
+  }
+
+  .tenant-selector select,
+  .tenant-selector button,
+  .user-menu button {
+    width: 100%;
+  }
 }

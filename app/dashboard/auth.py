@@ -397,7 +397,7 @@ def _is_auth_required() -> bool:
 
 def _admin_role_from_user_role(role: object) -> AdminRole:
     token = role.value if isinstance(role, Role) else str(role or "").strip().lower()
-    if token == Role.ADMIN.value:
+    if token in {Role.ADMIN.value, "break_glass_admin"}:
         return AdminRole.ADMIN
     if token == Role.OPERATOR.value:
         return AdminRole.OPERATOR
