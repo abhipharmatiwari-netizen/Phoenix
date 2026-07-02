@@ -89,6 +89,10 @@ function Redact-Evidence {
         return $null
     }
 
+    if ($Value -is [string] -or $Value -is [System.ValueType]) {
+        return $Value
+    }
+
     if ($Value -is [System.Collections.IDictionary]) {
         $copy = [ordered]@{}
         foreach ($key in $Value.Keys) {
@@ -214,7 +218,9 @@ $bundle = [PSCustomObject]@{
 }
 
 $redactedBundle = Redact-Evidence $bundle
-$redactedBundle | ConvertTo-Json -Depth 20 | Set-Content -Path $outFile -Encoding UTF8
+$jsonText = ($redactedBundle | ConvertTo-Json -Depth 20) -replace "`r`n", "`n"
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($outFile, "$jsonText`n", $utf8NoBom)
 Write-Host ""
 Write-Host "Bundle written to: $outFile" -ForegroundColor Cyan
 
