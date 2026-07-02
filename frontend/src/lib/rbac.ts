@@ -3,6 +3,7 @@ export enum Role {
   READONLY = 'readonly',
   OPERATOR = 'operator',
   ADMIN = 'admin',
+  BREAK_GLASS_ADMIN = 'break_glass_admin',
 }
 
 export interface User {
@@ -19,6 +20,7 @@ const ROLE_PRIORITY: Record<Role, number> = {
   [Role.READONLY]: 0,
   [Role.OPERATOR]: 1,
   [Role.ADMIN]: 2,
+  [Role.BREAK_GLASS_ADMIN]: 3,
 };
 
 export function normalizeRole(value: string | Role | null | undefined): Role {
@@ -26,6 +28,8 @@ export function normalizeRole(value: string | Role | null | undefined): Role {
   switch (token) {
     case Role.ADMIN:
       return Role.ADMIN;
+    case Role.BREAK_GLASS_ADMIN:
+      return Role.BREAK_GLASS_ADMIN;
     case Role.OPERATOR:
       return Role.OPERATOR;
     case Role.READONLY:

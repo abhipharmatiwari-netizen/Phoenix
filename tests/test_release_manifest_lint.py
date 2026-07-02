@@ -70,3 +70,14 @@ def test_release_manifest_has_evidence_requirements():
     assert isinstance(reqs.get("required"), list) and len(reqs["required"]) >= 1, (
         "evidence_requirements.required must be a non-empty list of evidence items."
     )
+
+    required_text = "\n".join(str(item) for item in reqs["required"])
+    for token in (
+        "compose_config_summary",
+        "admin_console_smoke",
+        "mobile_playwright_smoke",
+        "nginx_security_smoke",
+        "frontend_secret_scan",
+        "readyz_semantics",
+    ):
+        assert token in required_text

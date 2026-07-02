@@ -11,6 +11,7 @@ import app.server as server
 from app.data.state_store import StateStore
 from app.core.dashboard_bus import DashboardBus
 from app.core.instrument_control import InstrumentController
+from app.core import rate_limit_middleware
 from app.core.strategy_switch import StrategySwitchboard
 from app.brokers.base import Position, ProductType
 from app.dashboard import auth as dashboard_auth
@@ -122,6 +123,8 @@ def test_dashboard_auth_optional_only_in_local_when_disabled():
 @pytest.fixture
 def api_client(monkeypatch):
     """Yield TestClient with worker/watchdog/switchboard patched to in-memory stubs."""
+    with rate_limit_middleware._lock:
+        rate_limit_middleware._buckets.clear()
     runtime = DummyAppRuntime()
     monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
     monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard({"s1": False}))
@@ -148,6 +151,9 @@ def api_client(monkeypatch):
 
     with TestClient(server.app) as client:
         yield client, runtime
+
+    with rate_limit_middleware._lock:
+        rate_limit_middleware._buckets.clear()
 
 
 def _fetch_dashboard_ws_ticket(client: TestClient, mode: str = "delta") -> str:
@@ -1069,7 +1075,7 @@ def test_toggle_strategy_endpoint_updates_switchboard(api_client):
 
     resp = client.post(
         "/admin/strategies/toggle",
-        json={"name": "s1", "enabled": True},
+        json={"name": "s1", "enabled": True, "reason": "test enable"},
         headers={"X-Admin-Key": "test-admin"},
     )
     payload = resp.json()
@@ -1079,10 +1085,17 @@ def test_toggle_strategy_endpoint_updates_switchboard(api_client):
 
     resp_missing = client.post(
         "/admin/strategies/toggle",
-        json={"name": "", "enabled": True},
+        json={"name": "", "enabled": True, "reason": "test enable"},
         headers={"X-Admin-Key": "test-admin"},
     )
     assert resp_missing.status_code == 400
+
+    resp_no_reason = client.post(
+        "/admin/strategies/toggle",
+        json={"name": "s1", "enabled": True, "reason": "   "},
+        headers={"X-Admin-Key": "test-admin"},
+    )
+    assert resp_no_reason.status_code == 422
 
 
 def test_toggle_strategy_endpoint_emits_app_log(api_client, caplog):
@@ -1091,7 +1104,7 @@ def test_toggle_strategy_endpoint_emits_app_log(api_client, caplog):
 
     resp = client.post(
         "/admin/strategies/toggle",
-        json={"name": "s1", "enabled": True},
+        json={"name": "s1", "enabled": True, "reason": "test enable"},
         headers={"X-Admin-Key": "test-admin", "X-Request-Id": "req-123"},
     )
 
@@ -1105,7 +1118,7 @@ def test_strategy_alias_usage_endpoint(api_client):
 
     client.post(
         "/admin/strategies/toggle",
-        json={"name": "options_generic", "enabled": True},
+        json={"name": "options_generic", "enabled": True, "reason": "test alias"},
         headers={"X-Admin-Key": "test-admin"},
     )
     resp = client.get(
@@ -1124,13 +1137,27 @@ def test_toggle_strategy_endpoint_canonicalizes_aliases(api_client):
 
     resp = client.post(
         "/admin/strategies/toggle",
-        json={"name": "options_generic", "enabled": True},
+        json={"name": "options_generic", "enabled": True, "reason": "test alias"},
         headers={"X-Admin-Key": "test-admin"},
     )
     payload = resp.json()
 
     assert resp.status_code == 200
     assert payload == {"name": "option_strategy", "enabled": True}
+
+
+def test_toggle_strategy_live_requires_step_up(api_client, monkeypatch):
+    client, _ = api_client
+    monkeypatch.setattr(server, "_readiness_trade_mode", lambda: "LIVE")
+
+    resp = client.post(
+        "/admin/strategies/toggle",
+        json={"name": "s1", "enabled": True, "reason": "live enable"},
+        headers={"X-Admin-Key": "test-admin"},
+    )
+
+    assert resp.status_code == 403
+    assert "step_up_token" in resp.text
 
 
 def test_instrument_update_endpoint(api_client):

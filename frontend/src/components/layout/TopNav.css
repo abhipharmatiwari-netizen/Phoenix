@@ -2,203 +2,121 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background-color: #111827;
-  color: #d1d5db;
   gap: 1rem;
+  background: #fff;
+  color: #1f2937;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #d9e0e8;
   min-width: 0;
-  padding: calc(0.75rem + env(safe-area-inset-top)) calc(1rem + env(safe-area-inset-right)) 0.75rem calc(1rem + env(safe-area-inset-left));
 }
 
-.top-nav__brand {
+.top-nav__status {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.5rem;
   min-width: 0;
-}
-
-.top-nav .logo {
-  font-size: 1.5rem;
-  font-weight: bold;
-  color: #ffffff;
-  line-height: 1;
-  white-space: nowrap;
+  flex-wrap: wrap;
 }
 
 .mobile-menu-button {
   display: none;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
-  padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  width: 38px;
+  height: 38px;
   border-radius: 6px;
-  background: rgba(31, 41, 55, 0.95);
-  color: #f9fafb;
+  border: 1px solid #cdd5df;
+  background: #fff;
+  color: #1f2937;
   cursor: pointer;
+  flex: 0 0 38px;
 }
 
-.tenant-selector {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  min-width: 0;
+.top-nav .logo {
+  font-size: 1rem;
+  font-weight: 900;
+  color: #111827;
+  white-space: nowrap;
 }
 
-.tenant-selector input {
-  padding: 0.5rem;
-  border-radius: 4px;
-  border: 1px solid #374151;
-  background-color: #1f2937;
-  color: #d1d5db;
-}
-
-.tenant-selector button {
-  min-height: 44px;
-  padding: 0.5rem 1rem;
-  border-radius: 4px;
-  border: none;
-  background-color: #2563eb;
-  color: #ffffff;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background-color 0.2s;
-}
-
-.tenant-selector button:hover {
-  background-color: #1d4ed8;
-}
-
+.tenant-selector,
 .user-menu {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: 0.5rem;
+  flex-wrap: wrap;
   min-width: 0;
+}
+
+.tenant-selector button,
+.user-menu button {
+  padding: 0.45rem 0.7rem;
+  border-radius: 6px;
+  border: 1px solid #cdd5df;
+  background: #fff;
+  color: #1f2937;
+  font-weight: 700;
+  cursor: pointer;
 }
 
 .user-menu span {
-  font-weight: 500;
-}
-
-.user-email {
-  min-width: 0;
-  max-width: 22ch;
+  font-weight: 700;
+  max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .user-menu .role-badge {
-  background-color: #374151;
-  color: #9ca3af;
+  background: #e5e7eb;
+  color: #374151;
   padding: 0.25rem 0.5rem;
   border-radius: 9999px;
-  font-size: 0.75rem;
-  font-weight: 600;
+  font-size: 0.72rem;
+  font-weight: 800;
   text-transform: uppercase;
-}
-
-.user-menu button {
-  min-height: 44px;
-  padding: 0.35rem 0.5rem;
-  background: none;
-  border: none;
-  color: #9ca3af;
-  cursor: pointer;
-  transition: color 0.2s;
-}
-
-.user-menu button:hover {
-  color: #ffffff;
 }
 
 .tenant-selector select {
   min-width: 180px;
-  max-width: min(260px, 42vw);
-  padding: 8px 10px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  background: rgba(15, 23, 42, 0.8);
-  color: #f8fafc;
 }
 
 .tenant-hint {
   font-size: 12px;
-  color: rgba(226, 232, 240, 0.8);
-  overflow-wrap: anywhere;
+  color: #64748b;
 }
 
 @media (max-width: 900px) {
   .top-nav {
-    position: sticky;
-    top: 0;
-    z-index: 50;
-    align-items: center;
-    padding: calc(0.45rem + env(safe-area-inset-top)) calc(0.75rem + env(safe-area-inset-right)) 0.45rem calc(0.75rem + env(safe-area-inset-left));
-    gap: 0.5rem;
-    flex-wrap: wrap;
+    align-items: flex-start;
+    flex-direction: column;
+    padding-top: calc(0.75rem + env(safe-area-inset-top));
+    padding-right: calc(0.75rem + env(safe-area-inset-right));
+    padding-left: calc(0.75rem + env(safe-area-inset-left));
   }
 
   .mobile-menu-button {
     display: inline-flex;
   }
 
-  .top-nav .logo {
-    font-size: 1.15rem;
+  .top-nav__status {
+    width: 100%;
   }
 
-  .tenant-selector {
-    order: 3;
-    flex: 1 1 100%;
-    justify-content: stretch;
-  }
-
-  .tenant-selector select {
-    flex: 1 1 auto;
-    min-width: 0;
-    max-width: none;
-  }
-
-  .tenant-selector button {
-    flex: 0 0 auto;
-    padding-inline: 0.75rem;
-  }
-
+  .tenant-selector,
   .user-menu {
-    margin-left: auto;
-    gap: 0.45rem;
-  }
-
-  .user-email {
-    max-width: 28vw;
+    width: 100%;
   }
 }
 
-@media (max-width: 430px) {
-  .role-badge,
-  .user-email {
-    display: none;
+@media (max-width: 520px) {
+  .top-nav .logo {
+    width: 100%;
   }
 
-  .tenant-selector {
-    gap: 0.4rem;
-  }
-
-  .tenant-selector button {
-    padding-inline: 0.6rem;
-  }
-}
-
-@media (max-height: 430px) and (orientation: landscape) {
-  .top-nav {
-    padding-top: calc(0.3rem + env(safe-area-inset-top));
-    padding-bottom: 0.3rem;
-  }
-
-  .mobile-menu-button,
+  .tenant-selector select,
   .tenant-selector button,
   .user-menu button {
-    min-height: 40px;
-    height: 40px;
+    width: 100%;
   }
 }

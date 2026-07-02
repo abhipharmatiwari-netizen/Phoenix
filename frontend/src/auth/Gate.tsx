@@ -1,6 +1,6 @@
 import React from 'react';
 import { useAuth } from './AuthContext';
-import { Role } from '../lib/rbac';
+import { hasRequiredRole, Role } from '../lib/rbac';
 
 interface GateProps {
   requiredRoles: Role[];
@@ -10,7 +10,7 @@ interface GateProps {
 const Gate: React.FC<GateProps> = ({ requiredRoles, children }) => {
   const { user } = useAuth();
 
-  if (!user || !requiredRoles.includes(user.role)) {
+  if (!user || !requiredRoles.some((role) => hasRequiredRole(user.role, role))) {
     return null;
   }
 

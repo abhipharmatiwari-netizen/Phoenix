@@ -12,6 +12,10 @@ import {
   Settings,
   GitPullRequest,
   Heart,
+  Activity,
+  Clipboard,
+  FileText,
+  Sliders,
 } from 'react-feather';
 import './SideNav.css';
 
@@ -28,17 +32,22 @@ interface SideNavProps {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { to: '/', label: 'Dashboard', icon: <Home className="nav-icon" aria-hidden="true" />, end: true },
-  { to: '/tenants', label: 'Tenants', icon: <Users className="nav-icon" aria-hidden="true" /> },
-  { to: '/alerts', label: 'Alerts', icon: <AlertCircle className="nav-icon" aria-hidden="true" /> },
-  { to: '/mitigations', label: 'Mitigations', icon: <Shield className="nav-icon" aria-hidden="true" /> },
+  { to: '/', label: 'Overview', icon: <Home className="nav-icon" aria-hidden="true" />, end: true },
+  { to: '/safety', label: 'Safety', icon: <Heart className="nav-icon" aria-hidden="true" /> },
   { to: '/positions', label: 'Positions', icon: <Archive className="nav-icon" aria-hidden="true" /> },
   { to: '/orders', label: 'Orders', icon: <ShoppingCart className="nav-icon" aria-hidden="true" /> },
+  { to: '/strategies', label: 'Strategies', icon: <Activity className="nav-icon" aria-hidden="true" /> },
+  { to: '/accounts', label: 'Accounts', icon: <Users className="nav-icon" aria-hidden="true" /> },
+  { to: '/alerts', label: 'Alerts', icon: <AlertCircle className="nav-icon" aria-hidden="true" /> },
+  { to: '/mitigations', label: 'Mitigations', icon: <Shield className="nav-icon" aria-hidden="true" /> },
   { to: '/trades', label: 'Trades', icon: <BarChart2 className="nav-icon" aria-hidden="true" /> },
   { to: '/pnl', label: 'PnL', icon: <DollarSign className="nav-icon" aria-hidden="true" /> },
-  { to: '/control-tower', label: 'Control Tower', icon: <Settings className="nav-icon" aria-hidden="true" /> },
+  { to: '/audit', label: 'Audit', icon: <Clipboard className="nav-icon" aria-hidden="true" /> },
+  { to: '/release-evidence', label: 'Release Evidence', icon: <FileText className="nav-icon" aria-hidden="true" /> },
+  { to: '/control-tower', label: 'Control Tower', icon: <Sliders className="nav-icon" aria-hidden="true" /> },
+  { to: '/tenants', label: 'Tenants', icon: <Users className="nav-icon" aria-hidden="true" /> },
   { to: '/admin/strategy-candidates', label: 'Candidates', icon: <GitPullRequest className="nav-icon" aria-hidden="true" /> },
-  { to: '/safety', label: 'Safety', icon: <Heart className="nav-icon" aria-hidden="true" /> },
+  { to: '/settings', label: 'Settings', icon: <Settings className="nav-icon" aria-hidden="true" /> },
 ];
 
 const SideNav: React.FC<SideNavProps> = ({ isOpen = false, onNavigate }) => {
@@ -48,6 +57,10 @@ const SideNav: React.FC<SideNavProps> = ({ isOpen = false, onNavigate }) => {
       className={`side-nav${isOpen ? ' is-open' : ''}`}
       aria-label="Primary navigation"
     >
+      <div className="side-nav__brand">
+        <span className="side-nav__mark">P</span>
+        <span>Phoenix</span>
+      </div>
       <ul>
         {NAV_ITEMS.map((item) => (
           <li key={item.to}>

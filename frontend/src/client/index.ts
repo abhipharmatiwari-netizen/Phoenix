@@ -3,6 +3,7 @@ import { AlertsResponse, HealthSummary, MitigationsResponse } from '../types/hea
 import type { WebSocketConnectionDescriptor } from '../hooks/useWebSocket';
 import {
   AuditEvent,
+  BalanceResponse,
   BrokerAccount,
   Order,
   PnLSnapshot,
@@ -151,11 +152,48 @@ interface DashboardWebSocketTicketResponse {
   path: string;
 }
 
+export interface OperatorHealthSummaryResponse {
+  summary: HealthSummary;
+  source: 'admin' | 'public';
+  admin_error?: string;
+}
+
+interface StrategiesAdminResponse {
+  strategies: unknown;
+}
+
+interface StrategySelectionAdminResponse {
+  strategy_selection: unknown[];
+}
+
+interface InstrumentsAdminResponse {
+  instruments: unknown;
+}
+
 interface ControlTowerTogglePayload {
   tenant_id: string;
   strategy_id: string;
   enabled: boolean;
   reason?: string;
+}
+
+export interface StrategyTogglePayload {
+  name: string;
+  enabled: boolean;
+  reason: string;
+  step_up_token?: string | null;
+}
+
+export interface BreakGlassFlattenPayload {
+  tenant_id: string;
+  broker_account_id: string;
+  underlying: string;
+  expiry: string;
+  strike: string;
+  option_right: string;
+  product_type: string;
+  reason: string;
+  step_up_token?: string | null;
 }
 
 export interface StrategyCandidateDiff {
@@ -748,6 +786,21 @@ export const AuthService = {
 };
 
 export const DefaultService = {
+  async getOperatorHealthSummary(): Promise<OperatorHealthSummaryResponse> {
+    try {
+      return {
+        summary: await request<HealthSummary>({ path: bffPath('/admin/health/summary') }),
+        source: 'admin',
+      };
+    } catch (err) {
+      return {
+        summary: await request<HealthSummary>({ path: '/health/summary' }),
+        source: 'public',
+        admin_error: err instanceof Error ? err.message : String(err || 'Admin health unavailable'),
+      };
+    }
+  },
+
   async getHealthSummary(): Promise<HealthSummary> {
     try {
       return await request<HealthSummary>({ path: bffPath('/admin/health/summary') });
@@ -812,6 +865,46 @@ export const AdminService = {
   ): Promise<TenantDeactivateResponse> {
     return request<TenantDeactivateResponse>({
       path: bffPath(`/admin/tenants/${encodeURIComponent(tenantId)}/deactivate`),
+      method: 'POST',
+      body: payload,
+    });
+  },
+
+  getReleaseEvidence(): Promise<Record<string, unknown>> {
+    return request<Record<string, unknown>>({
+      path: bffPath('/admin/release-evidence'),
+    });
+  },
+
+  getStrategies(): Promise<StrategiesAdminResponse> {
+    return request<StrategiesAdminResponse>({
+      path: bffPath('/admin/strategies'),
+    });
+  },
+
+  getStrategySelection(): Promise<StrategySelectionAdminResponse> {
+    return request<StrategySelectionAdminResponse>({
+      path: bffPath('/admin/strategy-selection'),
+    });
+  },
+
+  getInstruments(): Promise<InstrumentsAdminResponse> {
+    return request<InstrumentsAdminResponse>({
+      path: bffPath('/admin/instruments'),
+    });
+  },
+
+  toggleStrategy(payload: StrategyTogglePayload): Promise<{ name: string; enabled: boolean }> {
+    return request<{ name: string; enabled: boolean }>({
+      path: bffPath('/admin/strategies/toggle'),
+      method: 'POST',
+      body: payload,
+    });
+  },
+
+  breakGlassFlatten(payload: BreakGlassFlattenPayload): Promise<Record<string, unknown>> {
+    return request<Record<string, unknown>>({
+      path: bffPath('/admin/break-glass/flatten'),
       method: 'POST',
       body: payload,
     });
@@ -1157,6 +1250,15 @@ export const TenantService = {
     return request<PnlResponse>({
       path: bffPath(`/tenant/me/accounts/${brokerAccountId}/pnl`),
       query: strategyId ? { strategy_id: strategyId } : undefined,
+      includeTenantHeader: true,
+    });
+  },
+
+  getAccountBalance(
+    brokerAccountId: string,
+  ): Promise<BalanceResponse> {
+    return request<BalanceResponse>({
+      path: bffPath(`/tenant/me/accounts/${brokerAccountId}/balance`),
       includeTenantHeader: true,
     });
   },

@@ -31,6 +31,7 @@ Collect all of the following without printing secret values:
 
 | Evidence | Pass condition |
 |---|---|
+| Docker Compose config | `docker compose --env-file <validation-env> -f docker-compose.live.single.yml config` exits 0 using non-secret validation placeholders or approved operator env; no real secret values are committed or printed |
 | Docker liveness | backend and web are healthy; Postgres reports Docker health `healthy` |
 | Backend-local `/readyz` | HTTP 200 and `ready=true` |
 | Backend-local `/health/summary` | status is acceptable for the release gate and operating mode is `HUB_AUTHORITATIVE` |
@@ -38,6 +39,11 @@ Collect all of the following without printing secret values:
 | Public `/health/summary` | response is redacted; internal schema, watchdog, and tracked-account details are omitted or masked |
 | Public `/health/alerts` and `/health/mitigations` | HTTP 200 JSON responses; neither endpoint returns SPA HTML |
 | Authenticated `/admin/health/summary` | schema, watchdog, tracked-account, and readiness fields are present for the logged-in operator view |
+| Authenticated `/admin/release-evidence` | HTTP 200 JSON via approved admin auth; secret-like values are absent or redacted |
+| Admin console smoke | `scripts/smoke/admin_console_smoke.py` passes: unauthenticated admin routes 401, authenticated admin routes 200, public summary redacted, and direct BFF diagnostic bypasses blocked |
+| Mobile console smoke | `npm.cmd run test:e2e` passes the desktop, mobile portrait, mobile landscape, Overview mobile, and Safety mobile Playwright checks |
+| Nginx route/security smoke | `scripts/smoke/nginx_security_smoke.py` passes: HSTS, CSP, frame protection, content-type protection, referrer policy, secure cookies, stale `/static/*` 404, JSON alerts/mitigations, and no stack traces |
+| Frontend build secret scan | Built frontend assets contain no private keys, cloud key IDs, refresh tokens, passwords, or secret-like literals |
 | Vultr tunnel sidecar | `phoenix-v9-vultr-tunnel` is healthy on nginx liveness when local/Vultr recovery is the active path |
 | Public HTTPS domain | `/health` and `/login` are reachable; `/readyz` returns HTTP 200 only when trading readiness is green |
 | Direct BFF diagnostic bypass | `/bff/health/summary`, `/bff/readyz`, and `/bff/dashboard/status` return 404 |
@@ -78,11 +84,40 @@ operator risk-halt or rollback decision is recorded.
 
 ## Collection Procedure
 
-1. Run the smoke suite before deploy:
+1. Validate the active compose manifest without real secrets:
+   ```powershell
+   New-Item -ItemType Directory -Force .artifacts/compose-validation/secrets | Out-Null
+   foreach ($name in @(
+     "admin_api_key",
+     "demo_auth_token_secret",
+     "control_plane_pg_password",
+     "angel_postback_token",
+     "admin_kill_switch_override",
+     "vultr_reverse_tunnel_ssh_key"
+   )) {
+     Set-Content -NoNewline -Encoding ascii ".artifacts/compose-validation/secrets/$name" "placeholder-not-a-secret"
+   }
+   Copy-Item docs/runbooks/docker-compose.live.single.validation.env.example `
+     .artifacts/compose-validation/docker-compose.live.single.validation.env
+   docker compose --env-file .artifacts/compose-validation/docker-compose.live.single.validation.env `
+     -f docker-compose.live.single.yml config
+   ```
+2. Run the smoke suite before deploy:
    ```bash
    pytest -m smoke -q
    ```
-2. Deploy through the Docker Desktop runbook and verify the sidecar:
+3. Build and test the admin console before deploy:
+   ```powershell
+   Push-Location frontend
+   npm.cmd run lint
+   npm.cmd run build
+   npm.cmd run test:e2e
+   Pop-Location
+   python scripts/smoke/admin_console_smoke.py --base-url http://127.0.0.1
+   python scripts/smoke/nginx_security_smoke.py --base-url http://127.0.0.1
+   python -m pytest tests/ui/test_nginx_spa_routes.py
+   ```
+4. Deploy through the Docker Desktop runbook and verify the sidecar:
    ```powershell
    docker ps --filter "name=phoenix-v9" --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
    docker ps --filter "name=phoenix-v9-vultr-tunnel" --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
@@ -91,7 +126,7 @@ operator risk-halt or rollback decision is recorded.
      https://app.phoenixtechnosolutions.in/readyz `
      https://app.phoenixtechnosolutions.in/health
    ```
-3. Wait for Docker liveness, then verify trading readiness:
+5. Wait for Docker liveness, then verify trading readiness:
    ```powershell
    docker ps --filter "name=phoenix-v9" --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
    docker exec phoenix-v9-backend curl -sS http://localhost:8080/readyz
@@ -101,14 +136,14 @@ operator risk-halt or rollback decision is recorded.
    curl.exe -sS http://localhost/health/alerts
    curl.exe -sS http://localhost/health/mitigations
    ```
-4. Validate local hardening invariants without printing secrets:
+6. Validate local hardening invariants without printing secrets:
    ```powershell
    docker inspect phoenix-v9-backend --format '{{json .Config.Image}}'
    docker inspect phoenix-v9-web --format '{{json .Config.Image}}'
    docker inspect phoenix-v9-vultr-tunnel --format '{{json .State.Health.Status}}'
    docker system df
    ```
-5. Verify malformed Host handling:
+7. Verify malformed Host handling:
    ```powershell
    curl.exe -sk -H "Host: phoenix.invalid%2fadmin" `
      -o NUL -w "%{http_code}`n" `
@@ -118,7 +153,7 @@ operator risk-halt or rollback decision is recorded.
      https://app.phoenixtechnosolutions.in/bff/health/summary
    ```
    Both commands should print `400`.
-6. Collect the authenticated release bundle:
+8. Collect the authenticated release bundle:
    ```powershell
    $adminKey = Get-Secret -Name ADMIN_API_KEY -AsPlainText
    curl.exe -sk -H "X-Admin-Key: $adminKey" `
@@ -129,9 +164,9 @@ operator risk-halt or rollback decision is recorded.
      https://app.phoenixtechnosolutions.in/bff/health/summary
    Remove-Variable adminKey
    ```
-7. Review every field against the pass criteria table.
-8. If all criteria pass, record the generated timestamp in the deployment log.
-9. If any criterion fails, roll back or hold the stack stopped and investigate.
+9. Review every field against the pass criteria table.
+10. If all criteria pass, record the generated timestamp in the deployment log.
+11. If any criterion fails, roll back or hold the stack stopped and investigate.
 
 The PowerShell helper remains available for local/operator workstations:
 

@@ -1,23 +1,3 @@
-:root {
-  --primary-accent-color: #2563eb;
-  --primary-accent-color-hover: #1d4ed8;
-  --app-bg: #f3f4f6;
-  --app-text: #1f2937;
-}
-
-html {
-  box-sizing: border-box;
-  min-width: 0;
-  min-height: 100%;
-  background-color: var(--app-bg);
-}
-
-*,
-*::before,
-*::after {
-  box-sizing: inherit;
-}
-
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
@@ -25,45 +5,18 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: var(--app-bg);
-  color: var(--app-text);
-  min-width: 0;
-  min-height: 100%;
-  overflow-x: hidden;
-}
-
-#root {
-  min-width: 0;
-  min-height: 100%;
+  background-color: #f3f4f6;
+  color: #1f2937;
 }
 
 code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
     monospace;
-  overflow-wrap: anywhere;
 }
 
-button,
-input,
-select,
-textarea {
-  font: inherit;
-}
-
-button,
-input:not([type="checkbox"]):not([type="radio"]),
-select {
-  min-height: 44px;
-}
-
-button {
-  touch-action: manipulation;
-}
-
-img,
-svg,
-canvas {
-  max-width: 100%;
+:root {
+  --primary-accent-color: #2563eb;
+  --primary-accent-color-hover: #1d4ed8;
 }
 
 /* Accessibility: visible focus styles */

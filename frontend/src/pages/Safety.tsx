@@ -10,6 +10,7 @@ import DataTable, { Column } from '../components/shared/DataTable';
 import LoadingSpinner from '../components/shared/LoadingSpinner';
 import Card from '../components/shared/Card';
 import KillSwitchPanel from '../components/KillSwitchPanel';
+import { classifyOperatorHealth } from '../lib/consoleUtils';
 
 const Safety: React.FC = () => {
   // PR #240 round-6 review P1: the kill-switch panel hard-codes
@@ -33,6 +34,7 @@ const Safety: React.FC = () => {
   const showGlobalKillSwitchPanel = user?.canAccessAllTenants === true;
 
   const [health, setHealth] = useState<HealthSummary | null>(null);
+  const [healthSource, setHealthSource] = useState<'admin' | 'public' | 'unavailable'>('unavailable');
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +44,7 @@ const Safety: React.FC = () => {
     const fetchData = async () => {
       try {
         const [healthResp, breakGlassResp, killSwitchResp, cancelAllResp] = await Promise.all([
-          DefaultService.getHealthSummary(),
+          DefaultService.getOperatorHealthSummary(),
           AuditService.getAuditLog({ action: 'break_glass', limit: 20 }).catch(() => ({ events: [], count: 0 })),
           // Issue #238: surface every kill-switch toggle attempt in the
           // audit table so operators see who tripped/cleared/rearmed and
@@ -56,7 +58,8 @@ const Safety: React.FC = () => {
           AuditService.getAuditLog({ resource_type: 'broker_orders', limit: 50 }).catch(() => ({ events: [], count: 0 })),
         ]);
         if (active) {
-          setHealth(healthResp);
+          setHealth(healthResp.summary);
+          setHealthSource(healthResp.source);
           // Merge the audit feeds; de-duplicate by audit_id when
           // present, otherwise by timestamp+action+resource_id.
           const merged: AuditEvent[] = [];
@@ -86,7 +89,8 @@ const Safety: React.FC = () => {
     return () => { active = false; clearInterval(timer); };
   }, []);
 
-  const isDegraded = health?.status !== 'ok' || health?.readiness?.ready === false;
+  const operatorHealthStatus = classifyOperatorHealth(health, healthSource);
+  const isDegraded = operatorHealthStatus !== 'healthy';
   const degradedReasons = health?.degraded_reasons || [];
   const readinessReason = health?.readiness?.reason;
   const shadowIngestion = health?.oi_ml_shadow_ingestion;
@@ -180,6 +184,19 @@ const Safety: React.FC = () => {
         ) : (
           <>
             {/* System Status Card */}
+            {healthSource !== 'admin' && (
+              <div style={{
+                border: '1px solid #f59e0b',
+                borderRadius: 8,
+                padding: '0.75rem 1rem',
+                backgroundColor: '#fffbeb',
+                color: '#92400e',
+                fontSize: '0.875rem',
+                marginBottom: '1rem',
+              }}>
+                Authenticated admin diagnostics are unavailable. Public health fallback is reachability-only and is treated as degraded.
+              </div>
+            )}
             <div style={{
               border: `2px solid ${isDegraded ? '#dc2626' : '#16a34a'}`,
               borderRadius: 12,

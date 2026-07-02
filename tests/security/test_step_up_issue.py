@@ -106,6 +106,8 @@ class TestStepUpIssueEndpoint:
         _RESOURCE_BOUND = {
             DangerousActionClass.KILL_SWITCH_CLEAR,
             DangerousActionClass.KILL_SWITCH_REARM,
+            DangerousActionClass.STRATEGY_ENABLE,
+            DangerousActionClass.STRATEGY_DISABLE,
         }
         with patch("app.security.step_up._is_live_mode", return_value=False):
             for ac in DangerousActionClass:

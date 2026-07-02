@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Menu } from 'react-feather';
 import { useAuth } from '../../auth/AuthContext';
 import { AdminService, getTenantId, setTenantId as persistTenantId } from '../../client';
+import { ConsoleStatus, statusClass } from '../../lib/consoleUtils';
 import './TopNav.css';
 
 interface TenantOption {
@@ -10,11 +11,20 @@ interface TenantOption {
 }
 
 interface TopNavProps {
+  mode?: string | null;
+  diagnosticSource?: 'admin' | 'public' | 'unavailable';
+  diagnosticStatus?: ConsoleStatus;
   isMobileNavOpen?: boolean;
   onMenuClick?: () => void;
 }
 
-const TopNav: React.FC<TopNavProps> = ({ isMobileNavOpen = false, onMenuClick }) => {
+const TopNav: React.FC<TopNavProps> = ({
+  mode,
+  diagnosticSource = 'unavailable',
+  diagnosticStatus = 'unknown',
+  isMobileNavOpen = false,
+  onMenuClick,
+}) => {
   const { user, logout } = useAuth();
   const [tenantId, setTenantId] = useState(getTenantId());
   const [tenantOptions, setTenantOptions] = useState<TenantOption[]>([]);
@@ -94,7 +104,7 @@ const TopNav: React.FC<TopNavProps> = ({ isMobileNavOpen = false, onMenuClick })
 
   return (
     <div className="top-nav">
-      <div className="top-nav__brand">
+      <div className="top-nav__status">
         {onMenuClick && (
           <button
             type="button"
@@ -107,7 +117,13 @@ const TopNav: React.FC<TopNavProps> = ({ isMobileNavOpen = false, onMenuClick })
             <Menu size={20} aria-hidden="true" />
           </button>
         )}
-        <div className="logo">Phoenix</div>
+        <div className="logo">Phoenix Operator Console</div>
+        <span className={`env-badge env-badge--${String(mode || 'UNKNOWN').toLowerCase()}`}>
+          {String(mode || 'UNKNOWN').toUpperCase()}
+        </span>
+        <span className={statusClass(diagnosticStatus)}>
+          {diagnosticSource === 'admin' ? 'Admin diagnostics' : diagnosticSource === 'public' ? 'Public reachability only' : 'Diagnostics unavailable'}
+        </span>
       </div>
       <div className="tenant-selector">
         {sortedTenantOptions.length > 0 ? (
@@ -132,7 +148,7 @@ const TopNav: React.FC<TopNavProps> = ({ isMobileNavOpen = false, onMenuClick })
         )}
       </div>
       <div className="user-menu">
-        <span className="user-email">{user?.email || 'User'}</span>
+        <span>{user?.email || 'User'}</span>
         <span className="role-badge">{user?.role || 'viewer'}</span>
         <button type="button" onClick={logout}>
           Logout

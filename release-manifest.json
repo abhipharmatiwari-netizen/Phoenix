@@ -3,6 +3,12 @@
     "description": "Minimum evidence required for LIVE promotion approval. All items must be satisfied and attached to the promotion record before go-live sign-off.",
     "required": [
       "release_evidence_snapshot: GET /admin/release-evidence (requires ADMIN_API_KEY via X-Admin-Key or an approved admin token) must show runtime_ready=true, schema_guard.status=ok, startup_recovery.status=ok, and no synthetic_contamination. position_authority_restored must be true when existing position records were restored; a fresh database with zero records is acceptable only if /readyz is otherwise healthy and the empty-state evidence is attached.",
+      "compose_config_summary: docker compose --env-file <non-secret validation env> -f docker-compose.live.single.yml config exits 0 for the active Docker/Vultr runtime manifest.",
+      "admin_console_smoke: authenticated /admin/health/summary and /admin/release-evidence return 200, unauthenticated access returns 401, public health is redacted, and direct BFF diagnostic bypasses remain blocked.",
+      "mobile_playwright_smoke: Playwright passes login desktop, login mobile portrait, login mobile landscape, Overview mobile, and Safety mobile checks.",
+      "nginx_security_smoke: local nginx validates HSTS, CSP, frame protection, content-type protection, referrer policy, secure cookies, stale /static/* 404 behavior, JSON alerts/mitigations, and no stack traces.",
+      "frontend_secret_scan: production frontend build output contains no private keys, cloud key IDs, refresh tokens, passwords, or secret-like literals.",
+      "readyz_semantics: backend-local /readyz remains the full trading-readiness gate while public /readyz remains redacted.",
       "smoke_test_summary: pytest -m smoke exit-code 0. Fast pre-deploy gate (< 30s). Attach output or CI artefact link.",
       "test_run_summary: pytest exit-code 0 with no newly-introduced failures. Attach output or CI artefact link.",
       "commit_hash: The exact git commit SHA deployed, traceable to the build artefact.",

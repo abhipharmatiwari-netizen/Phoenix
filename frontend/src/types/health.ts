@@ -12,6 +12,7 @@ export interface HealthSummary {
   timestamp: string;
   schema_status?: string;
   operating_mode: string | null;
+  trade_mode?: string | null;
   stream_worker_running?: boolean;
   stream_worker_expected?: boolean;
   watchdog_running?: boolean;
@@ -64,6 +65,20 @@ export interface HealthSummary {
   per_account_staleness: AccountStaleness[];
   alerts?: { firing_count: number; firing_rules: string[] };
   auto_mitigation: { enabled: boolean; total_events: number };
+  kill_switch?: {
+    ready?: boolean;
+    reason?: string | null;
+    degraded_reason?: string | null;
+    active_count?: number;
+    source?: string;
+    divergent?: boolean;
+    legacy_active?: boolean;
+  };
+  leader_lease?: Record<string, unknown>;
+  position_record_invariants?: {
+    terminal_nonzero_net_qty_count?: number;
+    error?: string | null;
+  };
 }
 
 export interface AlertRule {
