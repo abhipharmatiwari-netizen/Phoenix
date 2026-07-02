@@ -11,6 +11,7 @@ import app.server as server
 from app.data.state_store import StateStore
 from app.core.dashboard_bus import DashboardBus
 from app.core.instrument_control import InstrumentController
+from app.core import rate_limit_middleware
 from app.core.strategy_switch import StrategySwitchboard
 from app.brokers.base import Position, ProductType
 from app.dashboard import auth as dashboard_auth
@@ -122,6 +123,8 @@ def test_dashboard_auth_optional_only_in_local_when_disabled():
 @pytest.fixture
 def api_client(monkeypatch):
     """Yield TestClient with worker/watchdog/switchboard patched to in-memory stubs."""
+    with rate_limit_middleware._lock:
+        rate_limit_middleware._buckets.clear()
     runtime = DummyAppRuntime()
     monkeypatch.setattr(server, "get_app_runtime", lambda: runtime)
     monkeypatch.setattr(server, "strategy_switchboard", StrategySwitchboard({"s1": False}))
@@ -148,6 +151,9 @@ def api_client(monkeypatch):
 
     with TestClient(server.app) as client:
         yield client, runtime
+
+    with rate_limit_middleware._lock:
+        rate_limit_middleware._buckets.clear()
 
 
 def _fetch_dashboard_ws_ticket(client: TestClient, mode: str = "delta") -> str:
