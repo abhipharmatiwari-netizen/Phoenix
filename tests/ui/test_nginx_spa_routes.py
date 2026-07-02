@@ -167,6 +167,20 @@ def test_nginx_security_headers_are_hardened():
         assert "script-src 'self'" in content
 
 
+def test_nginx_index_location_preserves_security_headers():
+    for template in (NGINX_TEMPLATE, NGINX_SSL_TEMPLATE):
+        content = template.read_text()
+        match = re.search(r"location\s+=\s+/index\.html\s+\{(?P<body>.*?)\n\s*\}", content, flags=re.S)
+        assert match, template.name
+        body = match.group("body")
+        assert "add_header_inherit merge" in body
+        assert 'Cache-Control "no-store" always' in body
+        assert "Content-Security-Policy" in body
+        assert "Strict-Transport-Security" in body
+        assert "X-Frame-Options" in body
+        assert "X-Content-Type-Options" in body
+
+
 def test_frontend_build_output_does_not_contain_secret_like_literals():
     build_dir = REPO_ROOT / "frontend" / "build"
     if not build_dir.exists():

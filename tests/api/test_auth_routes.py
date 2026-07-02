@@ -158,6 +158,38 @@ def test_cookie_session_login_sets_httponly_refresh_cookie(auth_client, monkeypa
     assert "HttpOnly" in set_cookie
 
 
+def test_cookie_session_login_sets_secure_samesite_in_production(auth_client, monkeypatch):
+    client, users_db = auth_client
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setattr(
+        "app.core.session_store.issue_refresh_token",
+        lambda **_: ("refresh-cookie-value", None),
+    )
+    users_db["secure-cookie@example.com"] = {
+        "id": "user-secure-cookie",
+        "email": "secure-cookie@example.com",
+        "name": "Secure Cookie User",
+        "password_hash": auth_routes._hash_password("password-123"),
+        "role": Role.ADMIN,
+    }
+
+    login = client.post(
+        "/auth/login",
+        json={
+            "email": "secure-cookie@example.com",
+            "password": "password-123",
+            "cookie_session": True,
+        },
+    )
+
+    assert login.status_code == 200
+    set_cookie = login.headers.get("set-cookie", "")
+    assert "phoenix_refresh_token=" in set_cookie
+    assert "HttpOnly" in set_cookie
+    assert "Secure" in set_cookie
+    assert "SameSite=strict" in set_cookie
+
+
 def test_refresh_accepts_cookie_session_without_body_token(auth_client, monkeypatch):
     client, users_db = auth_client
     users_db["refresh@example.com"] = {
