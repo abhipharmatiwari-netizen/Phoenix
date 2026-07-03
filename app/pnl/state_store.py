@@ -40,6 +40,8 @@ class PnLStateStore(Protocol):
 
     def upsert_snapshot(self, snapshot: PnLSnapshot) -> None: ...
 
+    def upsert_mark_snapshot(self, snapshot: PnLSnapshot) -> None: ...
+
     def list_account_snapshots(
         self,
         *,
@@ -68,6 +70,25 @@ class InMemoryPnLStateStore:
             snapshot.key.strategy_id,
         )
         self._snapshots[key] = snapshot
+
+    def upsert_mark_snapshot(self, snapshot: PnLSnapshot) -> None:
+        key = (
+            snapshot.key.tenant_id,
+            snapshot.key.broker_account_id,
+            snapshot.key.strategy_id,
+        )
+        existing = self._snapshots.get(key)
+        if existing is None or existing.session_date != snapshot.session_date:
+            self._snapshots[key] = snapshot
+            return
+
+        snapshot.realized_pnl = existing.realized_pnl
+        existing.unrealized_pnl = snapshot.unrealized_pnl
+        existing.gross_exposure = snapshot.gross_exposure
+        existing.as_of = snapshot.as_of
+        existing.session_date = snapshot.session_date
+        existing.freshness_updated_at = snapshot.freshness_updated_at
+        existing.freshness_source = snapshot.freshness_source
 
     def list_account_snapshots(
         self,
@@ -195,6 +216,33 @@ class FirestorePnLStateStore:
         except Exception as exc:
             logger.warning(
                 "FirestorePnLStateStore.upsert_snapshot failed tenant=%s account=%s strategy=%s err=%s",
+                snapshot.key.tenant_id,
+                snapshot.key.broker_account_id,
+                snapshot.key.strategy_id,
+                exc,
+            )
+
+    def upsert_mark_snapshot(self, snapshot: PnLSnapshot) -> None:
+        payload = self._serialize(snapshot)
+        try:
+            existing = self.get_snapshot(
+                tenant_id=snapshot.key.tenant_id,
+                broker_account_id=snapshot.key.broker_account_id,
+                strategy_id=snapshot.key.strategy_id,
+            )
+            if existing is not None and existing.session_date == snapshot.session_date:
+                payload["realized_pnl"] = float(existing.realized_pnl or 0.0)
+                snapshot.realized_pnl = existing.realized_pnl
+            self._collection.document(
+                self._doc_id(
+                    snapshot.key.tenant_id,
+                    snapshot.key.broker_account_id,
+                    snapshot.key.strategy_id,
+                )
+            ).set(payload, merge=True)
+        except Exception as exc:
+            logger.warning(
+                "FirestorePnLStateStore.upsert_mark_snapshot failed tenant=%s account=%s strategy=%s err=%s",
                 snapshot.key.tenant_id,
                 snapshot.key.broker_account_id,
                 snapshot.key.strategy_id,
@@ -376,6 +424,51 @@ class PostgresPnLStateStore:
             with conn.cursor() as cur:
                 cur.execute(sql, payload)
 
+    def upsert_mark_snapshot(self, snapshot: PnLSnapshot) -> None:
+        sql = f"""
+            INSERT INTO {self._table} (
+                tenant_id, broker_account_id, strategy_id,
+                realized_pnl, unrealized_pnl, gross_exposure, as_of, session_date,
+                freshness_updated_at, freshness_source, updated_at
+            ) VALUES (
+                %(tenant_id)s, %(broker_account_id)s, %(strategy_id)s,
+                %(realized_pnl)s, %(unrealized_pnl)s, %(gross_exposure)s, %(as_of)s, %(session_date)s,
+                %(freshness_updated_at)s, %(freshness_source)s, NOW()
+            )
+            ON CONFLICT (tenant_id, broker_account_id, strategy_id) DO UPDATE SET
+                realized_pnl = CASE
+                    WHEN {self._table}.session_date IS DISTINCT FROM EXCLUDED.session_date
+                    THEN EXCLUDED.realized_pnl
+                    ELSE {self._table}.realized_pnl
+                END,
+                unrealized_pnl = EXCLUDED.unrealized_pnl,
+                gross_exposure = EXCLUDED.gross_exposure,
+                as_of = EXCLUDED.as_of,
+                session_date = EXCLUDED.session_date,
+                freshness_updated_at = EXCLUDED.freshness_updated_at,
+                freshness_source = EXCLUDED.freshness_source,
+                updated_at = NOW()
+            RETURNING realized_pnl
+        """
+        payload = {
+            "tenant_id": str(snapshot.key.tenant_id),
+            "broker_account_id": str(snapshot.key.broker_account_id),
+            "strategy_id": str(snapshot.key.strategy_id),
+            "realized_pnl": float(snapshot.realized_pnl or 0.0),
+            "unrealized_pnl": float(snapshot.unrealized_pnl or 0.0),
+            "gross_exposure": float(snapshot.gross_exposure or 0.0),
+            "as_of": snapshot.as_of,
+            "session_date": snapshot.session_date,
+            "freshness_updated_at": snapshot.freshness_updated_at,
+            "freshness_source": snapshot.freshness_source,
+        }
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, payload)
+                row = cur.fetchone()
+        if row:
+            snapshot.realized_pnl = float(row[0] or 0.0)
+
     def list_account_snapshots(
         self,
         *,
@@ -490,6 +583,16 @@ class RedisPnLStateStore:
             ),
             self._serialize(snapshot),
         )
+
+    def upsert_mark_snapshot(self, snapshot: PnLSnapshot) -> None:
+        existing = self.get_snapshot(
+            tenant_id=snapshot.key.tenant_id,
+            broker_account_id=snapshot.key.broker_account_id,
+            strategy_id=snapshot.key.strategy_id,
+        )
+        if existing is not None and existing.session_date == snapshot.session_date:
+            snapshot.realized_pnl = existing.realized_pnl
+        self.upsert_snapshot(snapshot)
 
     def list_account_snapshots(
         self,

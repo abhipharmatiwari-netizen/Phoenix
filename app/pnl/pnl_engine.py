@@ -100,13 +100,13 @@ class PnLEngine:
         except Exception:
             return now_dt.date()
 
-    def _reset_if_new_day(self, snap: PnLSnapshot, now: datetime) -> None:
+    def _reset_if_new_day(self, snap: PnLSnapshot, now: datetime) -> bool:
         today = self._today(now)
         if snap.session_date is None:
             snap.session_date = today
             snap.freshness_updated_at = now
             snap.freshness_source = "day_init"
-            return
+            return True
         if snap.session_date != today:
             snap.realized_pnl = 0.0
             snap.unrealized_pnl = 0.0
@@ -119,6 +119,8 @@ class PnLEngine:
             snap.control_open_pnl = 0.0
             snap.control_open_premium = 0.0
             snap.control_open_qty = 0
+            return True
+        return False
 
     # Get or create a snapshot for a tenant/account/strategy.
     def _get_snapshot(
@@ -176,12 +178,14 @@ class PnLEngine:
             strategy_id=seed_strategy_id,
         )
         if existing is not None:
-            self._reset_if_new_day(existing, now)
+            changed = self._reset_if_new_day(existing, now)
             # Backfill freshness for snapshots created before freshness was tracked
             if existing.freshness_updated_at is None:
                 existing.freshness_updated_at = now
                 existing.freshness_source = "bootstrap_backfill"
-            self._state_store.upsert_snapshot(existing)
+                changed = True
+            if changed:
+                self._state_store.upsert_snapshot(existing)
             return False
 
         snapshot = PnLSnapshot(
@@ -349,8 +353,8 @@ class PnLEngine:
         snap = self._get_snapshot(tenant_id, broker_account_id, strategy_id)
         if snap is None:
             return None
-        self._reset_if_new_day(snap, self._clock.now_utc())
-        self._state_store.upsert_snapshot(snap)
+        if self._reset_if_new_day(snap, self._clock.now_utc()):
+            self._state_store.upsert_snapshot(snap)
         return float(snap.realized_pnl) + float(snap.net_open_qty) * float(snap.open_avg_price)
 
     # Update unrealized PnL and exposure for a snapshot.
@@ -375,7 +379,7 @@ class PnLEngine:
         snap.as_of = now
         snap.freshness_updated_at = now
         snap.freshness_source = "mark_update"
-        self._state_store.upsert_snapshot(snap)
+        self._state_store.upsert_mark_snapshot(snap)
         
         # Persist to BigQuery in real-time
         self._persist_snapshot(snap)
@@ -445,7 +449,7 @@ class PnLEngine:
             snap.as_of = now
             snap.freshness_updated_at = now
             snap.freshness_source = str(source or "broker_sync")
-            self._state_store.upsert_snapshot(snap)
+            self._state_store.upsert_mark_snapshot(snap)
 
             # Persist synced mark snapshots using the same contract as other PnL mutations.
             self._persist_snapshot(snap)
@@ -463,8 +467,8 @@ class PnLEngine:
             strategy_id=strategy_id,
         )
         if snap is not None:
-            self._reset_if_new_day(snap, self._clock.now_utc())
-            self._state_store.upsert_snapshot(snap)
+            if self._reset_if_new_day(snap, self._clock.now_utc()):
+                self._state_store.upsert_snapshot(snap)
         return snap
 
     # Return strategy_ids that have snapshots for this account (excludes bootstrap seed).
@@ -505,8 +509,8 @@ class PnLEngine:
         now = self._clock.now_utc()
         total = 0.0
         for snap in snaps:
-            self._reset_if_new_day(snap, now)
-            self._state_store.upsert_snapshot(snap)
+            if self._reset_if_new_day(snap, now):
+                self._state_store.upsert_snapshot(snap)
             total += float(snap.realized_pnl or 0.0) + float(snap.net_open_qty or 0) * float(
                 snap.open_avg_price or 0.0
             )
@@ -527,8 +531,8 @@ class PnLEngine:
         )
         now = self._clock.now_utc()
         for snap in snaps:
-            self._reset_if_new_day(snap, now)
-            self._state_store.upsert_snapshot(snap)
+            if self._reset_if_new_day(snap, now):
+                self._state_store.upsert_snapshot(snap)
         return snaps
 
     def _warn_if_mark_snapshot_stale(
@@ -790,8 +794,8 @@ class PnLEngine:
         now = self._clock.now_utc()
 
         for snap in snaps:
-            self._reset_if_new_day(snap, now)
-            self._state_store.upsert_snapshot(snap)
+            if self._reset_if_new_day(snap, now):
+                self._state_store.upsert_snapshot(snap)
 
             if snap.freshness_updated_at is None:
                 if fail_closed:
