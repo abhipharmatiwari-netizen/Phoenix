@@ -1,5 +1,5 @@
 .tenants-page {
-  color: #111827;
+  color: var(--color-text-heading);
 }
 
 .tenants-page__header,
@@ -25,7 +25,7 @@
 
 .tenant-count,
 .tenant-subtext {
-  color: #6b7280;
+  color: var(--color-text-subtle);
   font-size: 0.8125rem;
 }
 
@@ -40,7 +40,7 @@
 .secondary-button,
 .icon-button {
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   font-weight: 600;
   display: inline-flex;
@@ -51,40 +51,40 @@
 }
 
 .primary-button {
-  background: #2563eb;
-  color: #fff;
+  background: var(--color-primary);
+  color: var(--color-text-inverse);
   padding: 0.45rem 0.8rem;
 }
 
 .primary-button:hover {
-  background: #1d4ed8;
+  background: var(--color-primary-hover);
 }
 
 .secondary-button {
-  background: #fff;
-  border-color: #d1d5db;
-  color: #1f2937;
+  background: var(--color-surface);
+  border-color: var(--color-border-input);
+  color: var(--color-text);
   padding: 0.42rem 0.7rem;
 }
 
 .secondary-button:hover {
-  background: #f9fafb;
+  background: var(--color-surface-subtle);
 }
 
 .icon-button {
   width: 44px;
   height: 44px;
-  background: #fff;
-  border-color: #d1d5db;
-  color: #374151;
+  background: var(--color-surface);
+  border-color: var(--color-border-input);
+  color: var(--color-text-neutral);
 }
 
 .icon-button:hover {
-  background: #f3f4f6;
+  background: var(--color-bg);
 }
 
 .icon-button--danger {
-  color: #b91c1c;
+  color: var(--color-danger-action);
 }
 
 .primary-button:disabled,
@@ -95,22 +95,22 @@
 }
 
 .tenant-alert {
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 0.75rem 0.9rem;
   margin-bottom: 0.8rem;
   font-size: 0.875rem;
 }
 
 .tenant-alert--error {
-  background: #fef2f2;
-  border: 1px solid #fecaca;
-  color: #991b1b;
+  background: var(--color-danger-bg-soft);
+  border: 1px solid var(--color-danger-border-soft);
+  color: var(--color-danger-fg-strong);
 }
 
 .tenant-alert--success {
-  background: #ecfdf5;
-  border: 1px solid #a7f3d0;
-  color: #065f46;
+  background: var(--color-success-bg-muted);
+  border: 1px solid var(--color-success-border-muted);
+  color: var(--color-success-fg-deep);
 }
 
 .tenants-layout {
@@ -122,9 +122,9 @@
 
 .tenant-list-panel,
 .tenant-detail-panel {
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
 }
 
 .tenant-list-panel {
@@ -149,15 +149,15 @@
 .tenant-table td {
   padding: 0.8rem;
   text-align: left;
-  border-bottom: 1px solid #f3f4f6;
+  border-bottom: 1px solid var(--color-bg);
   vertical-align: middle;
 }
 
 .tenant-table th {
-  color: #4b5563;
+  color: var(--color-text-body-muted);
   font-size: 0.75rem;
   font-weight: 700;
-  background: #f9fafb;
+  background: var(--color-surface-subtle);
   text-transform: uppercase;
 }
 
@@ -167,20 +167,20 @@
 
 .tenant-table tbody tr:hover,
 .tenant-table tbody tr.is-selected {
-  background: #eff6ff;
+  background: var(--color-info-bg-soft);
 }
 
 .tenant-name,
 .account-name {
   font-weight: 700;
-  color: #111827;
+  color: var(--color-text-heading);
 }
 
 .tenant-pill {
   display: inline-flex;
   align-items: center;
   min-height: 24px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 0 0.55rem;
   font-size: 0.6875rem;
   font-weight: 700;
@@ -188,23 +188,23 @@
 }
 
 .tenant-pill--ok {
-  background: #dcfce7;
-  color: #166534;
+  background: var(--color-success-bg);
+  color: var(--color-success-fg-strong);
 }
 
 .tenant-pill--warning {
-  background: #fef3c7;
-  color: #92400e;
+  background: var(--color-warn-bg);
+  color: var(--color-warn-fg);
 }
 
 .tenant-pill--danger {
-  background: #fee2e2;
-  color: #991b1b;
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg-strong);
 }
 
 .tenant-pill--muted {
-  background: #e5e7eb;
-  color: #374151;
+  background: var(--color-border-subtle);
+  color: var(--color-text-neutral);
 }
 
 .tenant-detail-panel__header {
@@ -227,15 +227,15 @@
 }
 
 .tenant-fields div {
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
   padding: 0.7rem;
   min-width: 0;
 }
 
 .tenant-fields span {
   display: block;
-  color: #6b7280;
+  color: var(--color-text-subtle);
   font-size: 0.75rem;
   margin-bottom: 0.25rem;
 }
@@ -254,7 +254,7 @@
 }
 
 .accounts-header span {
-  color: #6b7280;
+  color: var(--color-text-subtle);
   font-size: 0.8125rem;
 }
 
@@ -264,8 +264,8 @@
 }
 
 .account-row {
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
   padding: 0.8rem;
 }
 
@@ -287,27 +287,27 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.75rem;
-  color: #4b5563;
+  color: var(--color-text-body-muted);
   font-size: 0.8125rem;
   margin: 0.75rem 0;
 }
 
 .tenant-empty {
-  color: #6b7280;
+  color: var(--color-text-subtle);
   padding: 2rem;
   text-align: center;
 }
 
 .tenant-empty--compact {
   padding: 1rem;
-  border: 1px dashed #d1d5db;
-  border-radius: 8px;
+  border: 1px dashed var(--color-border-input);
+  border-radius: var(--radius-lg);
 }
 
 .tenant-modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(17, 24, 39, 0.55);
+  background: var(--overlay-neutral);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -316,9 +316,9 @@
 }
 
 .tenant-modal {
-  background: #fff;
-  border-radius: 8px;
-  box-shadow: 0 18px 50px rgba(17, 24, 39, 0.22);
+  background: var(--color-surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal-compact);
   width: min(760px, 96vw);
   max-height: calc(100dvh - 2rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
   overflow: auto;
@@ -330,7 +330,7 @@
   align-items: center;
   gap: 1rem;
   padding: 1rem;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid var(--color-border-subtle);
 }
 
 .tenant-form {
@@ -343,7 +343,7 @@
 .tenant-form label {
   display: grid;
   gap: 0.35rem;
-  color: #374151;
+  color: var(--color-text-neutral);
   font-size: 0.8125rem;
   font-weight: 700;
 }
@@ -353,10 +353,10 @@
 .tenant-form textarea {
   width: 100%;
   box-sizing: border-box;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
+  border: 1px solid var(--color-border-input);
+  border-radius: var(--radius-md);
   padding: 0.55rem 0.65rem;
-  color: #111827;
+  color: var(--color-text-heading);
   font: inherit;
 }
 
@@ -366,7 +366,7 @@
 }
 
 .tenant-form__help {
-  color: #6b7280;
+  color: var(--color-text-subtle);
   font-size: 0.75rem;
   font-weight: 500;
   line-height: 1.35;

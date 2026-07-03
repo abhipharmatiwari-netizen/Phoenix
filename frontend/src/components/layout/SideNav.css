@@ -1,8 +1,8 @@
 .side-nav {
   width: 248px;
   flex: 0 0 248px;
-  background: #111827;
-  color: #d1d5db;
+  background: var(--color-nav-bg);
+  color: var(--color-nav-text);
   padding: 0.85rem;
   height: 100dvh;
   overflow-y: auto;
@@ -14,7 +14,7 @@
   gap: 0.6rem;
   padding: 0.4rem 0.55rem 0.8rem;
   font-weight: 900;
-  color: #fff;
+  color: var(--color-text-inverse);
 }
 
 .side-nav__mark {
@@ -22,8 +22,27 @@
   place-items: center;
   width: 30px;
   height: 30px;
-  border-radius: 8px;
-  background: #0f766e;
+  border-radius: var(--radius-lg);
+  background: var(--color-brand);
+}
+
+.side-nav__sections {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.side-nav__section {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.side-nav__section-label {
+  padding: 0 0.7rem;
+  color: var(--color-text-disabled);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .side-nav ul {
@@ -41,21 +60,21 @@
   align-items: center;
   gap: 0.65rem;
   padding: 0.62rem 0.7rem;
-  border-radius: 6px;
-  color: #cbd5e1;
+  border-radius: var(--radius-md);
+  color: var(--color-nav-link);
   text-decoration: none;
   font-weight: 700;
   transition: background-color 0.2s, color 0.2s;
 }
 
 .side-nav a:hover {
-  background: #1f2937;
-  color: #fff;
+  background: var(--color-nav-hover-bg);
+  color: var(--color-text-inverse);
 }
 
 .side-nav a.active {
-  background: #0f766e;
-  color: #fff;
+  background: var(--color-brand);
+  color: var(--color-text-inverse);
 }
 
 .side-nav .nav-icon {
@@ -76,7 +95,7 @@
     overflow-y: auto;
     transform: translateX(-100%);
     transition: transform 180ms ease;
-    box-shadow: 18px 0 40px rgba(15, 23, 42, 0.22);
+    box-shadow: var(--shadow-drawer);
   }
 
   .side-nav.is-open {
@@ -85,6 +104,10 @@
 
   .side-nav ul {
     display: block;
+  }
+
+  .side-nav__sections {
+    gap: var(--space-3);
   }
 
   .side-nav li {
