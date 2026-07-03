@@ -1,8 +1,8 @@
-# NON-CURRENT FOR PRODUCTION.
-# The current production runtime is the OCI VM documented in
-# docs/OCI_VM_RUNTIME.md. This Docker/Desktop manifest is retained for local
-# engineering/reference only and must not be used as current live-operations
-# guidance.
+# ACTIVE LIVE RUNTIME FROM 2026-06-29 ONWARD.
+# The current production runtime is the Windows Docker Desktop stack described
+# in docs/runbooks/docker_desktop_live_deployment.md and exposed through the
+# Vultr reverse proxy/tunnel path. OCI VM material is historical/restoration
+# reference only unless a future migration explicitly reinstates it.
 # Secrets must be injected at runtime. Do not store real secrets in repo files.
 
 name: phoenix-live

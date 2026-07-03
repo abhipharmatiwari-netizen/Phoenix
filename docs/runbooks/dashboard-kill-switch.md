@@ -184,11 +184,13 @@ The Safety page's lower table merges:
 
 - `resource_type=kill_switch` events (trip, clear-with-password, legacy request-clear / confirm-clear / rearm)
 - `resource_type=broker_orders` events (cancel-all bulk attempts)
-- `action=break_glass` events (existing flatten flow)
+- `resource_type=position&action=break_glass_flatten` events (break-glass flatten flow)
 
 Every toggle records `actor`, `timestamp`, `reason`, prior state,
 requested state, broker-side per-account results, and a request id.
-The events are queryable via `GET /admin/audit?resource_type=kill_switch`.
+The kill-switch events are queryable via
+`GET /admin/audit?resource_type=kill_switch`; the Safety page merges the
+additional broker-order and break-glass feeds.
 
 ## Dashboard readiness
 
