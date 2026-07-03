@@ -617,6 +617,8 @@ class AccountRunner:
             symbol = str(getattr(pos, "symbol", "") or "").strip()
             avg_price = float(getattr(pos, "avg_price", 0.0) or 0.0)
             ltp = dashboard_bus.get_last_price(symbol) if symbol else None
+            if ltp is None and symbol:
+                ltp = dashboard_bus.get_last_price_for_instrument(symbol=symbol)
 
             # §94: In LIVE mode, do NOT use avg_price as a synthetic mark.
             # Using avg_price when ltp is None produces unrealized_pnl=0 which
