@@ -490,6 +490,9 @@ def test_dashboard_status_degrades_when_kill_switch_active(
     runtime.watchdog_running_state = True
     monkeypatch.setattr(server, "_readiness_trade_mode", lambda: "LIVE")
     monkeypatch.setenv("TRADE_MODE", "LIVE")
+    from app.observability import alert_rules
+
+    alert_rules.reset_alert_evaluator()
     monkeypatch.setattr(
         server,
         "get_hub_runtime",
@@ -518,6 +521,18 @@ def test_dashboard_status_degrades_when_kill_switch_active(
     assert payload["readiness"]["http_status"] == 503
     assert payload["readiness"]["reason"].startswith("kill_switch_active")
     assert payload["kill_switch"]["active_count"] == 1
+
+    alerts_resp = client.get("/health/alerts")
+    alerts_payload = alerts_resp.json()
+    firing_rules = [
+        alert["rule_name"]
+        for alert in alerts_payload["alerts"]
+        if alert["state"] == "firing"
+    ]
+    assert alerts_resp.status_code == 200
+    assert alerts_payload["firing_count"] >= 1
+    assert "readiness_kill_switch_active" in firing_rules
+    alert_rules.reset_alert_evaluator()
 
 
 def test_dashboard_status_degrades_when_runtime_not_ready(

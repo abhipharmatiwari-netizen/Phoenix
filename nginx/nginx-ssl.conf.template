@@ -7,6 +7,22 @@ map $http_x_forwarded_host $forwarded_host {
     ""      $host;
 }
 
+map $http_accept $phoenix_positions_accepts_json {
+    default 0;
+    "~*application/json" 1;
+}
+
+map $arg_broker_account_id $phoenix_positions_has_account_arg {
+    default 0;
+    "" 0;
+    "~.+" 1;
+}
+
+map "$phoenix_positions_accepts_json$phoenix_positions_has_account_arg" $phoenix_legacy_positions_api {
+    default 0;
+    "~1" 1;
+}
+
 log_format phoenix_no_query '$remote_addr - $remote_user [$time_local] '
                             '"$request_method $uri $server_protocol" $status $body_bytes_sent '
                             '"$http_referer" "$http_user_agent" "$http_x_forwarded_for"';
@@ -168,6 +184,24 @@ server {
     }
 
     location /tenant/ {
+        limit_req zone=general burst=30 nodelay;
+        proxy_pass http://backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    # Legacy API clients use /positions. Browser navigations keep the React route.
+    error_page 418 = @legacy_positions_api;
+    location = /positions {
+        if ($phoenix_legacy_positions_api) {
+            return 418;
+        }
+        try_files $uri $uri/ /index.html;
+    }
+
+    location @legacy_positions_api {
         limit_req zone=general burst=30 nodelay;
         proxy_pass http://backend;
         proxy_set_header Host $host;

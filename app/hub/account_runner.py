@@ -424,6 +424,13 @@ class AccountRunner:
 
         if result.status == PositionsStatus.OK:
             backoff.register_ok()
+            try:
+                previous_positions_status = (
+                    self._state_store.get_positions_status(self._broker_account_id)
+                    or {}
+                )
+            except Exception:
+                previous_positions_status = {}
             positions = result.positions or []
             self._last_positions = positions
             self._state_store.set_positions(self._broker_account_id, positions)
@@ -465,6 +472,10 @@ class AccountRunner:
             if self._pnl_engine is not None:
                 try:
                     self._sync_pnl_from_positions(positions)
+                    self._log_flat_pnl_recovery_if_needed(
+                        positions,
+                        previous_positions_status,
+                    )
                 except Exception as exc:
                     logger.warning(
                         "AccountRunner PnL sync failed for %s: %s",
@@ -520,6 +531,43 @@ class AccountRunner:
             self.broker_account_id,
             result.reason,
         )
+
+    def _log_flat_pnl_recovery_if_needed(
+        self,
+        positions: list[Any],
+        previous_positions_status: dict[str, Any],
+    ) -> None:
+        if not self._positions_are_flat(positions):
+            return
+        previous_status = str(previous_positions_status.get("status") or "").upper()
+        try:
+            previous_count = int(previous_positions_status.get("last_count") or 0)
+        except Exception:
+            previous_count = 0
+        if previous_status == "OK" and previous_count <= 0:
+            return
+        log_event(
+            logger,
+            event_type="PNL_MARK_RECOVERED_FLAT",
+            message="Broker positions are flat; refreshed PnL mark-to-market snapshot to zero.",
+            tenant_id=self._tenant_id,
+            broker_account_id=self._broker_account_id,
+            level=logging.INFO,
+            previous_positions_status=previous_status or "UNKNOWN",
+            previous_positions_count=previous_count,
+            source="broker_sync_flat",
+        )
+
+    @staticmethod
+    def _positions_are_flat(positions: list[Any]) -> bool:
+        for pos in positions or []:
+            try:
+                qty = int(getattr(pos, "quantity", 0) or 0)
+            except Exception:
+                return False
+            if qty != 0:
+                return False
+        return True
 
     async def _auto_recover_position_authority_if_broker_flat(self) -> None:
         callback = self._position_authority_auto_recovery
@@ -642,9 +690,12 @@ class AccountRunner:
                     except Exception:
                         pass  # non-critical; control PnL update is best-effort
 
-        _sync_source = (
-            "broker_sync_stale_mark" if _synthetic_mark_count > 0 else "broker_sync"
-        )
+        if self._positions_are_flat(positions):
+            _sync_source = "broker_sync_flat"
+        elif _synthetic_mark_count > 0:
+            _sync_source = "broker_sync_stale_mark"
+        else:
+            _sync_source = "broker_sync"
         self._pnl_engine.sync_account_mark_to_market(
             tenant_id=self._tenant_id,
             broker_account_id=self._broker_account_id,

@@ -58,6 +58,26 @@ def _is_blocked_direct_diagnostic_path(path: str) -> bool:
     return normalized in _BLOCKED_DIRECT_DIAGNOSTIC_PATHS
 
 
+def _upstream_timeout_response(method: str, path: str, exc: Exception) -> Response:
+    logger.warning(
+        "BFF upstream timeout during %s %s: %s",
+        method,
+        path,
+        type(exc).__name__,
+    )
+    return Response(status_code=504, content="Upstream request timed out")
+
+
+def _upstream_transport_error_response(method: str, path: str, exc: Exception) -> Response:
+    logger.warning(
+        "BFF upstream transport error during %s %s: %s",
+        method,
+        path,
+        type(exc).__name__,
+    )
+    return Response(status_code=502, content="Upstream unavailable")
+
+
 def _proxy_headers(
     request: Request,
     *,
@@ -104,6 +124,10 @@ async def proxy_post(request: Request, path: str):
             return response.json()
         except httpx.HTTPStatusError as e:
             return Response(content=e.response.text, status_code=e.response.status_code)
+        except httpx.TimeoutException as e:
+            return _upstream_timeout_response("POST", path, e)
+        except httpx.TransportError as e:
+            return _upstream_transport_error_response("POST", path, e)
         except Exception as e:
             logger.error("Error proxying POST to %s: %s: %s", path, type(e).__name__, e)
             return Response(status_code=500, content="Internal server error")
@@ -124,6 +148,10 @@ async def proxy_get(request: Request, path: str):
             return response.json()
         except httpx.HTTPStatusError as e:
             return Response(content=e.response.text, status_code=e.response.status_code)
+        except httpx.TimeoutException as e:
+            return _upstream_timeout_response("GET", path, e)
+        except httpx.TransportError as e:
+            return _upstream_transport_error_response("GET", path, e)
         except Exception as e:
             logger.error("Error proxying GET to %s: %s: %s", path, type(e).__name__, e)
             return Response(status_code=500, content="Internal server error")

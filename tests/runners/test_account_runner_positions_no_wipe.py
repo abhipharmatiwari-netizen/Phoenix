@@ -66,6 +66,27 @@ class _OkBrokerClient:
         raise NotImplementedError
 
 
+class _FlatBrokerClient:
+    async def login(self):
+        return None
+
+    async def get_balance(self):
+        raise NotImplementedError
+
+    async def get_positions(self):
+        return PositionsFetchResult(
+            status=PositionsStatus.OK,
+            positions=[],
+            reason="ok",
+        )
+
+    async def get_orders(self):
+        return []
+
+    async def place_order(self, request):
+        raise NotImplementedError
+
+
 def _dummy_account() -> BrokerAccountModel:
     return BrokerAccountModel(
         broker_account_id=BrokerAccountId("ba_test"),
@@ -322,4 +343,47 @@ def test_live_sync_positions_tags_snapshot_when_ltp_missing(monkeypatch, caplog)
     assert captured["per_strategy_marks"] == {}
     assert captured["source"] == "broker_sync_stale_mark"
     assert "mark.unavailable" in caplog.text
+    asyncio.run(runner.stop())
+
+
+def test_live_sync_positions_marks_pnl_recovered_when_broker_flat(caplog):
+    state_store = StateStore()
+    account = _dummy_account()
+    captured = {}
+    state_store.update_positions_status(
+        account.broker_account_id,
+        status="BLOCKED",
+        last_ok_ts="2026-07-03T06:57:00+00:00",
+        last_count=1,
+        error_reason="rate_limited",
+        blocked_ts="2026-07-03T06:58:00+00:00",
+        retry_after_seconds=30.0,
+    )
+
+    class _PnlEngine:
+        def sync_account_mark_to_market(self, **kwargs):
+            captured.update(kwargs)
+
+    runner = AccountRunner(
+        tenant_id=account.tenant_id,
+        broker_account=account,
+        broker_client=_FlatBrokerClient(),
+        runtime_mode="LIVE",
+        state_store=state_store,
+        pnl_engine=_PnlEngine(),
+        poll_interval_seconds=1,
+    )
+    caplog.set_level("INFO", logger="app.hub.account_runner")
+
+    asyncio.run(runner._sync_positions(force=True))
+
+    assert captured["account_unrealized_pnl"] == 0.0
+    assert captured["account_gross_exposure"] == 0.0
+    assert captured["per_strategy_marks"] == {}
+    assert captured["source"] == "broker_sync_flat"
+    status = state_store.get_positions_status(account.broker_account_id)
+    assert status["status"] == "OK"
+    assert status["last_count"] == 0
+    assert status["error_reason"] is None
+    assert "event_type=PNL_MARK_RECOVERED_FLAT" in caplog.text
     asyncio.run(runner.stop())

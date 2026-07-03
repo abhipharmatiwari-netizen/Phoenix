@@ -359,6 +359,56 @@ def test_account_total_returns_none_for_broker_sync_stale_mark(monkeypatch, capl
     assert "source=broker_sync_stale_mark" in caplog.text
 
 
+def test_account_total_recovers_after_broker_sync_flat(monkeypatch, caplog):
+    base_time = datetime(2026, 3, 26, 9, 15, tzinfo=timezone.utc)
+    engine, clock = _build_engine(monkeypatch, base_time=base_time)
+    tenant_id = TenantId("tenant-1")
+    broker_account_id = BrokerAccountId("A1")
+
+    engine.sync_account_mark_to_market(
+        tenant_id=tenant_id,
+        broker_account_id=broker_account_id,
+        account_unrealized_pnl=0.0,
+        account_gross_exposure=9150.0,
+        per_strategy_marks={},
+        as_of=base_time,
+        source="broker_sync_stale_mark",
+    )
+    assert engine.get_current_total_pnl(
+        tenant_id=tenant_id,
+        broker_account_id=broker_account_id,
+    ) is None
+
+    clock.advance(timedelta(seconds=10))
+    engine.sync_account_mark_to_market(
+        tenant_id=tenant_id,
+        broker_account_id=broker_account_id,
+        account_unrealized_pnl=0.0,
+        account_gross_exposure=0.0,
+        per_strategy_marks={},
+        as_of=clock.now_utc(),
+        source="broker_sync_flat",
+    )
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        total = engine.get_current_total_pnl(
+            tenant_id=tenant_id,
+            broker_account_id=broker_account_id,
+        )
+
+    snapshot = engine.get_snapshot(
+        tenant_id=tenant_id,
+        broker_account_id=broker_account_id,
+        strategy_id=StrategyId("__account_seed__"),
+    )
+    assert total == pytest.approx(0.0)
+    assert snapshot is not None
+    assert snapshot.gross_exposure == pytest.approx(0.0)
+    assert snapshot.freshness_source == "broker_sync_flat"
+    assert "PnL snapshot unavailable" not in caplog.text
+
+
 def test_display_realized_account_resets_previous_session(monkeypatch):
     base_time = datetime(2026, 5, 8, 9, 15, tzinfo=timezone.utc)
     engine, clock = _build_engine(monkeypatch, base_time=base_time)

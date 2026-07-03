@@ -199,6 +199,28 @@ class TestBuiltInRules:
         assert alert.state == AlertState.FIRING
         assert alert.value == 2
 
+    def test_kill_switch_readiness_alert_fires(self, monkeypatch):
+        monkeypatch.setenv("TRADE_MODE", "LIVE")
+        monkeypatch.setattr(
+            "app.risk.kill_switch.get_kill_switch_state",
+            lambda: {
+                "source": "kill_switch_manager",
+                "active_count": 1,
+                "legacy_kill_switch": {"active": False},
+                "divergence": {"divergent": False},
+            },
+        )
+
+        ev = get_alert_evaluator()
+        results = ev.evaluate_all()
+        alert = next(r for r in results if r.rule_name == "readiness_kill_switch_active")
+
+        assert alert.state == AlertState.FIRING
+        assert alert.severity == AlertSeverity.CRITICAL
+        assert alert.value == 1
+        assert alert.labels == {"component": "readiness", "source": "kill_switch"}
+        assert "active durable kill switch" in alert.message
+
     def test_oi_ml_shadow_ingestion_alert_fires(self, monkeypatch):
         monkeypatch.setattr(
             "app.strategies.oi_ml.shadow_health.collect_shadow_ingestion_status",

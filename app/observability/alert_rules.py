@@ -512,7 +512,44 @@ def build_default_alert_rules() -> list[AlertRule]:
         labels={"component": "leader_election"},
     ))
 
-    # 16. Readiness-critical position authority blockers.
+    # 16. Readiness-critical durable kill switch blockers.
+    def _check_kill_switch_readiness_degraded() -> tuple[bool, Any, str]:
+        if str(os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper() != "LIVE":
+            return False, 0, ""
+        try:
+            from app.risk.kill_switch import get_kill_switch_state
+
+            state = get_kill_switch_state() or {}
+            active_count = int(state.get("active_count") or 0)
+        except Exception as exc:
+            return (
+                True,
+                "unavailable",
+                (
+                    "Kill switch state unavailable during LIVE readiness alert "
+                    f"evaluation: {type(exc).__name__}"
+                ),
+            )
+        if active_count > 0:
+            return (
+                True,
+                active_count,
+                (
+                    "LIVE readiness blocked by active durable kill switch: "
+                    f"{active_count} non-INACTIVE scope(s)"
+                ),
+            )
+        return False, 0, ""
+
+    rules.append(AlertRule(
+        name="readiness_kill_switch_active",
+        description="LIVE readiness is blocked by an active durable kill switch",
+        severity=AlertSeverity.CRITICAL,
+        evaluate_fn=_check_kill_switch_readiness_degraded,
+        labels={"component": "readiness", "source": "kill_switch"},
+    ))
+
+    # 17. Readiness-critical position authority blockers.
     def _check_position_authority_degraded() -> tuple[bool, Any, str]:
         if str(os.getenv("TRADE_MODE", "PAPER") or "PAPER").strip().upper() != "LIVE":
             return False, 0, ""
@@ -560,7 +597,7 @@ def build_default_alert_rules() -> list[AlertRule]:
         labels={"component": "readiness"},
     ))
 
-    # 17. OI/ML shadow ingestion visibility.
+    # 18. OI/ML shadow ingestion visibility.
     def _check_oi_ml_shadow_ingestion() -> tuple[bool, Any, str]:
         try:
             from app.strategies.oi_ml.shadow_health import collect_shadow_ingestion_status

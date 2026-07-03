@@ -9,11 +9,30 @@ NGINX_SSL_TEMPLATE = REPO_ROOT / "nginx" / "nginx-ssl.conf.template"
 NGINX_DOCKERFILE = REPO_ROOT / "nginx" / "Dockerfile"
 
 
-def test_positions_route_is_not_proxied_over_spa():
-    content = NGINX_TEMPLATE.read_text()
+def test_positions_route_splits_legacy_api_from_spa():
+    for template in (NGINX_TEMPLATE, NGINX_SSL_TEMPLATE):
+        content = template.read_text()
 
-    assert "location /positions" not in content
-    assert "try_files $uri $uri/ /index.html;" in content
+        assert "map $http_accept $phoenix_positions_accepts_json" in content
+        assert "map $arg_broker_account_id $phoenix_positions_has_account_arg" in content
+        assert (
+            'map "$phoenix_positions_accepts_json$phoenix_positions_has_account_arg" '
+            "$phoenix_legacy_positions_api"
+        ) in content
+        assert "error_page 418 = @legacy_positions_api;" in content
+        assert "location = /positions" in content
+        assert "location @legacy_positions_api" in content
+
+        route_start = content.index("location = /positions")
+        route_end = content.index("location @legacy_positions_api")
+        route_body = content[route_start:route_end]
+        assert "if ($phoenix_legacy_positions_api)" in route_body
+        assert "return 418;" in route_body
+        assert "try_files $uri $uri/ /index.html;" in route_body
+
+        api_body = content[route_end:]
+        assert "proxy_pass http://backend;" in api_body
+        assert "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;" in api_body
 
 
 def test_index_html_is_marked_non_cacheable_for_route_refreshes():
