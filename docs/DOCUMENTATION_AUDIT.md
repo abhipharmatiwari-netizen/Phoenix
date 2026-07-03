@@ -1,6 +1,6 @@
 # Documentation Audit
 
-Audit date: 2026-06-29. Runtime snapshot refreshed after the 2026-06-23
+Audit date: 2026-07-03. Runtime snapshot refreshed after the 2026-06-23
 EMA20-only LIVE enablement, canonical-host login repair, persistent OI/ML
 sidecar dormancy, and Phoenix DB backup cron installation. On 2026-06-28, the
 Docker Desktop LIVE runbook was also refreshed with local LIVE runtime evidence
@@ -8,7 +8,10 @@ against Windows PostgreSQL 18 `phoenix`. On 2026-06-29, the Vultr reverse proxy
 runbook was added for the active public access path after OCI VM retirement,
 HTTPS was enabled for
 `app.phoenixtechnosolutions.in`, and the reverse tunnel owner was moved from a
-Windows Scheduled Task to Docker sidecar `phoenix-v9-vultr-tunnel`.
+Windows Scheduled Task to Docker sidecar `phoenix-v9-vultr-tunnel`. On
+2026-07-03, kill-switch runbooks were refreshed for the deployed
+`Legacy Recovery Clear` flow that resets stale legacy intraday drawdown
+baselines only after broker flatness/open-order validation.
 
 Scope: repository documentation, environment examples, Compose comments, and
 operator-facing runbooks were checked against the last verified OCI VM evidence
@@ -46,7 +49,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | `README.md` | operator entrypoint | CURRENT_LOCAL_RECOVERY_WITH_OCI_BASELINE | KEEP CURRENT |
 | `ABOUTME.md` | plain-language summary | CURRENT_LOCAL_RECOVERY_WITH_OCI_BASELINE | KEEP CURRENT |
 | `ARCHITECTURE.md` | production contract | CURRENT_LOCAL_RECOVERY_WITH_OCI_BASELINE | KEEP CURRENT |
-| `docs/ENCYCLOPEDIA.md` | runtime glossary and endpoint behavior index | CURRENT | KEEP CURRENT |
+| `docs/ENCYCLOPEDIA.md` | runtime glossary and endpoint behavior index | CURRENT_WITH_LEGACY_DRAWDOWN_RECOVERY | KEEP CURRENT |
 | `docs/OCI_VM_RUNTIME.md` | historical evidence snapshot | HISTORICAL_OCI_RESTORATION_ONLY | KEEP AS ARCHIVE |
 | `docs/runbooks/oci_live_deployment.md` | OCI restoration operations | HISTORICAL_OCI_RESTORATION_ONLY | KEEP AS ARCHIVE |
 | `docs/runbooks/oci_runtime_hardening.md` | OCI hardening/restoration | HISTORICAL_OCI_RESTORATION_ONLY | KEEP AS ARCHIVE |
@@ -58,7 +61,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | `docs/release-evidence/README.md` | release evidence folder guide | MATCHES_CURRENT_ENDPOINTS | KEEP CURRENT |
 | `docs/kpis_slos.md` | observability/KPI reference | MATCHES_CURRENT_ENDPOINTS | KEEP CURRENT |
 | `docs/runbooks/update_broker_credentials.md` | broker credential rotation | MATCHES_OCI_VM | KEEP CURRENT |
-| `docs/runbooks/dashboard-kill-switch.md` | kill-switch dashboard playbook | CURRENT_WITH_KILL_SWITCH_AUTHORITY | KEEP CURRENT |
+| `docs/runbooks/dashboard-kill-switch.md` | kill-switch dashboard playbook | CURRENT_WITH_LEGACY_RECOVERY_CLEAR | KEEP CURRENT |
 | `docs/runbooks/oi_ml_shadow_sidecar.md` | OI/ML shadow sidecar | CURRENT_DORMANT | KEEP CURRENT |
 | `docs/runbooks/docker_desktop_live_deployment.md` | Docker Desktop/Vultr active runtime | CURRENT_ACTIVE_LOCAL | KEEP CURRENT |
 | `docs/runbooks/vultr_reverse_proxy.md` | Vultr public reverse proxy for local Phoenix | CURRENT_LOCAL_PROXY_HTTPS_ACTIVE | KEEP CURRENT |
@@ -66,7 +69,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | `docs/runbooks/blue_green_cutover.md` | cutover plan | ROADMAP_ONLY_FOR_CURRENT_VM | KEEP WITH BANNER |
 | `docs/runbooks/restore_drill.md` | restore drill | CURRENT_WITH_OCI_NOTE | KEEP CURRENT |
 | `docs/runbooks/strategy_runtime_diagnostics.md` | strategy diagnostics | MATCHES_CURRENT_READYZ_GATES | KEEP CURRENT |
-| `docs/runbooks/kill_switch.md` | kill-switch operations | MATCHES_CURRENT_AUTHORITY | KEEP CURRENT |
+| `docs/runbooks/kill_switch.md` | kill-switch operations | MATCHES_CURRENT_LEGACY_RECOVERY_AUTHORITY | KEEP CURRENT |
 | `docs/STRATEGIES.md` | strategy catalog | HISTORICAL_AND_CURRENT_REFERENCE | KEEP |
 | `docs/Flowchart.md` | architecture diagrams | CURRENT_ENDPOINT_CONTEXT | KEEP |
 | `docs/parameters.md` | strategy parameter reference | NEEDS_STRATEGY_OWNER_REVIEW | KEEP |
@@ -98,6 +101,7 @@ Full evidence: [OCI VM Runtime Evidence](OCI_VM_RUNTIME.md).
 | Browser login returned `Invalid Host header` for the canonical domain | `PHOENIX_DOMAIN` and optional `PHOENIX_ALLOWED_HOSTS` are now forwarded to the backend Host guard; canonical login reaches validation while malformed hosts remain blocked |
 | Current docs described OI/ML as running and continuously monitored | Sidecar Compose now defaults dormant, no VM container is present, the retained image and historical data remain, backend monitoring is disabled, and reactivation requires an explicit reviewed override |
 | Phoenix DB backup automation was not represented in operator docs | The root cron schedule, installed script path, local dump path, log path, retention, restore-list verification, and dry-run check are documented in the Postgres backup, OCI deployment, hardening, restore, and release-evidence runbooks |
+| Kill-switch docs conflated daily-loss breaches with intraday drawdown re-trips and did not document the deployed legacy baseline reset | `docs/runbooks/kill_switch.md`, `docs/runbooks/dashboard-kill-switch.md`, `docs/runbooks/docker_desktop_live_deployment.md`, and `docs/ENCYCLOPEDIA.md` now document `Legacy Recovery Clear`, its broker-flatness/open-order validation, `baseline_reset` audit evidence, and the 2026-07-03 stale high-water-mark failure shape |
 
 ## Open Documentation-Backed Risks
 

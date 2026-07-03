@@ -396,6 +396,13 @@ the router, run these checks before considering automated LIVE recovered:
 - If `kill_switch.trip` appears, capture `reasons`, realized/unrealized/total
   PnL, drawdown fields, open labels, and `evaluation_source` before clearing.
   Do not clear until broker-side positions and open orders are verified.
+- If account PnL is not below the daily-loss limit but the trip reason contains
+  `realized_drawdown` or `floating_drawdown`, inspect the legacy
+  `risk_positions.json` high-water marks (`daily_peak_equity`,
+  `daily_peak_total_pnl`, `last_total_pnl`) before clearing. A stale same-day
+  peak can re-trip even with positive flat PnL. After broker flatness/open-order
+  evidence is clean, use the Safety page **Legacy Recovery Clear** action rather
+  than editing the file directly.
 
 ---
 

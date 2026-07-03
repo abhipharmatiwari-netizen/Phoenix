@@ -1,9 +1,9 @@
 # Phoenix Encyclopedia
 
-Last updated: 2026-06-29.
+Last updated: 2026-07-03.
 
 This is the quick-reference index for the current Phoenix runtime. As of
-2026-06-29, active operations run from the local Docker Desktop LIVE stack and
+2026-07-03, active operations run from the local Docker Desktop LIVE stack and
 Vultr HTTPS proxy. The OCI VM entries below remain the last verified VM baseline
 and restoration reference, not proof that the retired VM is currently running.
 
@@ -136,6 +136,21 @@ the order ids/fills and `kill_switch.trip` audit evidence, resolve any
 switch through the vault-backed password flow. Do not clear based only on
 `/health`; use `/readyz`, authenticated health summary, broker terminal evidence,
 and backend logs.
+
+## 2026-07-03 Legacy Drawdown-Baseline Recovery
+
+On 2026-07-03 the account was flat and account PnL was positive, but the
+legacy RiskManager high-water marks still implied a large same-day intraday
+drawdown: `daily_peak_total_pnl=31200.0` and `last_total_pnl=816.5`. The kill
+switch was therefore re-tripped by `realized_drawdown,floating_drawdown` even
+though daily loss was not breached.
+
+The supported web/API recovery is **Legacy Recovery Clear** on the Safety page
+or `POST /admin/kill-switch/legacy-recovery-clear`. It first validates broker
+flatness and open-order evidence, then clears the legacy flag and resets the
+legacy drawdown baseline to current flat PnL before rearming durable state.
+Direct `risk_positions.json` edits are break-glass only while this endpoint is
+available.
 
 ## Runbooks And Playbooks
 

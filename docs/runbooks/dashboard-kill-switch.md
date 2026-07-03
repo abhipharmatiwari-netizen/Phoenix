@@ -26,7 +26,8 @@ the order-cancellation path without requiring shell access to the runtime host.
 | Strategy is placing orders that look obviously wrong (wrong side, wrong qty, wrong symbol). | **Trip SOFT** - blocks new entries; use approved operator exit paths if exposure must be reduced. |
 | Operator wants to immediately stop everything including exit attempts. | **Trip HARD** — blocks all orders; you'll have to manually flatten via broker UI. |
 | Multiple unwanted broker orders are already open. | After tripping, **Cancel ALL Open Orders** to drain them. |
-| Burst behaviour stopped, ready to resume normal trading. | **Clear Kill Switch** with the vault-backed override password after broker-side flat and safety checks are confirmed. |
+| Burst behaviour stopped, ready to resume normal trading. | **Override Clear** with the vault-backed override password after broker-side flat and safety checks are confirmed. |
+| Override clear reports an active legacy RiskManager blocker after broker flatness/open-order evidence is clean. | **Legacy Recovery Clear** with the same vault-backed override password. |
 
 ## Where it lives
 
@@ -48,23 +49,28 @@ INACTIVE --(Trip)--> TRIPPED --(request_clear)--> CLEAR_PENDING
 
 **Important:** ``KillSwitchManager.trip()`` rejects any existing
 non-INACTIVE record, so you cannot re-trip directly from CLEARED.
-The dashboard's **Clear Kill Switch** button drives the clear cycle
+The dashboard's **Override Clear** button drives the standard clear cycle
 server-side: it verifies the vault-backed override password, runs
 the pre-clear safety checks, then advances any TRIPPED /
 CLEAR_PENDING / CLEARED global record to INACTIVE. If another
 incident needs the switch active again, wait for this clear call to
 return INACTIVE before tripping again.
 
+When the standard clear is blocked only by active legacy RiskManager
+state after broker flatness is proven, use **Legacy Recovery Clear**.
+That dashboard action calls `POST /admin/kill-switch/legacy-recovery-clear`;
+it is not a force-clear shortcut.
+
 The dashboard renders the current state as a coloured pill at the top
 right of the panel:
 
 - 🟩 **INACTIVE** — normal operation
 - 🟥 **TRIPPED** — new orders blocked (HARD also blocks exits)
-- 🟧 **CLEAR_PENDING** — clear requested; use **Clear Kill Switch**
+- 🟧 **CLEAR_PENDING** — clear requested; use **Override Clear**
   to complete the server-side clear/rearm flow
 - 🟦 **CLEARED** — router entry block has been released, but the
-  record still needs the server-side rearm step that **Clear Kill
-  Switch** performs
+  record still needs the server-side rearm step that **Override Clear**
+  performs
 
 ## Required input
 
@@ -126,7 +132,7 @@ A1: ok       (att=2, ok=2, fail=0, skip=0, raced_filled=0)
 A2: ok       (att=1, ok=0, fail=0, skip=1, raced_filled=0)
 ```
 
-## Override Password Clear
+## Override Clear
 
 The dashboard clear path is `POST /admin/kill-switch/clear-with-password`.
 It is available only to an authenticated ADMIN bearer session; an
@@ -159,6 +165,33 @@ quantity and no non-terminal orders. On success it clears the legacy
 risk-manager halt, advances the durable kill switch to `INACTIVE`,
 audits actor/reason/evidence, and returns post-action `/readyz` plus
 `/health/summary` recheck summaries.
+
+## Legacy Recovery Clear
+
+Use **Legacy Recovery Clear** only when all of the following are true:
+
+- broker terminal shows zero unsafe/open position quantity
+- cancel-all has completed, or the broker terminal shows no open orders
+- `/positions` corroborates flat state after at least one sync interval
+- the active blocker is legacy RiskManager state, not degraded position
+  authority or unresolved lifecycle records
+
+This button calls `POST /admin/kill-switch/legacy-recovery-clear` with
+the same ADMIN bearer session and vault-backed override password used
+by Override Clear. The backend first proves every registered broker
+runner is flat and has no non-terminal orders. Only after that
+validation passes, it clears the legacy `kill_switch_activated` flag,
+resets the same-day legacy drawdown high-water marks
+(`daily_peak_equity`, `daily_peak_total_pnl`, and `max_equity`) to the
+current flat PnL, persists the legacy state, and then advances the
+durable record to `INACTIVE`.
+
+This baseline reset is required for the 2026-07-03 failure shape:
+broker/Phoenix account PnL was positive, but legacy state still held
+`daily_peak_total_pnl=31200.0` and `last_total_pnl=816.5`, so the next
+risk tick computed `30383.5` intraday drawdown against a `2000` limit
+and immediately re-tripped. Daily loss was not breached; intraday
+drawdown was.
 
 The older `request-clear`, `confirm-clear`, `rearm`, and step-up-token
 endpoints remain available for advanced API compatibility. They are
@@ -213,7 +246,7 @@ the public redacted response alone.
 1. **Trip SOFT** with reason `"strategy XYZ mis-firing — bursts seen at 10:23"`.
 2. Verify state pill shows **TRIPPED · SOFT**.
 3. Optionally **Cancel ALL Open Orders** to drain pending entries.
-4. Investigate. Once safe, press **Clear Kill Switch** and enter the
+4. Investigate. Once safe, press **Override Clear** and enter the
    vault-backed override password.
 
 ### Scenario 2: Need to stop everything
@@ -222,7 +255,7 @@ the public redacted response alone.
 2. Verify state pill shows **TRIPPED · HARD**.
 3. **Cancel ALL Open Orders** with reason `"panic stop"`.
 4. Manually flatten broker-side positions in your broker UI / phone.
-5. Once positions are flat, press **Clear Kill Switch** and enter the
+5. Once positions are flat, press **Override Clear** and enter the
    vault-backed override password.
 
 ### Scenario 3: Postgres outage during a trip
@@ -277,8 +310,9 @@ curl -fsS -H "X-Admin-Key: $ADMIN_KEY" \
 curl -fsS -H "X-Admin-Key: $ADMIN_KEY" https://$VM/readyz | jq .
 
 # Confirm the legacy risk state file the runtime is using and its contents.
-# The OCI profile sets RISK_STATE_PATH to /opt/phoenix/state/risk_positions.json.
-docker exec phoenix-oci-backend sh -lc \
+# The active Docker Desktop/Vultr backend is phoenix-v9-backend; OCI container
+# names in older evidence are historical/restoration-only.
+docker exec phoenix-v9-backend sh -lc \
   'printf "RISK_STATE_PATH=%s\n" "${RISK_STATE_PATH:-}"; \
    python -c "from app.core.risk_manager import _resolve_risk_state_path; print(_resolve_risk_state_path())"; \
    cat "${RISK_STATE_PATH:-/opt/phoenix/state/risk_positions.json}"'
@@ -295,3 +329,11 @@ stream-owned legacy RiskManager instance(s), their broker account ids,
 state paths, active flags, and open local position/spread counts. Treat
 any active registered manager after a clear as a stop-the-line recovery
 blocker, even if durable `active_count` is zero.
+
+For a legacy recovery clear, also inspect the audit event metadata:
+`legacy_snapshot.cleared_risk_managers[].baseline_reset.before` should
+show the stale high-water marks, and `.after` should show
+`daily_peak_equity`, `daily_peak_total_pnl`, and `max_equity` reset to
+the current flat PnL. If a later `risk_manager_auto kill_switch.trip`
+appears with the same drawdown numbers, treat the recovery as failed
+and do not retry normal clear.

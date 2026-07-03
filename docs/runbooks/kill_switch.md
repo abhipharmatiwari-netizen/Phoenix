@@ -164,7 +164,7 @@ Earlier wording said operators could downgrade an existing HARD trip back to SOF
 
 ### Step 4 — Clear with the vault-backed override password
 
-After (and only after) broker-side flat is confirmed and the next `AccountRunner._sync_positions` tick has refreshed `StateStore` so `/positions` reflects the flat state (recall from Step 2 that the StateStore write is **not** gated by the kill switch — there is no separate "re-enable BROKER_SYNC" step in the durable flow), press **Clear Kill Switch** on the Safety page or call:
+After (and only after) broker-side flat is confirmed and the next `AccountRunner._sync_positions` tick has refreshed `StateStore` so `/positions` reflects the flat state (recall from Step 2 that the StateStore write is **not** gated by the kill switch — there is no separate "re-enable BROKER_SYNC" step in the durable flow), press **Override Clear** on the Safety page or call:
 
 ```http
 POST /admin/kill-switch/clear-with-password
@@ -253,17 +253,31 @@ Only after those preconditions pass, the endpoint:
 - publishes the legacy kill-switch state as inactive
 - clears each runner's legacy `RiskManager.kill_switch_activated` flag
   and persists the legacy risk-state shadow file
+- resets the same-day legacy drawdown high-water marks
+  (`daily_peak_equity`, `daily_peak_total_pnl`, and `max_equity`) to
+  the current flat PnL before persistence, so a stale peak cannot
+  immediately re-trip the next risk tick
 - advances the durable `KillSwitchManager` through
   `request_clear -> confirm_clear -> rearm` as needed
 - emits `kill_switch_legacy_recovery_clear` audit metadata with actor,
-  reason, broker-flatness evidence, legacy before/after state, durable
-  transitions, request id, and post-recheck summary
+  reason, broker-flatness evidence, legacy before/after state,
+  `baseline_reset` before/after values, durable transitions, request id,
+  and post-recheck summary
 - rechecks `/readyz` and `/health/summary` in-process and returns the
   sanitized result in `post_recheck`
 
 Do not use this endpoint while broker exposure remains open. It is a
 recovery workflow for stale legacy state after flatness is proven, not
 a flattening or order-cancellation tool.
+
+This baseline reset matters when daily loss is not breached but
+intraday drawdown still is. On 2026-07-03, broker/Phoenix account PnL
+was `816.5`, but legacy state still had `daily_peak_total_pnl=31200.0`
+and `last_total_pnl=816.5`. The next risk tick computed `30383.5`
+drawdown against the configured `2000` limit and re-tripped with
+`realized_drawdown,floating_drawdown`. `Legacy Recovery Clear` is the
+supported audited recovery for that exact flat-broker stale-baseline
+shape.
 
 ---
 
@@ -288,9 +302,11 @@ This subsection documents the status-quo behaviour of the automated exit engines
 
 ## How the kill switch is tripped
 
-### Automatic — daily loss threshold
+### Automatic — daily loss and intraday drawdown thresholds
 
 When realized plus unrealized PnL crosses `-abs(RISK_MAX_DAILY_LOSS)`, the system automatically activates the durable kill switch (Codex #256 round-1 P2 correction). **The auto-trip is always GLOBAL** — the bridge in `RiskManager.evaluate_account_loss()` calls `ksm.trip(KillSwitchScope.GLOBAL, "GLOBAL", ...)` unconditionally, irrespective of which account / strategy crossed the threshold. There is no per-account or per-strategy durable record produced on this path. Operators clearing a daily-loss auto-trip must therefore look up and clear the `GLOBAL` record (one durable trip blocks the whole hub), not a per-account scope.
+
+Daily loss is not the only automatic risk trigger. `RiskManager.evaluate_account_loss()` also enforces the configured intraday drawdown limit (`max_intraday_drawdown`). It computes both realized drawdown (`daily_peak_equity - realized_pnl`) and total/floating drawdown (`daily_peak_total_pnl - total_pnl`) and can trip with `realized_drawdown`, `floating_drawdown`, or both even when account PnL is positive. When an operator says "daily loss is not breached", check the `[RISK] Kill-switch activated` log line and `risk_positions.json` high-water marks before clearing; the trip may still be numerically correct under the drawdown rule.
 
 In `LIVE` + `HUB_AUTHORITATIVE` mode, a flat account's loss check uses the hub `PnLEngine` display-realized PnL when both the hub `StateStore` and PnL snapshots confirm there is no open broker quantity. The legacy `risk_positions.json` PnL is then treated as a stream-runtime shadow, not the authority. If the hub position/PnL read fails or any open quantity remains, the legacy path is used fail-closed. This prevents stale mark-based legacy close PnL from re-tripping the kill switch after broker fills have flattened the account while keeping conservative behavior when position authority is uncertain.
 
@@ -350,8 +366,8 @@ Safety page top-of-page card. Coloured state pill:
 
 - 🟩 **INACTIVE** — normal operation
 - 🟥 **TRIPPED** — new orders blocked (HARD also blocks exits)
-- 🟧 **CLEAR_PENDING** — clear requested; finish with **Clear Kill Switch**
-- 🟦 **CLEARED** — router entry block released; finish with **Clear Kill Switch** so the record returns to INACTIVE
+- 🟧 **CLEAR_PENDING** — clear requested; finish with **Override Clear**
+- 🟦 **CLEARED** — router entry block released; finish with **Override Clear** so the record returns to INACTIVE
 
 ### Via the durable API
 
@@ -475,9 +491,17 @@ X-Admin-Key: <ADMIN_API_KEY>
 POST /admin/kill-switch/clear-with-password
 Authorization: Bearer <ADMIN_ACCESS_TOKEN>
 {"scope": "GLOBAL", "scope_id": "GLOBAL", "password": "<override password from vault ceremony>", "reason": "broker flat verified"}
+
+# Legacy blocker recovery after broker flatness/open-order validation.
+# Use when clear-with-password is blocked only by active legacy
+# RiskManager state. Also resets stale same-day legacy drawdown
+# high-water marks to current flat PnL before durable rearm.
+POST /admin/kill-switch/legacy-recovery-clear
+Authorization: Bearer <ADMIN_ACCESS_TOKEN>
+{"scope": "GLOBAL", "scope_id": "GLOBAL", "password": "<override password from vault ceremony>", "reason": "broker flat verified; legacy recovery clear"}
 ```
 
-Most mutations in this API block are audited under `resource_type=kill_switch` and persisted to Postgres immediately. The exceptions (Codex #256 round-1 P3 + round-2 P2 corrections): `/admin/kill-switch/cancel-all` emits `action=kill_switch_cancel_all` with `resource_type=broker_orders` (`app/dashboard/admin_routes.py:2632-2636`) because the cancelled artefacts are broker orders, not kill-switch state; and `/admin/break-glass/flatten` emits `action=break_glass_flatten` with `resource_type=position` (`app/dashboard/admin_routes.py:1114-1118`) — **not** `resource_type=break_glass` as earlier wording in this runbook claimed. Password-clear emits a kill-switch audit event with the operator reason and transition metadata only; it must never include the override password. Legacy step-up token issuance and consumption are audited under `resource_type=step_up_token` only when the advanced legacy endpoints are used. When auditing a clear incident, query `resource_type=kill_switch` and `resource_type=broker_orders` and (if `break-glass/flatten` was used) `resource_type=position&action=break_glass_flatten` to get the full picture.
+Most mutations in this API block are audited under `resource_type=kill_switch` and persisted to Postgres immediately. The exceptions (Codex #256 round-1 P3 + round-2 P2 corrections): `/admin/kill-switch/cancel-all` emits `action=kill_switch_cancel_all` with `resource_type=broker_orders` (`app/dashboard/admin_routes.py:2632-2636`) because the cancelled artefacts are broker orders, not kill-switch state; and `/admin/break-glass/flatten` emits `action=break_glass_flatten` with `resource_type=position` (`app/dashboard/admin_routes.py:1114-1118`) — **not** `resource_type=break_glass` as earlier wording in this runbook claimed. Password-clear emits a kill-switch audit event with the operator reason and transition metadata only; it must never include the override password. Legacy recovery clear emits `kill_switch_legacy_recovery_clear` with broker-flatness evidence, legacy before/after state, and `baseline_reset` before/after values; it must never include the override password. Legacy step-up token issuance and consumption are audited under `resource_type=step_up_token` only when the advanced legacy endpoints are used. When auditing a clear incident, query `resource_type=kill_switch` and `resource_type=broker_orders` and (if `break-glass/flatten` was used) `resource_type=position&action=break_glass_flatten` to get the full picture.
 
 > **Important (§132 — corrected per Codex #256 round-1 P1).** The state-machine transition `CLEARED → INACTIVE` happens at `rearm`, but the **router-side entry block** is keyed on `KillSwitchManager.is_tripped()`, which only returns true for `TRIPPED` or `CLEAR_PENDING` (`app/risk/kill_switch.py:467-476`). Once `confirm_clear` lands and the record becomes `CLEARED`, the hub interceptor stops rejecting new entries — entry eligibility is restored at **confirm-clear**, not at rearm. Plan the confirm-clear timing accordingly.
 >
@@ -506,24 +530,33 @@ If the kill switch was activated by setting `GLOBAL_KILL=1`:
 > **After clearing — env-only path cleanup (Codex #256 round-4 P2).** If you executed SOP Step 3a's "Option (a) — issue a durable `POST /admin/kill-switch/trip` first so cancel-all is permitted" while the original trip path was env-var-only, the durable record you created for that purpose is still `TRIPPED`. Removing `GLOBAL_KILL` and restarting does **not** clear it — `KillSwitchManager.load_state()` rehydrates the row at startup and the hub interceptor keeps rejecting entries with `ORDER_REJECTED_KILL_SWITCH_MANAGER`. Cleanup is the standard password clear:
 >
 > 1. Confirm broker-side flat and Step 3a cancel-all evidence.
-> 2. Press **Clear Kill Switch** or call `POST /admin/kill-switch/clear-with-password` with the matching `scope` / `scope_id`.
+> 2. Press **Override Clear** or call `POST /admin/kill-switch/clear-with-password` with the matching `scope` / `scope_id`.
 > 3. Confirm the response reaches `INACTIVE`. **The helper record is now in the INACTIVE state — it is not deleted** (Codex #256 round-5 P3 correction). `KillSwitchManager.rearm` (`app/risk/kill_switch.py:440-463`) only transitions the in-memory record's `state` field to `KillSwitchState.INACTIVE`; `save_state` then upserts that row (still keyed on `(scope, scope_id)`) into `kill_switch_state` with `state='INACTIVE'`. On a subsequent process restart, `load_state` filters `WHERE state != 'INACTIVE'` (`app/risk/kill_switch.py:684-703`), so the row is **not** rehydrated into the in-memory manager next boot — but until that restart happens, `GET /admin/kill-switch/state` and the dashboard's kill-switch table will continue to list the helper record as an `INACTIVE` row. This is harmless (an INACTIVE record blocks nothing at the router and the next trip ceremony starts cleanly because `trip()` is permitted from `INACTIVE`); do not chase it as a residual issue during post-incident verification. If you want the Postgres row physically gone, run a manual `DELETE FROM kill_switch_state WHERE scope=:scope AND scope_id=:scope_id AND state='INACTIVE'` after rearm — this is optional and not part of the standard cleanup.
 >
 > If the helper durable trip was created at a non-GLOBAL scope (e.g. an account-scoped record to satisfy cancel-all for a specific broker account), use the matching `scope` / `scope_id` in each call above. Use the audit log (`GET /admin/audit?resource_type=kill_switch&action=kill_switch_trip`) to identify the record you created if you no longer remember its scope.
 
 ### Legacy path — persisted `RiskManager.kill_switch_activated` flag
 
-**Codex #256 round-5 P2 correction.** Earlier runbook wording said the legacy `RiskManager.kill_switch_activated` flag is "reset on restart because it is in-memory" — **that is wrong**. The flag is persisted to `risk_positions.json` alongside the rest of the legacy risk-state snapshot: `RiskManager._persist_state` writes `"kill_switch_activated": self.kill_switch_activated` on every persist tick (`app/core/risk_manager.py:1300`), and `RiskManager._load_state` rehydrates it on startup (`app/core/risk_manager.py:1269`: `self.kill_switch_activated = bool(data.get("kill_switch_activated", False))`). Restarting the backend therefore does **not** clear a legacy auto-trip — the flag survives the restart and `/readyz` keeps reporting `kill_switch_legacy_active=true`. There are only two paths that actually flip the flag back to False:
+**Codex #256 round-5 P2 correction.** Earlier runbook wording said the legacy `RiskManager.kill_switch_activated` flag is "reset on restart because it is in-memory" — **that is wrong**. The flag is persisted to `risk_positions.json` alongside the rest of the legacy risk-state snapshot: `RiskManager._persist_state` writes `"kill_switch_activated": self.kill_switch_activated` on every persist tick (`app/core/risk_manager.py:1300`), and `RiskManager._load_state` rehydrates it on startup (`app/core/risk_manager.py:1269`: `self.kill_switch_activated = bool(data.get("kill_switch_activated", False))`). Restarting the backend therefore does **not** clear a legacy auto-trip — the flag survives the restart and `/readyz` keeps reporting `kill_switch_legacy_active=true`.
 
-1. **Automatic daily reset (IST midnight).** `RiskManager._reset_daily_if_new_day` (`app/core/risk_manager.py:1346-1362`) sets `kill_switch_activated = False` when the next process-observed mark of the day rolls over into a new IST date. This fires on the next risk-evaluation tick after midnight IST — it is **not** a restart side-effect and does not require operator action.
-2. **Manual cleanup of `risk_positions.json` (incident-recovery only, audit-tracked separately).** Stop the backend, edit `risk_positions.json` to set `"kill_switch_activated": false`, restart. Capture the before/after JSON in the incident timeline because this path is not Phoenix-audited.
+PR #231 bridges legacy auto-trips into the durable `KillSwitchManager`, so a present-day legacy auto-trip will also leave a `TRIPPED` durable record behind. Clearing the durable record alone does **not** flip the legacy flag, and before the 2026-07-03 fix it also left same-day drawdown high-water marks intact. Conversely, the legacy daily reset does not clear the durable record either.
 
-PR #231 bridges legacy auto-trips into the durable `KillSwitchManager`, so a present-day legacy auto-trip will also leave a `TRIPPED` durable record behind. Clearing the durable record alone does **not** flip the legacy flag — the durable clear workflow only operates on the `kill_switch_state` table. Conversely, the legacy daily reset does not clear the durable record either. To fully recover from a legacy-driven auto-trip:
+The standard same-day recovery path is now **Legacy Recovery Clear** on the Safety page, or:
 
-1. Confirm `kill_switch_legacy_active=false` in `/readyz` — either wait for the IST-midnight reset or edit `risk_positions.json` as above.
-2. Run **Clear Kill Switch** or `POST /admin/kill-switch/clear-with-password` on the bridged `GLOBAL` record.
+```http
+POST /admin/kill-switch/legacy-recovery-clear
+Authorization: Bearer <ADMIN_ACCESS_TOKEN>
+{"scope": "GLOBAL", "scope_id": "GLOBAL", "password": "<override password from vault ceremony>", "reason": "broker flat verified; legacy recovery clear"}
+```
 
-**Do not** rely on a process restart alone to recover from a legacy auto-trip; both stores are persisted and both must be cleared explicitly.
+Use it only after broker terminal flatness and open-order cancellation are verified. The endpoint performs broker/state-store flatness checks, clears the legacy flag, resets the legacy drawdown baselines to current flat PnL, persists the shadow state, and advances the durable record to `INACTIVE` with audit metadata.
+
+There are still two non-standard cases:
+
+1. **Automatic daily reset (IST midnight).** `RiskManager._reset_daily_if_new_day` (`app/core/risk_manager.py:1346-1362`) sets `kill_switch_activated = False` when the next process-observed mark of the day rolls over into a new IST date. This fires on the next risk-evaluation tick after midnight IST — it is **not** a restart side-effect and does not require operator action. The durable record still needs `Override Clear` or the API clear flow.
+2. **Manual cleanup of `risk_positions.json` (break-glass only).** Use only when the backend recovery API is unavailable and incident command explicitly approves. Stop the backend, capture the before JSON, edit the legacy state, restart, then capture after JSON and `/readyz`. This path is not Phoenix-audited and must not be the routine LIVE recovery path.
+
+**Do not** rely on a process restart alone to recover from a legacy auto-trip; both stores are persisted and both must be cleared explicitly. **Do not** manually edit `risk_positions.json` to bypass broker-flatness validation when `legacy-recovery-clear` is available.
 
 ### Postgres-backed kill switch
 
@@ -563,6 +596,12 @@ If the kill switch state is persisted to Postgres and a restart does not clear i
 - Confirm kill switch state is `INACTIVE` or absent from the audit log.
 - Confirm position reconciliation is current. Password clear enforces `RECONCILING` / `MANUAL_REVIEW` lifecycle states; `ORPHAN_REVIEW` ownership records are out of band but should still be reviewed and resolved before resuming automated live trading.
 - Confirm `kill_switch_divergence` is false and `kill_switch_legacy_active` is false in `/readyz` (PR #234; field names corrected per Codex #256 round-1 P2).
+- If `Legacy Recovery Clear` was used, confirm the latest
+  `kill_switch_legacy_recovery_clear` audit event contains
+  `legacy_snapshot.cleared_risk_managers[].baseline_reset.after` with
+  `daily_peak_equity`, `daily_peak_total_pnl`, and `max_equity` equal
+  to the current flat PnL. Also confirm no later `risk_manager_auto`
+  trip reappeared with the same drawdown values.
 
 ## Rollback / recovery
 
@@ -571,6 +610,29 @@ If a clear was issued incorrectly, immediately trip the same scope again, captur
 ---
 
 ## Known incidents
+
+### 2026-07-03 legacy drawdown-baseline re-trip after flat PnL
+
+**Summary.** The account was broker-flat and Phoenix account PnL had been
+reconciled to `816.5`, so `max_daily_loss` was not breached. The legacy
+RiskManager still held `daily_peak_total_pnl=31200.0` and
+`last_total_pnl=816.5`, so every risk tick computed `30383.5` total
+drawdown against the configured `max_intraday_drawdown=2000`. Normal
+clear and legacy recovery cleared durable/legacy active flags briefly,
+but the next tick immediately re-tripped with
+`risk_manager_auto: realized_drawdown,floating_drawdown`.
+
+**Operator signal.** Look for `[RISK] Kill-switch activated:
+realized=816.50 unrealized=0.00 total=816.50 realized_dd=30383.50
+total_dd=30383.50 ... reasons=realized_drawdown,floating_drawdown`.
+This is not a daily-loss breach; it is an intraday drawdown high-water
+mark breach.
+
+**Fix.** `POST /admin/kill-switch/legacy-recovery-clear` now resets
+same-day legacy drawdown baselines to current flat PnL after broker
+flatness/open-order validation passes and before durable rearm. The
+Safety page exposes this as **Legacy Recovery Clear**. Do not edit
+`risk_positions.json` directly while this endpoint is available.
 
 ### 2026-05-08 NATURALGAS22MAY26265CE — 23-minute legacy↔durable gap
 
