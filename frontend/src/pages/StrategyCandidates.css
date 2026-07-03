@@ -1,6 +1,6 @@
 .strategy-candidates-page {
   padding: 1.5rem;
-  color: #111827;
+  color: var(--color-text-heading);
 }
 
 .strategy-candidates-header {
@@ -19,7 +19,7 @@
 
 .strategy-candidates-count {
   margin-top: 0.25rem;
-  color: #64748b;
+  color: var(--color-text-soft);
   font-size: 0.85rem;
 }
 
@@ -34,11 +34,11 @@
 .strategy-candidates-actions select,
 .review-reason input {
   min-height: 44px;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
+  border: 1px solid var(--color-border-neutral);
+  border-radius: var(--radius-md);
   padding: 0 0.6rem;
-  background: #fff;
-  color: #111827;
+  background: var(--color-surface);
+  color: var(--color-text-heading);
   font-size: 0.9rem;
 }
 
@@ -47,7 +47,7 @@
 .reject-button {
   min-height: 44px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 0 0.75rem;
   display: inline-flex;
   align-items: center;
@@ -60,19 +60,19 @@
 .icon-button {
   width: auto;
   height: auto;
-  border-color: #cbd5e1;
-  background: #f8fafc;
-  color: #334155;
+  border-color: var(--color-border-neutral);
+  background: var(--color-surface-muted);
+  color: var(--color-text-slate-strong);
 }
 
 .approve-button {
-  background: #0f766e;
-  color: #fff;
+  background: var(--color-brand);
+  color: var(--color-text-inverse);
 }
 
 .reject-button {
-  background: #b91c1c;
-  color: #fff;
+  background: var(--color-danger-action);
+  color: var(--color-text-inverse);
 }
 
 .icon-button:disabled,
@@ -84,22 +84,22 @@
 
 .strategy-candidates-error,
 .strategy-candidates-notice {
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 0.65rem 0.8rem;
   margin-bottom: 0.75rem;
   font-size: 0.9rem;
 }
 
 .strategy-candidates-error {
-  border: 1px solid #fecaca;
-  background: #fef2f2;
-  color: #991b1b;
+  border: 1px solid var(--color-danger-border-soft);
+  background: var(--color-danger-bg-soft);
+  color: var(--color-danger-fg-strong);
 }
 
 .strategy-candidates-notice {
-  border: 1px solid #bbf7d0;
-  background: #f0fdf4;
-  color: #14532d;
+  border: 1px solid var(--color-success-border-soft);
+  background: var(--color-success-bg-soft);
+  color: var(--color-success-fg);
 }
 
 .strategy-candidates-grid {
@@ -116,9 +116,9 @@
 
 .strategy-candidates-list {
   overflow-x: auto;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background: #fff;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
 }
 
 .strategy-candidates-table,
@@ -132,7 +132,7 @@
 .strategy-candidates-table td,
 .diff-table th,
 .diff-table td {
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid var(--color-border-subtle);
   padding: 0.7rem 0.75rem;
   text-align: left;
   vertical-align: top;
@@ -142,8 +142,8 @@
 
 .strategy-candidates-table th,
 .diff-table th {
-  background: #f8fafc;
-  color: #475569;
+  background: var(--color-surface-muted);
+  color: var(--color-text-slate);
   font-size: 0.72rem;
   text-transform: uppercase;
   font-weight: 700;
@@ -155,14 +155,14 @@
 
 .strategy-candidates-table tbody tr:hover,
 .strategy-candidates-table tbody tr.selected {
-  background: #eff6ff;
+  background: var(--color-info-bg-soft);
 }
 
 .row-select {
   border: 0;
   padding: 0;
   background: transparent;
-  color: #1d4ed8;
+  color: var(--color-primary-hover);
   font: inherit;
   font-weight: 700;
   cursor: pointer;
@@ -178,19 +178,19 @@
 
 .strategy-label {
   font-weight: 700;
-  color: #1f2937;
+  color: var(--color-text);
 }
 
 .account-label {
   margin-top: 0.2rem;
-  color: #64748b;
+  color: var(--color-text-soft);
   font-size: 0.78rem;
 }
 
 .strategy-candidates-detail {
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background: #fff;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
   padding: 1rem;
 }
 
@@ -210,35 +210,35 @@
 
 .status-pill {
   display: inline-flex;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 0.16rem 0.5rem;
   font-size: 0.72rem;
   font-weight: 700;
   text-transform: uppercase;
-  background: #e2e8f0;
-  color: #334155;
+  background: var(--color-border-slate);
+  color: var(--color-text-slate-strong);
 }
 
 .status-pending {
-  background: #fef3c7;
-  color: #92400e;
+  background: var(--color-warn-bg);
+  color: var(--color-warn-fg);
 }
 
 .status-promoted {
-  background: #ccfbf1;
-  color: #115e59;
+  background: var(--color-success-bg-teal);
+  color: var(--color-success-fg-teal);
 }
 
 .status-rejected {
-  background: #fee2e2;
-  color: #991b1b;
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg-strong);
 }
 
 .review-reason {
   display: grid;
   gap: 0.35rem;
   margin-bottom: 0.9rem;
-  color: #475569;
+  color: var(--color-text-slate);
   font-size: 0.78rem;
   font-weight: 700;
   text-transform: uppercase;
@@ -260,14 +260,14 @@
 
 .candidate-meta div {
   min-width: 0;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
   padding: 0.55rem;
-  background: #f8fafc;
+  background: var(--color-surface-muted);
 }
 
 .candidate-meta dt {
-  color: #64748b;
+  color: var(--color-text-soft);
   font-size: 0.72rem;
   text-transform: uppercase;
   font-weight: 700;
@@ -275,14 +275,14 @@
 
 .candidate-meta dd {
   margin: 0.2rem 0 0;
-  color: #111827;
+  color: var(--color-text-heading);
   font-size: 0.84rem;
   overflow-wrap: anywhere;
 }
 
 .strategy-candidates-detail h3 {
   margin: 1rem 0 0.5rem;
-  color: #1f2937;
+  color: var(--color-text);
   font-size: 0.9rem;
 }
 
@@ -294,8 +294,8 @@
 
 .metric-cell {
   min-width: 0;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
   padding: 0.55rem;
 }
 
@@ -306,27 +306,27 @@
 }
 
 .metric-cell span {
-  color: #64748b;
+  color: var(--color-text-soft);
   font-size: 0.72rem;
 }
 
 .metric-cell strong {
   margin-top: 0.2rem;
-  color: #111827;
+  color: var(--color-text-heading);
   font-size: 0.9rem;
 }
 
 .strategy-candidates-empty {
   padding: 1.5rem;
-  color: #64748b;
+  color: var(--color-text-soft);
   text-align: center;
   font-size: 0.9rem;
 }
 
 .strategy-candidates-empty.compact {
   padding: 0.75rem;
-  border: 1px dashed #cbd5e1;
-  border-radius: 6px;
+  border: 1px dashed var(--color-border-neutral);
+  border-radius: var(--radius-md);
 }
 
 @media (max-width: 1080px) {

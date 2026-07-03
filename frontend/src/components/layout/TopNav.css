@@ -3,10 +3,10 @@
   justify-content: space-between;
   align-items: center;
   gap: 1rem;
-  background: #fff;
-  color: #1f2937;
+  background: var(--color-surface);
+  color: var(--color-text);
   padding: 0.75rem 1rem;
-  border-bottom: 1px solid #d9e0e8;
+  border-bottom: 1px solid var(--color-border);
   min-width: 0;
 }
 
@@ -24,10 +24,10 @@
   justify-content: center;
   width: 38px;
   height: 38px;
-  border-radius: 6px;
-  border: 1px solid #cdd5df;
-  background: #fff;
-  color: #1f2937;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-control);
+  background: var(--color-surface);
+  color: var(--color-text);
   cursor: pointer;
   flex: 0 0 38px;
 }
@@ -35,7 +35,7 @@
 .top-nav .logo {
   font-size: 1rem;
   font-weight: 900;
-  color: #111827;
+  color: var(--color-text-heading);
   white-space: nowrap;
 }
 
@@ -51,10 +51,10 @@
 .tenant-selector button,
 .user-menu button {
   padding: 0.45rem 0.7rem;
-  border-radius: 6px;
-  border: 1px solid #cdd5df;
-  background: #fff;
-  color: #1f2937;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-control);
+  background: var(--color-surface);
+  color: var(--color-text);
   font-weight: 700;
   cursor: pointer;
 }
@@ -68,10 +68,10 @@
 }
 
 .user-menu .role-badge {
-  background: #e5e7eb;
-  color: #374151;
+  background: var(--color-border-subtle);
+  color: var(--color-text-neutral);
   padding: 0.25rem 0.5rem;
-  border-radius: 9999px;
+  border-radius: var(--radius-pill);
   font-size: 0.72rem;
   font-weight: 800;
   text-transform: uppercase;
@@ -83,7 +83,7 @@
 
 .tenant-hint {
   font-size: 12px;
-  color: #64748b;
+  color: var(--color-text-soft);
 }
 
 @media (max-width: 900px) {

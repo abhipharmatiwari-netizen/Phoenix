@@ -8,13 +8,13 @@
 .control-tower-title {
   font-size: 1.75rem;
   font-weight: 700;
-  color: #111827;
+  color: var(--color-text-heading);
   margin-bottom: 0.5rem;
 }
 
 .control-tower-subtitle {
   font-size: 0.875rem;
-  color: #6b7280;
+  color: var(--color-text-subtle);
   margin-bottom: 1.5rem;
 }
 
@@ -22,26 +22,26 @@
   width: 100%;
   border-collapse: separate;
   border-spacing: 0;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
   overflow: hidden;
 }
 
 .control-tower-table thead {
-  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+  background: linear-gradient(180deg, var(--color-surface-muted) 0%, var(--color-surface-muted-alt) 100%);
 }
 
 .control-tower-table th,
 .control-tower-table td {
   padding: 0.875rem 1rem;
   text-align: center;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid var(--color-border-subtle);
 }
 
 .control-tower-table th {
   font-weight: 600;
   font-size: 0.8rem;
-  color: #475569;
+  color: var(--color-text-slate);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   white-space: nowrap;
@@ -57,7 +57,7 @@
 }
 
 .control-tower-table thead th:first-child {
-  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+  background: linear-gradient(180deg, var(--color-surface-muted) 0%, var(--color-surface-muted-alt) 100%);
 }
 
 
@@ -66,11 +66,11 @@
 }
 
 .control-tower-table tbody tr:nth-child(even) {
-  background-color: #fafbfc;
+  background-color: var(--color-surface-raised);
 }
 
 .control-tower-table tbody tr:hover {
-  background-color: #eef2ff;
+  background-color: var(--color-info-bg);
 }
 
 .control-tower-table tbody tr td:first-child {
@@ -78,13 +78,13 @@
 }
 
 .control-tower-table td {
-  color: #374151;
+  color: var(--color-text-neutral);
   font-size: 0.9rem;
 }
 
 .control-tower-table td:first-child {
   font-weight: 600;
-  color: #1e293b;
+  color: var(--color-text-slate-dark);
   min-width: 160px;
 }
 
@@ -92,8 +92,8 @@
   cursor: pointer;
   width: 18px;
   height: 18px;
-  accent-color: #2563eb;
-  border-radius: 4px;
+  accent-color: var(--color-primary);
+  border-radius: var(--radius-sm);
 }
 
 .control-tower-table input[type="checkbox"]:disabled {
@@ -107,7 +107,7 @@
 .readonly-message,
 .empty-message {
   padding: 0.75rem 1rem;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   margin-bottom: 1rem;
   font-weight: 500;
   font-size: 0.875rem;
@@ -117,33 +117,33 @@
 }
 
 .loading-message {
-  background-color: #eef2ff;
-  color: #4338ca;
-  border: 1px solid #c7d2fe;
+  background-color: var(--color-info-bg);
+  color: var(--color-info-fg);
+  border: 1px solid var(--color-info-border);
 }
 
 .error-message {
-  background-color: #fef2f2;
-  color: #b91c1c;
-  border: 1px solid #fecaca;
+  background-color: var(--color-danger-bg-soft);
+  color: var(--color-danger-action);
+  border: 1px solid var(--color-danger-border-soft);
 }
 
 .success-message {
-  background-color: #f0fdf4;
-  color: #166534;
-  border: 1px solid #bbf7d0;
+  background-color: var(--color-success-bg-soft);
+  color: var(--color-success-fg-strong);
+  border: 1px solid var(--color-success-border-soft);
 }
 
 .readonly-message {
-  background-color: #fffbeb;
-  color: #92400e;
-  border: 1px solid #fde68a;
+  background-color: var(--color-warn-bg-soft);
+  color: var(--color-warn-fg);
+  border: 1px solid var(--color-warn-border-soft);
 }
 
 .empty-message {
-  background-color: #f8fafc;
-  color: #475569;
-  border: 1px solid #e2e8f0;
+  background-color: var(--color-surface-muted);
+  color: var(--color-text-slate);
+  border: 1px solid var(--color-border-slate);
 }
 
 .control-tower-status {
@@ -154,26 +154,26 @@
 }
 
 .control-tower-status > div {
-  border: 1px solid #dbe3ee;
-  border-radius: 8px;
-  background: #ffffff;
+  border: 1px solid var(--color-border-panel);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
   padding: 0.75rem 0.875rem;
   min-height: 66px;
 }
 
 .control-tower-status.is-readonly > div:first-child {
-  border-color: #fde68a;
-  background-color: #fffbeb;
+  border-color: var(--color-warn-border-soft);
+  background-color: var(--color-warn-bg-soft);
 }
 
 .control-tower-status.is-enabled > div:first-child {
-  border-color: #bbf7d0;
-  background-color: #f0fdf4;
+  border-color: var(--color-success-border-soft);
+  background-color: var(--color-success-bg-soft);
 }
 
 .status-label {
   display: block;
-  color: #64748b;
+  color: var(--color-text-soft);
   font-size: 0.72rem;
   font-weight: 700;
   text-transform: uppercase;
@@ -183,7 +183,7 @@
 
 .control-tower-status strong {
   display: block;
-  color: #111827;
+  color: var(--color-text-heading);
   font-size: 0.95rem;
   line-height: 1.25;
   overflow-wrap: anywhere;
