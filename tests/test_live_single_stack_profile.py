@@ -21,6 +21,15 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def test_live_compose_header_matches_active_docker_desktop_runtime():
+    text = _read_text(LIVE_COMPOSE_PATH)
+
+    assert "ACTIVE LIVE RUNTIME FROM 2026-06-29 ONWARD." in text
+    assert "Windows Docker Desktop stack" in text
+    assert "NON-CURRENT FOR PRODUCTION" not in text
+    assert "current production runtime is the OCI VM" not in text
+
+
 def test_live_compose_enables_pending_lock_persistence():
     text = _read_text(LIVE_COMPOSE_PATH)
     assert 'OWNERSHIP_PERSIST_PENDING_LOCKS: "true"' in text

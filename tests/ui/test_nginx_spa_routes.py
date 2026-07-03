@@ -143,6 +143,14 @@ def test_safety_treats_omitted_public_watchdog_as_unknown():
     assert "healthSource !== 'admin'" in safety
 
 
+def test_safety_merges_break_glass_flatten_audit_feed():
+    safety = (REPO_ROOT / "frontend" / "src" / "pages" / "Safety.tsx").read_text(encoding="utf-8")
+
+    assert "resource_type: 'position'" in safety
+    assert "action: 'break_glass_flatten'" in safety
+    assert "action: 'break_glass', limit: 20" not in safety
+
+
 def test_admin_console_routes_are_wired():
     app = (REPO_ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
     nav = (REPO_ROOT / "frontend" / "src" / "components" / "layout" / "SideNav.tsx").read_text(encoding="utf-8")

@@ -45,7 +45,13 @@ const Safety: React.FC = () => {
       try {
         const [healthResp, breakGlassResp, killSwitchResp, cancelAllResp] = await Promise.all([
           DefaultService.getOperatorHealthSummary(),
-          AuditService.getAuditLog({ action: 'break_glass', limit: 20 }).catch(() => ({ events: [], count: 0 })),
+          // Break-glass flatten emits action=break_glass_flatten under
+          // resource_type=position, so query that exact audit shape.
+          AuditService.getAuditLog({
+            resource_type: 'position',
+            action: 'break_glass_flatten',
+            limit: 20,
+          }).catch(() => ({ events: [], count: 0 })),
           // Issue #238: surface every kill-switch toggle attempt in the
           // audit table so operators see who tripped/cleared/rearmed and
           // what reason was recorded.
