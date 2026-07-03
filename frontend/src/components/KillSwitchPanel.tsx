@@ -19,6 +19,7 @@ type ActionKind =
   | 'confirm_clear'
   | 'rearm'
   | 'password_clear'
+  | 'legacy_recovery_clear'
   | 'cancel_all'
   | 'break_glass';
 
@@ -184,6 +185,15 @@ const KillSwitchPanel: React.FC = () => {
           });
           setFeedback('Override clear submitted and backend state refreshed.');
           break;
+        case 'legacy_recovery_clear':
+          await KillSwitchService.legacyRecoveryClear({
+            scope: 'GLOBAL',
+            scope_id: 'GLOBAL',
+            password: overridePassword,
+            reason: trimmedReason,
+          });
+          setFeedback('Legacy recovery clear submitted and backend state refreshed.');
+          break;
         case 'cancel_all': {
           const result = await KillSwitchService.cancelAll({ reason: trimmedReason });
           setCancelResult(result);
@@ -215,6 +225,8 @@ const KillSwitchPanel: React.FC = () => {
   const stateStatus = globalState === 'INACTIVE' ? 'ok' : globalState === 'UNKNOWN' ? 'unknown' : 'error';
   const stateDependentDisabled = busy || globalState === 'UNKNOWN';
   const cancelEnabled = !stateDependentDisabled && ['TRIPPED', 'CLEAR_PENDING'].includes(globalState);
+  const passwordClearEnabled = !stateDependentDisabled && ['TRIPPED', 'CLEAR_PENDING'].includes(globalState);
+  const legacyRecoveryEnabled = passwordClearEnabled && (legacyActive || legacyFallbackActive);
 
   return (
     <section className={`safety-panel safety-panel--${globalState.toLowerCase()}`}>
@@ -301,10 +313,18 @@ const KillSwitchPanel: React.FC = () => {
         <button
           className="danger-button"
           type="button"
-          disabled={stateDependentDisabled || globalState !== 'TRIPPED'}
+          disabled={!passwordClearEnabled}
           onClick={() => openAction({ kind: 'password_clear', title: 'Override clear', body: 'Use the vault-backed override password. Backend validation still fails closed.', requiresPassword: true })}
         >
           Override Clear
+        </button>
+        <button
+          className="danger-button"
+          type="button"
+          disabled={!legacyRecoveryEnabled}
+          onClick={() => openAction({ kind: 'legacy_recovery_clear', title: 'Legacy recovery clear', body: 'Use after broker flatness evidence. Backend resets the legacy drawdown baseline before rearming.', requiresPassword: true })}
+        >
+          Legacy Recovery Clear
         </button>
         <button
           className="danger-button"

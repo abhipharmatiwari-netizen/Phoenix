@@ -2810,6 +2810,48 @@ def _clear_legacy_kill_switch_runtime_state(*, actor: str, reason: str) -> dict[
     persist_failures: list[str] = []
     seen_manager_ids: set[int] = set()
 
+    def _float_attr(risk_manager: Any, name: str, default: float = 0.0) -> float:
+        try:
+            return float(getattr(risk_manager, name, default) or 0.0)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _reset_flat_drawdown_baseline(risk_manager: Any) -> dict[str, Any]:
+        before = {
+            "daily_realized_pnl": _float_attr(risk_manager, "daily_realized_pnl"),
+            "last_unrealized_pnl": _float_attr(risk_manager, "last_unrealized_pnl"),
+            "last_total_pnl": _float_attr(risk_manager, "last_total_pnl"),
+            "daily_peak_equity": _float_attr(risk_manager, "daily_peak_equity"),
+            "daily_peak_total_pnl": _float_attr(risk_manager, "daily_peak_total_pnl"),
+            "max_equity": _float_attr(risk_manager, "max_equity"),
+        }
+        current_realized = before["daily_realized_pnl"]
+        current_total = current_realized
+        # Legacy recovery is reachable only after broker flatness and open-order
+        # validation. Reset same-day peak drawdown baselines to the flat PnL so
+        # the next risk tick does not immediately re-trip on a stale intraday
+        # high-water mark.
+        for name, value in {
+            "realized_pnl": current_realized,
+            "daily_realized_pnl": current_realized,
+            "last_unrealized_pnl": 0.0,
+            "last_total_pnl": current_total,
+            "daily_peak_equity": current_realized,
+            "daily_peak_total_pnl": current_total,
+            "max_equity": current_total,
+        }.items():
+            if hasattr(risk_manager, name):
+                setattr(risk_manager, name, value)
+        after = {
+            "daily_realized_pnl": _float_attr(risk_manager, "daily_realized_pnl"),
+            "last_unrealized_pnl": _float_attr(risk_manager, "last_unrealized_pnl"),
+            "last_total_pnl": _float_attr(risk_manager, "last_total_pnl"),
+            "daily_peak_equity": _float_attr(risk_manager, "daily_peak_equity"),
+            "daily_peak_total_pnl": _float_attr(risk_manager, "daily_peak_total_pnl"),
+            "max_equity": _float_attr(risk_manager, "max_equity"),
+        }
+        return {"before": before, "after": after}
+
     def _clear_one_risk_manager(account_id: str, risk_manager: Any) -> None:
         if risk_manager is None:
             return
@@ -2818,6 +2860,7 @@ def _clear_legacy_kill_switch_runtime_state(*, actor: str, reason: str) -> dict[
             return
         seen_manager_ids.add(manager_id)
         was_active = bool(getattr(risk_manager, "kill_switch_activated", False))
+        baseline_reset = _reset_flat_drawdown_baseline(risk_manager)
         setattr(risk_manager, "kill_switch_activated", False)
         if hasattr(risk_manager, "_durable_kill_switch_bridge_succeeded"):
             setattr(risk_manager, "_durable_kill_switch_bridge_succeeded", True)
@@ -2843,6 +2886,7 @@ def _clear_legacy_kill_switch_runtime_state(*, actor: str, reason: str) -> dict[
         cleared_managers.append({
             "broker_account_id": account_id,
             "was_active": was_active,
+            "baseline_reset": baseline_reset,
         })
 
     for account_id in _hub_runner_ids(hub):

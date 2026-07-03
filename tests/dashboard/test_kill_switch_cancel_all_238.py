@@ -257,6 +257,13 @@ def test_clear_validator_trusts_enriched_legacy_inactive_state(monkeypatch):
 
 class _LegacyRecoveryRiskManager:
     def __init__(self) -> None:
+        self.realized_pnl = 816.5
+        self.daily_realized_pnl = 816.5
+        self.last_unrealized_pnl = 0.0
+        self.last_total_pnl = 816.5
+        self.daily_peak_equity = 31200.0
+        self.daily_peak_total_pnl = 31200.0
+        self.max_equity = 31200.0
         self.kill_switch_activated = True
         self._durable_kill_switch_bridge_succeeded = False
         self._pending_audit_reemit = True
@@ -516,6 +523,9 @@ def test_legacy_recovery_clears_legacy_and_durable_after_flat_evidence(monkeypat
     assert result["durable_transitions"] == ["CLEAR_PENDING", "CLEARED", "INACTIVE"]
     assert result["post_recheck"]["endpoints"] == ["/readyz", "/health/summary"]
     assert rm.kill_switch_activated is False
+    assert rm.daily_peak_equity == pytest.approx(rm.daily_realized_pnl)
+    assert rm.daily_peak_total_pnl == pytest.approx(rm.last_total_pnl)
+    assert rm.last_unrealized_pnl == pytest.approx(0.0)
     assert rm._durable_kill_switch_bridge_succeeded is True
     assert rm.persist_calls == 1
     assert ksm.get_record(KillSwitchScope.GLOBAL, "GLOBAL").state == KillSwitchState.INACTIVE
@@ -523,6 +533,9 @@ def test_legacy_recovery_clears_legacy_and_durable_after_flat_evidence(monkeypat
     assert audit_events
     assert audit_events[0]["action"] == "kill_switch_legacy_recovery_clear"
     assert audit_events[0]["metadata"]["reason"] == "broker flat verified"
+    baseline_reset = audit_events[0]["metadata"]["legacy_snapshot"]["cleared_risk_managers"][0]["baseline_reset"]
+    assert baseline_reset["before"]["daily_peak_total_pnl"] == pytest.approx(31200.0)
+    assert baseline_reset["after"]["daily_peak_total_pnl"] == pytest.approx(816.5)
 
 
 class _FakeBroker:

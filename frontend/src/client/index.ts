@@ -1016,6 +1016,18 @@ export interface KillSwitchPasswordClearResponse {
   message?: string;
 }
 
+export interface KillSwitchLegacyRecoveryResponse {
+  status: 'inactive' | 'partial';
+  record_id?: number | string | null;
+  state: string;
+  legacy_recovered: boolean;
+  durable_transitions: string[];
+  broker_flatness_evidence?: Array<Record<string, unknown>>;
+  divergence_before?: Record<string, unknown>;
+  post_recheck?: Record<string, unknown>;
+  next_step?: string;
+}
+
 export interface KillSwitchDurableRepairPayload {
   reason: string;
   block_exits?: boolean;
@@ -1130,6 +1142,16 @@ export const KillSwitchService = {
   ): Promise<KillSwitchPasswordClearResponse> {
     return request<KillSwitchPasswordClearResponse>({
       path: bffPath('/admin/kill-switch/clear-with-password'),
+      method: 'POST',
+      body: payload,
+    });
+  },
+
+  legacyRecoveryClear(
+    payload: KillSwitchPasswordClearPayload,
+  ): Promise<KillSwitchLegacyRecoveryResponse> {
+    return request<KillSwitchLegacyRecoveryResponse>({
+      path: bffPath('/admin/kill-switch/legacy-recovery-clear'),
       method: 'POST',
       body: payload,
     });
