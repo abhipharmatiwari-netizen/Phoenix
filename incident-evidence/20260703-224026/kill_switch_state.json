@@ -1,0 +1,42 @@
+{
+    "source":  "kill_switch_manager",
+    "records":  [
+                    {
+                        "id":  "64575b8614db4b88a4c3329371f73d02",
+                        "state":  "TRIPPED",
+                        "scope":  "GLOBAL",
+                        "scope_id":  "GLOBAL",
+                        "tripped_at":  "2026-07-03T17:02:40.790236Z",
+                        "tripped_by":  "risk_manager_auto",
+                        "trip_reason":  "risk_manager_auto: realized_drawdown,floating_drawdown source=tick:NG_ATM_CE_310",
+                        "cleared_at":  null,
+                        "cleared_by":  null,
+                        "clear_reason":  null,
+                        "clear_request_id":  null,
+                        "updated_at":  "2026-07-03T17:02:40.790236Z",
+                        "block_exits":  false
+                    }
+                ],
+    "active_count":  1,
+    "legacy_kill_switch":  {
+                               "publisher_seen":  true,
+                               "active":  true,
+                               "reason":  "registered_risk_manager_active:A1",
+                               "divergence_age_seconds":  468.220152,
+                               "registered_risk_managers":  [
+                                                                {
+                                                                    "key":  "A1",
+                                                                    "broker_account_id":  "A1",
+                                                                    "state_path":  "/app/state/risk_positions.json",
+                                                                    "active":  true,
+                                                                    "open_position_count":  0,
+                                                                    "open_spread_count":  0
+                                                                }
+                                                            ]
+                           },
+    "divergence":  {
+                       "divergent":  false,
+                       "durable_global_active":  true
+                   },
+    "trade_mode":  "LIVE"
+}

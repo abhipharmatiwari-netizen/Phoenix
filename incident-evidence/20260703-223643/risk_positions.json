@@ -1,0 +1,13 @@
+{
+  "realized_pnl": 816.5,
+  "open_spreads": {},
+  "open_positions": {},
+  "max_equity": 0.0,
+  "daily_realized_pnl": 816.5,
+  "daily_peak_equity": 31200.0,
+  "daily_peak_total_pnl": 31200.0,
+  "last_unrealized_pnl": 0.0,
+  "last_total_pnl": 816.5,
+  "kill_switch_activated": true,
+  "kill_switch_date": "2026-07-03"
+}
